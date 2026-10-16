@@ -19,6 +19,8 @@ robust = "1.2"
 libm = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+schemars = "1.2"
+datum-mcp = { path = "crates/datum-mcp" }
 proptest = "1.12"
 rayon = "1.12"
 criterion = { version = "0.8", default-features = false }

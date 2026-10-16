@@ -5,6 +5,7 @@
 
 use std::ops::{Add, Mul, Neg, Sub};
 
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Serialize};
 
 /// A 2D point or vector. In JSON: `[x, y]`.
@@ -85,6 +86,25 @@ impl From<Vec3> for [f64; 3] {
         v.to_array()
     }
 }
+
+/// Vectors are plain arrays in JSON, and so in their schemas.
+macro_rules! array_schema {
+    ($t:ty, $n:literal) => {
+        impl JsonSchema for $t {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($t).into()
+            }
+            fn inline_schema() -> bool {
+                true
+            }
+            fn json_schema(g: &mut SchemaGenerator) -> Schema {
+                <[f64; $n]>::json_schema(g)
+            }
+        }
+    };
+}
+array_schema!(Vec2, 2);
+array_schema!(Vec3, 3);
 
 impl Add for Vec3 {
     type Output = Self;

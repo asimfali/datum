@@ -12,7 +12,7 @@ mod prism;
 mod tess;
 mod validate;
 
-pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, Plane, Vertex};
+pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vertex};
 pub use build::{FaceSpec, build};
 pub use id::{Origin, TopoId};
 pub use prism::{cuboid, prism};

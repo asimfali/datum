@@ -16,6 +16,7 @@ mod export;
 const USAGE: &str = "usage:
   datum build <model.json> [--out <file.stl|file.obj>]   evaluate a model, export its final bodies
   datum determinism-check <model.json|dir>...           same result on 1, 4 and 16 threads (C4)
+  datum mcp                                             MCP server on stdin/stdout
 threads: RAYON_NUM_THREADS (default: all cores)";
 
 fn main() -> ExitCode {
@@ -33,6 +34,9 @@ fn run(args: &[String]) -> Result<(), String> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => cmd_build(rest),
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
+        Some((cmd, [])) if cmd == "mcp" => {
+            datum_mcp::Server::default().serve(std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string())
+        }
         _ => Err(USAGE.into()),
     }
 }

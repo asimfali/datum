@@ -60,6 +60,15 @@ fn unit_cube_hash_is_pinned() {
 }
 
 #[test]
+fn mass_properties_of_a_box() {
+    let b = cuboid(id("box"), Vec3::new(1.0, 2.0, 3.0), Vec3::new(3.0, 3.0, 7.0)).unwrap();
+    let m = b.mass_properties();
+    assert_eq!((m.volume, m.area), (8.0, 2.0 * (2.0 + 8.0 + 4.0)));
+    assert_eq!(m.centroid, Vec3::new(2.0, 2.5, 5.0));
+    assert_eq!((m.min, m.max), (Vec3::new(1.0, 2.0, 3.0), Vec3::new(3.0, 3.0, 7.0)));
+}
+
+#[test]
 fn non_convex_prism() {
     let b = l_prism();
     assert_eq!(b.volume(), 4.5);
