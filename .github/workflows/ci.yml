@@ -10,7 +10,12 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    # Windows proves cross-platform determinism: the pinned hashes must match Linux bit for bit.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -18,3 +23,4 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: scripts/check.sh
+        shell: bash

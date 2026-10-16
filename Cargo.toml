@@ -13,8 +13,12 @@ datum-math = { path = "crates/datum-math" }
 datum-brep = { path = "crates/datum-brep" }
 datum-ops = { path = "crates/datum-ops" }
 datum-graph = { path = "crates/datum-graph" }
+datum-model = { path = "crates/datum-model" }
 blake3 = "1.8"
 robust = "1.2"
+libm = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
 proptest = "1.12"
 rayon = "1.12"
 criterion = { version = "0.8", default-features = false }
