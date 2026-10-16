@@ -1,0 +1,24 @@
+[package]
+name = "datum-graph"
+description = "Feature graph of the Datum kernel: memoised, incremental, parallel evaluation"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+datum-brep = { workspace = true }
+datum-ops = { workspace = true }
+blake3 = { workspace = true }
+rayon = { workspace = true }
+
+[dev-dependencies]
+datum-math = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "graph"
+harness = false

@@ -13,6 +13,9 @@ pub struct FaceSpec {
 
 /// Builds a body in canonical order: vertices, faces and edges sorted by ID, each loop starting
 /// at its lowest vertex ID, holes ordered by that vertex. Input order does not matter.
+///
+/// Structural errors found while linking are returned; the full [`Body::validate`] runs once per
+/// operation in `datum-ops` (debug builds).
 pub fn build(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>) -> Result<Body, BrepError> {
     vertices.sort_unstable_by_key(|v| v.id);
     if let Some(w) = vertices.windows(2).find(|w| w[0].id == w[1].id) {
@@ -50,9 +53,6 @@ pub fn build(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>) -> Result<Body
     let mut body = Body { vertices, half_edges, edges: Vec::new(), loops, faces: out_faces, hash: [0; 32] };
     link_edges(&mut body)?;
     body.rehash();
-    if cfg!(debug_assertions) {
-        body.validate()?;
-    }
     Ok(body)
 }
 
