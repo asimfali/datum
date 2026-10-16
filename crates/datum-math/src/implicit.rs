@@ -101,12 +101,20 @@ pub fn orient3d(a: &Point, b: &Point, c: &Point, d: &Point) -> Sign {
 /// they turn counterclockwise seen from the positive end of the axis, `Zero` when collinear in
 /// projection.
 pub fn orient2d_along(a: &Point, b: &Point, c: &Point, axis: usize) -> Sign {
+    if let [Point::Explicit(a), Point::Explicit(b), Point::Explicit(c)] = [a, b, c] {
+        let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
+        let p = |p: &Vec3| crate::Vec2::new(p.to_array()[u], p.to_array()[v]);
+        return crate::orient2d(p(a), p(b), p(c));
+    }
     sign(&Orient2d { pts: [a, b, c], axis })
 }
 
 /// Exact comparison of one coordinate (0 = x, 1 = y, 2 = z) of two points: orders points on a
 /// line by its dominant axis.
 pub fn cmp_axis(a: &Point, b: &Point, axis: usize) -> Ordering {
+    if let (Point::Explicit(a), Point::Explicit(b)) = (a, b) {
+        return a.to_array()[axis].partial_cmp(&b.to_array()[axis]).unwrap_or(Ordering::Equal);
+    }
     match sign(&CmpAxis { pts: [a, b], axis }) {
         Sign::Negative => Ordering::Less,
         Sign::Zero => Ordering::Equal,
@@ -258,9 +266,8 @@ mod tests {
         fn orient3d_is_antisymmetric(v in pts::<10>(), w in pts::<2>()) {
             let (Some(a), Some(b)) = (lpi([v[0], v[1], v[2], v[3], v[4]]), lpi([v[5], v[6], v[7], v[8], v[9]])) else { return Ok(()) };
             let [c, d] = w.map(Point::Explicit);
-            let flip = |s: Sign| match s { Sign::Positive => Sign::Negative, Sign::Negative => Sign::Positive, Sign::Zero => Sign::Zero };
-            prop_assert_eq!(orient3d(&a, &b, &c, &d), flip(orient3d(&b, &a, &c, &d)));
-            prop_assert_eq!(orient3d(&a, &b, &c, &d), flip(orient3d(&a, &b, &d, &c)));
+            prop_assert_eq!(orient3d(&a, &b, &c, &d), -orient3d(&b, &a, &c, &d));
+            prop_assert_eq!(orient3d(&a, &b, &c, &d), -orient3d(&a, &b, &d, &c));
         }
 
         #[test]

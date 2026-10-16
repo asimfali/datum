@@ -2,6 +2,7 @@
 
 use datum_math::{Sign, Vec2, Vec3, orient2d};
 
+use crate::tess::segments_touch;
 use crate::{Body, BrepError, FaceSpec, Plane, TopoId, Vertex, build};
 
 /// Prism over `polygon` (either orientation) from `z0` to `z1`, with IDs derived from `feature`.
@@ -84,16 +85,4 @@ fn is_simple(p: &[Vec2]) -> bool {
         }
     }
     true
-}
-
-/// Closed segments `ab` and `cd` share at least one point (exact).
-fn segments_touch(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
-    let (d1, d2) = (orient2d(a, b, c), orient2d(a, b, d));
-    let (d3, d4) = (orient2d(c, d, a), orient2d(c, d, b));
-    if [d1, d2, d3, d4].iter().all(|s| *s == Sign::Zero) {
-        let overlap = |a0: f64, a1: f64, b0: f64, b1: f64| a0.min(a1) <= b0.max(b1) && b0.min(b1) <= a0.max(a1);
-        return overlap(a.x, b.x, c.x, d.x) && overlap(a.y, b.y, c.y, d.y);
-    }
-    let straddles = |s: Sign, t: Sign| s == Sign::Zero || t == Sign::Zero || s != t;
-    straddles(d1, d2) && straddles(d3, d4)
 }

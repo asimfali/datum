@@ -1,0 +1,17 @@
+{
+  "format": "datum/1",
+  "features": [
+    { "name": "plate", "op": "prism", "polygon": [[0, 0], [120, 0], [120, 60], [60, 80], [0, 60]], "z0": 0, "z1": 8 },
+    { "name": "pin", "op": "prism", "polygon": [[-4, -4], [4, -4], [4, 4], [-4, 4]], "z0": -5, "z1": 13 },
+    { "name": "hole_a", "op": "transform", "inputs": ["pin"], "translate": [20, 20, 0], "angle_deg": 17 },
+    { "name": "hole_b", "op": "transform", "inputs": ["pin"], "translate": [60, 30, 0], "angle_deg": 41 },
+    { "name": "hole_c", "op": "transform", "inputs": ["pin"], "translate": [100, 25, 0], "axis": [0.2, 0.1, 1], "angle_deg": 29 },
+    { "name": "drilled", "op": "boolean", "inputs": ["plate", "hole_a", "hole_b", "hole_c"], "kind": "difference" },
+    { "name": "boss", "op": "prism", "polygon": [[50, 50], [75, 45], [80, 70], [55, 75]], "z0": 4, "z1": 20 },
+    { "name": "tilted_boss", "op": "transform", "inputs": ["boss"], "axis": [1, 0.3, 0], "angle_deg": 3.5 },
+    { "name": "with_boss", "op": "boolean", "inputs": ["drilled", "tilted_boss"], "kind": "union" },
+    { "name": "window", "op": "prism", "polygon": [[-30, -20], [30, -20], [30, 20], [-30, 20]], "z0": -3, "z1": 30 },
+    { "name": "placed_window", "op": "transform", "inputs": ["window"], "translate": [65, 45, 0], "axis": [0.1, -0.2, 1], "angle_deg": 23 },
+    { "name": "core", "op": "boolean", "inputs": ["with_boss", "placed_window"], "kind": "intersection" }
+  ]
+}

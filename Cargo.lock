@@ -361,6 +361,7 @@ dependencies = [
  "blake3",
  "datum-brep",
  "datum-math",
+ "proptest",
  "schemars",
  "serde",
 ]

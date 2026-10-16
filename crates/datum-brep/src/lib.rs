@@ -16,7 +16,7 @@ pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vert
 pub use build::{FaceSpec, build};
 pub use id::{Origin, TopoId};
 pub use prism::{cuboid, prism};
-pub use tess::{Mesh, tessellate};
+pub use tess::{Mesh, tessellate, triangulate_face};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrepError {
