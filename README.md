@@ -17,6 +17,7 @@ Datum is designed around a different set of assumptions:
 - **A dependency graph, not a list.** Independent features rebuild in parallel. Only what actually changed is recomputed.
 - **Stable topology IDs.** Every face, edge and vertex is named by its origin ("side face of extrusion X from sketch edge Y"), not by a counter. References survive edits, and results do not depend on thread count.
 - **Symbolic intersections.** Boolean operations match intersection vertices by key, not by distance tolerance, so faces can be split independently on different cores and stitched back exactly.
+- **No modeling box.** No absolute tolerances, so there is no "1 km cube": a site plan and an M6 bolt live in one model, with local frames and georeferencing.
 - **Agent-native.** Every operation is a JSON command with a generated schema; the same commands drive the CLI, the UI and an MCP server. Models are stored as a JSON feature graph, and geometry is rebuilt deterministically.
 - **Honest failure.** An unsupported degenerate case returns an error instead of a plausible-looking wrong body.
 
@@ -50,6 +51,7 @@ Design documents are currently in Russian:
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): goals, data structures, algorithms, decision log
 - [`CLAUDE.md`](CLAUDE.md): project rules (determinism, geometry, code style)
+- [`PAINS.md`](PAINS.md): real engineering pain points that drive priorities
 
 ## Development
 
