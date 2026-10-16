@@ -17,4 +17,5 @@ workspace = true
 datum-brep = { workspace = true }
 datum-graph = { workspace = true }
 datum-model = { workspace = true }
+datum-mcp = { workspace = true }
 rayon = { workspace = true }

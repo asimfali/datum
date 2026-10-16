@@ -15,7 +15,11 @@
 
 use std::fmt;
 
-use datum_graph::{Graph, GraphError, Op};
+mod session;
+
+pub use session::Session;
+
+use datum_graph::{Graph, GraphError, NodeIx, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -55,44 +59,49 @@ pub fn parse(json: &str) -> Result<Graph, ModelError> {
         return Err(ModelError::Format(file.format));
     }
     let mut g = Graph::default();
-    for (index, mut fields) in file.features.into_iter().enumerate() {
-        let err = |msg: String| ModelError::Feature { index, msg };
-        let name = match fields.remove("name") {
-            Some(Value::String(s)) => s,
-            _ => return Err(err("`name` must be a string".into())),
-        };
-        let inputs: Vec<String> = match fields.remove("inputs") {
-            None => Vec::new(),
-            Some(v) => serde_json::from_value(v).map_err(|e| err(format!("`{name}`: inputs: {e}")))?,
-        };
-        let inputs = inputs
-            .iter()
-            .map(|i| g.find(i).ok_or_else(|| err(format!("`{name}`: unknown input `{i}` (features come after their inputs)"))))
-            .collect::<Result<Vec<_>, _>>()?;
-        let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| err(format!("`{name}`: {e}")))?;
-        g.add(&name, op, &inputs).map_err(ModelError::Graph)?;
+    for (index, fields) in file.features.into_iter().enumerate() {
+        add_feature(&mut g, fields).map_err(|msg| ModelError::Feature { index, msg })?;
     }
     Ok(g)
 }
 
+/// Adds a feature given as in the file: `name`, optional `inputs` (earlier names), `op` and its
+/// parameters. The same object is the `add` command's parameters.
+pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<NodeIx, String> {
+    let name = match fields.remove("name") {
+        Some(Value::String(s)) => s,
+        _ => return Err("`name` must be a string".into()),
+    };
+    let inputs: Vec<String> = match fields.remove("inputs") {
+        None => Vec::new(),
+        Some(v) => serde_json::from_value(v).map_err(|e| format!("`{name}`: inputs: {e}"))?,
+    };
+    let inputs = inputs
+        .iter()
+        .map(|i| g.find(i).ok_or_else(|| format!("`{name}`: unknown input `{i}` (features come after their inputs)")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| format!("`{name}`: {e}"))?;
+    g.add(&name, op, &inputs).map_err(|e| e.to_string())
+}
+
+/// A feature as its file object.
+pub fn feature_json(g: &Graph, ix: NodeIx) -> Map<String, Value> {
+    let node = &g.nodes()[ix as usize];
+    let mut fields = match serde_json::to_value(&node.op) {
+        Ok(Value::Object(m)) => m,
+        _ => Map::new(),
+    };
+    fields.insert("name".into(), Value::String(node.name.clone()));
+    if !node.inputs.is_empty() {
+        let names = node.inputs.iter().map(|&i| Value::String(g.nodes()[i as usize].name.clone())).collect();
+        fields.insert("inputs".into(), Value::Array(names));
+    }
+    fields
+}
+
 /// Canonical JSON: sorted keys, two-space indent, trailing newline.
 pub fn to_json(g: &Graph) -> String {
-    let features = g
-        .nodes()
-        .iter()
-        .map(|node| {
-            let mut fields = match serde_json::to_value(&node.op) {
-                Ok(Value::Object(m)) => m,
-                _ => Map::new(),
-            };
-            fields.insert("name".into(), Value::String(node.name.clone()));
-            if !node.inputs.is_empty() {
-                let names = node.inputs.iter().map(|&i| Value::String(g.nodes()[i as usize].name.clone())).collect();
-                fields.insert("inputs".into(), Value::Array(names));
-            }
-            fields
-        })
-        .collect();
+    let features = (0..g.nodes().len() as NodeIx).map(|i| feature_json(g, i)).collect();
     let mut s = serde_json::to_string_pretty(&File { format: FORMAT.into(), features }).unwrap_or_default();
     s.push('\n');
     s

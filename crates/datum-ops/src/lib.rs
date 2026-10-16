@@ -2,10 +2,11 @@
 
 use datum_brep::{Body, BrepError, TopoId, prism};
 use datum_math::{Rigid, Vec2, Vec3};
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
     /// A polygon in the XY plane extruded from `z0` to `z1`. No inputs.

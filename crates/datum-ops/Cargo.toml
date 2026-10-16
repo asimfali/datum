@@ -14,3 +14,4 @@ datum-math = { workspace = true }
 datum-brep = { workspace = true }
 blake3 = { workspace = true }
 serde = { workspace = true }
+schemars = { workspace = true }

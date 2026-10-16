@@ -58,6 +58,16 @@ pub struct Face {
     pub hash: [u8; 32],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MassProperties {
+    pub volume: f64,
+    pub area: f64,
+    pub centroid: Vec3,
+    /// Bounding box corners.
+    pub min: Vec3,
+    pub max: Vec3,
+}
+
 /// A closed, oriented, manifold solid. Immutable: operations make new bodies.
 ///
 /// Element vectors are in canonical order (ARCHITECTURE §4.1): equal bodies have equal memory
@@ -122,23 +132,61 @@ impl Body {
         self.loop_half_edges(l).map(|h| self.point(self.half_edges[h as usize].origin))
     }
 
-    /// Enclosed volume by the divergence theorem, relative to the first vertex so that the result
-    /// does not degrade with distance from the origin. Fixed summation order: deterministic.
-    pub fn volume(&self) -> f64 {
-        let Some(o) = self.vertices.first().map(|v| v.point) else { return 0.0 };
-        let mut sum = 0.0;
-        for l in 0..self.loops.len() as Ix {
+    /// Calls `f(a, b, c)` for every fan triangle of the loops in `loops`, with points relative to
+    /// the body's first vertex `o`. Fans of a closed body form a closed surface, so the divergence
+    /// theorem holds even when a face's vertices are not exactly coplanar.
+    fn fans(&self, loops: Range<Ix>, o: Vec3, mut f: impl FnMut(Vec3, Vec3, Vec3)) {
+        for l in loops {
             let mut pts = self.loop_points(l).map(|p| p - o);
             let Some(p0) = pts.next() else { continue };
             let mut prev = pts.next();
             for p in pts {
                 if let Some(a) = prev {
-                    sum += p0.dot(a.cross(p));
+                    f(p0, a, p);
                 }
                 prev = Some(p);
             }
         }
+    }
+
+    fn reference(&self) -> Vec3 {
+        self.vertices.first().map_or(Vec3::ZERO, |v| v.point)
+    }
+
+    /// Enclosed volume by the divergence theorem, relative to the first vertex so that the result
+    /// does not degrade with distance from the origin. Fixed summation order: deterministic.
+    pub fn volume(&self) -> f64 {
+        let mut sum = 0.0;
+        self.fans(0..self.loops.len() as Ix, self.reference(), |a, b, c| sum += a.dot(b.cross(c)));
         sum / 6.0
+    }
+
+    /// Area vector of a face: its normal scaled by its area (holes subtracted).
+    pub fn face_area_vector(&self, f: Ix) -> Vec3 {
+        let mut sum = Vec3::ZERO;
+        self.fans(self.face_loops(f), self.reference(), |a, b, c| sum = sum + (b - a).cross(c - a));
+        sum * 0.5
+    }
+
+    /// Volume, surface area, centre of mass (uniform density) and bounding box.
+    pub fn mass_properties(&self) -> MassProperties {
+        let o = self.reference();
+        let (mut six_v, mut moment) = (0.0, Vec3::ZERO);
+        self.fans(0..self.loops.len() as Ix, o, |a, b, c| {
+            let v = a.dot(b.cross(c));
+            six_v += v;
+            moment = moment + (a + b + c) * v;
+        });
+        let area = (0..self.faces.len() as Ix).map(|f| self.face_area_vector(f)).map(|v| v.dot(v).sqrt()).sum();
+        let centroid = if six_v != 0.0 { o + moment * (0.25 / six_v) } else { o };
+        let mut min = o;
+        let mut max = o;
+        for v in &self.vertices {
+            let p = v.point;
+            min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
+            max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
+        }
+        MassProperties { volume: six_v / 6.0, area, centroid, min, max }
     }
 
     /// The same body moved by `m`. Topology IDs are unchanged; hashes follow the new coordinates.

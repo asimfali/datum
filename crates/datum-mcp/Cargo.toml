@@ -1,0 +1,14 @@
+[package]
+name = "datum-mcp"
+description = "Datum MCP server: JSON-RPC 2.0 over stdio on top of the command registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+datum-model = { workspace = true }
+serde_json = { workspace = true }

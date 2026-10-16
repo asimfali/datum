@@ -58,6 +58,7 @@ Design documents are currently in Russian:
 ```bash
 scripts/check.sh   # fmt, clippy, tests, determinism check
 cargo run --release -p datum-cli -- build tests/models/bracket.json --out bracket.stl
+cargo run --release -p datum-cli -- mcp   # MCP server on stdio (.mcp.json registers it for Claude Code)
 ```
 
 ## License

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "datum": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "--release", "-p", "datum-cli", "--", "mcp"]
+    }
+  }
+}
