@@ -17,6 +17,7 @@ Datum is designed around a different set of assumptions:
 - **A dependency graph, not a list.** Independent features rebuild in parallel. Only what actually changed is recomputed.
 - **Stable topology IDs.** Every face, edge and vertex is named by its origin ("side face of extrusion X from sketch edge Y"), not by a counter. References survive edits, and results do not depend on thread count.
 - **Symbolic intersections.** Boolean operations match intersection vertices by key, not by distance tolerance, so faces can be split independently on different cores and stitched back exactly.
+- **Agent-native.** Every operation is a JSON command with a generated schema; the same commands drive the CLI, the UI and an MCP server. Models are stored as a JSON feature graph, and geometry is rebuilt deterministically.
 - **Honest failure.** An unsupported degenerate case returns an error instead of a plausible-looking wrong body.
 
 The long-term goal is an open CAD system for professional engineers, built around what they actually need.
@@ -37,7 +38,7 @@ All comparisons are within Datum itself: sequential vs parallel.
 | Stage | Scope |
 |---|---|
 | M0 | Workspace, math, half-edge B-rep, primitives, validation, volume, canonical hash, STL/OBJ export, CLI |
-| M1 | Feature graph: memoization, early cutoff, parallel scheduler; determinism tests (C1, C2, C4) |
+| M1 | Feature graph: memoization, early cutoff, parallel scheduler; JSON model format; MCP server; determinism tests (C1, C2, C4) |
 | M2 | Parallel Boolean operations on polyhedra (C3) |
 | M3 | 2D sketches with a constraint solver; extrude, cut, patterns |
 | M4 | Viewer with live parameter editing |
