@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "apps/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/asimfali/datum"
+
+[workspace.dependencies]
+datum-math = { path = "crates/datum-math" }
+datum-brep = { path = "crates/datum-brep" }
+blake3 = "1.8"
+robust = "1.2"
+proptest = "1.12"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.release]
+debug = "line-tables-only"

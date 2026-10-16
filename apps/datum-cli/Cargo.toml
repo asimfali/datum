@@ -1,0 +1,18 @@
+[package]
+name = "datum-cli"
+description = "Command-line front end of the Datum kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "datum"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+datum-math = { workspace = true }
+datum-brep = { workspace = true }
