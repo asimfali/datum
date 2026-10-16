@@ -2,13 +2,28 @@
 
 use datum_brep::{Body, BrepError, TopoId, prism};
 use datum_math::{Rigid, Vec2, Vec3};
+use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq)]
+/// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
     /// A polygon in the XY plane extruded from `z0` to `z1`. No inputs.
     Prism { polygon: Vec<Vec2>, z0: f64, z1: f64 },
     /// Rotation by `angle_deg` about `axis` through the origin, then translation. One input.
-    Transform { translate: Vec3, axis: Vec3, angle_deg: f64 },
+    /// Defaults: no translation, Z axis, no rotation.
+    Transform {
+        #[serde(default)]
+        translate: Vec3,
+        #[serde(default = "z_axis")]
+        axis: Vec3,
+        #[serde(default)]
+        angle_deg: f64,
+    },
+}
+
+fn z_axis() -> Vec3 {
+    Vec3::new(0.0, 0.0, 1.0)
 }
 
 impl Op {

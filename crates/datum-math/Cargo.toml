@@ -11,3 +11,5 @@ workspace = true
 
 [dependencies]
 robust = { workspace = true }
+libm = { workspace = true }
+serde = { workspace = true }

@@ -57,6 +57,7 @@ Design documents are currently in Russian:
 
 ```bash
 scripts/check.sh   # fmt, clippy, tests, determinism check
+cargo run --release -p datum-cli -- build tests/models/bracket.json --out bracket.stl
 ```
 
 ## License

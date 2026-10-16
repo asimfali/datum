@@ -1,0 +1,80 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "profile",
+      "op": "prism",
+      "polygon": [
+        [
+          0,
+          0
+        ],
+        [
+          60,
+          0
+        ],
+        [
+          60,
+          5
+        ],
+        [
+          5,
+          5
+        ],
+        [
+          5,
+          40
+        ],
+        [
+          0,
+          40
+        ]
+      ],
+      "z0": 0,
+      "z1": 30
+    },
+    {
+      "name": "left",
+      "op": "transform",
+      "inputs": [
+        "profile"
+      ],
+      "translate": [
+        -80,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "right",
+      "op": "transform",
+      "inputs": [
+        "profile"
+      ],
+      "translate": [
+        80,
+        0,
+        0
+      ],
+      "axis": [
+        0,
+        0,
+        1
+      ],
+      "angle_deg": 90
+    },
+    {
+      "name": "tilted",
+      "op": "transform",
+      "inputs": [
+        "right"
+      ],
+      "axis": [
+        1,
+        1,
+        0
+      ],
+      "angle_deg": 12.5
+    }
+  ]
+}

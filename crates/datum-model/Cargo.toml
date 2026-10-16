@@ -1,0 +1,18 @@
+[package]
+name = "datum-model"
+description = "Datum model files: canonical JSON of the feature graph"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+datum-graph = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+datum-math = { workspace = true }

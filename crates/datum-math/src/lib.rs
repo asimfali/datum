@@ -5,8 +5,11 @@
 
 use std::ops::{Add, Mul, Neg, Sub};
 
-/// A 2D point or vector.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+use serde::{Deserialize, Serialize};
+
+/// A 2D point or vector. In JSON: `[x, y]`.
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(from = "[f64; 2]", into = "[f64; 2]")]
 pub struct Vec2 {
     pub x: f64,
     pub y: f64,
@@ -18,8 +21,9 @@ impl Vec2 {
     }
 }
 
-/// A 3D point or vector.
-#[derive(Clone, Copy, Debug, PartialEq, Default)]
+/// A 3D point or vector. In JSON: `[x, y, z]`.
+#[derive(Clone, Copy, Debug, PartialEq, Default, Serialize, Deserialize)]
+#[serde(from = "[f64; 3]", into = "[f64; 3]")]
 pub struct Vec3 {
     pub x: f64,
     pub y: f64,
@@ -55,6 +59,30 @@ impl Vec3 {
         } else {
             2
         }
+    }
+}
+
+impl From<[f64; 2]> for Vec2 {
+    fn from([x, y]: [f64; 2]) -> Self {
+        Self::new(x, y)
+    }
+}
+
+impl From<Vec2> for [f64; 2] {
+    fn from(v: Vec2) -> Self {
+        [v.x, v.y]
+    }
+}
+
+impl From<[f64; 3]> for Vec3 {
+    fn from([x, y, z]: [f64; 3]) -> Self {
+        Self::new(x, y, z)
+    }
+}
+
+impl From<Vec3> for [f64; 3] {
+    fn from(v: Vec3) -> Self {
+        v.to_array()
     }
 }
 
@@ -103,7 +131,8 @@ impl Rigid {
     /// Rotation by `angle` radians about `axis` (any non-zero length) through the origin.
     pub fn rotation(axis: Vec3, angle: f64) -> Self {
         let k = axis * (1.0 / axis.dot(axis).sqrt());
-        let (s, c) = angle.sin_cos();
+        // libm, not the platform's: bit-identical on every OS (C4).
+        let (s, c) = libm::sincos(angle);
         let t = 1.0 - c;
         let rot = [
             Vec3::new(t * k.x * k.x + c, t * k.x * k.y - s * k.z, t * k.x * k.z + s * k.y),
