@@ -1,7 +1,14 @@
 //! Datum math: vectors, rigid transforms and exact geometric predicates.
 //!
-//! Decisions ("which side", "do they cross") go through [`orient2d`], which is exact for any
-//! `f64` input. Constructions (new coordinates) are plain `f64`.
+//! Decisions ("which side", "do they cross") go through exact predicates: [`orient2d`] on plain
+//! coordinates, and [`orient3d`], [`orient2d_along`], [`cmp_axis`] on [`Point`]s, which may be
+//! implicit intersections (D38). Constructions (new coordinates) are plain `f64`, rounded once.
+
+mod exact;
+mod implicit;
+
+pub use exact::exact_fallbacks;
+pub use implicit::{Lpi, Point, cmp_axis, orient2d_along, orient3d};
 
 use std::ops::{Add, Mul, Neg, Sub};
 
@@ -189,7 +196,7 @@ pub enum Sign {
 }
 
 impl Sign {
-    fn of(v: f64) -> Self {
+    pub(crate) fn of(v: f64) -> Self {
         if v > 0.0 {
             Self::Positive
         } else if v < 0.0 {
