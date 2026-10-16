@@ -195,6 +195,17 @@ pub enum Sign {
     Positive,
 }
 
+impl Neg for Sign {
+    type Output = Self;
+    fn neg(self) -> Self {
+        match self {
+            Self::Negative => Self::Positive,
+            Self::Zero => Self::Zero,
+            Self::Positive => Self::Negative,
+        }
+    }
+}
+
 impl Sign {
     pub(crate) fn of(v: f64) -> Self {
         if v > 0.0 {

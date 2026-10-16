@@ -1,5 +1,10 @@
 //! Datum operations: pure functions from parameters and input bodies to a new body.
 
+mod boolean;
+
+use std::ops::RangeInclusive;
+
+pub use boolean::{BooleanKind, boolean};
 use datum_brep::{Body, BrepError, TopoId, prism};
 use datum_math::{Rigid, Vec2, Vec3};
 use schemars::JsonSchema;
@@ -21,6 +26,9 @@ pub enum Op {
         #[serde(default)]
         angle_deg: f64,
     },
+    /// The first input (target) combined with every further input (tools) in one pass. Tools
+    /// must not touch each other; faces of different bodies must not be coplanar where they meet.
+    Boolean { kind: BooleanKind },
 }
 
 fn z_axis() -> Vec3 {
@@ -32,14 +40,16 @@ impl Op {
         match self {
             Self::Prism { .. } => "prism",
             Self::Transform { .. } => "transform",
+            Self::Boolean { .. } => "boolean",
         }
     }
 
-    /// Number of input bodies.
-    pub fn arity(&self) -> usize {
+    /// Allowed numbers of input bodies.
+    pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
-            Self::Prism { .. } => 0,
-            Self::Transform { .. } => 1,
+            Self::Prism { .. } => 0..=0,
+            Self::Transform { .. } => 1..=1,
+            Self::Boolean { .. } => 2..=usize::MAX,
         }
     }
 
@@ -57,14 +67,17 @@ impl Op {
             Self::Transform { translate, axis, angle_deg } => {
                 translate.to_array().into_iter().chain(axis.to_array()).chain([*angle_deg]).for_each(num);
             }
+            Self::Boolean { kind } => {
+                h.update(kind.name().as_bytes());
+            }
         }
     }
 
     /// Evaluates the operation for the feature with ID `feature`. In debug builds the result is
     /// validated here, once for every operation.
     pub fn eval(&self, feature: TopoId, inputs: &[&Body]) -> Result<Body, BrepError> {
-        if inputs.len() != self.arity() {
-            return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), self.arity(), inputs.len())));
+        if !self.arity().contains(&inputs.len()) {
+            return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), inputs.len())));
         }
         let body = match self {
             Self::Prism { polygon, z0, z1 } => prism(feature, polygon, *z0, *z1)?,
@@ -78,10 +91,20 @@ impl Op {
                 };
                 inputs[0].transformed(&rot.then(Rigid::translation(*translate)))
             }
+            Self::Boolean { kind } => boolean(feature, *kind, inputs)?,
         };
         if cfg!(debug_assertions) {
             body.validate()?;
         }
         Ok(body)
+    }
+}
+
+/// `"1"`, `"2–4"` or `"at least 2"`.
+pub fn describe_arity(r: RangeInclusive<usize>) -> String {
+    match (*r.start(), *r.end()) {
+        (a, b) if a == b => a.to_string(),
+        (a, usize::MAX) => format!("at least {a}"),
+        (a, b) => format!("{a}–{b}"),
     }
 }

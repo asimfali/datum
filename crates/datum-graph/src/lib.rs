@@ -11,6 +11,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     fmt,
+    ops::RangeInclusive,
     sync::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -43,7 +44,7 @@ pub struct Graph {
 pub enum GraphError {
     DuplicateName(String),
     UnknownInput { node: String, input: NodeIx },
-    Arity { node: String, expected: usize, got: usize },
+    Arity { node: String, expected: RangeInclusive<usize>, got: usize },
 }
 
 impl fmt::Display for GraphError {
@@ -51,7 +52,7 @@ impl fmt::Display for GraphError {
         match self {
             Self::DuplicateName(n) => write!(f, "a feature named `{n}` already exists"),
             Self::UnknownInput { node, input } => write!(f, "`{node}`: input #{input} is not an earlier feature"),
-            Self::Arity { node, expected, got } => write!(f, "`{node}` takes {expected} input(s), got {got}"),
+            Self::Arity { node, expected, got } => write!(f, "`{node}` takes {} input(s), got {got}", datum_ops::describe_arity(expected.clone())),
         }
     }
 }
@@ -91,7 +92,7 @@ impl Graph {
 }
 
 fn check_arity(name: &str, op: &Op, got: usize) -> Result<(), GraphError> {
-    if op.arity() == got { Ok(()) } else { Err(GraphError::Arity { node: name.into(), expected: op.arity(), got }) }
+    if op.arity().contains(&got) { Ok(()) } else { Err(GraphError::Arity { node: name.into(), expected: op.arity(), got }) }
 }
 
 #[derive(Clone, Debug, PartialEq)]
