@@ -14,3 +14,13 @@ robust = { workspace = true }
 libm = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
+num-bigint = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+rayon = { workspace = true }
+
+[[bench]]
+name = "predicates"
+harness = false
