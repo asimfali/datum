@@ -1,0 +1,259 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "base",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "point": "o",
+            "type": "fix"
+          },
+          {
+            "line": "bottom",
+            "type": "horizontal"
+          },
+          {
+            "line": "right",
+            "type": "vertical"
+          },
+          {
+            "line": "step",
+            "type": "horizontal"
+          },
+          {
+            "line": "riser",
+            "type": "vertical"
+          },
+          {
+            "line": "top",
+            "type": "horizontal"
+          },
+          {
+            "line": "left",
+            "type": "vertical"
+          },
+          {
+            "line": "bottom",
+            "type": "length",
+            "value": 70.0
+          },
+          {
+            "line": "right",
+            "type": "length",
+            "value": 20.0
+          },
+          {
+            "line": "left",
+            "type": "length",
+            "value": 40.0
+          },
+          {
+            "line": "top",
+            "type": "length",
+            "value": 30.0
+          },
+          {
+            "line": "w1",
+            "type": "horizontal"
+          },
+          {
+            "line": "w2",
+            "type": "vertical"
+          },
+          {
+            "line": "w3",
+            "type": "horizontal"
+          },
+          {
+            "line": "w4",
+            "type": "vertical"
+          },
+          {
+            "lines": [
+              "w1",
+              "w2"
+            ],
+            "type": "equal"
+          },
+          {
+            "line": "w1",
+            "type": "length",
+            "value": 8.0
+          },
+          {
+            "line": "left",
+            "point": "h1",
+            "type": "point_line",
+            "value": 10.0
+          },
+          {
+            "line": "bottom",
+            "point": "h1",
+            "type": "point_line",
+            "value": 10.0
+          }
+        ],
+        "lines": {
+          "bottom": {
+            "from": "o",
+            "to": "a"
+          },
+          "left": {
+            "from": "e",
+            "to": "o"
+          },
+          "right": {
+            "from": "a",
+            "to": "b"
+          },
+          "riser": {
+            "from": "c",
+            "to": "d"
+          },
+          "step": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "d",
+            "to": "e"
+          },
+          "w1": {
+            "from": "h1",
+            "to": "h2"
+          },
+          "w2": {
+            "from": "h2",
+            "to": "h3"
+          },
+          "w3": {
+            "from": "h3",
+            "to": "h4"
+          },
+          "w4": {
+            "from": "h4",
+            "to": "h1"
+          }
+        },
+        "points": {
+          "a": [
+            58.0,
+            1.0
+          ],
+          "b": [
+            61.0,
+            22.0
+          ],
+          "c": [
+            33.0,
+            24.0
+          ],
+          "d": [
+            31.0,
+            41.0
+          ],
+          "e": [
+            -1.0,
+            39.0
+          ],
+          "h1": [
+            10.0,
+            10.0
+          ],
+          "h2": [
+            18.0,
+            10.0
+          ],
+          "h3": [
+            18.0,
+            18.0
+          ],
+          "h4": [
+            10.0,
+            18.0
+          ],
+          "o": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "base"
+      ],
+      "name": "plate",
+      "op": "extrude",
+      "z0": 0.0,
+      "z1": 12.0
+    },
+    {
+      "face": "df34ab372c2756871d73c688a4eba5ca",
+      "inputs": [
+        "plate"
+      ],
+      "name": "pocket_sketch",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [],
+        "lines": {
+          "k1": {
+            "from": "p",
+            "to": "q"
+          },
+          "k2": {
+            "from": "q",
+            "to": "r"
+          },
+          "k3": {
+            "from": "r",
+            "to": "s"
+          },
+          "k4": {
+            "from": "s",
+            "to": "p"
+          }
+        },
+        "points": {
+          "p": [
+            40.0,
+            4.0
+          ],
+          "q": [
+            52.0,
+            4.0
+          ],
+          "r": [
+            52.0,
+            14.0
+          ],
+          "s": [
+            40.0,
+            14.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "pocket_sketch"
+      ],
+      "name": "pocket",
+      "op": "extrude",
+      "z0": -5.0,
+      "z1": 0.0
+    },
+    {
+      "inputs": [
+        "plate",
+        "pocket"
+      ],
+      "kind": "difference",
+      "name": "cut",
+      "op": "boolean"
+    }
+  ]
+}

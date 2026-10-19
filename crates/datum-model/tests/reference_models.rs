@@ -21,7 +21,9 @@ fn reference_models_match_pinned_hashes() {
         let mut model = BTreeMap::new();
         for (node, r) in g.nodes().iter().zip(e.results) {
             let b = r.unwrap_or_else(|err| panic!("{}: {}: {err}", path.display(), node.name));
-            b.validate().unwrap();
+            if let Some(body) = b.body() {
+                body.validate().unwrap();
+            }
             model.insert(node.name.clone(), b.hash().iter().map(|x| format!("{x:02x}")).collect());
         }
         actual.insert(path.file_name().unwrap().to_string_lossy().into_owned(), model);

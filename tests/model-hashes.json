@@ -78,6 +78,13 @@
     "pins": "d9cdb53129b97334522846d183551ae2dfefb1a2eab11a86d95a8f986c377ad5",
     "plate": "39072f351ebabf2590a8622e909a436ef31a2ff434450244e43a6f5c805421d9"
   },
+  "sketch_plate.json": {
+    "base": "f0b5a3bdbc2070a994d7f5e862e22e5c86ff686e71079d4b720771865b239f13",
+    "cut": "f3f23b21be8c82286cd1fdb41d8a3c767611837f8aa7f106377bd2308b2e38f2",
+    "plate": "fe3bc46557848ce81116f5888a26e6196dd7f866a48ca619efeb2bdccbd69e4f",
+    "pocket": "c9a6f583fbcb86fa59cc7ff51674a400aaf5f264892d8a1ce15fe9cfb5074d4d",
+    "pocket_sketch": "ef4e8514645896c980c37320be8063b8b0725fabfb9e0da764b7d2d32b0f00a9"
+  },
   "terrain_pit.json": {
     "excavation": "429b66e00ed12044ad317e0244088487860d155aaa2b9bc27e8d642eaeb4c8b0",
     "ground": "c361bf6c28e9ec42e89a0c0aa4a80082384e4ea536069d26818cbc85153e596c",
