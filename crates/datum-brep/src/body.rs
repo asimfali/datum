@@ -238,6 +238,25 @@ impl Body {
         (0..self.faces.len() as Ix).map(|f| find(&mut parent, f)).collect()
     }
 
+    /// For every vertex, the number of its shell, shells numbered in the order of their first
+    /// faces (as in [`Body::shell_vertices`]).
+    pub fn vertex_shells(&self) -> Vec<u32> {
+        let shells = self.face_shells();
+        let mut number = vec![u32::MAX; self.faces.len()];
+        let mut next = 0;
+        for f in 0..self.faces.len() {
+            if shells[f] == f as Ix {
+                number[f] = next;
+                next += 1;
+            }
+        }
+        let mut of_vertex = vec![0; self.vertices.len()];
+        for he in &self.half_edges {
+            of_vertex[he.origin as usize] = number[shells[self.loops[he.loop_ix as usize].face as usize] as usize];
+        }
+        of_vertex
+    }
+
     /// One vertex of every shell, shells in the order of their first faces.
     pub fn shell_vertices(&self) -> Vec<Ix> {
         let shells = self.face_shells();

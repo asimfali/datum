@@ -110,24 +110,24 @@ fn edges_on_triangulation_diagonals() {
     assert_close(run(Difference, &[&p, &diamond, &on_diagonals]).unwrap().volume(), 100_000.0 - 1_000.0 - 500.0, 1e-12);
 }
 
+/// Tools must not touch each other (D40). Contacts with the target are resolved (Q7, see
+/// `contacts.rs`); between tools the growth makes them overlap, which is refused too.
 #[test]
-fn degenerate_contacts_are_refused() {
+fn touching_tools_are_refused() {
     let p = plate();
-    let degenerate = |bodies: &[&Body], why: &str| match boolean(feature(), Difference, None, bodies) {
+    let refused = |bodies: &[&Body], why: &str| match boolean(feature(), Difference, None, bodies) {
         Err(BrepError::Degenerate(m)) => assert!(m.contains(why), "{m}"),
         r => panic!("expected `{why}`, got {r:?}"),
     };
-    // Tool top flush with the plate top: coplanar faces (D40, `through` in M2c).
-    let flush = cuboid(id("flush"), Vec3::new(10.0, 10.0, -5.0), Vec3::new(20.0, 20.0, 10.0)).unwrap();
-    degenerate(&[&p, &flush], "lies on a face");
-    degenerate(&[&p, &square_tool("a", 30.0, 25.0, 0.2), &square_tool("b", 36.0, 25.0, 0.5)], "tools 1 and 2 intersect");
+    refused(&[&p, &square_tool("a", 30.0, 25.0, 0.2), &square_tool("b", 36.0, 25.0, 0.5)], "tools 1 and 2 intersect");
     // A tool nested in another, touching neither its surface nor the plate's.
     let big = cuboid(id("big"), Vec3::new(10.0, 10.0, -5.0), Vec3::new(40.0, 40.0, 15.0)).unwrap();
     let small = cuboid(id("small"), Vec3::new(20.0, 20.0, 1.0), Vec3::new(25.0, 25.0, 5.0)).unwrap();
-    degenerate(&[&p, &big, &small], "tools 1 and 2 intersect");
-    // A tool edge through the plate's vertical edge at the origin.
-    let across = prism(id("across"), &[(-5.0, 5.0), (5.0, -5.0), (5.0, 5.0)].map(|(x, y)| Vec2::new(x, y)), 2.0, 8.0).unwrap();
-    degenerate(&[&p, &across], "edges of two bodies cross");
+    refused(&[&p, &big, &small], "tools 1 and 2 intersect");
+    // Two cut-outs sharing a wall.
+    let left = cuboid(id("l"), Vec3::new(10.0, 10.0, -5.0), Vec3::new(20.0, 20.0, 15.0)).unwrap();
+    let right = cuboid(id("r"), Vec3::new(20.0, 10.0, -5.0), Vec3::new(30.0, 20.0, 15.0)).unwrap();
+    refused(&[&p, &left, &right], "tools 1 and 2 intersect");
 }
 
 /// Principle 8: the same model far from the origin and turned gives the same topology and volume.

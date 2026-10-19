@@ -7,7 +7,7 @@
 mod exact;
 mod implicit;
 
-pub use exact::exact_fallbacks;
+pub use exact::{exact_fallbacks, perturbed_signs, ties};
 pub use implicit::{Lpi, Point, cmp_axis, orient2d_along, orient3d};
 
 use std::ops::{Add, Mul, Neg, Sub};
@@ -216,6 +216,13 @@ impl Sign {
             Self::Zero
         }
     }
+}
+
+/// Exact orientation of `d` relative to the plane through `a, b, c`, on plain coordinates, with the
+/// convention of [`orient3d`]. Nothing moves: a contact is `Zero`.
+pub fn orient3d_coords(a: Vec3, b: Vec3, c: Vec3, d: Vec3) -> Sign {
+    let p = |v: Vec3| robust::Coord3D { x: v.x, y: v.y, z: v.z };
+    Sign::of(robust::orient3d(p(a), p(b), p(c), p(d)))
 }
 
 /// Exact orientation of `c` relative to the directed line `a → b`: `Positive` when `a, b, c` turn
