@@ -51,7 +51,42 @@ unimplemented = "deny"
 debug = "line-tables-only"
 
 # Geometry is hot even in tests (the 10 000-hole reference model); debug assertions stay on.
-[profile.dev.package."*"]
+# Only what the kernel computes with is optimised: the GUI stack (egui, wgpu) costs minutes to
+# optimise and nothing to run unoptimised in tests.
+[profile.dev.package.blake3]
+opt-level = 2
+
+[profile.dev.package.robust]
+opt-level = 2
+
+[profile.dev.package.libm]
+opt-level = 2
+
+[profile.dev.package.num-bigint]
+opt-level = 2
+
+[profile.dev.package.num-integer]
+opt-level = 2
+
+[profile.dev.package.num-traits]
+opt-level = 2
+
+[profile.dev.package.rayon]
+opt-level = 2
+
+[profile.dev.package.rayon-core]
+opt-level = 2
+
+[profile.dev.package.smallvec]
+opt-level = 2
+
+[profile.dev.package.crossbeam-deque]
+opt-level = 2
+
+[profile.dev.package.crossbeam-epoch]
+opt-level = 2
+
+[profile.dev.package.crossbeam-utils]
 opt-level = 2
 
 [profile.dev.package.datum-math]
