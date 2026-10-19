@@ -115,7 +115,7 @@ pub fn snapshot(values: &[&Value], view: &str, width: u32, height: u32) -> Resul
         return Err("the picture needs a width and a height".into());
     }
     let scene = Scene::new(values, &mut Default::default());
-    camera.fit(scene.bounds);
+    camera.fit(scene.bounds, f64::from(width) / f64::from(height));
     let rgba = picture(&scene, &camera, width, height)?;
     let mut out = Vec::new();
     png(&rgba, width, height, &mut out)?;
