@@ -169,7 +169,7 @@ fn big_sign(v: &BigInt) -> Sign {
 /// coefficients are computed to growing powers. Coordinates are quadratic in `ε` and predicates
 /// at most of degree 12 in coordinates, so 25 coefficients hold the whole polynomial: zero there
 /// is zero for every motion.
-fn perturbed(e: &impl Expr) -> Sign {
+pub(crate) fn perturbed(e: &impl Expr) -> Sign {
     PERTURBED.fetch_add(1, Ordering::Relaxed);
     TIES.with(|t| t.set(t.get() + 1));
     if let Some(s) = e.eval(&Moved::<_, 2>(Approx::input)).0[1].sign() {

@@ -9,7 +9,7 @@ use std::cmp::Ordering;
 
 use num_bigint::BigInt;
 
-use crate::exact::{Approx, Expr, Lift, Ring, Scale, Still, filtered, sign};
+use crate::exact::{Approx, Expr, Lift, Ring, Scale, Still, filtered, perturbed, sign};
 use crate::{Sign, Vec3};
 
 /// A point: explicit coordinates or an implicit intersection.
@@ -183,10 +183,9 @@ impl Point {
 pub fn orient3d(a: &Point, b: &Point, c: &Point, d: &Point) -> Sign {
     let pts = [a, b, c, d];
     if let [Some(a), Some(b), Some(c), Some(d)] = pts.map(Point::site) {
+        // An exact zero on the coordinates goes straight to the perturbation.
         let s = crate::orient3d_coords(a, b, c, d);
-        if s != Sign::Zero || !pts.iter().any(|p| p.moves()) {
-            return s;
-        }
+        return if s == Sign::Zero && pts.iter().any(|p| p.moves()) { perturbed(&Orient3d(pts)) } else { s };
     }
     sign(&Orient3d(pts))
 }
@@ -200,9 +199,7 @@ pub fn orient2d_along(a: &Point, b: &Point, c: &Point, axis: usize) -> Sign {
         let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
         let p = |p: Vec3| crate::Vec2::new(p.to_array()[u], p.to_array()[v]);
         let s = crate::orient2d(p(a), p(b), p(c));
-        if s != Sign::Zero || !pts.iter().any(|p| p.moves()) {
-            return s;
-        }
+        return if s == Sign::Zero && pts.iter().any(|p| p.moves()) { perturbed(&Orient2d { pts, axis }) } else { s };
     }
     sign(&Orient2d { pts, axis })
 }
@@ -215,8 +212,13 @@ pub fn cmp_axis(a: &Point, b: &Point, axis: usize) -> Ordering {
         if o != Ordering::Equal || !(a.moves() || b.moves()) {
             return o;
         }
+        return ordering(perturbed(&CmpAxis { pts: [a, b], axis }));
     }
-    match sign(&CmpAxis { pts: [a, b], axis }) {
+    ordering(sign(&CmpAxis { pts: [a, b], axis }))
+}
+
+fn ordering(s: Sign) -> Ordering {
+    match s {
         Sign::Negative => Ordering::Less,
         Sign::Zero => Ordering::Equal,
         Sign::Positive => Ordering::Greater,
@@ -230,11 +232,7 @@ pub fn cmp_axis_filtered(a: &Point, b: &Point, axis: usize) -> Option<Ordering> 
     if let (Some(x), Some(y)) = (a.site(), b.site()) {
         return x.to_array()[axis].partial_cmp(&y.to_array()[axis]);
     }
-    filtered(&CmpAxis { pts: [a, b], axis }).map(|s| match s {
-        Sign::Negative => Ordering::Less,
-        Sign::Zero => Ordering::Equal,
-        Sign::Positive => Ordering::Greater,
-    })
+    filtered(&CmpAxis { pts: [a, b], axis }).map(ordering)
 }
 
 /// One integer scale for a whole set of points (see [`Exact`]).
