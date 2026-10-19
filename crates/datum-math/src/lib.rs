@@ -240,6 +240,13 @@ pub fn orient2d(a: Vec2, b: Vec2, c: Vec2) -> Sign {
     Sign::of(robust::orient2d(p(a), p(b), p(c)))
 }
 
+/// Exact position of `d` relative to the circle through `a, b, c` (counterclockwise):
+/// `Positive` inside, `Zero` on it.
+pub fn incircle(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Sign {
+    let p = |v: Vec2| robust::Coord { x: v.x, y: v.y };
+    Sign::of(robust::incircle(p(a), p(b), p(c), p(d)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

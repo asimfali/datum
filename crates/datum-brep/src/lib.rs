@@ -18,7 +18,7 @@ pub use build::{FaceSpec, build};
 pub use id::{Origin, TopoId};
 pub use prism::{ProfileLoop, Region, cuboid, extrude, prism};
 pub use terrain::{Grid, terrain};
-pub use tess::{Mesh, Triangles, tessellate, triangulate_face};
+pub use tess::{Mesh, Triangles, tessellate, triangulate_face, triangulate_face_delaunay};
 
 /// Results of a parallel stage in input order, or the first error in input order: the outcome,
 /// error message included, does not depend on the thread count (C4).

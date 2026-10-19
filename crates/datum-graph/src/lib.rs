@@ -157,6 +157,19 @@ pub struct Evaluation {
     pub reused: usize,
 }
 
+impl Evaluation {
+    /// Values of the features nothing else uses: what the model ends in. Failed ones are left out.
+    pub fn final_values(&self, graph: &Graph) -> Vec<&Value> {
+        let mut used = vec![false; graph.nodes.len()];
+        for n in &graph.nodes {
+            for &i in &n.inputs {
+                used[i as usize] = true;
+            }
+        }
+        self.results.iter().zip(used).filter(|(_, u)| !u).filter_map(|(r, _)| r.as_ref().ok().map(|v| v.as_ref())).collect()
+    }
+}
+
 /// Evaluates graphs, keeping computed bodies by key across evaluations. The cache is unbounded
 /// for now; eviction comes when memory is measured (ARCHITECTURE §5.1).
 #[derive(Default)]
