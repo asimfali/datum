@@ -341,7 +341,11 @@ mod tests {
             version: 0,
             edits,
         };
-        let mut h = egui_kittest::Harness::builder().with_size([360.0, 420.0]).wgpu().build_ui(|ui| {
+        // Layout needs no GPU; only a picture of the panel (`DATUM_VIEW_SHOT=file.png`) does.
+        let shot = std::env::var_os("DATUM_VIEW_SHOT");
+        let builder = egui_kittest::Harness::builder().with_size([360.0, 420.0]);
+        let builder = if shot.is_some() { builder.wgpu() } else { builder };
+        let mut h = builder.build_ui(|ui| {
             egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
         });
         h.run();
@@ -351,8 +355,8 @@ mod tests {
             let needed = h.ctx.fonts_mut(|f| f.layout_no_wrap(text.into(), egui::FontId::proportional(14.0), egui::Color32::WHITE).size().x);
             assert!(width > needed + 8.0, "`{text}` needs {needed}, the field is {width}");
         }
-        if let (Some(path), Ok(img)) = (std::env::var_os("DATUM_VIEW_SHOT"), h.render()) {
-            img.save(path).unwrap();
+        if let Some(path) = shot {
+            h.render().unwrap().save(path).unwrap();
         }
     }
 }
