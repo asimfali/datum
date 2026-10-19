@@ -14,7 +14,8 @@
 //! face, two edges crossing) is refused as [`BrepError::Degenerate`].
 
 use std::cmp::Ordering;
-use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as Atomic};
+use std::sync::{Mutex, PoisonError};
 
 use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, TopoId, Vertex, build, in_order, triangulate_face};
 use datum_math::{Lpi, Point, Sign, Vec3, cmp_axis, orient2d_along, orient3d};
@@ -65,6 +66,11 @@ fn degenerate<T>(msg: impl Into<String>) -> Result<T, BrepError> {
     Err(BrepError::Degenerate(msg.into()))
 }
 
+/// A point for an error message: where the engineer should look.
+fn at(p: Vec3) -> String {
+    format!("({}, {}, {})", p.x, p.y, p.z)
+}
+
 /// Index of an input body: 0 is the target, then the tools.
 type Part = usize;
 /// A triangle: part and index in that part's triangles.
@@ -111,23 +117,22 @@ struct Input<'a> {
 
 impl<'a> Input<'a> {
     fn new(x: Part, body: &'a Body) -> Result<Self, BrepError> {
-        // Directed half-edges `(origin, destination) → (face, edge)` label triangle sides.
-        let mut directed: Vec<((Ix, Ix), (Ix, Ix))> = (0..body.half_edges().len() as Ix)
-            .map(|h| {
-                let he = &body.half_edges()[h as usize];
-                let to = body.half_edges()[body.next(h) as usize].origin;
-                ((he.origin, to), (body.loops()[he.loop_ix as usize].face, he.edge))
-            })
-            .collect();
-        directed.par_sort_unstable();
-        let face_tris = |f: Ix| -> Result<Vec<Tri>, BrepError> {
-            let mut tris = Vec::new();
+        let face_tris = |f: Ix| -> Result<SmallVec<[Tri; 2]>, BrepError> {
+            // The face's own half-edges `(origin, destination, edge)` label triangle sides: a side
+            // along one is a B-rep edge, any other is a diagonal.
+            let mut own: SmallVec<[(Ix, Ix, Ix); 8]> = body
+                .face_loops(f)
+                .flat_map(|l| body.loop_half_edges(l))
+                .map(|h| (body.half_edges()[h as usize].origin, body.half_edges()[body.next(h) as usize].origin, body.half_edges()[h as usize].edge))
+                .collect();
+            own.sort_unstable();
+            let mut tris = SmallVec::new();
             for v in triangulate_face(body, f)? {
                 let segs = [0, 1, 2].map(|k| {
                     let (a, b) = (v[k], v[(k + 1) % 3]);
-                    match directed.binary_search_by_key(&(a, b), |d| d.0) {
-                        Ok(i) if directed[i].1.0 == f => Seg::Edge(x, directed[i].1.1),
-                        _ => Seg::Diagonal(x, a.min(b), a.max(b)),
+                    match own.binary_search_by_key(&(a, b), |d| (d.0, d.1)) {
+                        Ok(i) => Seg::Edge(x, own[i].2),
+                        Err(_) => Seg::Diagonal(x, a.min(b), a.max(b)),
                     }
                 });
                 let p = v.map(|i| body.point(i));
@@ -142,7 +147,23 @@ impl<'a> Input<'a> {
             }
             Ok(tris)
         };
-        let tris: Vec<Tri> = in_order((0..body.faces().len() as Ix).into_par_iter().map(face_tris))?.into_iter().flatten().collect();
+        // Streamed without a vector per face; the error of the lowest face wins, as in face order.
+        let error: Mutex<Option<(Ix, BrepError)>> = Mutex::new(None);
+        let tris: Vec<Tri> = (0..body.faces().len() as Ix)
+            .into_par_iter()
+            .flat_map_iter(|f| {
+                face_tris(f).unwrap_or_else(|e| {
+                    let mut first = error.lock().unwrap_or_else(PoisonError::into_inner);
+                    if first.as_ref().is_none_or(|(g, _)| f < *g) {
+                        *first = Some((f, e));
+                    }
+                    SmallVec::new()
+                })
+            })
+            .collect();
+        if let Some((_, e)) = error.into_inner().unwrap_or_else(PoisonError::into_inner) {
+            return Err(e);
+        }
         Ok(Self { body, tris, bounds: bounds(body.vertices().iter().map(|v| v.point)) })
     }
 
@@ -342,7 +363,8 @@ enum Location {
     Outside,
     Interior,
     OnSide(usize),
-    OnVertex,
+    /// On vertex `k` of the triangle.
+    OnVertex(usize),
 }
 
 /// Where `p`, a point in the plane of triangle `t`, lies relative to it.
@@ -355,7 +377,8 @@ fn locate(t: &Tri, pts: &[Vec3; 3], p: &Point) -> Location {
     match o.iter().filter(|s| **s == Sign::Zero).count() {
         0 => Location::Interior,
         1 => Location::OnSide(o.iter().position(|s| *s == Sign::Zero).unwrap_or(0)),
-        _ => Location::OnVertex,
+        // Vertex `k` closes side `k − 1` and opens side `k`.
+        _ => Location::OnVertex((0..3).find(|&k| o[k] == Sign::Zero && o[(k + 2) % 3] == Sign::Zero).unwrap_or(0)),
     }
 }
 
@@ -407,8 +430,7 @@ fn boundary_in(inputs: &[Input], a: TriRef, pa: &[Vec3; 3], sa: &[Sign; 3], b: T
     let (ta, tb) = (&inputs[a.0].tris[a.1], &inputs[b.0].tris[b.1]);
     for k in 0..3 {
         if sa[k] == Sign::Zero && !matches!(locate(tb, pb, &Point::Explicit(pa[k])), Location::Outside) {
-            let id = inputs[a.0].body.vertices()[ta.v[k] as usize].id;
-            return degenerate(format!("vertex {id:?} of one body lies on a face of another"));
+            return degenerate(format!("a vertex of one body at {} lies on a face of another", at(pa[k])));
         }
         let k1 = (k + 1) % 3;
         if sa[k] == Sign::Zero || sa[k1] == Sign::Zero || sa[k] == sa[k1] {
@@ -422,7 +444,7 @@ fn boundary_in(inputs: &[Input], a: TriRef, pa: &[Vec3; 3], sa: &[Sign; 3], b: T
             Location::OnSide(j) => {
                 canonical(Cross { seg: ta.segs[k], part: b.0, face: tb.face }, Cross { seg: tb.segs[j], part: a.0, face: ta.face })?
             }
-            Location::OnVertex => return degenerate("an edge of one body passes through a vertex of another"),
+            Location::OnVertex(j) => return degenerate(format!("an edge of one body passes through a vertex of another at {}", at(pb[j]))),
         };
         ends.push((key, Hit { point, plane: if key.part == b.0 { b } else { a } }));
     }
@@ -526,50 +548,76 @@ fn nested(inputs: &[Input], j: Part, k: Part) -> Result<bool, BrepError> {
 /// flips the answer; the first crossing from an end tells that end's side, and a connected part
 /// with no crossing at all is decided by a ray.
 fn classify(inputs: &[Input], x: Part, found: &Found) -> Result<Vec<bool>, BrepError> {
+    // Per vertex: unknown, outside or inside. Statuses follow from parity alone, so the
+    // breadth-first walk runs level by level in parallel: a vertex is claimed by one atomic
+    // compare-and-set, and a contradiction is seen from whichever end of an edge comes later.
+    const UNKNOWN: u8 = 0;
+    let code = |inside: bool| if inside { 2 } else { 1 };
     let body = inputs[x].body;
     let n = body.vertices().len();
-    let mut status: Vec<Option<bool>> = vec![None; n];
-    let mut adjacent: Vec<Vec<(Ix, bool)>> = vec![Vec::new(); n];
-    let mut queue = VecDeque::new();
+    let status: Vec<AtomicU8> = (0..n).map(|_| AtomicU8::new(UNKNOWN)).collect();
+    // One outgoing half-edge per vertex: its neighbours are walked around its fan, no lists.
+    let mut out = vec![0; n];
+    for (h, he) in body.half_edges().iter().enumerate() {
+        out[he.origin as usize] = h as Ix;
+    }
     let inconsistent = || degenerate("vertices cannot be classified consistently");
+    let mut frontier = Vec::new();
     for (e, edge) in body.edges().iter().enumerate() {
         let he = &body.half_edges()[edge.half as usize];
-        let (u, v) = (he.origin, body.half_edges()[he.twin as usize].origin);
-        let on = &found.on_edges[x][e];
-        adjacent[u as usize].push((v, on.len() % 2 == 1));
-        adjacent[v as usize].push((u, on.len() % 2 == 1));
-        let Some(first) = on.first() else { continue };
+        let u = he.origin;
+        let Some(first) = found.on_edges[x][e].first() else { continue };
         let plane = found.hits.get(first).plane;
         let p = inputs[plane.0].points(plane.1).map(Point::Explicit);
         let inside = match orient3d(&p[0], &p[1], &p[2], &Point::Explicit(body.point(u))) {
-            Sign::Zero => return degenerate("a vertex lies on a face of another body"),
+            Sign::Zero => return degenerate(format!("a vertex of one body at {} lies on a face of another", at(body.point(u)))),
             s => s == Sign::Positive,
         };
-        match status[u as usize] {
-            None => {
-                status[u as usize] = Some(inside);
-                queue.push_back(u);
+        match status[u as usize].load(Atomic::Relaxed) {
+            UNKNOWN => {
+                status[u as usize].store(code(inside), Atomic::Relaxed);
+                frontier.push(u);
             }
-            Some(s) if s != inside => return inconsistent(),
-            Some(_) => {}
+            c if c != code(inside) => return inconsistent(),
+            _ => {}
         }
     }
+    let conflict = AtomicBool::new(false);
+    let mut unclassified = 0;
     loop {
-        while let Some(u) = queue.pop_front() {
-            let s = status[u as usize].unwrap_or_default();
-            for &(v, flip) in &adjacent[u as usize] {
-                match status[v as usize] {
-                    None => {
-                        status[v as usize] = Some(s ^ flip);
-                        queue.push_back(v);
+        while !frontier.is_empty() {
+            frontier = frontier
+                .par_iter()
+                .flat_map_iter(|&u| {
+                    let s = status[u as usize].load(Atomic::Relaxed) == code(true);
+                    let mut claimed: SmallVec<[Ix; 8]> = SmallVec::new();
+                    let start = out[u as usize];
+                    let mut h = start;
+                    loop {
+                        let he = &body.half_edges()[h as usize];
+                        let v = body.half_edges()[body.next(h) as usize].origin;
+                        let want = code(s ^ (found.on_edges[x][he.edge as usize].len() % 2 == 1));
+                        match status[v as usize].compare_exchange(UNKNOWN, want, Atomic::Relaxed, Atomic::Relaxed) {
+                            Ok(_) => claimed.push(v),
+                            Err(c) if c != want => conflict.store(true, Atomic::Relaxed),
+                            Err(_) => {}
+                        }
+                        h = body.next(he.twin);
+                        if h == start {
+                            break;
+                        }
                     }
-                    Some(t) if t != s ^ flip => return inconsistent(),
-                    Some(_) => {}
-                }
+                    claimed
+                })
+                .collect();
+            if conflict.load(Atomic::Relaxed) {
+                return inconsistent();
             }
         }
-        let Some(v) = status.iter().position(Option::is_none) else { break };
-        let p = body.point(v as Ix);
+        // Classified vertices stay classified: the scan for the next part only moves forward.
+        let Some(k) = status[unclassified..].iter().position(|s| s.load(Atomic::Relaxed) == UNKNOWN) else { break };
+        unclassified += k;
+        let p = body.point(unclassified as Ix);
         let others: Vec<Part> = if x == 0 { (1..inputs.len()).collect() } else { vec![0] };
         let mut inside = false;
         for y in others {
@@ -577,10 +625,10 @@ fn classify(inputs: &[Input], x: Part, found: &Found) -> Result<Vec<bool>, BrepE
                 inside = true;
             }
         }
-        status[v] = Some(inside);
-        queue.push_back(v as Ix);
+        status[unclassified].store(code(inside), Atomic::Relaxed);
+        frontier.push(unclassified as Ix);
     }
-    Ok(status.into_iter().map(Option::unwrap_or_default).collect())
+    Ok(status.into_iter().map(|s| s.into_inner() == code(true)).collect())
 }
 
 /// Whether `p` (not on the surface) lies inside part `y`: the parity of crossings of a ray along
@@ -614,7 +662,7 @@ fn ray_inside(inputs: &[Input], y: Part, p: Vec3) -> Result<bool, BrepError> {
                 continue 'axes;
             }
             match side {
-                Sign::Zero => return degenerate("a vertex lies on a face of another body"),
+                Sign::Zero => return degenerate(format!("a vertex of one body at {} lies on a face of another", at(p))),
                 s if s == along => crossings += 1,
                 _ => {}
             }
@@ -675,6 +723,38 @@ fn assemble_face(
     (x, f): (Part, Ix),
 ) -> Result<(Vec<Vertex>, Vec<FaceSpec>), BrepError> {
     let body = inputs[x].body;
+    let face = &body.faces()[f as usize];
+    // A face that no cut reaches and no crossing splits is kept or dropped whole, as it is: most of
+    // a large terrain or plate. Its vertices share one status.
+    let mut half_edges = body.face_loops(f).flat_map(|l| body.loop_half_edges(l));
+    if found.face_cuts(x, f).next().is_none() && half_edges.all(|h| found.on_edges[x][body.half_edges()[h as usize].edge as usize].is_empty()) {
+        let first = body.half_edges()[body.loops()[face.first_loop as usize].first as usize].origin;
+        if status[first as usize] != kind.keeps_inside(x) {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        let mut vertices = Vec::new();
+        let loops = body
+            .face_loops(f)
+            .map(|l| {
+                let mut ids: Vec<TopoId> = body
+                    .loop_half_edges(l)
+                    .filter_map(|h| {
+                        let v = body.half_edges()[h as usize].origin;
+                        let id = node_id(Node::Vert(x, v))?;
+                        vertices.push(Vertex { id, point: body.point(v) });
+                        Some(id)
+                    })
+                    .collect();
+                if kind.flips(x) {
+                    ids.reverse();
+                }
+                ids
+            })
+            .collect();
+        let normal = if kind.flips(x) { -face.plane.normal } else { face.plane.normal };
+        let id = out_id(feature, x, face.id);
+        return Ok((vertices, vec![FaceSpec { id, plane: Plane { origin: face.plane.origin, normal }, loops }]));
+    }
     let mut pieces: Vec<(Node, Node)> = found.face_cuts(x, f).collect();
     for l in body.face_loops(f) {
         for h in body.loop_half_edges(l) {
@@ -700,7 +780,6 @@ fn assemble_face(
     if pieces.is_empty() {
         return Ok((vertices, faces));
     }
-    let face = &body.faces()[f as usize];
     let groups = group_loops(trace(pieces)?, face.plane.normal, &|n| found.point(inputs, n))?;
     let several = groups.len() > 1;
     // A face may have thousands of loops (perforation): they are named in parallel.

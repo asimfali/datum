@@ -1,6 +1,8 @@
 //! Origin-derived topology IDs (ARCHITECTURE §4.2).
 
+use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use smallvec::SmallVec;
 
@@ -18,6 +20,29 @@ impl TopoId {
 impl fmt::Debug for TopoId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{:032x}", self.0)
+    }
+}
+
+/// A map keyed by topology IDs. The IDs are already uniform hashes, so the hasher takes their low
+/// 64 bits as they are: fast and the same on every run (no `DefaultHasher`). For lookups only.
+pub(crate) type IdMap<V> = HashMap<TopoId, V, BuildHasherDefault<IdHasher>>;
+
+#[derive(Default)]
+pub(crate) struct IdHasher(u64);
+
+impl Hasher for IdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+
+    fn write_u128(&mut self, v: u128) {
+        self.0 = v as u64;
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
     }
 }
 

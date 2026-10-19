@@ -7,7 +7,7 @@ mod pattern;
 use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
-use datum_brep::{Body, BrepError, TopoId, prism};
+use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
@@ -41,6 +41,9 @@ pub enum Op {
     /// `count[0] × count[1]` copies of the input, copy `(i, j)` moved by `i·step[0] + j·step[1]`,
     /// as one body. Copies must not touch. One input.
     PatternGrid { count: [u32; 2], step: [Vec3; 2] },
+    /// Ground under a regular grid of heights down to the level `base`: node `(i, j)` stands at
+    /// `origin + (i·step[0], j·step[1])` with height `heights[j·count[0] + i]`. No inputs.
+    Terrain { origin: Vec2, step: [f64; 2], count: [u32; 2], heights: Vec<f64>, base: f64 },
 }
 
 fn z_axis() -> Vec3 {
@@ -54,13 +57,14 @@ impl Op {
             Self::Transform { .. } => "transform",
             Self::Boolean { .. } => "boolean",
             Self::PatternGrid { .. } => "pattern_grid",
+            Self::Terrain { .. } => "terrain",
         }
     }
 
     /// Allowed numbers of input bodies.
     pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
-            Self::Prism { .. } => 0..=0,
+            Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
             Self::Transform { .. } | Self::PatternGrid { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
         }
@@ -87,6 +91,12 @@ impl Op {
             Self::PatternGrid { count, step } => {
                 count.iter().map(|&c| f64::from(c)).chain(step.iter().flat_map(|s| s.to_array())).for_each(num);
             }
+            Self::Terrain { origin, step, count, heights, base } => {
+                // The same bytes as feeding the numbers one by one, in one call: a million heights.
+                let values = [origin.x, origin.y, step[0], step[1], f64::from(count[0]), f64::from(count[1]), *base, heights.len() as f64];
+                let bytes: Vec<u8> = values.iter().chain(heights).flat_map(|x| x.to_bits().to_le_bytes()).collect();
+                h.update(&bytes);
+            }
         }
     }
 
@@ -110,6 +120,9 @@ impl Op {
             }
             Self::Boolean { kind, through } => boolean(feature, *kind, *through, inputs)?,
             Self::PatternGrid { count, step } => pattern_grid(feature, inputs[0], *count, *step)?,
+            Self::Terrain { origin, step, count, heights, base } => {
+                terrain(feature, &Grid { origin: *origin, step: *step, count: *count, heights }, *base)?
+            }
         };
         if cfg!(debug_assertions) {
             body.validate()?;
