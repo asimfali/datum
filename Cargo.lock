@@ -372,6 +372,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "datum-sketch"
+version = "0.1.0"
+dependencies = [
+ "datum-math",
+ "libm",
+ "proptest",
+ "rayon",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
