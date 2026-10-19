@@ -13,7 +13,10 @@
 //! Bodies are not stored: evaluation rebuilds them bit for bit. Features come after their
 //! inputs, in history order. Keys are written sorted, `f64` values round-trip exactly.
 
+use std::collections::BTreeMap;
 use std::fmt;
+
+use datum_math::expr::Num;
 
 mod session;
 
@@ -50,6 +53,9 @@ impl std::error::Error for ModelError {}
 #[serde(deny_unknown_fields)]
 struct File {
     format: String,
+    /// Model parameters: numbers or expressions of each other (D57).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    parameters: BTreeMap<String, Num>,
     features: Vec<Map<String, Value>>,
 }
 
@@ -59,6 +65,9 @@ pub fn parse(json: &str) -> Result<Graph, ModelError> {
         return Err(ModelError::Format(file.format));
     }
     let mut g = Graph::default();
+    for (name, value) in file.parameters {
+        g.set_parameter(&name, value).map_err(ModelError::Graph)?;
+    }
     for (index, fields) in file.features.into_iter().enumerate() {
         add_feature(&mut g, fields).map_err(|msg| ModelError::Feature { index, msg })?;
     }
@@ -102,7 +111,7 @@ pub fn feature_json(g: &Graph, ix: NodeIx) -> Map<String, Value> {
 /// Canonical JSON: sorted keys, two-space indent, trailing newline.
 pub fn to_json(g: &Graph) -> String {
     let features = (0..g.nodes().len() as NodeIx).map(|i| feature_json(g, i)).collect();
-    let mut s = serde_json::to_string_pretty(&File { format: FORMAT.into(), features }).unwrap_or_default();
+    let mut s = serde_json::to_string_pretty(&File { format: FORMAT.into(), parameters: g.parameters().clone(), features }).unwrap_or_default();
     s.push('\n');
     s
 }

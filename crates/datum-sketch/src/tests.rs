@@ -30,8 +30,8 @@ fn rectangle(w: f64, h: f64, scale: f64) -> Sketch {
         Constraint::Horizontal { line: "top".into() },
         Constraint::Vertical { line: "left".into() },
         Constraint::Vertical { line: "right".into() },
-        Constraint::Length { line: "bottom".into(), value: w * scale },
-        Constraint::Length { line: "left".into(), value: h * scale },
+        Constraint::Length { line: "bottom".into(), value: (w * scale).into() },
+        Constraint::Length { line: "left".into(), value: (h * scale).into() },
     ];
     s
 }
@@ -74,7 +74,7 @@ fn missing_constraints_leave_freedom() {
 #[test]
 fn conflicts_are_named() {
     let mut s = rectangle(12.0, 5.0, 1.0);
-    s.constraints.push(Constraint::Length { line: "top".into(), value: 13.0 });
+    s.constraints.push(Constraint::Length { line: "top".into(), value: 13.0.into() });
     let Err(SketchError::Conflict(names)) = solve(&s) else { panic!("expected a conflict") };
     // Either width, or the top's own length, or a constraint keeping them equal must go.
     assert!(names.iter().any(|n| n.contains("length (top = 13)")), "{names:?}");
@@ -167,8 +167,8 @@ proptest::proptest! {
         s.points.insert("a".into(), Vec2::new(0.0, 0.0));
         for c in &mut s.constraints {
             match c {
-                Constraint::Length { line, value } if line == "bottom" => *value = w,
-                Constraint::Length { value, .. } => *value = h,
+                Constraint::Length { line, value } if line == "bottom" => *value = w.into(),
+                Constraint::Length { value, .. } => *value = h.into(),
                 _ => {}
             }
         }

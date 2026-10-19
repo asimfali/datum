@@ -8,8 +8,13 @@ fn sample() -> Graph {
     let mut g = Graph::default();
     // Values chosen to break naive float printing: 0.1 + 0.2, a subnormal-adjacent tiny number.
     let poly = vec![Vec2::new(0.0, 0.0), Vec2::new(0.1 + 0.2, 0.0), Vec2::new(0.0, 1e-300 * 1e299)];
-    let p = g.add("plate", Op::Prism { polygon: poly, z0: -1.5, z1: std::f64::consts::PI }, &[]).unwrap();
-    g.add("moved", Op::Transform { translate: Vec3::new(1e7, -3.0, 0.0), axis: Vec3::new(0.3, -0.5, 0.8), angle_deg: 37.25 }, &[p]).unwrap();
+    let p = g.add("plate", Op::Prism { polygon: poly, z0: (-1.5).into(), z1: std::f64::consts::PI.into() }, &[]).unwrap();
+    g.add(
+        "moved",
+        Op::Transform { translate: [1e7.into(), (-3.0).into(), 0.0.into()], axis: Vec3::new(0.3, -0.5, 0.8), angle_deg: 37.25.into() },
+        &[p],
+    )
+    .unwrap();
     g
 }
 
@@ -31,7 +36,10 @@ fn defaults_and_input_order() {
     ]}"#,
     )
     .unwrap();
-    assert_eq!(g.nodes()[1].op, Op::Transform { translate: Vec3::ZERO, axis: Vec3::new(0.0, 0.0, 1.0), angle_deg: 0.0 });
+    assert_eq!(
+        g.nodes()[1].op,
+        Op::Transform { translate: [0.0.into(), 0.0.into(), 0.0.into()], axis: Vec3::new(0.0, 0.0, 1.0), angle_deg: 0.0.into() }
+    );
 }
 
 #[test]

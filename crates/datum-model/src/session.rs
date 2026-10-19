@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use datum_brep::{Body, Ix};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
+use datum_math::expr::{Num, parameter_values};
 use serde_json::{Map, Value, json};
 
 use crate::{add_feature, feature_json, parse, to_json};
@@ -68,6 +69,32 @@ const COMMANDS: &[Command] = &[
         params: feature_schema,
         run: |s, p| {
             add_feature(&mut s.graph, p.clone())?;
+            Ok(s.rebuild())
+        },
+    },
+    Command {
+        name: "set_parameter",
+        description: "Set a model parameter to a number or an expression of other parameters (e.g. {name: \"t\", value: \"w / 5\"}). \
+                      Numbers of features and sketch dimensions may be expressions of parameters: `+ - * /`, parentheses, `pi`, \
+                      sqrt, abs, min, max, sin, cos, tan (degrees).",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "value": {"type": ["number", "string"]}
+            }, "required": ["name", "value"]})
+        },
+        run: |s, p| {
+            let value: Num = serde_json::from_value(p.get("value").cloned().unwrap_or(Value::Null)).map_err(|e| format!("value: {e}"))?;
+            s.graph.set_parameter(text(p, "name")?, value).map_err(|e| e.to_string())?;
+            Ok(s.rebuild())
+        },
+    },
+    Command {
+        name: "remove_parameter",
+        description: "Remove a model parameter; features still using it then fail and say so.",
+        params: name_param,
+        run: |s, p| {
+            s.graph.remove_parameter(text(p, "name")?).map_err(|e| e.to_string())?;
             Ok(s.rebuild())
         },
     },
@@ -256,6 +283,19 @@ impl Session {
                 Value::Object(f)
             })
             .collect();
-        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "features": features})
+        let values = parameter_values(self.graph.parameters());
+        let parameters: serde_json::Map<String, Value> = self
+            .graph
+            .parameters()
+            .iter()
+            .map(|(n, def)| {
+                let v = match &values[n] {
+                    Ok(v) => json!({"definition": def, "value": v}),
+                    Err(e) => json!({"definition": def, "error": e.to_string()}),
+                };
+                (n.clone(), v)
+            })
+            .collect();
+        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "parameters": parameters, "features": features})
     }
 }

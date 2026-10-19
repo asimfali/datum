@@ -17,6 +17,7 @@ schemars = { workspace = true }
 num-bigint = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
 rayon = { workspace = true }

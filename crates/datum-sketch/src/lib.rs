@@ -18,6 +18,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use datum_math::Vec2;
+use datum_math::expr::{ExprError, Num};
 use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -85,22 +86,41 @@ pub enum Constraint {
     },
     Distance {
         points: [String; 2],
-        value: f64,
+        value: Num,
     },
     Length {
         line: String,
-        value: f64,
+        value: Num,
     },
     /// Distance from a point to the line through a segment, on the side the point was drawn.
     PointLine {
         point: String,
         line: String,
-        value: f64,
+        value: Num,
     },
     Angle {
         lines: [String; 2],
-        degrees: f64,
+        degrees: Num,
     },
+}
+
+impl Sketch {
+    /// The same sketch with every dimension a number: expressions evaluated with parameter
+    /// values from `lookup`. An error names the constraint.
+    pub fn resolve(&self, lookup: &impl Fn(&str) -> Result<f64, ExprError>) -> Result<Sketch, String> {
+        let mut s = self.clone();
+        for (k, c) in s.constraints.iter_mut().enumerate() {
+            let describe = c.describe(k);
+            if let Constraint::Distance { value, .. }
+            | Constraint::Length { value, .. }
+            | Constraint::PointLine { value, .. }
+            | Constraint::Angle { degrees: value, .. } = c
+            {
+                *value = Num::Value(value.resolve(lookup).map_err(|e| format!("{describe}: {e}"))?);
+            }
+        }
+        Ok(s)
+    }
 }
 
 impl Constraint {

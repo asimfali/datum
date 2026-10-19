@@ -15,11 +15,11 @@ pub fn ngon(n: usize, r: f64) -> Vec<Vec2> {
 }
 
 pub fn prism(polygon: Vec<Vec2>) -> Op {
-    Op::Prism { polygon, z0: 0.0, z1: 10.0 }
+    Op::Prism { polygon, z0: 0.0.into(), z1: 10.0.into() }
 }
 
 pub fn turn(angle_deg: f64, translate: Vec3) -> Op {
-    Op::Transform { translate, axis: Vec3::new(0.3, -0.5, 0.8), angle_deg }
+    Op::Transform { translate: translate.to_array().map(Into::into), axis: Vec3::new(0.3, -0.5, 0.8), angle_deg: angle_deg.into() }
 }
 
 /// C1: `n` independent bodies, each a prism over a `sides`-gon, then moved.

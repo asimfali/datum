@@ -71,3 +71,58 @@ fn every_command_has_a_schema() {
     let add = cmds.iter().find(|c| c["name"] == "add").unwrap();
     assert!(add["params"].to_string().contains("transform"));
 }
+
+fn volume(s: &mut Session, name: &str) -> f64 {
+    run(s, "mass_properties", json!({"name": name}))["volume"].as_f64().unwrap()
+}
+
+/// D57: parameters drive sketch dimensions, extrusion heights and pattern counts; an edit
+/// recomputes only the features whose numbers change.
+#[test]
+fn parameters_drive_the_model() {
+    let mut s = Session::default();
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 40}));
+    run(&mut s, "set_parameter", json!({"name": "t", "value": "w / 8"}));
+    run(&mut s, "set_parameter", json!({"name": "n", "value": "2 + 1"}));
+    let square = json!({
+        "points": {"a": [0, 0], "b": [9, 0], "c": [9, 9], "d": [0, 9]},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "a"}},
+        "constraints": [
+            {"type": "fix", "point": "a"}, {"type": "horizontal", "line": "l1"}, {"type": "vertical", "line": "l2"},
+            {"type": "horizontal", "line": "l3"}, {"type": "vertical", "line": "l4"},
+            {"type": "length", "line": "l1", "value": "w"}, {"type": "equal", "lines": ["l1", "l2"]}
+        ]
+    });
+    run(&mut s, "add", json!({"name": "base", "op": "sketch", "sketch": square}));
+    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "inputs": ["base"], "z0": 0, "z1": "t"}));
+    run(&mut s, "add", json!({"name": "row", "op": "pattern_grid", "inputs": ["slab"], "count": ["n", 1], "step": [["w + 10", 0, 0], [0, 0, 0]]}));
+    assert_eq!(volume(&mut s, "row"), 3.0 * 40.0 * 40.0 * 5.0);
+    // A thicker slab: the sketch keeps its cache entry, slab and row are recomputed.
+    let r = run(&mut s, "set_parameter", json!({"name": "t", "value": 6}));
+    assert_eq!((r["computed"].as_u64(), r["reused"].as_u64()), (Some(2), Some(1)));
+    assert_eq!(volume(&mut s, "row"), 3.0 * 40.0 * 40.0 * 6.0);
+    let p = &run(&mut s, "inspect", json!({}))["parameters"];
+    assert_eq!((&p["w"]["value"], &p["t"]["definition"]), (&json!(40.0), &json!(6.0)));
+
+    // Mistakes are named where they bite.
+    let failed =
+        |r: &Value| r["failed"].as_array().unwrap().iter().map(|f| format!("{}: {}", f["feature"], f["error"])).collect::<Vec<_>>().join("; ");
+    let r = run(&mut s, "set_parameter", json!({"name": "n", "value": "2.5"}));
+    assert!(failed(&r).contains("a count must be a whole number"), "{}", failed(&r));
+    let r = run(&mut s, "set_parameter", json!({"name": "w", "value": "t * size"}));
+    assert!(failed(&r).contains("unknown parameter `size`"), "{}", failed(&r));
+    let r = run(&mut s, "set_parameter", json!({"name": "w", "value": "t + w"}));
+    assert!(failed(&r).contains("depends on itself"), "{}", failed(&r));
+    assert!(s.execute("set_parameter", &json!({"name": "2x", "value": 1})).unwrap_err().contains("not a valid parameter name"));
+
+    // Saved and opened again, bit for bit.
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 40}));
+    run(&mut s, "set_parameter", json!({"name": "n", "value": 3}));
+    let path = std::env::temp_dir().join(format!("datum-params-{}.json", std::process::id()));
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(volume(&mut t, "row"), 3.0 * 40.0 * 40.0 * 6.0);
+    assert_eq!(datum_model::to_json(t.graph()), datum_model::to_json(s.graph()));
+}
