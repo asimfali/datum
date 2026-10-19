@@ -35,6 +35,13 @@ pub struct Lpi {
     /// Homogeneous coordinates in filter arithmetic, computed once: every predicate on the point
     /// starts from them instead of rebuilding the plane and the line (Attene et al.).
     pub(crate) filter: [Approx; 4],
+    /// The end of the line that lies exactly in the plane, if one does: then that end is the
+    /// point in the actual geometry. A punch's edge ending in a face of the sheet makes such
+    /// points by the thousand; predicates on them take the fast paths of input vertices, and
+    /// only a tie goes to the perturbation, which still sees the line and the plane. An index
+    /// into `pts` (0 or 1), not the coordinates: points are copied by the million, and their
+    /// size shows in the C3 benchmark.
+    site: Option<u8>,
 }
 
 /// Two points are the same definition: the cached filter values follow from the inputs.
@@ -71,23 +78,41 @@ impl Lpi {
             centre: centre.unwrap_or(Vec3::ZERO),
             moving: [p.1.is_some(), r.1.is_some()],
             filter: [Approx::input(0.0); 4],
+            site: None,
         };
         lpi.filter = lpi.homogeneous(&Still(Approx::input));
         let w = lpi.filter[3].sign().unwrap_or_else(|| sign(&Denominator(&lpi)));
         match w {
-            Sign::Positive => Some(lpi),
+            Sign::Positive => {}
             // Swapping `p, q` negates the direction, `w` and `λ`; the point stays.
             Sign::Negative => {
                 lpi.pts.swap(0, 1);
                 lpi.filter = lpi.homogeneous(&Still(Approx::input));
-                Some(lpi)
             }
-            Sign::Zero => None,
+            Sign::Zero => return None,
         }
+        let [p, q, r, s, t] = lpi.pts;
+        // An end `e` is the point when `(x, y, z) = e·w`; the filter rules that out cheaply in
+        // nearly every case, and `robust` decides the rest.
+        let off = |e: Vec3| (0..3).any(|i| (lpi.filter[i] - Approx::input(e.to_array()[i]) * lpi.filter[3]).sign().is_some_and(|s| s != Sign::Zero));
+        lpi.site = [p, q].into_iter().position(|e| !off(e) && crate::orient3d_coords(r, s, t, e) == Sign::Zero).map(|i| i as u8);
+        // On an input vertex the filter is exact: `(x, y, z, 1)`.
+        if let Some(v) = lpi.site() {
+            lpi.filter = [v.x, v.y, v.z, 1.0].map(Approx::input);
+        }
+        Some(lpi)
+    }
+
+    /// The line's end that is the point in the actual geometry, if one is.
+    fn site(&self) -> Option<Vec3> {
+        self.site.map(|i| self.pts[i as usize])
     }
 
     /// Rounded coordinates, for output only: decisions never read them.
     pub fn approx(&self) -> Vec3 {
+        if let Some(v) = self.site() {
+            return v;
+        }
         let [p, q, r, s, t] = self.pts;
         let n = (s - r).cross(t - r);
         p + (q - p) * (n.dot(r - p) / n.dot(q - p))
@@ -168,11 +193,12 @@ impl Point {
         }
     }
 
-    /// Coordinates when the point is an input vertex: the fast paths of the predicates.
+    /// Exact coordinates in the actual geometry, when known without arithmetic: an input vertex,
+    /// or an intersection at the end of its line. The fast paths of the predicates.
     fn site(&self) -> Option<Vec3> {
         match self {
             Self::Explicit(v) | Self::Moved(v, _) => Some(*v),
-            Self::Lpi(_) => None,
+            Self::Lpi(l) => l.site(),
         }
     }
 }
