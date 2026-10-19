@@ -98,15 +98,20 @@ fn excavation_and_remainder_add_up() {
     assert!(dug > 9.0 * 9.0 * 0.5);
 }
 
-/// Q7: a pit wall through grid nodes is a contact the kernel does not resolve yet; it is refused
-/// with the cause, not approximated.
+/// Q7: walls along grid lines and a bottom at a node's height are ordinary for an engineer.
+/// The grid nodes on the walls stay vertices of the result, and the volume is exact.
 #[test]
-fn pit_wall_on_a_grid_line_is_refused() {
-    let g = ground(12, hills).unwrap();
-    let on_grid = pit((5.0, 5.0), 4.0, 0.0, 8.5);
-    match boolean(id("dig"), BooleanKind::Intersection, None, &[&g, &on_grid]) {
-        // The message names the place: here a grid node on the wall x = 3.
-        Err(BrepError::Degenerate(m)) => assert!(m.contains(" at (3, "), "{m}"),
-        r => panic!("expected a degenerate contact, got {r:?}"),
-    }
+fn pit_on_the_grid() {
+    let g = ground(21, |x, y| 3.0 + 0.25 * x + 0.5 * y).unwrap();
+    // Walls on x = 6, 12 and y = 5, 13; the bottom is the height of node (6, 5).
+    let pit = prism(id("pit"), &[(6.0, 5.0), (12.0, 5.0), (12.0, 13.0), (6.0, 13.0)].map(|(x, y)| Vec2::new(x, y)), 1.0, 100.0).unwrap();
+    let cut = checked(boolean(id("dig"), BooleanKind::Intersection, None, &[&g, &pit]));
+    assert_close(cut.volume(), 48.0 * (3.0 + 0.25 * 9.0 + 0.5 * 9.0 - 1.0), 1e-12);
+    assert!(cut.vertices().iter().any(|v| v.point == Vec3::new(6.0, 5.0, 3.0 + 1.5 + 2.5)));
+    let rolling = ground(16, hills).unwrap();
+    let flat_bottom =
+        prism(id("pit"), &[(3.0, 4.0), (9.0, 4.0), (9.0, 11.0), (3.0, 11.0)].map(|(x, y)| Vec2::new(x, y)), hills(5.0, 6.0), 100.0).unwrap();
+    let dug = checked(boolean(id("dig"), BooleanKind::Intersection, None, &[&rolling, &flat_bottom])).volume();
+    let left = checked(boolean(id("dig"), BooleanKind::Difference, None, &[&rolling, &flat_bottom])).volume();
+    assert_close(dug + left, rolling.volume(), 1e-12);
 }

@@ -7,13 +7,17 @@
 
 use std::cmp::Ordering;
 
-use crate::exact::{Approx, Expr, Ring, sign};
+use crate::exact::{Approx, Expr, Lift, Ring, Still, sign};
 use crate::{Sign, Vec3};
 
 /// A point: explicit coordinates or an implicit intersection.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Point {
     Explicit(Vec3),
+    /// An input vertex of a shell that moves under the symbolic perturbation (Q7): it grows away
+    /// from the shell's centre, the second field, and shifts in a fixed direction, both by an
+    /// infinitesimal amount. Decisions that tie on the coordinates are settled by that motion.
+    Moved(Vec3, Vec3),
     Lpi(Lpi),
 }
 
@@ -22,30 +26,58 @@ pub enum Point {
 pub struct Lpi {
     /// `p, q, r, s, t`, with `p, q` ordered so that the homogeneous `w` is positive.
     pts: [Vec3; 5],
+    /// Centre of the moving shell, and which of the line and the plane belong to it. Both may
+    /// move only with one centre: points of two different moving shells are never combined.
+    centre: Vec3,
+    moving: [bool; 2],
     /// Homogeneous coordinates in filter arithmetic, computed once: every predicate on the point
     /// starts from them instead of rebuilding the plane and the line (Attene et al.).
     pub(crate) filter: [Approx; 4],
 }
 
-/// Two points are the same definition: the cached filter values follow from `pts`.
+/// Two points are the same definition: the cached filter values follow from the inputs.
 impl PartialEq for Lpi {
     fn eq(&self, o: &Self) -> bool {
-        self.pts == o.pts
+        self.pts == o.pts && self.moving == o.moving && (self.moving == [false; 2] || self.centre == o.centre)
     }
 }
 
 impl Lpi {
-    /// `None` when the line is parallel to the plane or the triangle is degenerate.
+    /// The line through `p, q` and the plane through `r, s, t`, none of which move. `None` when
+    /// the line is parallel to the plane or the triangle is degenerate.
     pub fn new(p: Vec3, q: Vec3, r: Vec3, s: Vec3, t: Vec3) -> Option<Self> {
-        let mut lpi = Self { pts: [p, q, r, s, t], filter: [Approx::input(0.0); 4] };
-        lpi.filter = lpi.homogeneous(&Approx::input);
+        Self::between([&Point::Explicit(p), &Point::Explicit(q)], [&Point::Explicit(r), &Point::Explicit(s), &Point::Explicit(t)])
+    }
+
+    /// The line through two input points and the plane through three, each explicit or moving
+    /// with one common centre. `None` for implicit inputs, moving inputs with different centres, a
+    /// line parallel to the plane or a degenerate triangle.
+    pub fn between(line: [&Point; 2], plane: [&Point; 3]) -> Option<Self> {
+        let site = |p: &Point| match *p {
+            Point::Explicit(v) => Some((v, None)),
+            Point::Moved(v, c) => Some((v, Some(c))),
+            Point::Lpi(_) => None,
+        };
+        let ([p, q], [r, s, t]) = (line.map(site), plane.map(site));
+        let (p, q, r, s, t) = (p?, q?, r?, s?, t?);
+        let centre = match (p.1, r.1) {
+            (Some(a), Some(b)) if a != b => return None,
+            (a, b) => a.or(b),
+        };
+        let mut lpi = Self {
+            pts: [p.0, q.0, r.0, s.0, t.0],
+            centre: centre.unwrap_or(Vec3::ZERO),
+            moving: [p.1.is_some(), r.1.is_some()],
+            filter: [Approx::input(0.0); 4],
+        };
+        lpi.filter = lpi.homogeneous(&Still(Approx::input));
         let w = lpi.filter[3].sign().unwrap_or_else(|| sign(&Denominator(&lpi)));
         match w {
             Sign::Positive => Some(lpi),
             // Swapping `p, q` negates the direction, `w` and `λ`; the point stays.
             Sign::Negative => {
                 lpi.pts.swap(0, 1);
-                lpi.filter = lpi.homogeneous(&Approx::input);
+                lpi.filter = lpi.homogeneous(&Still(Approx::input));
                 Some(lpi)
             }
             Sign::Zero => None,
@@ -61,18 +93,26 @@ impl Lpi {
 
     /// Normal of the plane, direction of the line, and a point on each: `p + dir·λ` meets the
     /// plane where `normal·(r - p) = λ·normal·dir`.
-    fn parts<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> [[T; 3]; 4] {
-        let [p, q, r, s, t] = self.pts.map(|v| v.to_array().map(lift));
+    #[inline]
+    fn parts<T: Ring>(&self, lift: &impl Lift<T>) -> [[T; 3]; 4] {
+        let (line, plane) = (self.moving[0].then_some(self.centre), self.moving[1].then_some(self.centre));
+        let (p, q) = (lift.point(self.pts[0], line), lift.point(self.pts[1], line));
+        let (r, s, t) = (lift.point(self.pts[2], plane), lift.point(self.pts[3], plane), lift.point(self.pts[4], plane));
         let normal = cross(sub(&s, &r), sub(&t, &r));
         [sub(&q, &p), normal, p, r]
     }
 
-    pub(crate) fn homogeneous<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> [T; 4] {
+    pub(crate) fn homogeneous<T: Ring>(&self, lift: &impl Lift<T>) -> [T; 4] {
         let [dir, normal, p, r] = self.parts(lift);
         let w = dot(&normal, &dir);
         let lambda = dot(&normal, &sub(&r, &p));
         let [x, y, z] = [0, 1, 2].map(|i| p[i].clone() * w.clone() + dir[i].clone() * lambda.clone());
         [x, y, z, w]
+    }
+
+    fn inputs(&self) -> impl Iterator<Item = f64> + '_ {
+        let centre = self.moving.contains(&true).then_some(&self.centre);
+        self.pts.iter().chain(centre).flat_map(|v| v.to_array())
     }
 }
 
@@ -80,57 +120,99 @@ impl Point {
     /// Rounded coordinates, for output only.
     pub fn approx(&self) -> Vec3 {
         match self {
-            Self::Explicit(v) => *v,
+            Self::Explicit(v) | Self::Moved(v, _) => *v,
             Self::Lpi(l) => l.approx(),
         }
     }
 
-    fn inputs(&self) -> &[Vec3] {
-        match self {
-            Self::Explicit(v) => std::slice::from_ref(v),
-            Self::Lpi(l) => &l.pts,
+    /// The same point without the perturbation: for questions about the actual geometry, such as
+    /// whether two points of a result coincide.
+    pub fn still(&self) -> Self {
+        match *self {
+            Self::Moved(v, _) => Self::Explicit(v),
+            Self::Lpi(l) => Self::Lpi(Lpi { moving: [false; 2], ..l }),
+            p => p,
         }
     }
 
-    fn homogeneous<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> [T; 4] {
+    fn moves(&self) -> bool {
+        match self {
+            Self::Explicit(_) => false,
+            Self::Moved(..) => true,
+            Self::Lpi(l) => l.moving.contains(&true),
+        }
+    }
+
+    fn inputs(&self) -> impl Iterator<Item = f64> + '_ {
+        let (own, lpi) = match self {
+            Self::Explicit(v) => ([Some(*v), None], None),
+            Self::Moved(v, c) => ([Some(*v), Some(*c)], None),
+            Self::Lpi(l) => ([None, None], Some(l)),
+        };
+        own.into_iter().flatten().flat_map(|v| v.to_array()).chain(lpi.into_iter().flat_map(Lpi::inputs))
+    }
+
+    fn homogeneous<T: Ring>(&self, lift: &impl Lift<T>) -> [T; 4] {
         match self {
             Self::Explicit(v) => {
-                let [x, y, z] = v.to_array().map(lift);
+                let [x, y, z] = lift.point(*v, None);
+                [x, y, z, T::one()]
+            }
+            Self::Moved(v, c) => {
+                let [x, y, z] = lift.point(*v, Some(*c));
                 [x, y, z, T::one()]
             }
             Self::Lpi(l) => T::lpi(l, lift),
+        }
+    }
+
+    /// Coordinates when the point is an input vertex: the fast paths of the predicates.
+    fn site(&self) -> Option<Vec3> {
+        match self {
+            Self::Explicit(v) | Self::Moved(v, _) => Some(*v),
+            Self::Lpi(_) => None,
         }
     }
 }
 
 /// Exact orientation of `d` relative to the plane through `a, b, c`, with the convention of
 /// [`robust::orient3d`]: `Positive` when `d` lies below the plane, `a, b, c` counterclockwise seen
-/// from above; `Zero` when coplanar.
+/// from above; `Zero` when coplanar and nothing moving breaks the tie.
 pub fn orient3d(a: &Point, b: &Point, c: &Point, d: &Point) -> Sign {
-    if let [Point::Explicit(a), Point::Explicit(b), Point::Explicit(c), Point::Explicit(d)] = [a, b, c, d] {
-        let p = |v: &Vec3| robust::Coord3D { x: v.x, y: v.y, z: v.z };
-        return Sign::of(robust::orient3d(p(a), p(b), p(c), p(d)));
+    let pts = [a, b, c, d];
+    if let [Some(a), Some(b), Some(c), Some(d)] = pts.map(Point::site) {
+        let s = crate::orient3d_coords(a, b, c, d);
+        if s != Sign::Zero || !pts.iter().any(|p| p.moves()) {
+            return s;
+        }
     }
-    sign(&Orient3d([a, b, c, d]))
+    sign(&Orient3d(pts))
 }
 
 /// Exact orientation of `a, b, c` projected along `axis` (0 = x, 1 = y, 2 = z): `Positive` when
 /// they turn counterclockwise seen from the positive end of the axis, `Zero` when collinear in
-/// projection.
+/// projection and nothing moving breaks the tie.
 pub fn orient2d_along(a: &Point, b: &Point, c: &Point, axis: usize) -> Sign {
-    if let [Point::Explicit(a), Point::Explicit(b), Point::Explicit(c)] = [a, b, c] {
+    let pts = [a, b, c];
+    if let [Some(a), Some(b), Some(c)] = pts.map(Point::site) {
         let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-        let p = |p: &Vec3| crate::Vec2::new(p.to_array()[u], p.to_array()[v]);
-        return crate::orient2d(p(a), p(b), p(c));
+        let p = |p: Vec3| crate::Vec2::new(p.to_array()[u], p.to_array()[v]);
+        let s = crate::orient2d(p(a), p(b), p(c));
+        if s != Sign::Zero || !pts.iter().any(|p| p.moves()) {
+            return s;
+        }
     }
-    sign(&Orient2d { pts: [a, b, c], axis })
+    sign(&Orient2d { pts, axis })
 }
 
 /// Exact comparison of one coordinate (0 = x, 1 = y, 2 = z) of two points: orders points on a
 /// line by its dominant axis.
 pub fn cmp_axis(a: &Point, b: &Point, axis: usize) -> Ordering {
-    if let (Point::Explicit(a), Point::Explicit(b)) = (a, b) {
-        return a.to_array()[axis].partial_cmp(&b.to_array()[axis]).unwrap_or(Ordering::Equal);
+    if let (Some(x), Some(y)) = (a.site(), b.site()) {
+        let o = x.to_array()[axis].partial_cmp(&y.to_array()[axis]).unwrap_or(Ordering::Equal);
+        if o != Ordering::Equal || !(a.moves() || b.moves()) {
+            return o;
+        }
     }
     match sign(&CmpAxis { pts: [a, b], axis }) {
         Sign::Negative => Ordering::Less,
@@ -140,16 +222,19 @@ pub fn cmp_axis(a: &Point, b: &Point, axis: usize) -> Ordering {
 }
 
 fn inputs<'a>(pts: &'a [&'a Point]) -> impl Iterator<Item = f64> + 'a {
-    pts.iter().flat_map(|p| p.inputs()).flat_map(|v| v.to_array())
+    pts.iter().flat_map(|p| p.inputs())
 }
 
 struct Denominator<'a>(&'a Lpi);
 
 impl Expr for Denominator<'_> {
     fn inputs(&self) -> impl Iterator<Item = f64> {
-        self.0.pts.iter().flat_map(|v| v.to_array())
+        self.0.inputs()
     }
-    fn eval<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> T {
+    fn moves(&self) -> bool {
+        self.0.moving.contains(&true)
+    }
+    fn eval<T: Ring>(&self, lift: &impl Lift<T>) -> T {
         let [dir, normal, ..] = self.0.parts(lift);
         dot(&normal, &dir)
     }
@@ -161,9 +246,12 @@ impl Expr for Orient3d<'_> {
     fn inputs(&self) -> impl Iterator<Item = f64> {
         inputs(&self.0)
     }
+    fn moves(&self) -> bool {
+        self.0.iter().any(|p| p.moves())
+    }
     /// `det [a b c d]` with points as rows `(x, y, z, w)`, by Laplace expansion on the first two
     /// rows. For `w = 1` it equals `det [a-d; b-d; c-d]`, as in `robust`.
-    fn eval<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> T {
+    fn eval<T: Ring>(&self, lift: &impl Lift<T>) -> T {
         let [a, b, c, d] = self.0.map(|p| p.homogeneous(lift));
         let top = |i: usize, j: usize| a[i].clone() * b[j].clone() - a[j].clone() * b[i].clone();
         let bottom = |i: usize, j: usize| c[i].clone() * d[j].clone() - c[j].clone() * d[i].clone();
@@ -181,9 +269,12 @@ impl Expr for Orient2d<'_> {
     fn inputs(&self) -> impl Iterator<Item = f64> {
         inputs(&self.pts)
     }
+    fn moves(&self) -> bool {
+        self.pts.iter().any(|p| p.moves())
+    }
     /// `det [a b c]` with points as rows `(u, v, w)`; `u, v` follow `axis` cyclically, so the
     /// projection keeps the handedness seen from the axis.
-    fn eval<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> T {
+    fn eval<T: Ring>(&self, lift: &impl Lift<T>) -> T {
         let (u, v) = ((self.axis + 1) % 3, (self.axis + 2) % 3);
         let [a, b, c] = self.pts.map(|p| p.homogeneous(lift));
         let minor = |i: usize, j: usize| b[i].clone() * c[j].clone() - b[j].clone() * c[i].clone();
@@ -200,8 +291,11 @@ impl Expr for CmpAxis<'_> {
     fn inputs(&self) -> impl Iterator<Item = f64> {
         inputs(&self.pts)
     }
+    fn moves(&self) -> bool {
+        self.pts.iter().any(|p| p.moves())
+    }
     /// `a/wa - b/wb` scaled by `wa·wb > 0`.
-    fn eval<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> T {
+    fn eval<T: Ring>(&self, lift: &impl Lift<T>) -> T {
         let [a, b] = self.pts.map(|p| p.homogeneous(lift));
         a[self.axis].clone() * b[3].clone() - b[self.axis].clone() * a[3].clone()
     }
@@ -320,6 +414,51 @@ mod tests {
         let (ex, ey) = (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
         assert_eq!(Lpi::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 1.0, 1.0), o, ex, ey), None);
         assert_eq!(Lpi::new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, -1.0), o, ex, ex * 2.0), None);
+    }
+
+    /// The perturbed sign is the sign for a small real motion of the same kind.
+    #[test]
+    fn contacts_resolve_as_a_small_growth() {
+        let [a, b, c] = [[0.0, 0.0, 1.0], [4.0, 0.0, 1.0], [0.0, 4.0, 1.0]].map(x);
+        let on_plane = Vec3::new(1.0, 1.0, 1.0);
+        for centre in [Vec3::new(0.5, 0.5, -2.0), Vec3::new(0.5, 0.5, 3.0)] {
+            let grown = on_plane + (on_plane - centre) * 1e-3;
+            assert_eq!(orient3d(&a, &b, &c, &Point::Moved(on_plane, centre)), orient3d(&a, &b, &c, &Point::Explicit(grown)));
+            assert_ne!(orient3d(&a, &b, &c, &Point::Moved(on_plane, centre)), Sign::Zero);
+        }
+        // Growth along the plane leaves the tie; the second-order shift breaks it.
+        let centre = Vec3::new(-3.0, 2.0, 1.0);
+        let shifted = on_plane + Vec3::from(crate::exact::SHIFT_FOR_TESTS) * 1e-3;
+        assert_eq!(orient3d(&a, &b, &c, &Point::Moved(on_plane, centre)), orient3d(&a, &b, &c, &Point::Explicit(shifted)));
+    }
+
+    #[test]
+    fn perturbed_signs_stay_antisymmetric() {
+        let [a, b, c] = [[0.0, 0.0, 1.0], [4.0, 0.0, 1.0], [0.0, 4.0, 1.0]].map(x);
+        let d = Point::Moved(Vec3::new(1.0, 1.0, 1.0), Vec3::new(2.0, 2.0, 2.0));
+        assert_eq!(orient3d(&a, &b, &c, &d), -orient3d(&b, &a, &c, &d));
+        assert_eq!(orient2d_along(&a, &b, &d, 2), -orient2d_along(&b, &a, &d, 2));
+    }
+
+    /// Points of one moving shell move together: a face of the shell stays planar.
+    #[test]
+    fn a_moving_face_stays_planar() {
+        let centre = Vec3::new(0.3, 0.2, 0.0);
+        let [a, b, c, d] = [[0.0, 0.0, 1.0], [4.0, 0.0, 1.0], [0.0, 4.0, 1.0], [1.0, 1.0, 1.0]].map(|v| Point::Moved(v.into(), centre));
+        assert_eq!(orient3d(&a, &b, &c, &d), Sign::Zero);
+    }
+
+    /// A moving edge exactly through a still vertex: the crossing leaves the vertex, but the
+    /// unperturbed geometry still knows they coincide.
+    #[test]
+    fn crossing_through_a_vertex_separates() {
+        let centre = Vec3::new(0.0, 0.0, 5.0);
+        let (p, q) = (Point::Moved(Vec3::new(1.0, 1.0, -1.0), centre), Point::Moved(Vec3::new(1.0, 1.0, 3.0), centre));
+        let tri = [[1.0, 1.0, 1.0], [5.0, 1.0, 1.0], [1.0, 5.0, 1.0]].map(x);
+        let l = Point::Lpi(Lpi::between([&p, &q], [&tri[0], &tri[1], &tri[2]]).unwrap());
+        assert!((0..3).any(|axis| cmp_axis(&l, &tri[0], axis) != Ordering::Equal));
+        assert!((0..3).all(|axis| cmp_axis(&l.still(), &tri[0], axis) == Ordering::Equal));
+        assert_eq!(l.approx(), Vec3::new(1.0, 1.0, 1.0));
     }
 
     #[test]
