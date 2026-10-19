@@ -19,6 +19,7 @@ use std::{
 };
 
 use datum_brep::{BrepError, TopoId};
+use datum_math::expr::{ExprError, Num, parameter_values};
 pub use datum_ops::{Op, Value};
 
 pub type NodeIx = u32;
@@ -39,19 +40,31 @@ pub struct Node {
 pub struct Graph {
     nodes: Vec<Node>,
     by_name: BTreeMap<String, NodeIx>,
+    /// Model parameters by name: numbers or expressions of each other (D57).
+    parameters: BTreeMap<String, Num>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GraphError {
     DuplicateName(String),
-    UnknownInput { node: String, input: NodeIx },
-    Arity { node: String, expected: RangeInclusive<usize>, got: usize },
+    /// Not a valid parameter name, or one some feature still uses.
+    Parameter(String),
+    UnknownInput {
+        node: String,
+        input: NodeIx,
+    },
+    Arity {
+        node: String,
+        expected: RangeInclusive<usize>,
+        got: usize,
+    },
 }
 
 impl fmt::Display for GraphError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateName(n) => write!(f, "a feature named `{n}` already exists"),
+            Self::Parameter(m) => write!(f, "{m}"),
             Self::UnknownInput { node, input } => write!(f, "`{node}`: input #{input} is not an earlier feature"),
             Self::Arity { node, expected, got } => write!(f, "`{node}` takes {} input(s), got {got}", datum_ops::describe_arity(expected.clone())),
         }
@@ -83,6 +96,23 @@ impl Graph {
         Ok(ix)
     }
 
+    pub fn parameters(&self) -> &BTreeMap<String, Num> {
+        &self.parameters
+    }
+
+    /// Sets parameter `name` to a number or an expression of other parameters.
+    pub fn set_parameter(&mut self, name: &str, value: Num) -> Result<(), GraphError> {
+        if !datum_math::expr::valid_name(name) {
+            return Err(GraphError::Parameter(format!("`{name}` is not a valid parameter name: a letter or `_`, then letters, digits or `_`")));
+        }
+        self.parameters.insert(name.into(), value);
+        Ok(())
+    }
+
+    pub fn remove_parameter(&mut self, name: &str) -> Result<(), GraphError> {
+        self.parameters.remove(name).map(|_| ()).ok_or_else(|| GraphError::Parameter(format!("no parameter named `{name}`")))
+    }
+
     /// Replaces a node's operation (a parameter edit) keeping its inputs.
     pub fn set_op(&mut self, ix: NodeIx, op: Op) -> Result<(), GraphError> {
         let node = &mut self.nodes[ix as usize];
@@ -99,6 +129,8 @@ fn check_arity(name: &str, op: &Op, got: usize) -> Result<(), GraphError> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum EvalError {
     Op(BrepError),
+    /// A number of the operation could not be evaluated.
+    Parameter(String),
     /// The named input failed, so this node could not run.
     Input(String),
 }
@@ -107,6 +139,7 @@ impl fmt::Display for EvalError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Op(e) => e.fmt(f),
+            Self::Parameter(m) => write!(f, "parameter: {m}"),
             Self::Input(n) => write!(f, "input `{n}` failed"),
         }
     }
@@ -141,8 +174,10 @@ impl Evaluator {
                 dependents[j as usize].push(i as NodeIx);
             }
         }
+        let values = parameter_values(&graph.parameters);
         let run = Run {
             graph,
+            values,
             evaluator: self,
             results: (0..n).map(|_| OnceLock::new()).collect(),
             pending: graph.nodes.iter().map(|node| AtomicUsize::new(node.inputs.len())).collect(),
@@ -172,6 +207,8 @@ impl Evaluator {
 
 struct Run<'a> {
     graph: &'a Graph,
+    /// Parameter values, computed once per evaluation.
+    values: BTreeMap<String, Result<f64, ExprError>>,
     evaluator: &'a Evaluator,
     results: Vec<OnceLock<Result<ValueRef, EvalError>>>,
     pending: Vec<AtomicUsize>,
@@ -210,9 +247,13 @@ impl<'a> Run<'a> {
                 _ => return Err(EvalError::Input(self.graph.nodes[j as usize].name.clone())),
             }
         }
+        // Numbers are evaluated before the key: a parameter edit recomputes exactly the features
+        // whose numbers change.
+        let lookup = |n: &str| self.values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
+        let op = node.op.resolve(&lookup).map_err(EvalError::Parameter)?;
         let mut h = blake3::Hasher::new();
         h.update(&node.id.0.to_le_bytes());
-        node.op.hash_params(&mut h);
+        op.hash_params(&mut h);
         for b in &inputs {
             h.update(&b.hash());
         }
@@ -222,7 +263,7 @@ impl<'a> Run<'a> {
             return Ok(b);
         }
         let refs: Vec<&Value> = inputs.iter().map(|b| b.as_ref()).collect();
-        let body = Arc::new(node.op.eval(node.id, &refs).map_err(EvalError::Op)?);
+        let body = Arc::new(op.eval(node.id, &refs).map_err(EvalError::Op)?);
         self.computed.fetch_add(1, Ordering::Relaxed);
         self.evaluator.cache().insert(key, body.clone());
         Ok(body)

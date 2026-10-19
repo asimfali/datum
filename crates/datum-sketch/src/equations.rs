@@ -9,6 +9,8 @@ use datum_math::Vec2;
 use rayon::prelude::*;
 
 use crate::solver::{self, Fit};
+use datum_math::expr::Num;
+
 use crate::{Constraint, Sketch, SketchError};
 
 /// A constraint with names resolved: point and line indices, values normalised.
@@ -84,7 +86,9 @@ impl<'a> Equations<'a> {
         let diagonal = if start.is_empty() { 0.0 } else { ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2)).sqrt() };
         // The size of the sketch: as drawn, or as dimensioned when everything was drawn at one spot.
         let largest = sketch.constraints.iter().fold(0.0f64, |m, c| match c {
-            Constraint::Distance { value, .. } | Constraint::Length { value, .. } | Constraint::PointLine { value, .. } => m.max(value.abs()),
+            Constraint::Distance { value, .. } | Constraint::Length { value, .. } | Constraint::PointLine { value, .. } => {
+                m.max(value.value().unwrap_or(0.0).abs())
+            }
             _ => m,
         });
         let size = if diagonal > 0.0 {
@@ -97,7 +101,9 @@ impl<'a> Equations<'a> {
         let mut fixed = vec![false; names.len()];
         let mut eqs = Vec::with_capacity(sketch.constraints.len());
         for (k, c) in sketch.constraints.iter().enumerate() {
-            let positive = |v: f64| {
+            let number = |v: &Num| v.value().ok_or_else(|| SketchError::Invalid(format!("{}: the expression is not evaluated", c.describe(k))));
+            let positive = |v: &Num| {
+                let v = number(v)?;
                 if v.is_finite() && v > 0.0 {
                     Ok(v / size)
                 } else {
@@ -129,16 +135,17 @@ impl<'a> Equations<'a> {
                     fixed[point(p)?] = true;
                     Eq::Fix
                 }
-                Constraint::Distance { points, value } => Eq::Distance(point(&points[0])?, point(&points[1])?, positive(*value)?),
-                Constraint::Length { line: l, value } => Eq::Length(line(l)?, positive(*value)?),
+                Constraint::Distance { points, value } => Eq::Distance(point(&points[0])?, point(&points[1])?, positive(value)?),
+                Constraint::Length { line: l, value } => Eq::Length(line(l)?, positive(value)?),
                 Constraint::PointLine { point: p, line: l, value } => {
                     let (p, l) = (point(p)?, line(l)?);
                     let (a, b) = lines[l];
                     let (d, q) = ([start[b].x - start[a].x, start[b].y - start[a].y], [start[p].x - start[a].x, start[p].y - start[a].y]);
                     let side = if d[0] * q[1] - d[1] * q[0] < 0.0 { -1.0 } else { 1.0 };
-                    Eq::PointLine(p, l, positive(*value)?, side)
+                    Eq::PointLine(p, l, positive(value)?, side)
                 }
                 Constraint::Angle { lines, degrees } => {
+                    let degrees = number(degrees)?;
                     if !degrees.is_finite() {
                         return invalid(format!("{}: the angle must be finite", c.describe(k)));
                     }

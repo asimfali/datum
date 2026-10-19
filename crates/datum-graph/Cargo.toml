@@ -11,12 +11,12 @@ workspace = true
 
 [dependencies]
 datum-brep = { workspace = true }
+datum-math = { workspace = true }
 datum-ops = { workspace = true }
 blake3 = { workspace = true }
 rayon = { workspace = true }
 
 [dev-dependencies]
-datum-math = { workspace = true }
 criterion = { workspace = true }
 
 [[bench]]

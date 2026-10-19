@@ -1,0 +1,19 @@
+{
+  "format": "datum/1",
+  "parameters": {"w": 120, "h": "w / 2", "t": 8, "hole": 6, "pitch": "hole * 2.5", "n": "floor_count", "floor_count": 4},
+  "features": [
+    {"name": "outline", "op": "sketch", "sketch": {
+      "points": {"a": [0, 0], "b": [100, 2], "c": [103, 55], "d": [-2, 58]},
+      "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+      "constraints": [
+        {"type": "fix", "point": "a"}, {"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"},
+        {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
+        {"type": "length", "line": "bottom", "value": "w"}, {"type": "length", "line": "left", "value": "h"}
+      ]}},
+    {"name": "plate", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": "t"},
+    {"name": "pin", "op": "prism", "polygon": [[-3, -3], [3, -3], [3, 3], [-3, 3]], "z0": 0, "z1": "t"},
+    {"name": "first", "op": "transform", "inputs": ["pin"], "translate": ["pitch", "pitch", 0], "angle_deg": 15},
+    {"name": "pins", "op": "pattern_grid", "inputs": ["first"], "count": ["n", 2], "step": [["pitch * 2", 0, 0], [0, "pitch * 2", 0]]},
+    {"name": "drilled", "op": "boolean", "inputs": ["plate", "pins"], "kind": "difference"}
+  ]
+}

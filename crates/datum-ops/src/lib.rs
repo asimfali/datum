@@ -6,10 +6,12 @@ mod bounds;
 mod pattern;
 mod sketch;
 
+use std::borrow::Cow;
 use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
+use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
@@ -21,16 +23,16 @@ pub use sketch::{Placed, SketchPlane, extrude_sketch, place};
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
     /// A polygon in the XY plane extruded from `z0` to `z1`. No inputs.
-    Prism { polygon: Vec<Vec2>, z0: f64, z1: f64 },
+    Prism { polygon: Vec<Vec2>, z0: Num, z1: Num },
     /// Rotation by `angle_deg` about `axis` through the origin, then translation. One input.
     /// Defaults: no translation, Z axis, no rotation.
     Transform {
-        #[serde(default)]
-        translate: Vec3,
+        #[serde(default = "zero3")]
+        translate: [Num; 3],
         #[serde(default = "z_axis")]
         axis: Vec3,
-        #[serde(default)]
-        angle_deg: f64,
+        #[serde(default = "zero")]
+        angle_deg: Num,
     },
     /// The first input (target) combined with every further input (tools) in one pass. Tools
     /// must not touch each other; faces of different bodies must not be coplanar where they meet.
@@ -43,7 +45,7 @@ pub enum Op {
     },
     /// `count[0] × count[1]` copies of the input, copy `(i, j)` moved by `i·step[0] + j·step[1]`,
     /// as one body. Copies must not touch. One input.
-    PatternGrid { count: [u32; 2], step: [Vec3; 2] },
+    PatternGrid { count: [Num; 2], step: [[Num; 3]; 2] },
     /// Ground under a regular grid of heights down to the level `base`: node `(i, j)` stands at
     /// `origin + (i·step[0], j·step[1])` with height `heights[j·count[0] + i]`. No inputs.
     Terrain { origin: Vec2, step: [f64; 2], count: [u32; 2], heights: Vec<f64>, base: f64 },
@@ -58,7 +60,34 @@ pub enum Op {
     },
     /// The closed profiles of the input sketch swept from `z0` to `z1` along its normal; a loop
     /// inside another is a hole. One input: a sketch.
-    Extrude { z0: f64, z1: f64 },
+    Extrude { z0: Num, z1: Num },
+}
+
+fn zero() -> Num {
+    Num::Value(0.0)
+}
+
+fn zero3() -> [Num; 3] {
+    [zero(), zero(), zero()]
+}
+
+/// A number of a resolved operation (see [`Op::resolve`]).
+fn num(n: &Num) -> Result<f64, BrepError> {
+    n.value().ok_or_else(|| BrepError::Invalid(format!("`{n}` is not evaluated: resolve the operation's parameters first")))
+}
+
+fn vec3(v: &[Num; 3]) -> Result<Vec3, BrepError> {
+    Ok(Vec3::new(num(&v[0])?, num(&v[1])?, num(&v[2])?))
+}
+
+/// A count: a whole number, not negative.
+fn count(n: &Num) -> Result<u32, BrepError> {
+    let v = num(n)?;
+    if v >= 0.0 && v <= f64::from(u32::MAX) && v.fract() == 0.0 {
+        Ok(v as u32)
+    } else {
+        Err(BrepError::Degenerate(format!("a count must be a whole number, got {v}")))
+    }
 }
 
 /// What a feature produces.
@@ -119,26 +148,47 @@ impl Op {
         }
     }
 
-    /// Feeds the kind and parameters into a cache key. `f64` values go in by their bits.
+    /// The operation with every number evaluated, parameter values coming from `lookup` (D57).
+    /// An error names the field and says what is wrong with its expression.
+    pub fn resolve(&self, lookup: &impl Fn(&str) -> Result<f64, ExprError>) -> Result<Cow<'_, Op>, String> {
+        let r = |n: &Num, field: &str| n.resolve(lookup).map(Num::Value).map_err(|e| format!("`{field}`: {e}"));
+        let r3 = |v: &[Num; 3], field: &str| -> Result<[Num; 3], String> { Ok([r(&v[0], field)?, r(&v[1], field)?, r(&v[2], field)?]) };
+        Ok(Cow::Owned(match self {
+            Self::Prism { polygon, z0, z1 } => Self::Prism { polygon: polygon.clone(), z0: r(z0, "z0")?, z1: r(z1, "z1")? },
+            Self::Transform { translate, axis, angle_deg } => {
+                Self::Transform { translate: r3(translate, "translate")?, axis: *axis, angle_deg: r(angle_deg, "angle_deg")? }
+            }
+            Self::PatternGrid { count, step } => {
+                Self::PatternGrid { count: [r(&count[0], "count")?, r(&count[1], "count")?], step: [r3(&step[0], "step")?, r3(&step[1], "step")?] }
+            }
+            Self::Sketch { sketch, plane, face } => Self::Sketch { sketch: sketch.resolve(lookup)?, plane: *plane, face: face.clone() },
+            Self::Extrude { z0, z1 } => Self::Extrude { z0: r(z0, "z0")?, z1: r(z1, "z1")? },
+            Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
+        }))
+    }
+
+    /// Feeds the kind and parameters of a resolved operation into a cache key. `f64` values go
+    /// in by their bits.
     pub fn hash_params(&self, h: &mut blake3::Hasher) {
         h.update(self.kind().as_bytes());
         let mut num = |x: f64| {
             h.update(&x.to_bits().to_le_bytes());
         };
+        let value = |n: &Num| n.value().unwrap_or(f64::NAN);
         match self {
             Self::Prism { polygon, z0, z1 } => {
-                [polygon.len() as f64, *z0, *z1].into_iter().for_each(&mut num);
+                [polygon.len() as f64, value(z0), value(z1)].into_iter().for_each(&mut num);
                 polygon.iter().flat_map(|p| [p.x, p.y]).for_each(num);
             }
             Self::Transform { translate, axis, angle_deg } => {
-                translate.to_array().into_iter().chain(axis.to_array()).chain([*angle_deg]).for_each(num);
+                translate.iter().map(value).chain(axis.to_array()).chain([value(angle_deg)]).for_each(num);
             }
             Self::Boolean { kind, through } => {
                 through.iter().flat_map(|d| d.to_array()).for_each(num);
                 h.update(kind.name().as_bytes());
             }
             Self::PatternGrid { count, step } => {
-                count.iter().map(|&c| f64::from(c)).chain(step.iter().flat_map(|s| s.to_array())).for_each(num);
+                count.iter().chain(step.iter().flatten()).map(value).for_each(num);
             }
             Self::Terrain { origin, step, count, heights, base } => {
                 // The same bytes as feeding the numbers one by one, in one call: a million heights.
@@ -151,7 +201,7 @@ impl Op {
             Self::Sketch { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
-            Self::Extrude { z0, z1 } => [*z0, *z1].into_iter().for_each(num),
+            Self::Extrude { z0, z1 } => [value(z0), value(z1)].into_iter().for_each(num),
         }
     }
 
@@ -173,19 +223,22 @@ impl Op {
                 .collect::<Result<_, _>>()?,
         };
         let body = match self {
-            Self::Prism { polygon, z0, z1 } => prism(feature, polygon, *z0, *z1)?,
+            Self::Prism { polygon, z0, z1 } => prism(feature, polygon, num(z0)?, num(z1)?)?,
             Self::Transform { translate, axis, angle_deg } => {
-                let rot = if *angle_deg == 0.0 {
+                let angle = num(angle_deg)?;
+                let rot = if angle == 0.0 {
                     Rigid::IDENTITY
                 } else if axis.dot(*axis) > 0.0 {
-                    Rigid::rotation(*axis, angle_deg.to_radians())
+                    Rigid::rotation(*axis, angle.to_radians())
                 } else {
                     return Err(BrepError::Degenerate("rotation about a zero axis".into()));
                 };
-                inputs[0].transformed(&rot.then(Rigid::translation(*translate)))
+                inputs[0].transformed(&rot.then(Rigid::translation(vec3(translate)?)))
             }
             Self::Boolean { kind, through } => boolean(feature, *kind, *through, &inputs)?,
-            Self::PatternGrid { count, step } => pattern_grid(feature, inputs[0], *count, *step)?,
+            Self::PatternGrid { count: n, step } => {
+                pattern_grid(feature, inputs[0], [count(&n[0])?, count(&n[1])?], [vec3(&step[0])?, vec3(&step[1])?])?
+            }
             Self::Terrain { origin, step, count, heights, base } => {
                 terrain(feature, &Grid { origin: *origin, step: *step, count: *count, heights }, *base)?
             }
@@ -197,7 +250,7 @@ impl Op {
                 };
                 return Ok(Value::Sketch(place(sketch, plane.as_ref(), host)?));
             }
-            Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, *z0, *z1)?,
+            Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, num(z0)?, num(z1)?)?,
         };
         if cfg!(debug_assertions) {
             body.validate()?;

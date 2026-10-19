@@ -39,7 +39,7 @@ fn editing_the_last_node_recomputes_only_it() {
 /// Different parameters, identical body: nodes below are not recomputed.
 #[test]
 fn early_cutoff_stops_at_an_unchanged_body() {
-    let identity = |axis| Op::Transform { translate: Vec3::ZERO, axis, angle_deg: 0.0 };
+    let identity = |axis| Op::Transform { translate: [0.0.into(), 0.0.into(), 0.0.into()], axis, angle_deg: 0.0.into() };
     let mut g = Graph::default();
     let p = g.add("p", prism(ngon(6, 1.0)), &[]).unwrap();
     let a = g.add("a", identity(Vec3::new(0.0, 0.0, 1.0)), &[p]).unwrap();
@@ -54,7 +54,7 @@ fn early_cutoff_stops_at_an_unchanged_body() {
 #[test]
 fn failures_name_their_cause() {
     let mut g = Graph::default();
-    let p = g.add("flat", Op::Prism { polygon: ngon(4, 1.0), z0: 1.0, z1: 1.0 }, &[]).unwrap();
+    let p = g.add("flat", Op::Prism { polygon: ngon(4, 1.0), z0: 1.0.into(), z1: 1.0.into() }, &[]).unwrap();
     g.add("moved", turn(10.0, Vec3::ZERO), &[p]).unwrap();
     let e = Evaluator::default().evaluate(&g);
     assert!(matches!(e.results[0], Err(EvalError::Op(BrepError::Degenerate(_)))));

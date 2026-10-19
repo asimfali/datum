@@ -5,6 +5,7 @@
 //! implicit intersections (D38). Constructions (new coordinates) are plain `f64`, rounded once.
 
 mod exact;
+pub mod expr;
 mod implicit;
 
 pub use exact::{exact_fallbacks, perturbed_signs, ties};

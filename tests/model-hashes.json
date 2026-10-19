@@ -37,6 +37,14 @@
     "placed": "aea4b8cdf98102d9747fde10aec75351371fe5d9e6f052f6dede1bc6ac2d8574",
     "slab": "78bd115c4e70f1e53f144303b2c6008af7210f014be1f968d9ddebcf50891646"
   },
+  "parametric.json": {
+    "drilled": "d05ed88d25efdb653567dd62f7b5d984ee2e229491881a11bda83408963eff44",
+    "first": "110706260cce18bd6a5ddec5dc369caacd4435915ff8d5c924bacd8eb62b4fb5",
+    "outline": "dd89b72a4e49fdc914121a1c6bbf17dca354b6af3cac37e1e2fbb484b863fefe",
+    "pin": "01c71671c662f15a0923553076105af5e8d7882676c0c199334dac81d3c1ea6d",
+    "pins": "f151e147bae920ae0316f901e1346aa0e89c212fd1f5d20fe3b75421ac67a5fa",
+    "plate": "40ae4adef885449acece7b6caed281bf97df59f466912059257962ef4785621f"
+  },
   "pattern_16.json": {
     "p0": "40865d8315bd855755c46ffb7fbf21f8d6ab1ec92fb003b9a182d19dc7a856d1",
     "p1": "a62d6519f8e3400fe8d10f336fa332e2946fbb70246ae21e0bf3a322fd799cf6",

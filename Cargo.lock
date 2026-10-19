@@ -334,6 +334,7 @@ dependencies = [
  "robust",
  "schemars",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
