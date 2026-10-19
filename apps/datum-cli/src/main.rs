@@ -17,6 +17,7 @@ const USAGE: &str = "usage:
   datum build <model.json> [--out <file.stl|file.obj>]   evaluate a model, export its final bodies
   datum determinism-check <model.json|dir>...           same result on 1, 4 and 16 threads (C4)
   datum view <model.json>                               window: the model in 3D, parameters to edit
+  datum <model.json>                                    the same (a model dropped on datum.exe)
   datum snapshot <model.json> --out <file.png> [--size WxH]   picture of the final bodies and sketches
   datum mcp                                             MCP server on stdin/stdout
 threads: RAYON_NUM_THREADS (default: all cores)";
@@ -38,6 +39,8 @@ fn run(args: &[String]) -> Result<(), String> {
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
         Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest),
         Some((cmd, [model])) if cmd == "view" => datum_view::run(PathBuf::from(model)),
+        // A model dropped on the program, or opened with it: show it.
+        Some((model, [])) if model.ends_with(".json") && Path::new(model).is_file() => datum_view::run(PathBuf::from(model)),
         Some((cmd, [])) if cmd == "mcp" => {
             datum_mcp::Server::default().serve(std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string())
         }
