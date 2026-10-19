@@ -18,7 +18,8 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "Datum is a parametric solid-modelling kernel. A model is a history of features (JSON objects with \
 `name`, `inputs` and `op` plus parameters); bodies are rebuilt from it deterministically and incrementally. Start with \
 list_commands, build with execute (add, edit, remove, open, save), check with inspect_model, mass_properties and \
-query_topology. Every edit returns which features were recomputed and which failed, with the cause.";
+query_topology, and look at the result with render. Every edit returns which features were recomputed and which \
+failed, with the cause.";
 
 /// Query tools: (tool name, command it runs, description).
 const SHORTCUTS: &[(&str, &str, &str)] = &[
@@ -96,6 +97,12 @@ impl Server {
                         self.session.execute(cmd, args.get("params").unwrap_or(&Value::Null))
                     }
                     "list_commands" => Ok(Session::commands()),
+                    "render" => {
+                        return Ok(match self.render(&args) {
+                            Ok(png) => json!({"content": [{"type": "image", "data": base64(&png), "mimeType": "image/png"}]}),
+                            Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
+                        });
+                    }
                     _ => match SHORTCUTS.iter().find(|(tool, ..)| *tool == name) {
                         Some((_, cmd, _)) => self.session.execute(cmd, &args),
                         None => return Err((INVALID_PARAMS, format!("unknown tool `{name}`"))),
@@ -109,6 +116,42 @@ impl Server {
             _ => Err((METHOD_NOT_FOUND, format!("method `{method}` not found"))),
         }
     }
+}
+
+impl Server {
+    /// A PNG of the named features, or of what the model ends in.
+    fn render(&self, args: &Value) -> Result<Vec<u8>, String> {
+        let s = &self.session;
+        let values = match args.get("features").and_then(Value::as_array) {
+            Some(names) => names.iter().map(|n| s.value(n.as_str().ok_or("`features` lists feature names")?)).collect::<Result<Vec<_>, _>>()?,
+            None => s.evaluation().final_values(s.graph()),
+        };
+        let size = |key: &str, default: u64| match args.get(key) {
+            None => Ok(default as u32),
+            Some(v) => {
+                v.as_u64().filter(|n| (16..=MAX_SIZE).contains(n)).map(|n| n as u32).ok_or(format!("`{key}` is a whole number from 16 to {MAX_SIZE}"))
+            }
+        };
+        let view = args.get("view").map_or(Ok("iso"), |v| v.as_str().ok_or("`view` must be a string"))?;
+        datum_view::capture::snapshot(&values, view, size("width", 800)?, size("height", 600)?)
+    }
+}
+
+/// The largest side of a rendered picture, in pixels.
+const MAX_SIZE: u64 = 2048;
+
+/// Standard base64 with padding (RFC 4648 §4), for image content.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [chunk[0], chunk.get(1).copied().unwrap_or(0), chunk.get(2).copied().unwrap_or(0)];
+        let n = u32::from(b[0]) << 16 | u32::from(b[1]) << 8 | u32::from(b[2]);
+        for k in 0..4 {
+            out.push(if k <= chunk.len() { char::from(ALPHABET[(n >> (18 - 6 * k)) as usize & 63]) } else { '=' });
+        }
+    }
+    out
 }
 
 fn error(id: Value, code: i64, message: impl Into<String>) -> Value {
@@ -125,6 +168,13 @@ fn tool_definitions() -> Value {
             "inputSchema": {"type": "object", "properties": {}}}),
     ];
     tools.extend(SHORTCUTS.iter().map(|(tool, cmd, description)| json!({"name": tool, "description": description, "inputSchema": schema_of(cmd)})));
+    tools.push(json!({"name": "render",
+        "description": "A PNG picture of the model: shaded faces, sharp edges, sketches in orange. Shows what the model ends in, or only `features`.",
+        "inputSchema": {"type": "object", "properties": {
+            "features": {"type": "array", "items": {"type": "string"}, "description": "Feature names to show; default: features nothing else uses."},
+            "view": {"type": "string", "enum": datum_view::camera::VIEWS, "description": "Direction of view, fitted to the shown features; front looks along +Y. Default: iso."},
+            "width": {"type": "integer", "minimum": 16, "maximum": MAX_SIZE, "description": "Pixels, default 800."},
+            "height": {"type": "integer", "minimum": 16, "maximum": MAX_SIZE, "description": "Pixels, default 600."}}}}));
     json!({"tools": tools})
 }
 

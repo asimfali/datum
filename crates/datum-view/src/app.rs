@@ -184,10 +184,6 @@ impl Viewer {
             self.busy = false;
             self.geometry = m.geometry.clone();
             self.version += 1;
-            if !self.fitted && m.scene.bounds.is_some() {
-                self.camera.fit(m.scene.bounds);
-                self.fitted = true;
-            }
             if let Some(p) = m.inspect["parameters"].as_object() {
                 self.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
@@ -267,13 +263,16 @@ impl Viewer {
                 self.camera.zoom(libm::exp(-f64::from(scroll) * 0.002));
             }
         }
-        if r.double_clicked() {
-            self.camera.fit(self.model.as_ref().and_then(|m| m.scene.bounds));
-        }
         let Some(m) = &self.model else { return };
+        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        // The first model is fitted once, where the view's shape is known.
+        if r.double_clicked() || (!self.fitted && m.scene.bounds.is_some()) {
+            self.camera.fit(m.scene.bounds, aspect);
+            self.fitted = true;
+        }
         let anchor = m.scene.anchor();
         let radius = m.scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
-        let (view_projection, eye) = self.camera.matrices(anchor, f64::from(rect.width() / rect.height().max(1.0)), radius);
+        let (view_projection, eye) = self.camera.matrices(anchor, aspect, radius);
         let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, Paint(frame)));
         // What the view costs, to tell a slow frame from a slow rebuild.

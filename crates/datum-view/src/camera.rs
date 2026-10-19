@@ -21,20 +21,52 @@ impl Default for Camera {
     }
 }
 
+/// Standard views: the default isometric one and the six along the axes (front looks along +Y).
+pub const VIEWS: [&str; 7] = ["iso", "top", "bottom", "front", "back", "left", "right"];
+
 impl Camera {
+    /// The camera of standard view `name` (one of [`VIEWS`]), to be fitted to a scene.
+    pub fn view(name: &str) -> Result<Self, String> {
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let (yaw, pitch) = match name {
+            "iso" => return Ok(Self::default()),
+            "top" => (-quarter, quarter),
+            "bottom" => (-quarter, -quarter),
+            "front" => (-quarter, 0.0),
+            "back" => (quarter, 0.0),
+            "left" => (2.0 * quarter, 0.0),
+            "right" => (0.0, 0.0),
+            _ => return Err(format!("unknown view `{name}`; one of {}", VIEWS.join(", "))),
+        };
+        Ok(Self { yaw, pitch, ..Self::default() })
+    }
+
     pub fn eye(&self) -> Vec3 {
         let (sy, cy) = libm::sincos(self.yaw);
         let (sp, cp) = libm::sincos(self.pitch);
         self.target + Vec3::new(cp * cy, cp * sy, sp) * self.distance
     }
 
-    /// Looks at the whole of `bounds` from the current direction.
-    pub fn fit(&mut self, bounds: Option<(Vec3, Vec3)>) {
+    /// Looks at the whole of `bounds` from the current direction, as close as a view of width
+    /// / height `aspect` allows: every corner of the box just inside the picture, not its
+    /// bounding sphere (a thin plate seen edge-on would be a line across a blank picture).
+    pub fn fit(&mut self, bounds: Option<(Vec3, Vec3)>, aspect: f64) {
         let Some((lo, hi)) = bounds else { return };
-        let d = hi - lo;
-        let radius = (d.dot(d).sqrt() * 0.5).max(f64::MIN_POSITIVE);
         self.target = (lo + hi) * 0.5;
-        self.distance = radius / libm::sin(self.fov * 0.5) * 1.05;
+        let (r, u, f) = self.axes();
+        let t = libm::tan(self.fov * 0.5);
+        let half = (hi - lo) * 0.5;
+        // A corner `p` from the target is in view when its offsets across the view fit the
+        // frustum at its depth `distance + p·f`.
+        let distance = (0..8).fold(0.0f64, |d, k| {
+            let p = Vec3::new(
+                if k & 1 == 0 { -half.x } else { half.x },
+                if k & 2 == 0 { -half.y } else { half.y },
+                if k & 4 == 0 { -half.z } else { half.z },
+            );
+            d.max(-p.dot(f) + (p.dot(r).abs() / (t * aspect.max(1e-6))).max(p.dot(u).abs() / t))
+        });
+        self.distance = (distance * 1.05).max(f64::MIN_POSITIVE);
     }
 
     /// Turns around the target by a drag of `dx, dy` pixels.
@@ -59,8 +91,9 @@ impl Camera {
     fn axes(&self) -> (Vec3, Vec3, Vec3) {
         let f = self.target - self.eye();
         let f = f * (1.0 / f.dot(f).sqrt());
-        let r = f.cross(Vec3::new(0.0, 0.0, 1.0));
-        let r = r * (1.0 / r.dot(r).sqrt().max(f64::MIN_POSITIVE));
+        // Right is horizontal and follows the yaw alone, so straight down (top view) is no special case.
+        let (sy, cy) = libm::sincos(self.yaw);
+        let r = Vec3::new(-sy, cy, 0.0);
         (r, r.cross(f), f)
     }
 

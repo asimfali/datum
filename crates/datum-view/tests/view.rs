@@ -23,22 +23,26 @@ fn project(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
 }
 
 #[test]
-fn fit_centres_the_model_within_the_depth_range() {
+fn fit_fills_the_view_within_the_depth_range() {
     let s = scene("sketch_plate.json");
     let mut cam = Camera::default();
-    cam.fit(s.bounds);
+    cam.fit(s.bounds, 1.5);
     let anchor = s.anchor();
     let (lo, hi) = s.bounds.unwrap();
     let radius = (hi - lo).dot(hi - lo).sqrt() * 0.5;
     let (m, _) = cam.matrices(anchor, 1.5, radius);
     let centre = project(&m, [0.0; 3]);
     assert!(centre[0].abs() < 1e-5 && centre[1].abs() < 1e-5, "{centre:?}");
-    // Every corner of the bounds is in view and between the near and far planes.
+    // Every corner of the bounds is in view and between the near and far planes, and the
+    // farthest one out is near the edge: the part fills the picture.
+    let mut widest = 0.0f32;
     for k in 0..8 {
         let c = Vec3::new(if k & 1 == 0 { lo.x } else { hi.x }, if k & 2 == 0 { lo.y } else { hi.y }, if k & 4 == 0 { lo.z } else { hi.z }) - anchor;
         let p = project(&m, [c.x as f32, c.y as f32, c.z as f32]);
         assert!(p.iter().take(2).all(|v| v.abs() <= 1.0) && (0.0..=1.0).contains(&p[2]), "corner {k}: {p:?}");
+        widest = widest.max(p[0].abs()).max(p[1].abs());
     }
+    assert!(widest > 0.9, "{widest}");
 }
 
 /// D24: a site 10⁷ m from the origin goes to the GPU as small numbers, with its millimetres.
@@ -62,7 +66,7 @@ fn far_models_are_drawn_relative_to_an_anchor() {
 fn headless_picture() {
     let s = scene("sketch_plate.json");
     let mut cam = Camera::default();
-    cam.fit(s.bounds);
+    cam.fit(s.bounds, 160.0 / 120.0);
     let (w, h) = (160, 120);
     let rgba = match datum_view::capture::picture(&s, &cam, w, h) {
         Ok(p) => p,
@@ -78,4 +82,29 @@ fn headless_picture() {
     assert_eq!(at(0, 0), background);
     assert_eq!(at(w - 1, h - 1), background);
     assert_ne!(at(w / 2, h / 2), background);
+}
+
+/// Standard views put the axes where a drawing has them: top shows +X right and +Y up, front
+/// +X right and +Z up, right +Y right and +Z up.
+#[test]
+fn standard_views_follow_drawing_conventions() {
+    let screen = |view: &str, p: [f32; 3]| {
+        let cam = Camera::view(view).unwrap();
+        let (m, _) = cam.matrices(cam.target, 1.0, 1.0);
+        let q = project(&m, p);
+        [q[0], q[1]]
+    };
+    let close = |a: [f32; 2], b: [f32; 2]| assert!((a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5, "{a:?} vs {b:?}");
+    let right_up = |view: &str, right: [f32; 3], up: [f32; 3]| {
+        let (r, u) = (screen(view, right), screen(view, up));
+        assert!(r[0] > 0.0 && u[1] > 0.0, "{view}: {r:?} {u:?}");
+        close([0.0, r[1]], [0.0, 0.0]);
+        close([u[0], 0.0], [0.0, 0.0]);
+    };
+    right_up("top", [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    right_up("front", [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    right_up("right", [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+    right_up("back", [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    right_up("left", [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]);
+    assert!(Camera::view("isometric").is_err());
 }

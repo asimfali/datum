@@ -713,6 +713,7 @@ name = "datum-mcp"
 version = "0.1.0"
 dependencies = [
  "datum-model",
+ "datum-view",
  "serde_json",
 ]
 
