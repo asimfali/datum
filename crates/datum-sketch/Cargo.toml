@@ -1,0 +1,21 @@
+[package]
+name = "datum-sketch"
+description = "2D sketches and their constraint solver for the Datum kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+datum-math = { workspace = true }
+libm = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+schemars = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+serde_json = { workspace = true }
