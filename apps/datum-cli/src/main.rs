@@ -10,6 +10,7 @@ use std::{
 
 use datum_brep::{Body, Mesh, tessellate};
 use datum_graph::{Evaluator, Graph, Value};
+use datum_math::expr::Num;
 
 mod export;
 
@@ -21,6 +22,8 @@ const USAGE: &str = "usage:
   datum                                                 the viewer without a model: open one from it
   datum snapshot <model.json> --out <file.png> [--size WxH] [--view iso|top|bottom|front|back|left|right]
                                                         picture of the final bodies and sketches
+  datum bench-view <model.json> [--size WxH] [--frames N] [--set name=value]...
+                                                        GPU time per frame, whole model and close up
   datum mcp                                             MCP server on stdin/stdout
 threads: RAYON_NUM_THREADS (default: all cores)";
 
@@ -40,6 +43,7 @@ fn run(args: &[String]) -> Result<(), String> {
         Some((cmd, rest)) if cmd == "build" => cmd_build(rest),
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
         Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest),
+        Some((cmd, rest)) if cmd == "bench-view" => cmd_bench_view(rest),
         Some((cmd, [model])) if cmd == "view" => datum_view::run(Some(PathBuf::from(model))),
         // A model dropped on the program, or opened with it: show it.
         Some((model, [])) if model.ends_with(".json") && Path::new(model).is_file() => datum_view::run(Some(PathBuf::from(model))),
@@ -105,13 +109,56 @@ fn cmd_snapshot(args: &[String]) -> Result<(), String> {
         }
     }
     let out = out.ok_or(USAGE)?;
-    let (w, h) =
-        size.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))).ok_or("--size takes WxH, e.g. 1024x768")?;
+    let (w, h) = parse_size(size)?;
     let g = load(Path::new(model))?;
     let e = Evaluator::default().evaluate(&g);
     let png = datum_view::capture::snapshot(&e.final_values(&g), view, w, h)?;
     std::fs::write(out, png).map_err(|e| format!("{out}: {e}"))?;
     println!("written {out} ({w}×{h})");
+    Ok(())
+}
+
+fn parse_size(size: &str) -> Result<(u32, u32), String> {
+    size.split_once('x')
+        .and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?)))
+        .filter(|&(w, h)| w > 0 && h > 0)
+        .ok_or_else(|| "--size takes WxH, e.g. 1024x768".into())
+}
+
+fn cmd_bench_view(args: &[String]) -> Result<(), String> {
+    let [model, rest @ ..] = args else { return Err(USAGE.into()) };
+    let mut g = load(Path::new(model))?;
+    let (mut size, mut frames) = ("1600x900", 60);
+    for pair in rest.chunks(2) {
+        match pair {
+            [flag, s] if flag == "--size" => size = s,
+            [flag, n] if flag == "--frames" => frames = n.parse().map_err(|_| "--frames takes a whole number")?,
+            [flag, kv] if flag == "--set" => {
+                let (name, value) = kv.split_once('=').ok_or("--set takes name=value")?;
+                let value = value.parse().map_or_else(|_| Num::Expr(value.into()), Num::Value);
+                g.set_parameter(name, value).map_err(|e| e.to_string())?;
+            }
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let (w, h) = parse_size(size)?;
+    let start = Instant::now();
+    let e = Evaluator::default().evaluate(&g);
+    let rebuild = start.elapsed();
+    let start = Instant::now();
+    let scene = datum_view::scene::Scene::new(&e.final_values(&g), &mut Default::default());
+    let tessellation = start.elapsed();
+    let (triangles, edges) = scene.bodies.iter().fold((0, 0), |(t, l), m| (t + m.triangles.len(), l + m.edges.len()));
+    println!(
+        "rebuild {:.0} ms, tessellation {:.0} ms: {triangles} triangles, {edges} edges",
+        rebuild.as_secs_f64() * 1e3,
+        tessellation.as_secs_f64() * 1e3
+    );
+    let (adapter, cases) = datum_view::capture::frame_times(&scene, w, h, frames)?;
+    println!("{adapter}, {w}×{h}, median of {frames} frames:");
+    for (case, ms) in cases {
+        println!("  {case:<24} {ms:>8.2} ms");
+    }
     Ok(())
 }
 
