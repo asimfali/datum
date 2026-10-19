@@ -7,7 +7,9 @@
 
 use std::cmp::Ordering;
 
-use crate::exact::{Approx, Expr, Lift, Ring, Still, sign};
+use num_bigint::BigInt;
+
+use crate::exact::{Approx, Expr, Lift, Ring, Scale, Still, filtered, sign};
 use crate::{Sign, Vec3};
 
 /// A point: explicit coordinates or an implicit intersection.
@@ -218,6 +220,47 @@ pub fn cmp_axis(a: &Point, b: &Point, axis: usize) -> Ordering {
         Sign::Negative => Ordering::Less,
         Sign::Zero => Ordering::Equal,
         Sign::Positive => Ordering::Greater,
+    }
+}
+
+/// [`cmp_axis`] for points that do not move, when the `f64` filter settles it; `None` when the
+/// coordinates may be equal and only [`Exact`] can tell.
+pub fn cmp_axis_filtered(a: &Point, b: &Point, axis: usize) -> Option<Ordering> {
+    debug_assert!(!a.moves() && !b.moves(), "still points only");
+    if let (Some(x), Some(y)) = (a.site(), b.site()) {
+        return x.to_array()[axis].partial_cmp(&y.to_array()[axis]);
+    }
+    filtered(&CmpAxis { pts: [a, b], axis }).map(|s| match s {
+        Sign::Negative => Ordering::Less,
+        Sign::Zero => Ordering::Equal,
+        Sign::Positive => Ordering::Greater,
+    })
+}
+
+/// One integer scale for a whole set of points (see [`Exact`]).
+pub struct ExactScale(Scale);
+
+impl ExactScale {
+    pub fn of<'a>(points: impl Iterator<Item = &'a Point>) -> Self {
+        Self(Scale::of(points.flat_map(Point::inputs)))
+    }
+
+    /// Exact homogeneous coordinates of `p`, which must not move.
+    pub fn exact(&self, p: &Point) -> Exact {
+        debug_assert!(!p.moves(), "still points only");
+        Exact(p.homogeneous(&Still(|x| self.0.lift(x))))
+    }
+}
+
+/// Exact homogeneous coordinates of a still point, lifted with the scale of its set: computed
+/// once, then compared with the others of the set by two products. Sorting many points with equal
+/// coordinates (a perforation's columns) would otherwise recompute both points at every tie.
+pub struct Exact([BigInt; 4]);
+
+impl Exact {
+    /// [`cmp_axis`] of the two points (`w > 0` for both).
+    pub fn cmp_axis(&self, other: &Exact, axis: usize) -> Ordering {
+        (&self.0[axis] * &other.0[3]).cmp(&(&other.0[axis] * &self.0[3]))
     }
 }
 

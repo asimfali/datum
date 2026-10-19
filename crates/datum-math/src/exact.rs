@@ -296,16 +296,16 @@ impl Ring for BigInt {
 /// Maps finite `f64` values to integers, all multiplied by the same power of two `2^-shift`.
 /// Each `f64` is `±m·2^e` with integer `m`, so the map is exact; and the common positive factor
 /// scales every point uniformly, which leaves the sign of every predicate unchanged.
-struct Scale {
+pub(crate) struct Scale {
     shift: i32,
 }
 
 impl Scale {
-    fn of(values: impl Iterator<Item = f64>) -> Self {
+    pub(crate) fn of(values: impl Iterator<Item = f64>) -> Self {
         Self { shift: values.filter(|v| *v != 0.0).map(|v| decompose(v).2).min().unwrap_or(0) }
     }
 
-    fn lift(&self, v: f64) -> BigInt {
+    pub(crate) fn lift(&self, v: f64) -> BigInt {
         let (negative, m, e) = decompose(v);
         // `e >= shift` for every input, and the difference is under 2100 bits.
         let n = BigInt::from(m) << (e - self.shift) as usize;
