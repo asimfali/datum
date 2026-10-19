@@ -22,6 +22,7 @@ eframe = { workspace = true, features = ["default_fonts", "wgpu", "x11", "waylan
 egui-wgpu = { workspace = true }
 pollster = { workspace = true }
 png = { workspace = true }
+rfd = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }

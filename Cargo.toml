@@ -34,6 +34,7 @@ eframe = { version = "0.36", default-features = false }
 egui-wgpu = "0.36"
 pollster = "0.4"
 png = "0.18"
+rfd = "0.17"
 egui_kittest = "0.36"
 
 [workspace.lints.rust]

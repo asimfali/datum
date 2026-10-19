@@ -16,13 +16,13 @@ use crate::capture::BACKGROUND;
 use crate::render::{Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
 
-/// Opens a window on the model at `path`.
-pub fn run(path: PathBuf) -> Result<(), String> {
+/// Opens the viewer window, on the model at `path` if given; models open from the window too.
+pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         depth_buffer: 24,
         multisampling: SAMPLES as u16,
-        viewport: egui::ViewportBuilder::default().with_title(format!("Datum — {}", path.display())).with_inner_size([1280.0, 800.0]),
+        viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
     eframe::run_native(
@@ -40,6 +40,10 @@ pub fn run(path: PathBuf) -> Result<(), String> {
 }
 
 const SAMPLES: u32 = 4;
+
+fn title(path: Option<&std::path::Path>) -> String {
+    path.map_or_else(|| "Datum".into(), |p| format!("Datum — {}", p.display()))
+}
 
 enum Request {
     Open(PathBuf),
@@ -109,13 +113,50 @@ struct Viewer {
 }
 
 impl Viewer {
-    fn new(path: PathBuf, ctx: egui::Context) -> Self {
+    fn new(path: Option<PathBuf>, ctx: egui::Context) -> Self {
         let (requests, inbox) = channel();
         let (outbox, models) = channel();
         std::thread::spawn(move || worker(inbox, outbox, ctx));
-        let _ = requests.send(Request::Open(path));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
-        Self { requests, models, model: None, busy: true, camera: Camera::default(), fitted: false, geometry, version: 0, edits: BTreeMap::new() }
+        let mut v = Self {
+            requests,
+            models,
+            model: None,
+            busy: false,
+            camera: Camera::default(),
+            fitted: false,
+            geometry,
+            version: 0,
+            edits: BTreeMap::new(),
+        };
+        if let Some(p) = path {
+            v.open(p);
+        }
+        v
+    }
+
+    fn open(&mut self, path: PathBuf) {
+        let _ = self.requests.send(Request::Open(path));
+        self.busy = true;
+        self.fitted = false;
+    }
+
+    /// The toolbar: open a model by dialog; a `.json` dropped on the window opens too.
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.button("Open…").clicked()
+                && let Some(p) = rfd::FileDialog::new().add_filter("Datum model", &["json"]).pick_file()
+            {
+                ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+                self.open(p);
+            }
+            ui.weak("or drop a model (.json) on the window");
+        });
+        let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
+        if let Some(p) = dropped {
+            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+            self.open(p);
+        }
     }
 
     fn receive(&mut self) {
@@ -136,7 +177,7 @@ impl Viewer {
 
     fn side(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
-            ui.label("Opening…");
+            ui.label(if self.busy { "Opening…" } else { "No model open." });
             return;
         };
         if let Some(e) = &m.error {
@@ -240,6 +281,7 @@ fn definition(v: &Json) -> String {
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive();
+        egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| self.viewport(ui));
