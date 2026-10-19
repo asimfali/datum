@@ -55,8 +55,13 @@ struct Model {
     /// `inspect` of the session: features with status, parameters with values.
     inspect: Json,
     scene: Scene,
+    /// GPU vertices of the scene, made on the background thread too.
+    geometry: Arc<Geometry>,
     /// The last command's error, if it was refused.
     error: Option<String>,
+    /// Milliseconds the rebuild and the scene (meshes, vertices) took.
+    rebuild_ms: f64,
+    scene_ms: f64,
 }
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
@@ -67,6 +72,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
         pending.extend(requests.try_iter());
+        let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
         let mut error = None;
         for r in pending {
@@ -87,11 +93,15 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 error = Some(e);
             }
         }
+        let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
+        let start = std::time::Instant::now();
         let finals = session.evaluation().final_values(session.graph());
         let scene = Scene::new(&finals, &mut meshes);
         meshes.retain(&finals.iter().filter_map(|v| v.body()).collect::<Vec<_>>());
+        let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
+        let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, error }).is_err() {
+        if models.send(Model { inspect, scene, geometry, error, rebuild_ms, scene_ms }).is_err() {
             return;
         }
         ctx.request_repaint();
@@ -108,6 +118,8 @@ struct Viewer {
     /// GPU vertices of the current scene, their version, and the anchor they are relative to.
     geometry: Arc<Geometry>,
     version: u64,
+    /// Smoothed time between frames, milliseconds.
+    frame_ms: f64,
     /// Parameter definitions as typed, by name.
     edits: BTreeMap<String, String>,
 }
@@ -127,6 +139,7 @@ impl Viewer {
             fitted: false,
             geometry,
             version: 0,
+            frame_ms: 0.0,
             edits: BTreeMap::new(),
         };
         if let Some(p) = path {
@@ -162,7 +175,7 @@ impl Viewer {
     fn receive(&mut self) {
         while let Ok(m) = self.models.try_recv() {
             self.busy = false;
-            self.geometry = Arc::new(Geometry::new(&m.scene, m.scene.anchor()));
+            self.geometry = m.geometry.clone();
             self.version += 1;
             if !self.fitted && m.scene.bounds.is_some() {
                 self.camera.fit(m.scene.bounds);
@@ -256,15 +269,25 @@ impl Viewer {
         let (view_projection, eye) = self.camera.matrices(anchor, f64::from(rect.width() / rect.height().max(1.0)), radius);
         let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, Paint(frame)));
-        if self.busy {
-            ui.painter().text(
-                rect.left_top() + egui::vec2(10.0, 10.0),
-                egui::Align2::LEFT_TOP,
-                "rebuilding…",
-                egui::FontId::proportional(14.0),
-                egui::Color32::GRAY,
-            );
-        }
+        // What the view costs, to tell a slow frame from a slow rebuild.
+        let dt = f64::from(ui.input(|i| i.unstable_dt)) * 1e3;
+        self.frame_ms = if self.frame_ms == 0.0 { dt } else { self.frame_ms * 0.9 + dt * 0.1 };
+        let (tris, lines) =
+            (m.geometry.triangles.len() as u64 / crate::scene::TRIANGLE_VERTEX / 3, m.geometry.lines.len() as u64 / crate::scene::LINE_VERTEX / 2);
+        let status = format!(
+            "{}frame {:.1} ms · rebuild {:.0} ms · scene {:.0} ms · {tris} triangles · {lines} edges",
+            if self.busy { "rebuilding…  " } else { "" },
+            self.frame_ms,
+            m.rebuild_ms,
+            m.scene_ms
+        );
+        ui.painter().text(
+            rect.left_top() + egui::vec2(10.0, 10.0),
+            egui::Align2::LEFT_TOP,
+            status,
+            egui::FontId::monospace(12.0),
+            egui::Color32::DARK_GRAY,
+        );
     }
 }
 
@@ -333,12 +356,20 @@ mod tests {
         let mut v = Viewer {
             requests,
             models,
-            model: Some(Model { inspect, scene: Scene::default(), error: None }),
+            model: Some(Model {
+                inspect,
+                scene: Scene::default(),
+                geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
+                error: None,
+                rebuild_ms: 0.0,
+                scene_ms: 0.0,
+            }),
             busy: false,
             camera: Camera::default(),
             fitted: true,
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
             version: 0,
+            frame_ms: 0.0,
             edits,
         };
         // Layout needs no GPU; only a picture of the panel (`DATUM_VIEW_SHOT=file.png`) does.
