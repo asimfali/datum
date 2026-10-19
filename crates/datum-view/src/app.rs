@@ -239,7 +239,7 @@ fn definition(v: &Json) -> String {
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive();
-        egui::Panel::left("datum_side").default_size(340.0).show(ui, |ui| self.side(ui));
+        egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| self.viewport(ui));
     }
