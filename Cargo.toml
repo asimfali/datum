@@ -38,3 +38,16 @@ unimplemented = "deny"
 
 [profile.release]
 debug = "line-tables-only"
+
+# Geometry is hot even in tests (the 10 000-hole reference model); debug assertions stay on.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.dev.package.datum-math]
+opt-level = 2
+
+[profile.dev.package.datum-brep]
+opt-level = 2
+
+[profile.dev.package.datum-ops]
+opt-level = 2

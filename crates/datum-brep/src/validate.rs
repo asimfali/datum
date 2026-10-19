@@ -118,20 +118,7 @@ impl Body {
 
     /// `V − E + 2F − L = 2(S − G)` with `S` shells and genus `G ≥ 0`.
     fn check_euler(&self) -> Result<(), BrepError> {
-        let mut parent: Vec<Ix> = (0..self.faces.len() as Ix).collect();
-        fn find(p: &mut [Ix], mut x: Ix) -> Ix {
-            while p[x as usize] != x {
-                p[x as usize] = p[p[x as usize] as usize];
-                x = p[x as usize];
-            }
-            x
-        }
-        for he in &self.half_edges {
-            let face = |h: Ix| self.loops[self.half_edges[h as usize].loop_ix as usize].face;
-            let (a, b) = (find(&mut parent, face(he.twin)), find(&mut parent, self.loops[he.loop_ix as usize].face));
-            parent[a.max(b) as usize] = a.min(b);
-        }
-        let shells = (0..self.faces.len() as Ix).filter(|&f| find(&mut parent, f) == f).count() as i64;
+        let shells = self.face_shells().iter().enumerate().filter(|&(f, &root)| root == f as Ix).count() as i64;
         let chi = self.vertices.len() as i64 - self.edges.len() as i64 + 2 * self.faces.len() as i64 - self.loops.len() as i64;
         if chi % 2 != 0 || chi > 2 * shells {
             return invalid(format!("Euler–Poincaré fails: V − E + 2F − L = {chi} with {shells} shell(s)"));

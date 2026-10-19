@@ -4,7 +4,7 @@ use std::ops::Range;
 
 use datum_math::{Rigid, Vec3};
 
-use crate::TopoId;
+use crate::{FaceSpec, TopoId};
 
 /// Index into one of a body's element vectors.
 pub type Ix = u32;
@@ -191,15 +191,58 @@ impl Body {
 
     /// The same body moved by `m`. Topology IDs are unchanged; hashes follow the new coordinates.
     pub fn transformed(&self, m: &Rigid) -> Body {
+        self.mapped(|p| m.apply(p), |n| m.apply_vector(n))
+    }
+
+    /// The body under an affine map that keeps orientation: `point` maps points, `normal` maps
+    /// normals (by the inverse transpose). Planes stay planes; topology IDs are unchanged.
+    pub fn mapped(&self, point: impl Fn(Vec3) -> Vec3, normal: impl Fn(Vec3) -> Vec3) -> Body {
         let mut b = self.clone();
         for v in &mut b.vertices {
-            v.point = m.apply(v.point);
+            v.point = point(v.point);
         }
         for f in &mut b.faces {
-            f.plane = Plane { origin: m.apply(f.plane.origin), normal: m.apply_vector(f.plane.normal) };
+            f.plane = Plane { origin: point(f.plane.origin), normal: normal(f.plane.normal) };
         }
         b.rehash();
         b
+    }
+
+    /// Face `f` as builder input.
+    pub fn face_spec(&self, f: Ix) -> FaceSpec {
+        let face = &self.faces[f as usize];
+        let loops = self
+            .face_loops(f)
+            .map(|l| self.loop_half_edges(l).map(|h| self.vertices[self.half_edges[h as usize].origin as usize].id).collect())
+            .collect();
+        FaceSpec { id: face.id, plane: face.plane, loops }
+    }
+
+    /// For every face, the lowest face index of its shell: faces joined by edges form a shell.
+    pub(crate) fn face_shells(&self) -> Vec<Ix> {
+        let mut parent: Vec<Ix> = (0..self.faces.len() as Ix).collect();
+        fn find(p: &mut [Ix], mut x: Ix) -> Ix {
+            while p[x as usize] != x {
+                p[x as usize] = p[p[x as usize] as usize];
+                x = p[x as usize];
+            }
+            x
+        }
+        let face = |h: Ix| self.loops[self.half_edges[h as usize].loop_ix as usize].face;
+        for he in &self.half_edges {
+            let (a, b) = (find(&mut parent, face(he.twin)), find(&mut parent, self.loops[he.loop_ix as usize].face));
+            parent[a.max(b) as usize] = a.min(b);
+        }
+        (0..self.faces.len() as Ix).map(|f| find(&mut parent, f)).collect()
+    }
+
+    /// One vertex of every shell, shells in the order of their first faces.
+    pub fn shell_vertices(&self) -> Vec<Ix> {
+        let shells = self.face_shells();
+        (0..self.faces.len())
+            .filter(|&f| shells[f] == f as Ix)
+            .map(|f| self.half_edges[self.loops[self.faces[f].first_loop as usize].first as usize].origin)
+            .collect()
     }
 
     pub(crate) fn rehash(&mut self) {
