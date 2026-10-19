@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use datum_brep::{Body, Ix, triangulate_face};
+use datum_brep::{Body, Ix, triangulate_face_delaunay};
 use datum_graph::Value;
 use datum_math::Vec3;
 use rayon::prelude::*;
@@ -34,7 +34,7 @@ impl BodyMesh {
                 let len = n.dot(n).sqrt();
                 let normal = if len > 0.0 { [(n.x / len) as f32, (n.y / len) as f32, (n.z / len) as f32] } else { [0.0; 3] };
                 // A face that cannot be triangulated is left out of the picture, not the program.
-                let tris = triangulate_face(body, f).map(|t| t.iter().map(|t| t.map(|v| body.point(v))).collect()).unwrap_or_default();
+                let tris = triangulate_face_delaunay(body, f).map(|t| t.iter().map(|t| t.map(|v| body.point(v))).collect()).unwrap_or_default();
                 (tris, normal)
             })
             .collect();

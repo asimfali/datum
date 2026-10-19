@@ -1,6 +1,6 @@
 //! Triangulation of a body's faces for export, display and Boolean operations.
 
-use datum_math::{Sign, Vec2, orient2d};
+use datum_math::{Sign, Vec2, incircle, orient2d};
 
 use rayon::prelude::*;
 use smallvec::{SmallVec, smallvec};
@@ -30,6 +30,18 @@ pub fn tessellate(body: &Body) -> Result<Mesh, BrepError> {
 /// ch. 3). Every decision is an exact predicate; O(n log n) in the number of vertices, so faces
 /// with thousands of holes stay cheap (PAINS P4).
 pub fn triangulate_face(body: &Body, f: Ix) -> Result<Triangles, BrepError> {
+    triangulate(body, f, false)
+}
+
+/// [`triangulate_face`] with edges flipped until the triangulation is constrained Delaunay. The
+/// sweep leaves slivers across the whole face, which a GPU fills slowly (a perforated panel close
+/// up: 290 ms a frame); Boolean operations do not mind them and skip the flips, which cost more
+/// than the sweep.
+pub fn triangulate_face_delaunay(body: &Body, f: Ix) -> Result<Triangles, BrepError> {
+    triangulate(body, f, true)
+}
+
+fn triangulate(body: &Body, f: Ix, delaunay: bool) -> Result<Triangles, BrepError> {
     let face = &body.faces()[f as usize];
     // A triangle is its own triangulation (terrain: millions of them).
     if face.loop_count == 1 && body.loops()[face.first_loop as usize].len == 3 {
@@ -60,7 +72,7 @@ pub fn triangulate_face(body: &Body, f: Ix) -> Result<Triangles, BrepError> {
         })
         .collect();
     let tris = Polygon::new(&pts, next)
-        .and_then(|poly| poly.triangulate())
+        .and_then(|poly| poly.triangulate(delaunay))
         .map_err(|()| BrepError::Degenerate(format!("face {:?} cannot be triangulated", face.id)))?;
     Ok(tris.into_iter().map(|t| t.map(|k| ids[k as usize])).collect())
 }
@@ -145,7 +157,7 @@ impl<'a> Polygon<'a> {
         })
     }
 
-    fn triangulate(&self) -> Result<Vec<[Vx; 3]>, ()> {
+    fn triangulate(&self, delaunay: bool) -> Result<Vec<[Vx; 3]>, ()> {
         let diagonals = self.monotone_diagonals()?;
         let n = self.p.len();
         let loops = n - self.next.iter().enumerate().filter(|&(k, &x)| x as usize > k).count();
@@ -158,7 +170,69 @@ impl<'a> Polygon<'a> {
         if tris.len() != expected {
             return Err(());
         }
+        if delaunay {
+            self.delaunay(&mut tris);
+        }
         Ok(tris)
+    }
+
+    /// Flips interior edges whose opposite vertex lies strictly inside the other triangle's
+    /// circumcircle (Lawson) until none is left. Loop edges border one triangle and stay.
+    fn delaunay(&self, tris: &mut [[Vx; 3]]) {
+        const NONE: u32 = u32::MAX;
+        // Neighbour across edge `i → i + 1` of each triangle, found by sorting the edges.
+        let mut edges: Vec<(Vx, Vx, u32)> = Vec::with_capacity(tris.len() * 3);
+        for (t, tri) in tris.iter().enumerate() {
+            for i in 0..3 {
+                let (a, b) = (tri[i], tri[(i + 1) % 3]);
+                edges.push((a.min(b), a.max(b), (t * 3 + i) as u32));
+            }
+        }
+        edges.sort_unstable();
+        let mut nb = vec![[NONE; 3]; tris.len()];
+        let mut stack = Vec::new();
+        for w in edges.windows(2) {
+            if (w[0].0, w[0].1) == (w[1].0, w[1].1) {
+                let (s, t) = (w[0].2, w[1].2);
+                nb[s as usize / 3][s as usize % 3] = t / 3;
+                nb[t as usize / 3][t as usize % 3] = s / 3;
+                stack.push((s / 3, tris[s as usize / 3][s as usize % 3], tris[s as usize / 3][(s as usize + 1) % 3]));
+            }
+        }
+        let slot = |tri: &[Vx; 3], a: Vx, b: Vx| (0..3).find(|&i| tri[i] == a && tri[(i + 1) % 3] == b);
+        while let Some((t1, a, b)) = stack.pop() {
+            // The edge may have been flipped away since it was pushed.
+            let Some(i) = slot(&tris[t1 as usize], a, b) else { continue };
+            let t2 = nb[t1 as usize][i];
+            if t2 == NONE {
+                continue;
+            }
+            let Some(j) = slot(&tris[t2 as usize], b, a) else { continue };
+            let c = tris[t1 as usize][(i + 2) % 3];
+            let d = tris[t2 as usize][(j + 2) % 3];
+            if incircle(self.pt(a), self.pt(b), self.pt(c), self.pt(d)) != Sign::Positive
+                || self.orient(c, a, d) != Sign::Positive
+                || self.orient(d, b, c) != Sign::Positive
+            {
+                continue;
+            }
+            let (n_bc, n_ca) = (nb[t1 as usize][(i + 1) % 3], nb[t1 as usize][(i + 2) % 3]);
+            let (n_ad, n_db) = (nb[t2 as usize][(j + 1) % 3], nb[t2 as usize][(j + 2) % 3]);
+            tris[t1 as usize] = [c, a, d];
+            nb[t1 as usize] = [n_ca, n_ad, t2];
+            tris[t2 as usize] = [d, b, c];
+            nb[t2 as usize] = [n_db, n_bc, t1];
+            for (n, from, to) in [(n_ad, t2, t1), (n_bc, t1, t2)] {
+                if n != NONE {
+                    for x in &mut nb[n as usize] {
+                        if *x == from {
+                            *x = to;
+                        }
+                    }
+                }
+            }
+            stack.extend([(t1, c, a), (t1, a, d), (t2, d, b), (t2, b, c)]);
+        }
     }
 
     /// Position in `status` of the first edge not strictly west of `v`.

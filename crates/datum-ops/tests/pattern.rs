@@ -1,8 +1,8 @@
 //! Grid pattern and through cuts (M2c): copies, stable IDs, contact checks, perforation.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use datum_brep::{Body, BrepError, TopoId, cuboid, prism, tessellate};
-use datum_math::{Rigid, Vec2, Vec3};
+use datum_brep::{Body, BrepError, TopoId, cuboid, prism, tessellate, triangulate_face, triangulate_face_delaunay};
+use datum_math::{Rigid, Sign, Vec2, Vec3, incircle};
 use datum_ops::{BooleanKind, boolean, pattern_grid};
 
 fn id(tag: &str) -> TopoId {
@@ -142,5 +142,43 @@ fn same_result_on_any_thread_count() {
     let reference = run(1);
     for threads in [2, 3, 7, 16] {
         assert_eq!(run(threads), reference, "{threads} threads");
+    }
+}
+
+/// The view's triangulation of a perforated face: the same area in as many triangles, no point
+/// inside a neighbour's circumcircle, and none of the sweep's slivers across the plate.
+#[test]
+fn delaunay_removes_slivers() {
+    let pins = grid(&pin(1.0, 4.0), [12, 10], 10.0).unwrap();
+    let plate = cuboid(id("plate"), Vec3::new(-5.0, -5.0, 0.0), Vec3::new(115.0, 95.0, 5.0)).unwrap();
+    let r = checked(boolean(id("cut"), BooleanKind::Difference, Some(Vec3::new(0.0, 0.0, 1.0)), &[&plate, &pins]));
+    let f = r.faces().iter().position(|f| f.plane.normal.z > 0.0).unwrap() as u32;
+    let xy = |v: u32| {
+        let p = r.point(v);
+        Vec2::new(p.x, p.y)
+    };
+    let measure = |tris: &[[u32; 3]]| {
+        tris.iter().fold((0.0, 0.0), |(area, perimeter), t| {
+            let [a, b, c] = t.map(xy);
+            let len = |p: Vec2, q: Vec2| ((q.x - p.x).powi(2) + (q.y - p.y).powi(2)).sqrt();
+            (area + ((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5, perimeter + len(a, b) + len(b, c) + len(c, a))
+        })
+    };
+    let sweep = triangulate_face(&r, f).unwrap();
+    let fine = triangulate_face_delaunay(&r, f).unwrap();
+    assert_eq!(fine.len(), sweep.len());
+    let ((a0, p0), (a1, p1)) = (measure(&sweep), measure(&fine));
+    assert_close(a1, a0, 1e-12);
+    assert!(p1 * 2.0 < p0, "perimeter {p1} after flips, {p0} before");
+    for (i, t) in fine.iter().enumerate() {
+        for u in &fine[i + 1..] {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                if let Some(j) = (0..3).find(|&j| u[j] == b && u[(j + 1) % 3] == a) {
+                    let d = u[(j + 2) % 3];
+                    assert_ne!(incircle(xy(a), xy(b), xy(t[(k + 2) % 3]), xy(d)), Sign::Positive);
+                }
+            }
+        }
     }
 }
