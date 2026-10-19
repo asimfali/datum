@@ -152,7 +152,8 @@ impl Viewer {
             for (name, p) in &params {
                 ui.label(name);
                 let text = self.edits.entry(name.clone()).or_default();
-                let r = ui.add(egui::TextEdit::singleline(text).desired_width(150.0));
+                // A grid cell is as wide as its column was: sized explicitly, the field widens it.
+                let r = ui.add_sized([170.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(text));
                 // Applied when the field is left (Enter, Tab or a click elsewhere) changed. The
                 // field itself takes the Enter key, so asking for it here would never fire.
                 if r.lost_focus() && *text != definition(&p["definition"]) {
@@ -266,6 +267,50 @@ impl egui_wgpu::CallbackTrait for Paint {
     fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
         if let Some(r) = resources.get::<Renderer>() {
             r.paint(pass);
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use egui_kittest::kittest::Queryable;
+
+    use super::*;
+
+    /// The side panel of a real model: every parameter's definition shows whole in its field.
+    #[test]
+    fn expressions_show_whole() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/parametric.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let inspect = session.execute("inspect", &json!({})).unwrap();
+        let (requests, _inbox) = channel();
+        let (_outbox, models) = channel();
+        let edits = inspect["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
+        let mut v = Viewer {
+            requests,
+            models,
+            model: Some(Model { inspect, scene: Scene::default(), error: None }),
+            busy: false,
+            camera: Camera::default(),
+            fitted: true,
+            geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
+            version: 0,
+            edits,
+        };
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 420.0]).wgpu().build_ui(|ui| {
+            egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+        });
+        h.run();
+        for text in ["floor_count", "hole * 2.5", "w / 2"] {
+            // `floor_count` is also a parameter's name: the widest node is the field.
+            let width = h.get_all_by_value(text).map(|n| n.rect().width()).fold(0.0f32, f32::max);
+            let needed = h.ctx.fonts_mut(|f| f.layout_no_wrap(text.into(), egui::FontId::proportional(14.0), egui::Color32::WHITE).size().x);
+            assert!(width > needed + 8.0, "`{text}` needs {needed}, the field is {width}");
+        }
+        if let (Some(path), Ok(img)) = (std::env::var_os("DATUM_VIEW_SHOT"), h.render()) {
+            img.save(path).unwrap();
         }
     }
 }
