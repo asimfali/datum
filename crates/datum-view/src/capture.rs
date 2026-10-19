@@ -5,6 +5,8 @@ use std::sync::Arc;
 
 use egui_wgpu::wgpu;
 
+use datum_graph::Value;
+
 use crate::camera::Camera;
 use crate::render::{Frame, Renderer};
 use crate::scene::{Geometry, Scene};
@@ -105,8 +107,22 @@ pub fn picture(scene: &Scene, camera: &Camera, width: u32, height: u32) -> Resul
     Ok(data.chunks(padded as usize).take(height as usize).flat_map(|r| &r[..row as usize]).copied().collect())
 }
 
-/// `rgba` as a PNG.
-pub fn png(rgba: &[u8], width: u32, height: u32, out: impl std::io::Write) -> Result<(), String> {
+/// A PNG of `values` (bodies and sketches) in standard view `view`, fitted to fill the picture:
+/// what `datum snapshot` writes and the MCP tool `render` returns.
+pub fn snapshot(values: &[&Value], view: &str, width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let mut camera = Camera::view(view)?;
+    if width == 0 || height == 0 {
+        return Err("the picture needs a width and a height".into());
+    }
+    let scene = Scene::new(values, &mut Default::default());
+    camera.fit(scene.bounds);
+    let rgba = picture(&scene, &camera, width, height)?;
+    let mut out = Vec::new();
+    png(&rgba, width, height, &mut out)?;
+    Ok(out)
+}
+
+fn png(rgba: &[u8], width: u32, height: u32, out: impl std::io::Write) -> Result<(), String> {
     let mut e = png::Encoder::new(out, width, height);
     e.set_color(png::ColorType::Rgba);
     e.set_depth(png::BitDepth::Eight);

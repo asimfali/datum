@@ -256,10 +256,14 @@ impl Session {
         self.graph.find(name).ok_or_else(|| format!("no feature named `{name}`"))
     }
 
-    fn body(&self, name: &str) -> Result<&Body, String> {
+    /// The value of feature `name` in the last evaluation, or why there is none.
+    pub fn value(&self, name: &str) -> Result<&Feature, String> {
         let ix = self.find(name)?;
-        let value = self.last.results[ix as usize].as_ref().map_err(|e| format!("`{name}` failed: {e}"))?;
-        value.body().ok_or_else(|| format!("`{name}` is a sketch, not a body"))
+        self.last.results[ix as usize].as_deref().map_err(|e| format!("`{name}` failed: {e}"))
+    }
+
+    fn body(&self, name: &str) -> Result<&Body, String> {
+        self.value(name)?.body().ok_or_else(|| format!("`{name}` is a sketch, not a body"))
     }
 
     fn inspect(&self) -> Value {

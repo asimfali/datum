@@ -21,7 +21,26 @@ impl Default for Camera {
     }
 }
 
+/// Standard views: the default isometric one and the six along the axes (front looks along +Y).
+pub const VIEWS: [&str; 7] = ["iso", "top", "bottom", "front", "back", "left", "right"];
+
 impl Camera {
+    /// The camera of standard view `name` (one of [`VIEWS`]), to be fitted to a scene.
+    pub fn view(name: &str) -> Result<Self, String> {
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let (yaw, pitch) = match name {
+            "iso" => return Ok(Self::default()),
+            "top" => (-quarter, quarter),
+            "bottom" => (-quarter, -quarter),
+            "front" => (-quarter, 0.0),
+            "back" => (quarter, 0.0),
+            "left" => (2.0 * quarter, 0.0),
+            "right" => (0.0, 0.0),
+            _ => return Err(format!("unknown view `{name}`; one of {}", VIEWS.join(", "))),
+        };
+        Ok(Self { yaw, pitch, ..Self::default() })
+    }
+
     pub fn eye(&self) -> Vec3 {
         let (sy, cy) = libm::sincos(self.yaw);
         let (sp, cp) = libm::sincos(self.pitch);
@@ -59,8 +78,9 @@ impl Camera {
     fn axes(&self) -> (Vec3, Vec3, Vec3) {
         let f = self.target - self.eye();
         let f = f * (1.0 / f.dot(f).sqrt());
-        let r = f.cross(Vec3::new(0.0, 0.0, 1.0));
-        let r = r * (1.0 / r.dot(r).sqrt().max(f64::MIN_POSITIVE));
+        // Right is horizontal and follows the yaw alone, so straight down (top view) is no special case.
+        let (sy, cy) = libm::sincos(self.yaw);
+        let r = Vec3::new(-sy, cy, 0.0);
         (r, r.cross(f), f)
     }
 

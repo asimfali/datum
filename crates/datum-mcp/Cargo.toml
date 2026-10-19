@@ -11,4 +11,5 @@ workspace = true
 
 [dependencies]
 datum-model = { workspace = true }
+datum-view = { workspace = true }
 serde_json = { workspace = true }

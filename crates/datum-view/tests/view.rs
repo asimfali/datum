@@ -79,3 +79,28 @@ fn headless_picture() {
     assert_eq!(at(w - 1, h - 1), background);
     assert_ne!(at(w / 2, h / 2), background);
 }
+
+/// Standard views put the axes where a drawing has them: top shows +X right and +Y up, front
+/// +X right and +Z up, right +Y right and +Z up.
+#[test]
+fn standard_views_follow_drawing_conventions() {
+    let screen = |view: &str, p: [f32; 3]| {
+        let cam = Camera::view(view).unwrap();
+        let (m, _) = cam.matrices(cam.target, 1.0, 1.0);
+        let q = project(&m, p);
+        [q[0], q[1]]
+    };
+    let close = |a: [f32; 2], b: [f32; 2]| assert!((a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5, "{a:?} vs {b:?}");
+    let right_up = |view: &str, right: [f32; 3], up: [f32; 3]| {
+        let (r, u) = (screen(view, right), screen(view, up));
+        assert!(r[0] > 0.0 && u[1] > 0.0, "{view}: {r:?} {u:?}");
+        close([0.0, r[1]], [0.0, 0.0]);
+        close([u[0], 0.0], [0.0, 0.0]);
+    };
+    right_up("top", [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
+    right_up("front", [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    right_up("right", [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]);
+    right_up("back", [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    right_up("left", [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]);
+    assert!(Camera::view("isometric").is_err());
+}

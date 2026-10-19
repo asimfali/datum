@@ -19,7 +19,8 @@ const USAGE: &str = "usage:
   datum view <model.json>                               window: the model in 3D, parameters to edit
   datum <model.json>                                    the same (a model dropped on datum.exe)
   datum                                                 the viewer without a model: open one from it
-  datum snapshot <model.json> --out <file.png> [--size WxH]   picture of the final bodies and sketches
+  datum snapshot <model.json> --out <file.png> [--size WxH] [--view iso|top|bottom|front|back|left|right]
+                                                        picture of the final bodies and sketches
   datum mcp                                             MCP server on stdin/stdout
 threads: RAYON_NUM_THREADS (default: all cores)";
 
@@ -93,21 +94,23 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
 }
 
 fn cmd_snapshot(args: &[String]) -> Result<(), String> {
-    let (model, out, size) = match args {
-        [m, flag, o] if flag == "--out" => (m, o, "1024x768"),
-        [m, flag, o, sflag, size] if flag == "--out" && sflag == "--size" => (m, o, size.as_str()),
-        _ => return Err(USAGE.into()),
-    };
+    let [model, rest @ ..] = args else { return Err(USAGE.into()) };
+    let (mut out, mut size, mut view) = (None, "1024x768", "iso");
+    for pair in rest.chunks(2) {
+        match pair {
+            [flag, o] if flag == "--out" => out = Some(o),
+            [flag, s] if flag == "--size" => size = s,
+            [flag, v] if flag == "--view" => view = v,
+            _ => return Err(USAGE.into()),
+        }
+    }
+    let out = out.ok_or(USAGE)?;
     let (w, h) =
         size.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))).ok_or("--size takes WxH, e.g. 1024x768")?;
     let g = load(Path::new(model))?;
     let e = Evaluator::default().evaluate(&g);
-    let scene = datum_view::scene::Scene::new(&e.final_values(&g), &mut Default::default());
-    let mut camera = datum_view::camera::Camera::default();
-    camera.fit(scene.bounds);
-    let rgba = datum_view::capture::picture(&scene, &camera, w, h)?;
-    let file = File::create(out).map_err(|e| format!("{out}: {e}"))?;
-    datum_view::capture::png(&rgba, w, h, BufWriter::new(file))?;
+    let png = datum_view::capture::snapshot(&e.final_values(&g), view, w, h)?;
+    std::fs::write(out, png).map_err(|e| format!("{out}: {e}"))?;
     println!("written {out} ({w}×{h})");
     Ok(())
 }
