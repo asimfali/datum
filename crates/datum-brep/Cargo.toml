@@ -12,6 +12,8 @@ workspace = true
 [dependencies]
 datum-math = { workspace = true }
 blake3 = { workspace = true }
+rayon = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

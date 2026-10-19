@@ -1,6 +1,5 @@
-//! Perforation (PAINS P4, C3): a grid of pins cut through a plate in one Boolean operation, and
-//! the tessellation of the drilled face. Each on one thread and on all threads; the operations
-//! are sequential until M2d, so the two agree for now.
+//! C3 (PAINS P4): a 100 × 100 grid of pins cut through a plate in one Boolean operation, and the
+//! tessellation of the drilled plate. Each on one thread and on all threads.
 #![allow(clippy::expect_used)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -31,8 +30,8 @@ fn drill(plate: &Body, pins: &Body) -> Body {
 }
 
 fn perforation(c: &mut Criterion) {
-    let (plate, pins) = plate_and_pins(40);
-    let mut group = c.benchmark_group("perforation_1600");
+    let (plate, pins) = plate_and_pins(100);
+    let mut group = c.benchmark_group("c3_perforation_10000");
     group.sample_size(10);
     for (name, pool) in pools() {
         group.bench_function(&name, |b| b.iter(|| pool.install(|| drill(&plate, &pins))));

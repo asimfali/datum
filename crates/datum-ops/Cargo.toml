@@ -13,13 +13,14 @@ workspace = true
 datum-math = { workspace = true }
 datum-brep = { workspace = true }
 blake3 = { workspace = true }
+rayon = { workspace = true }
+smallvec = { workspace = true }
 serde = { workspace = true }
 schemars = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
-rayon = { workspace = true }
 
 [[bench]]
 name = "perforation"

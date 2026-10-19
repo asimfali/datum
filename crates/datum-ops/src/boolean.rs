@@ -1,5 +1,7 @@
 //! N-ary Boolean operation (ARCHITECTURE §7, D38–D40): a target combined with any number of
-//! pairwise disjoint tools in one pass. This is the sequential form of the §7.1 pipeline.
+//! pairwise disjoint tools in one pass, along the §7.1 pipeline. Stages run in parallel over
+//! triangles, pairs, edges and faces; their results are collected by index and merged in a fixed
+//! order, so the body is the same bit for bit on any number of threads (C4).
 //!
 //! Faces are triangulated internally. Intersection points stay implicit ([`Lpi`]) and every
 //! decision is an exact predicate on the original coordinates. A point is named by the segment
@@ -12,10 +14,14 @@
 //! face, two edges crossing) is refused as [`BrepError::Degenerate`].
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
+use std::collections::VecDeque;
 
-use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, TopoId, Vertex, build, triangulate_face};
+use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, TopoId, Vertex, build, in_order, triangulate_face};
 use datum_math::{Lpi, Point, Sign, Vec3, cmp_axis, orient2d_along, orient3d};
+
+use rayon::iter::Either;
+use rayon::prelude::*;
+use smallvec::SmallVec;
 
 use crate::bounds::{Aabb, bounds, overlap, overlapping_pairs};
 use schemars::JsonSchema;
@@ -113,9 +119,9 @@ impl<'a> Input<'a> {
                 ((he.origin, to), (body.loops()[he.loop_ix as usize].face, he.edge))
             })
             .collect();
-        directed.sort_unstable();
-        let mut tris = Vec::with_capacity(body.half_edges().len());
-        for f in 0..body.faces().len() as Ix {
+        directed.par_sort_unstable();
+        let face_tris = |f: Ix| -> Result<Vec<Tri>, BrepError> {
+            let mut tris = Vec::new();
             for v in triangulate_face(body, f)? {
                 let segs = [0, 1, 2].map(|k| {
                     let (a, b) = (v[k], v[(k + 1) % 3]);
@@ -134,7 +140,9 @@ impl<'a> Input<'a> {
                 };
                 tris.push(Tri { face: f, v, segs, axis, ccw, bounds: bounds(p.iter().copied()) });
             }
-        }
+            Ok(tris)
+        };
+        let tris: Vec<Tri> = in_order((0..body.faces().len() as Ix).into_par_iter().map(face_tris))?.into_iter().flatten().collect();
         Ok(Self { body, tris, bounds: bounds(body.vertices().iter().map(|v| v.point)) })
     }
 
@@ -143,45 +151,71 @@ impl<'a> Input<'a> {
     }
 }
 
+/// Up to two end points of a common segment, on the stack: one pair of triangles must not allocate.
+type Ends = SmallVec<[(Cross, Hit); 4]>;
+
 /// An intersection point and a triangle of the crossed face whose plane it lies on.
+#[derive(Clone, Copy)]
 struct Hit {
     point: Point,
     plane: TriRef,
 }
 
+/// Intersection points sorted by name. Names and points are kept apart: a lookup reads only the
+/// compact names.
+struct Hits {
+    keys: Vec<Cross>,
+    hits: Vec<Hit>,
+}
+
+impl Hits {
+    /// Merges the points of all triangle pairs, given in pair order with the first error, if
+    /// any. A name found by several pairs must name one point; the first pair's copy is kept.
+    /// Only `(name, position)` is sorted, and the points are moved once.
+    fn new(all: Vec<Result<(Cross, Hit), BrepError>>) -> Result<Self, BrepError> {
+        if let Some(e) = all.iter().find_map(|r| r.as_ref().err()) {
+            return Err(e.clone());
+        }
+        let all: Vec<&(Cross, Hit)> = all.iter().flatten().collect();
+        let mut order: Vec<(Cross, u32)> = all.par_iter().enumerate().map(|(i, e)| (e.0, i as u32)).collect();
+        order.par_sort_unstable();
+        let differ = |p: &Point, q: &Point| p != q && (0..3).any(|a| cmp_axis(p, q, a) != Ordering::Equal);
+        if order.par_windows(2).any(|w| w[0].0 == w[1].0 && differ(&all[w[0].1 as usize].1.point, &all[w[1].1 as usize].1.point)) {
+            return degenerate("a segment crosses a face more than once");
+        }
+        order.dedup_by_key(|e| e.0);
+        Ok(Self { keys: order.par_iter().map(|e| e.0).collect(), hits: order.par_iter().map(|e| all[e.1 as usize].1).collect() })
+    }
+
+    fn index(&self, c: &Cross) -> usize {
+        self.keys.partition_point(|k| k < c)
+    }
+
+    fn get(&self, c: &Cross) -> &Hit {
+        &self.hits[self.index(c)]
+    }
+}
+
 /// What the triangle pairs found.
 struct Found {
-    hits: BTreeMap<Cross, Hit>,
+    hits: Hits,
     /// Per part and edge: the points on that edge, sorted from the origin of its `half`.
     on_edges: Vec<Vec<Vec<Cross>>>,
-    /// Per part and face: cut segments, oriented with the kept side on the left seen from
-    /// outside the part.
-    cuts: Vec<Vec<Vec<(Node, Node)>>>,
+    /// Cut segments by part and face, oriented with the kept side on the left seen from outside
+    /// the part.
+    cuts: Vec<((Part, Ix), (Node, Node))>,
 }
 
 impl Found {
-    fn add(&mut self, key: Cross, hit: Hit) -> Result<(), BrepError> {
-        match self.hits.entry(key) {
-            Entry::Vacant(e) => {
-                if let Seg::Edge(x, edge) = key.seg {
-                    self.on_edges[x][edge as usize].push(key);
-                }
-                e.insert(hit);
-            }
-            Entry::Occupied(e) => {
-                let p = &e.get().point;
-                if *p != hit.point && (0..3).any(|a| cmp_axis(p, &hit.point, a) != Ordering::Equal) {
-                    return degenerate("a segment crosses a face more than once");
-                }
-            }
-        }
-        Ok(())
+    fn face_cuts(&self, x: Part, f: Ix) -> impl Iterator<Item = (Node, Node)> + '_ {
+        let from = self.cuts.partition_point(|c| c.0 < (x, f));
+        self.cuts[from..].iter().take_while(move |c| c.0 == (x, f)).map(|c| c.1)
     }
 
     fn point(&self, inputs: &[Input], n: Node) -> Point {
         match n {
             Node::Vert(x, v) => Point::Explicit(inputs[x].body.point(v)),
-            Node::Cross(c) => self.hits[&c].point,
+            Node::Cross(c) => self.hits.get(&c).point,
         }
     }
 }
@@ -196,40 +230,73 @@ pub fn boolean(feature: TopoId, kind: BooleanKind, through: Option<Vec3>, bodies
         _ => Vec::new(),
     };
     let bodies: Vec<&Body> = if through.is_some() { bodies.iter().copied().take(1).chain(&stretched).collect() } else { bodies.to_vec() };
-    let inputs = bodies.iter().enumerate().map(|(x, b)| Input::new(x, b)).collect::<Result<Vec<_>, _>>()?;
-    let mut found = Found {
-        hits: BTreeMap::new(),
-        on_edges: inputs.iter().map(|i| vec![Vec::new(); i.body.edges().len()]).collect(),
-        cuts: inputs.iter().map(|i| vec![Vec::new(); i.body.faces().len()]).collect(),
-    };
-    for (a, b) in candidate_pairs(&inputs) {
-        if a.0 != 0 {
-            // Tools may not even touch (D40).
-            if !matches!(contact(&inputs, a, b), Ok(None)) {
-                return degenerate(format!("tools {} and {} intersect or touch", a.0, b.0));
-            }
-            continue;
-        }
-        let Some(c) = contact(&inputs, a, b)? else { continue };
-        if let [p, q] = &c.ends[..] {
-            for (t, signs) in [(a, c.sa), (b, c.sb)] {
-                if let Some(cut) = orient_cut(&inputs, t, signs, kind.keeps_inside(t.0), p, q)? {
-                    found.cuts[t.0][inputs[t.0].tris[t.1].face as usize].push(cut);
-                }
-            }
-        }
-        for (key, hit) in c.ends {
-            found.add(key, hit)?;
+    let inputs = in_order(bodies.par_iter().enumerate().map(|(x, b)| Input::new(x, b)))?;
+    // Pairs in parallel, merged in pair order.
+    let pairs = candidate_pairs(&inputs);
+    // One pass splits the items; errors travel with the points, so the first one in pair order is
+    // reported.
+    let (mut cuts, ends): (Vec<_>, Vec<_>) = pairs.par_iter().flat_map_iter(|&(a, b)| pair_items(&inputs, kind, a, b)).partition_map(|i| match i {
+        Ok(Item::Cut(face, cut)) => Either::Left((face, cut)),
+        Ok(Item::End(key, hit)) => Either::Right(Ok((key, hit))),
+        Err(e) => Either::Right(Err(e)),
+    });
+    cuts.par_sort_by_key(|c| c.0);
+    let hits = Hits::new(ends)?;
+    let mut on_edges: Vec<Vec<Vec<Cross>>> = inputs.iter().map(|i| vec![Vec::new(); i.body.edges().len()]).collect();
+    for key in &hits.keys {
+        if let Seg::Edge(x, edge) = key.seg {
+            on_edges[x][edge as usize].push(*key);
         }
     }
+    let mut found = Found { hits, on_edges, cuts };
     check_nested_tools(&inputs)?;
     for (input, edges) in inputs.iter().zip(&mut found.on_edges) {
-        for (e, on) in edges.iter_mut().enumerate() {
-            sort_along_edge(input.body, e as Ix, on, &found.hits)?;
+        in_order(edges.par_iter_mut().enumerate().map(|(e, on)| sort_along_edge(input.body, e as Ix, on, &found.hits)))?;
+    }
+    let status = in_order((0..inputs.len()).into_par_iter().map(|x| classify(&inputs, x, &found)))?;
+    assemble(feature, kind, &inputs, &found, &status)
+}
+
+/// What a pair of triangles adds: a cut segment across a face of a part, or an intersection point.
+enum Item {
+    Cut((Part, Ix), (Node, Node)),
+    End(Cross, Hit),
+}
+
+/// The items of one pair, or its error, without allocating.
+fn pair_items(inputs: &[Input], kind: BooleanKind, a: TriRef, b: TriRef) -> SmallVec<[Result<Item, BrepError>; 4]> {
+    let mut items = SmallVec::new();
+    if let Err(e) = pair_contact(inputs, kind, a, b, &mut items) {
+        items.clear();
+        items.push(Err(e));
+    }
+    items
+}
+
+fn pair_contact(
+    inputs: &[Input],
+    kind: BooleanKind,
+    a: TriRef,
+    b: TriRef,
+    items: &mut SmallVec<[Result<Item, BrepError>; 4]>,
+) -> Result<(), BrepError> {
+    if a.0 != 0 {
+        // Tools may not even touch (D40).
+        return match contact(inputs, a, b) {
+            Ok(None) => Ok(()),
+            _ => degenerate(format!("tools {} and {} intersect or touch", a.0, b.0)),
+        };
+    }
+    let Some(c) = contact(inputs, a, b)? else { return Ok(()) };
+    if let [p, q] = &c.ends[..] {
+        for (t, signs) in [(a, c.sa), (b, c.sb)] {
+            if let Some(cut) = orient_cut(inputs, t, signs, kind.keeps_inside(t.0), p, q)? {
+                items.push(Ok(Item::Cut((t.0, inputs[t.0].tris[t.1].face), cut)));
+            }
         }
     }
-    let status = (0..inputs.len()).map(|x| classify(&inputs, x, &found)).collect::<Result<Vec<_>, _>>()?;
-    assemble(feature, kind, &inputs, &found, &status)
+    items.extend(c.ends.into_iter().map(|(key, hit)| Ok(Item::End(key, hit))));
+    Ok(())
 }
 
 /// `tool` stretched along `dir` so that it reaches past `target` on both sides by the target's own
@@ -295,7 +362,7 @@ fn locate(t: &Tri, pts: &[Vec3; 3], p: &Point) -> Location {
 /// How two triangles of different parts meet: one or two end points of their common segment, and
 /// the sides of each triangle's vertices relative to the other's plane (`Positive`: inside).
 struct Contact {
-    ends: Vec<(Cross, Hit)>,
+    ends: Ends,
     sa: [Sign; 3],
     sb: [Sign; 3],
 }
@@ -322,7 +389,7 @@ fn contact(inputs: &[Input], a: TriRef, b: TriRef) -> Result<Option<Contact>, Br
             Ok(None)
         };
     }
-    let mut ends = Vec::with_capacity(4);
+    let mut ends = Ends::new();
     boundary_in(inputs, b, &pb, &sb, a, &pa, &mut ends)?;
     boundary_in(inputs, a, &pa, &sa, b, &pb, &mut ends)?;
     ends.sort_by_key(|e| e.0);
@@ -336,15 +403,7 @@ fn contact(inputs: &[Input], a: TriRef, b: TriRef) -> Result<Option<Contact>, Br
 
 /// Where the boundary of triangle `a` crosses the plane of triangle `b` inside `b`. `sa` holds
 /// the sides of `a`'s vertices relative to `b`'s plane.
-fn boundary_in(
-    inputs: &[Input],
-    a: TriRef,
-    pa: &[Vec3; 3],
-    sa: &[Sign; 3],
-    b: TriRef,
-    pb: &[Vec3; 3],
-    ends: &mut Vec<(Cross, Hit)>,
-) -> Result<(), BrepError> {
+fn boundary_in(inputs: &[Input], a: TriRef, pa: &[Vec3; 3], sa: &[Sign; 3], b: TriRef, pb: &[Vec3; 3], ends: &mut Ends) -> Result<(), BrepError> {
     let (ta, tb) = (&inputs[a.0].tris[a.1], &inputs[b.0].tris[b.1]);
     for k in 0..3 {
         if sa[k] == Sign::Zero && !matches!(locate(tb, pb, &Point::Explicit(pa[k])), Location::Outside) {
@@ -413,7 +472,7 @@ fn orient_cut(
 }
 
 /// Sorts the points on edge `e` from the origin of its `half`; two at one place are refused.
-fn sort_along_edge(body: &Body, e: Ix, on: &mut [Cross], hits: &BTreeMap<Cross, Hit>) -> Result<(), BrepError> {
+fn sort_along_edge(body: &Body, e: Ix, on: &mut [Cross], hits: &Hits) -> Result<(), BrepError> {
     if on.len() < 2 {
         return Ok(());
     }
@@ -424,7 +483,7 @@ fn sort_along_edge(body: &Body, e: Ix, on: &mut [Cross], hits: &BTreeMap<Cross, 
     let axis = d.dominant_axis();
     let forward = d.to_array()[axis] > 0.0;
     let cmp = |a: &Cross, b: &Cross| {
-        let o = cmp_axis(&hits[a].point, &hits[b].point, axis);
+        let o = cmp_axis(&hits.get(a).point, &hits.get(b).point, axis);
         if forward { o } else { o.reverse() }
     };
     on.sort_by(cmp);
@@ -480,7 +539,7 @@ fn classify(inputs: &[Input], x: Part, found: &Found) -> Result<Vec<bool>, BrepE
         adjacent[u as usize].push((v, on.len() % 2 == 1));
         adjacent[v as usize].push((u, on.len() % 2 == 1));
         let Some(first) = on.first() else { continue };
-        let plane = found.hits[first].plane;
+        let plane = found.hits.get(first).plane;
         let p = inputs[plane.0].points(plane.1).map(Point::Explicit);
         let inside = match orient3d(&p[0], &p[1], &p[2], &Point::Explicit(body.point(u))) {
             Sign::Zero => return degenerate("a vertex lies on a face of another body"),
@@ -571,81 +630,112 @@ fn out_id(feature: TopoId, x: Part, id: TopoId) -> TopoId {
 }
 
 fn assemble(feature: TopoId, kind: BooleanKind, inputs: &[Input], found: &Found, status: &[Vec<bool>]) -> Result<Body, BrepError> {
-    // `None` for points on triangulation diagonals: they are dropped from the result.
+    // Every intersection point is named once; `None` for points on triangulation diagonals,
+    // which are dropped from the result.
+    let names: Vec<Option<TopoId>> = found
+        .hits
+        .keys
+        .par_iter()
+        .map(|c| match c.seg {
+            Seg::Edge(x, e) => {
+                let edge = out_id(feature, x, inputs[x].body.edges()[e as usize].id);
+                Some(TopoId::derive("boolean.x").id(edge).id(out_id(feature, c.part, inputs[c.part].body.faces()[c.face as usize].id)).finish())
+            }
+            Seg::Diagonal(..) => None,
+        })
+        .collect();
     let node_id = |n: Node| match n {
         Node::Vert(x, v) => Some(out_id(feature, x, inputs[x].body.vertices()[v as usize].id)),
-        Node::Cross(Cross { seg: Seg::Edge(x, e), part, face }) => {
-            let edge = out_id(feature, x, inputs[x].body.edges()[e as usize].id);
-            Some(TopoId::derive("boolean.x").id(edge).id(out_id(feature, part, inputs[part].body.faces()[face as usize].id)).finish())
-        }
-        Node::Cross(_) => None,
+        Node::Cross(c) => names[found.hits.index(&c)],
     };
-    let mut vertices = BTreeMap::new();
-    let mut faces = Vec::new();
-    for (x, input) in inputs.iter().enumerate() {
-        let body = input.body;
-        for f in 0..body.faces().len() as Ix {
-            let mut pieces = found.cuts[x][f as usize].clone();
-            for l in body.face_loops(f) {
-                for h in body.loop_half_edges(l) {
-                    let he = &body.half_edges()[h as usize];
-                    let (u, v) = (he.origin, body.half_edges()[body.next(h) as usize].origin);
-                    let on = &found.on_edges[x][he.edge as usize];
-                    let forward = body.edges()[he.edge as usize].half == h;
-                    let mut nodes = vec![Node::Vert(x, u)];
-                    if forward {
-                        nodes.extend(on.iter().map(|c| Node::Cross(*c)));
-                    } else {
-                        nodes.extend(on.iter().rev().map(|c| Node::Cross(*c)));
-                    }
-                    nodes.push(Node::Vert(x, v));
-                    for (i, w) in nodes.windows(2).enumerate() {
-                        if status[x][u as usize] ^ (i % 2 == 1) == kind.keeps_inside(x) {
-                            pieces.push((w[0], w[1]));
-                        }
-                    }
-                }
-            }
-            if pieces.is_empty() {
-                continue;
-            }
-            let face = &body.faces()[f as usize];
-            let groups = group_loops(trace(pieces)?, face.plane.normal, &|n| found.point(inputs, n))?;
-            let several = groups.len() > 1;
-            for group in groups {
-                let mut loops = Vec::with_capacity(group.len());
-                for lp in group {
-                    let mut ids: Vec<TopoId> = Vec::with_capacity(lp.len());
-                    for n in lp {
-                        let Some(id) = node_id(n) else { continue };
-                        vertices.entry(id).or_insert_with(|| Vertex { id, point: found.point(inputs, n).approx() });
-                        ids.push(id);
-                    }
-                    if ids.len() < 3 {
-                        return degenerate(format!("a piece of face {:?} collapses", face.id));
-                    }
-                    if kind.flips(x) {
-                        ids.reverse();
-                    }
-                    loops.push(ids);
-                }
-                let own = out_id(feature, x, face.id);
-                let id =
-                    if several { TopoId::derive("boolean.split").id(own).id(loops[0].iter().copied().min().unwrap_or(own)).finish() } else { own };
-                let normal = if kind.flips(x) { -face.plane.normal } else { face.plane.normal };
-                faces.push(FaceSpec { id, plane: Plane { origin: face.plane.origin, normal }, loops });
-            }
-        }
+    let all: Vec<(Part, Ix)> = inputs.iter().enumerate().flat_map(|(x, i)| (0..i.body.faces().len() as Ix).map(move |f| (x, f))).collect();
+    let per_face = in_order(all.par_iter().map(|&(x, f)| assemble_face(feature, kind, inputs, found, &status[x], &node_id, (x, f))))?;
+    let (mut vertices, mut faces) = (Vec::new(), Vec::new());
+    for (v, f) in per_face {
+        vertices.extend(v);
+        faces.extend(f);
     }
     if faces.is_empty() {
         return degenerate("the result is empty");
     }
-    build(vertices.into_values().collect(), faces)
+    // A vertex shared by faces comes from one node, so its copies are equal.
+    vertices.par_sort_unstable_by_key(|v: &Vertex| v.id);
+    vertices.dedup_by_key(|v| v.id);
+    build(vertices, faces)
+}
+
+/// The output faces from face `f` of part `x`, and the vertices they use.
+fn assemble_face(
+    feature: TopoId,
+    kind: BooleanKind,
+    inputs: &[Input],
+    found: &Found,
+    status: &[bool],
+    node_id: &(impl Fn(Node) -> Option<TopoId> + Sync),
+    (x, f): (Part, Ix),
+) -> Result<(Vec<Vertex>, Vec<FaceSpec>), BrepError> {
+    let body = inputs[x].body;
+    let mut pieces: Vec<(Node, Node)> = found.face_cuts(x, f).collect();
+    for l in body.face_loops(f) {
+        for h in body.loop_half_edges(l) {
+            let he = &body.half_edges()[h as usize];
+            let (u, v) = (he.origin, body.half_edges()[body.next(h) as usize].origin);
+            let on = &found.on_edges[x][he.edge as usize];
+            let forward = body.edges()[he.edge as usize].half == h;
+            let mut nodes = vec![Node::Vert(x, u)];
+            if forward {
+                nodes.extend(on.iter().map(|c| Node::Cross(*c)));
+            } else {
+                nodes.extend(on.iter().rev().map(|c| Node::Cross(*c)));
+            }
+            nodes.push(Node::Vert(x, v));
+            for (i, w) in nodes.windows(2).enumerate() {
+                if status[u as usize] ^ (i % 2 == 1) == kind.keeps_inside(x) {
+                    pieces.push((w[0], w[1]));
+                }
+            }
+        }
+    }
+    let (mut vertices, mut faces) = (Vec::new(), Vec::new());
+    if pieces.is_empty() {
+        return Ok((vertices, faces));
+    }
+    let face = &body.faces()[f as usize];
+    let groups = group_loops(trace(pieces)?, face.plane.normal, &|n| found.point(inputs, n))?;
+    let several = groups.len() > 1;
+    // A face may have thousands of loops (perforation): they are named in parallel.
+    let name_loop = |lp: Vec<Node>| -> Result<(Vec<Vertex>, Vec<TopoId>), BrepError> {
+        let mut verts = Vec::with_capacity(lp.len());
+        for n in lp {
+            let Some(id) = node_id(n) else { continue };
+            verts.push(Vertex { id, point: found.point(inputs, n).approx() });
+        }
+        if verts.len() < 3 {
+            return degenerate(format!("a piece of face {:?} collapses", face.id));
+        }
+        let mut ids: Vec<TopoId> = verts.iter().map(|v| v.id).collect();
+        if kind.flips(x) {
+            ids.reverse();
+        }
+        Ok((verts, ids))
+    };
+    for group in groups {
+        let mut loops = Vec::with_capacity(group.len());
+        for (verts, ids) in in_order(group.into_par_iter().map(name_loop))? {
+            vertices.extend(verts);
+            loops.push(ids);
+        }
+        let own = out_id(feature, x, face.id);
+        let id = if several { TopoId::derive("boolean.split").id(own).id(loops[0].iter().copied().min().unwrap_or(own)).finish() } else { own };
+        let normal = if kind.flips(x) { -face.plane.normal } else { face.plane.normal };
+        faces.push(FaceSpec { id, plane: Plane { origin: face.plane.origin, normal }, loops });
+    }
+    Ok((vertices, faces))
 }
 
 /// Joins pieces `(from, to)` into closed loops: every point must start exactly one piece.
 fn trace(mut pieces: Vec<(Node, Node)>) -> Result<Vec<Vec<Node>>, BrepError> {
-    pieces.sort_unstable();
+    pieces.par_sort_unstable();
     if pieces.windows(2).any(|w| w[0].0 == w[1].0) {
         return degenerate("cut curves touch inside a face");
     }
@@ -675,12 +765,17 @@ fn trace(mut pieces: Vec<(Node, Node)>) -> Result<Vec<Vec<Node>>, BrepError> {
 
 /// Splits the loops of one face into faces: each outer loop (counterclockwise seen from outside)
 /// with the holes it is the innermost outer loop around. Exact, in the face's dominant projection.
-fn group_loops(loops: Vec<Vec<Node>>, normal: Vec3, point: &impl Fn(Node) -> Point) -> Result<Vec<Vec<Vec<Node>>>, BrepError> {
+fn group_loops(loops: Vec<Vec<Node>>, normal: Vec3, point: &(impl Fn(Node) -> Point + Sync)) -> Result<Vec<Vec<Vec<Node>>>, BrepError> {
+    // A face needs an outer loop: a single loop is one.
+    if loops.len() == 1 {
+        return Ok(vec![loops]);
+    }
     let axis = normal.dominant_axis();
     let convex = if normal.to_array()[axis] < 0.0 { Sign::Negative } else { Sign::Positive };
+    let signs = in_order(loops.par_iter().map(|lp| loop_sign(lp, axis, point)))?;
     let (mut outers, mut holes) = (Vec::new(), Vec::new());
-    for lp in loops {
-        if loop_sign(&lp, axis, point)? == convex {
+    for (lp, sign) in loops.into_iter().zip(signs) {
+        if sign == convex {
             outers.push(vec![lp]);
         } else {
             holes.push(lp);
@@ -701,7 +796,7 @@ fn group_loops(loops: Vec<Vec<Node>>, normal: Vec3, point: &impl Fn(Node) -> Poi
 }
 
 /// Turning sense of a simple loop in projection along `axis`: the sign at its lowest vertex.
-fn loop_sign(lp: &[Node], axis: usize, point: &impl Fn(Node) -> Point) -> Result<Sign, BrepError> {
+fn loop_sign(lp: &[Node], axis: usize, point: &(impl Fn(Node) -> Point + Sync)) -> Result<Sign, BrepError> {
     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
     let n = lp.len();
     let pts: Vec<Point> = lp.iter().map(|&x| point(x)).collect();

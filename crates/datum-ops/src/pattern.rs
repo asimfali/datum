@@ -1,7 +1,8 @@
 //! Grid pattern: copies of a body in rows and columns, as one body (PAINS P4).
 
-use datum_brep::{Body, BrepError, FaceSpec, TopoId, Vertex, build};
+use datum_brep::{Body, BrepError, FaceSpec, TopoId, Vertex, build, in_order};
 use datum_math::Vec3;
+use rayon::prelude::*;
 
 use crate::boolean::disjoint;
 use crate::bounds::{Aabb, bounds, overlapping_pairs};
@@ -37,19 +38,22 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
             .collect();
         (vertices, faces)
     };
-    for (a, b) in overlapping_pairs(&boxes, |i| i) {
+    let touching = |(a, b): (usize, usize)| -> Result<(), BrepError> {
         let body = |c: [u32; 2]| {
             let (v, f) = copy(c);
             build(v, f)
         };
-        if !disjoint(&body(copies[a])?, &body(copies[b])?)? {
-            return Err(BrepError::Degenerate(format!("pattern copies {:?} and {:?} touch", copies[a], copies[b])));
+        if disjoint(&body(copies[a])?, &body(copies[b])?)? {
+            Ok(())
+        } else {
+            Err(BrepError::Degenerate(format!("pattern copies {:?} and {:?} touch", copies[a], copies[b])))
         }
-    }
+    };
+    in_order(overlapping_pairs(&boxes, |i| i).into_par_iter().map(touching))?;
+    let parts = copies.par_iter().map(|&c| copy(c)).collect::<Vec<_>>();
     let mut vertices = Vec::with_capacity(copies.len() * source.vertices().len());
     let mut faces = Vec::with_capacity(copies.len() * source.faces().len());
-    for &c in &copies {
-        let (v, f) = copy(c);
+    for (v, f) in parts {
         vertices.extend(v);
         faces.extend(f);
     }

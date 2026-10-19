@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use datum_math::Vec3;
+use rayon::prelude::*;
 
 /// Corners `(min, max)`.
 pub(crate) type Aabb = (Vec3, Vec3);
@@ -21,13 +22,34 @@ pub(crate) fn overlap(a: Aabb, b: Aabb) -> bool {
 
 /// Sorted pairs `(i, j)`, `i < j`, of overlapping boxes of different groups, by sweeping along X.
 /// Every group keeps its own list of boxes crossing the sweep line, so boxes of one group are never
-/// compared: a body of many triangles costs nothing against itself.
-pub(crate) fn overlapping_pairs(boxes: &[Aabb], group: impl Fn(usize) -> usize) -> Vec<(usize, usize)> {
+/// compared: a body of many triangles costs nothing against itself. The sweep is cut into strips
+/// swept in parallel, each starting with the earlier boxes that reach into it; a pair is found
+/// once, by its later box, so the sorted result does not depend on the cut.
+pub(crate) fn overlapping_pairs(boxes: &[Aabb], group: impl Fn(usize) -> usize + Sync) -> Vec<(usize, usize)> {
     let mut order: Vec<usize> = (0..boxes.len()).collect();
-    order.sort_by(|&a, &b| boxes[a].0.x.total_cmp(&boxes[b].0.x).then(a.cmp(&b)));
+    order.par_sort_unstable_by(|&a, &b| boxes[a].0.x.total_cmp(&boxes[b].0.x).then(a.cmp(&b)));
+    let strip = order.len().div_ceil(4 * rayon::current_num_threads()).max(1024);
+    let mut pairs: Vec<(usize, usize)> = order
+        .par_chunks(strip)
+        .enumerate()
+        .flat_map_iter(|(k, chunk)| {
+            let start = boxes[chunk[0]].0.x;
+            let earlier = order[..k * strip].iter().copied().filter(|&o| boxes[o].1.x >= start);
+            sweep(boxes, &group, earlier, chunk)
+        })
+        .collect();
+    pairs.par_sort_unstable();
+    pairs
+}
+
+/// Sweeps `chunk` (sorted by `min.x`), starting with the active boxes `earlier`.
+fn sweep(boxes: &[Aabb], group: &impl Fn(usize) -> usize, earlier: impl Iterator<Item = usize>, chunk: &[usize]) -> Vec<(usize, usize)> {
     let mut pairs = Vec::new();
     let mut active: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for i in order {
+    for o in earlier {
+        active.entry(group(o)).or_default().push(o);
+    }
+    for &i in chunk {
         let (g, b) = (group(i), boxes[i]);
         active.retain(|&h, list| {
             if h != g {
@@ -38,6 +60,5 @@ pub(crate) fn overlapping_pairs(boxes: &[Aabb], group: impl Fn(usize) -> usize) 
         });
         active.entry(g).or_default().push(i);
     }
-    pairs.sort_unstable();
     pairs
 }

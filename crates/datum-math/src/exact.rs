@@ -10,10 +10,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use num_bigint::BigInt;
 
 use crate::Sign;
+use crate::implicit::Lpi;
 
 /// The arithmetic an expression is evaluated in.
 pub(crate) trait Ring: Clone + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> {
     fn one() -> Self;
+
+    /// Homogeneous coordinates of an implicit point. The filter reads the copy computed once when
+    /// the point was made; the exact path computes them.
+    fn lpi(l: &Lpi, lift: &impl Fn(f64) -> Self) -> [Self; 4] {
+        l.homogeneous(lift)
+    }
 }
 
 /// A polynomial in `f64` inputs whose sign a predicate needs.
@@ -72,11 +79,11 @@ pub(crate) struct Approx {
 }
 
 impl Approx {
-    fn input(v: f64) -> Self {
+    pub(crate) fn input(v: f64) -> Self {
         Self { v, err: 0.0 }
     }
 
-    fn sign(self) -> Option<Sign> {
+    pub(crate) fn sign(self) -> Option<Sign> {
         (self.v.abs() > self.err * SLACK).then(|| Sign::of(self.v))
     }
 }
@@ -108,6 +115,10 @@ impl Mul for Approx {
 impl Ring for Approx {
     fn one() -> Self {
         Self::input(1.0)
+    }
+
+    fn lpi(l: &Lpi, _: &impl Fn(f64) -> Self) -> [Self; 4] {
+        l.filter
     }
 }
 
