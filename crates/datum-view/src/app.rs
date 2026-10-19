@@ -33,7 +33,9 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let depth = egui_wgpu::depth_format_from_bits(24, 0).unwrap_or(wgpu::TextureFormat::Depth24Plus);
             let renderer = Renderer::new(&rs.device, rs.target_format, depth, SAMPLES);
             rs.renderer.write().callback_resources.insert(renderer);
-            Ok(Box::new(Viewer::new(path, cc.egui_ctx.clone())))
+            let info = rs.adapter.get_info();
+            let adapter = format!("{} ({:?})", info.name, info.backend);
+            Ok(Box::new(Viewer::new(path, cc.egui_ctx.clone(), adapter)))
         }),
     )
     .map_err(|e| e.to_string())
@@ -118,14 +120,17 @@ struct Viewer {
     /// GPU vertices of the current scene, their version, and the anchor they are relative to.
     geometry: Arc<Geometry>,
     version: u64,
-    /// Smoothed time between frames, milliseconds.
+    /// Smoothed time between frames, and of the window's own work in a frame, milliseconds.
     frame_ms: f64,
+    ui_ms: f64,
+    /// The GPU drawing the view and its API: a software one explains a slow frame.
+    adapter: String,
     /// Parameter definitions as typed, by name.
     edits: BTreeMap<String, String>,
 }
 
 impl Viewer {
-    fn new(path: Option<PathBuf>, ctx: egui::Context) -> Self {
+    fn new(path: Option<PathBuf>, ctx: egui::Context, adapter: String) -> Self {
         let (requests, inbox) = channel();
         let (outbox, models) = channel();
         std::thread::spawn(move || worker(inbox, outbox, ctx));
@@ -140,6 +145,8 @@ impl Viewer {
             geometry,
             version: 0,
             frame_ms: 0.0,
+            ui_ms: 0.0,
+            adapter,
             edits: BTreeMap::new(),
         };
         if let Some(p) = path {
@@ -271,15 +278,17 @@ impl Viewer {
         ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, Paint(frame)));
         // What the view costs, to tell a slow frame from a slow rebuild.
         let dt = f64::from(ui.input(|i| i.unstable_dt)) * 1e3;
-        self.frame_ms = if self.frame_ms == 0.0 { dt } else { self.frame_ms * 0.9 + dt * 0.1 };
+        self.frame_ms = smooth(self.frame_ms, dt);
         let (tris, lines) =
             (m.geometry.triangles.len() as u64 / crate::scene::TRIANGLE_VERTEX / 3, m.geometry.lines.len() as u64 / crate::scene::LINE_VERTEX / 2);
         let status = format!(
-            "{}frame {:.1} ms · rebuild {:.0} ms · scene {:.0} ms · {tris} triangles · {lines} edges",
+            "{}frame {:.1} ms (ui {:.1}) · rebuild {:.0} ms · scene {:.0} ms · {tris} triangles · {lines} edges\n{}",
             if self.busy { "rebuilding…  " } else { "" },
             self.frame_ms,
+            self.ui_ms,
             m.rebuild_ms,
-            m.scene_ms
+            m.scene_ms,
+            self.adapter
         );
         ui.painter().text(
             rect.left_top() + egui::vec2(10.0, 10.0),
@@ -289,6 +298,11 @@ impl Viewer {
             egui::Color32::DARK_GRAY,
         );
     }
+}
+
+/// A running average of frame times, steady enough to read.
+fn smooth(average: f64, sample: f64) -> f64 {
+    if average == 0.0 { sample } else { average * 0.9 + sample * 0.1 }
 }
 
 /// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
@@ -303,11 +317,13 @@ fn definition(v: &Json) -> String {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let start = std::time::Instant::now();
         self.receive();
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| self.viewport(ui));
+        self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
     }
 }
 
@@ -370,6 +386,8 @@ mod tests {
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
             version: 0,
             frame_ms: 0.0,
+            ui_ms: 0.0,
+            adapter: String::new(),
             edits,
         };
         // Layout needs no GPU; only a picture of the panel (`DATUM_VIEW_SHOT=file.png`) does.
