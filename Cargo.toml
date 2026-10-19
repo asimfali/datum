@@ -27,6 +27,13 @@ proptest = "1.12"
 rayon = "1.12"
 criterion = { version = "0.8", default-features = false }
 smallvec = "1.15"
+datum-view = { path = "crates/datum-view" }
+# The viewer (M4): the same egui stack as CADCraft (D13).
+egui = "0.36"
+eframe = { version = "0.36", default-features = false }
+egui-wgpu = "0.36"
+pollster = "0.4"
+png = "0.18"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -19,3 +19,4 @@ datum-graph = { workspace = true }
 datum-model = { workspace = true }
 datum-mcp = { workspace = true }
 rayon = { workspace = true }
+datum-view = { workspace = true }

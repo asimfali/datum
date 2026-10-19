@@ -205,6 +205,11 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
 }
 
 impl Session {
+    /// The last evaluation: a result per feature.
+    pub fn evaluation(&self) -> &Evaluation {
+        &self.last
+    }
+
     pub fn graph(&self) -> &Graph {
         &self.graph
     }

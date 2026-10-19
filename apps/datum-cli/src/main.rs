@@ -9,13 +9,15 @@ use std::{
 };
 
 use datum_brep::{Body, Mesh, tessellate};
-use datum_graph::{Evaluation, Evaluator, Graph};
+use datum_graph::{Evaluator, Graph, Value};
 
 mod export;
 
 const USAGE: &str = "usage:
   datum build <model.json> [--out <file.stl|file.obj>]   evaluate a model, export its final bodies
   datum determinism-check <model.json|dir>...           same result on 1, 4 and 16 threads (C4)
+  datum view <model.json>                               window: the model in 3D, parameters to edit
+  datum snapshot <model.json> --out <file.png> [--size WxH]   picture of the final bodies and sketches
   datum mcp                                             MCP server on stdin/stdout
 threads: RAYON_NUM_THREADS (default: all cores)";
 
@@ -34,6 +36,8 @@ fn run(args: &[String]) -> Result<(), String> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => cmd_build(rest),
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
+        Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest),
+        Some((cmd, [model])) if cmd == "view" => datum_view::run(PathBuf::from(model)),
         Some((cmd, [])) if cmd == "mcp" => {
             datum_mcp::Server::default().serve(std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string())
         }
@@ -73,7 +77,8 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     }
     println!("computed {}, reused {}, {:.2} ms", e.computed, e.reused, elapsed.as_secs_f64() * 1e3);
     if let Some(path) = out {
-        write_mesh(&final_bodies(&g, &e), path)?;
+        let bodies: Vec<&Body> = e.final_values(&g).into_iter().filter_map(Value::body).collect();
+        write_mesh(&bodies, path)?;
     }
     match e.results.iter().filter(|r| r.is_err()).count() {
         0 => Ok(()),
@@ -81,15 +86,24 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// Bodies of the features nothing else uses.
-fn final_bodies<'e>(g: &Graph, e: &'e Evaluation) -> Vec<&'e Body> {
-    let mut used = vec![false; g.nodes().len()];
-    for n in g.nodes() {
-        for &i in &n.inputs {
-            used[i as usize] = true;
-        }
-    }
-    e.results.iter().zip(used).filter(|(_, u)| !u).filter_map(|(r, _)| r.as_ref().ok().and_then(|v| v.body())).collect()
+fn cmd_snapshot(args: &[String]) -> Result<(), String> {
+    let (model, out, size) = match args {
+        [m, flag, o] if flag == "--out" => (m, o, "1024x768"),
+        [m, flag, o, sflag, size] if flag == "--out" && sflag == "--size" => (m, o, size.as_str()),
+        _ => return Err(USAGE.into()),
+    };
+    let (w, h) =
+        size.split_once('x').and_then(|(w, h)| Some((w.parse::<u32>().ok()?, h.parse::<u32>().ok()?))).ok_or("--size takes WxH, e.g. 1024x768")?;
+    let g = load(Path::new(model))?;
+    let e = Evaluator::default().evaluate(&g);
+    let scene = datum_view::scene::Scene::new(&e.final_values(&g), &mut Default::default());
+    let mut camera = datum_view::camera::Camera::default();
+    camera.fit(scene.bounds);
+    let rgba = datum_view::capture::picture(&scene, &camera, w, h)?;
+    let file = File::create(out).map_err(|e| format!("{out}: {e}"))?;
+    datum_view::capture::png(&rgba, w, h, BufWriter::new(file))?;
+    println!("written {out} ({w}×{h})");
+    Ok(())
 }
 
 fn write_mesh(bodies: &[&Body], path: &Path) -> Result<(), String> {
