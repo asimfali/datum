@@ -18,3 +18,9 @@ schemars = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+rayon = { workspace = true }
+
+[[bench]]
+name = "perforation"
+harness = false

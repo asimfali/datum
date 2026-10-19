@@ -23,16 +23,7 @@ fn hex(h: [u8; 32]) -> String {
 
 /// The faces of `b` as builder input.
 fn specs(b: &Body) -> Vec<FaceSpec> {
-    (0..b.faces().len() as Ix)
-        .map(|f| FaceSpec {
-            id: b.faces()[f as usize].id,
-            plane: b.faces()[f as usize].plane,
-            loops: b
-                .face_loops(f)
-                .map(|l| b.loop_half_edges(l).map(|h| b.vertices()[b.half_edges()[h as usize].origin as usize].id).collect())
-                .collect(),
-        })
-        .collect()
+    (0..b.faces().len() as Ix).map(|f| b.face_spec(f)).collect()
 }
 
 fn mesh_volume(m: &Mesh) -> f64 {

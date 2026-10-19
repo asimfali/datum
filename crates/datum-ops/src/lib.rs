@@ -1,12 +1,15 @@
 //! Datum operations: pure functions from parameters and input bodies to a new body.
 
 mod boolean;
+mod bounds;
+mod pattern;
 
 use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
 use datum_brep::{Body, BrepError, TopoId, prism};
 use datum_math::{Rigid, Vec2, Vec3};
+pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -28,7 +31,16 @@ pub enum Op {
     },
     /// The first input (target) combined with every further input (tools) in one pass. Tools
     /// must not touch each other; faces of different bodies must not be coplanar where they meet.
-    Boolean { kind: BooleanKind },
+    /// With `through`, every tool is first stretched along that direction past the target on both
+    /// sides: holes stay through when the target changes.
+    Boolean {
+        kind: BooleanKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        through: Option<Vec3>,
+    },
+    /// `count[0] × count[1]` copies of the input, copy `(i, j)` moved by `i·step[0] + j·step[1]`,
+    /// as one body. Copies must not touch. One input.
+    PatternGrid { count: [u32; 2], step: [Vec3; 2] },
 }
 
 fn z_axis() -> Vec3 {
@@ -41,6 +53,7 @@ impl Op {
             Self::Prism { .. } => "prism",
             Self::Transform { .. } => "transform",
             Self::Boolean { .. } => "boolean",
+            Self::PatternGrid { .. } => "pattern_grid",
         }
     }
 
@@ -48,7 +61,7 @@ impl Op {
     pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
             Self::Prism { .. } => 0..=0,
-            Self::Transform { .. } => 1..=1,
+            Self::Transform { .. } | Self::PatternGrid { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
         }
     }
@@ -67,8 +80,12 @@ impl Op {
             Self::Transform { translate, axis, angle_deg } => {
                 translate.to_array().into_iter().chain(axis.to_array()).chain([*angle_deg]).for_each(num);
             }
-            Self::Boolean { kind } => {
+            Self::Boolean { kind, through } => {
+                through.iter().flat_map(|d| d.to_array()).for_each(num);
                 h.update(kind.name().as_bytes());
+            }
+            Self::PatternGrid { count, step } => {
+                count.iter().map(|&c| f64::from(c)).chain(step.iter().flat_map(|s| s.to_array())).for_each(num);
             }
         }
     }
@@ -91,7 +108,8 @@ impl Op {
                 };
                 inputs[0].transformed(&rot.then(Rigid::translation(*translate)))
             }
-            Self::Boolean { kind } => boolean(feature, *kind, inputs)?,
+            Self::Boolean { kind, through } => boolean(feature, *kind, *through, inputs)?,
+            Self::PatternGrid { count, step } => pattern_grid(feature, inputs[0], *count, *step)?,
         };
         if cfg!(debug_assertions) {
             body.validate()?;

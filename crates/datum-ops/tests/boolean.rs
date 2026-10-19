@@ -17,7 +17,7 @@ fn feature() -> TopoId {
 }
 
 fn run(kind: BooleanKind, bodies: &[&Body]) -> Result<Body, BrepError> {
-    let b = boolean(feature(), kind, bodies)?;
+    let b = boolean(feature(), kind, None, bodies)?;
     b.validate().unwrap();
     // Every face, holes included, triangulates, and the mesh encloses the same volume.
     let m = tessellate(&b).unwrap();
@@ -96,7 +96,7 @@ fn union_of_disjoint_bodies_has_two_shells() {
     let a = cuboid(id("a"), Vec3::ZERO, Vec3::new(1.0, 1.0, 1.0)).unwrap();
     let b = cuboid(id("b"), Vec3::new(5.0, 0.0, 0.0), Vec3::new(6.0, 2.0, 1.0)).unwrap();
     assert_close(run(Union, &[&a, &b]).unwrap().volume(), 3.0, 1e-12);
-    assert!(matches!(boolean(feature(), Intersection, &[&a, &b]), Err(BrepError::Degenerate(_))));
+    assert!(matches!(boolean(feature(), Intersection, None, &[&a, &b]), Err(BrepError::Degenerate(_))));
 }
 
 /// Tool edges exactly on the diagonals of the internal triangulation are not a degeneracy of the
@@ -113,7 +113,7 @@ fn edges_on_triangulation_diagonals() {
 #[test]
 fn degenerate_contacts_are_refused() {
     let p = plate();
-    let degenerate = |bodies: &[&Body], why: &str| match boolean(feature(), Difference, bodies) {
+    let degenerate = |bodies: &[&Body], why: &str| match boolean(feature(), Difference, None, bodies) {
         Err(BrepError::Degenerate(m)) => assert!(m.contains(why), "{m}"),
         r => panic!("expected `{why}`, got {r:?}"),
     };

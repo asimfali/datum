@@ -1,0 +1,10 @@
+{
+  "format": "datum/1",
+  "features": [
+    { "name": "plate", "op": "prism", "polygon": [[0, 0], [1000, 0], [1000, 1000], [0, 1000]], "z0": 0, "z1": 5 },
+    { "name": "pin", "op": "prism", "polygon": [[3, 0], [1.5, 2.598076], [-1.5, 2.598076], [-3, 0], [-1.5, -2.598076], [1.5, -2.598076]], "z0": 0, "z1": 5 },
+    { "name": "first_pin", "op": "transform", "inputs": ["pin"], "translate": [5, 5, 0], "angle_deg": 17 },
+    { "name": "pins", "op": "pattern_grid", "inputs": ["first_pin"], "count": [100, 100], "step": [[10, 0, 0], [0, 10, 0]] },
+    { "name": "perforated", "op": "boolean", "inputs": ["plate", "pins"], "kind": "difference", "through": [0, 0, 1] }
+  ]
+}

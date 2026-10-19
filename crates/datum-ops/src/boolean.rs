@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, VecDeque, btree_map::Entry};
 
 use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, TopoId, Vertex, build, triangulate_face};
 use datum_math::{Lpi, Point, Sign, Vec3, cmp_axis, orient2d_along, orient3d};
+
+use crate::bounds::{Aabb, bounds, overlap, overlapping_pairs};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -92,15 +94,13 @@ struct Tri {
     /// A projection axis that keeps the triangle non-degenerate, and its turning sense there.
     axis: usize,
     ccw: Sign,
-    min: Vec3,
-    max: Vec3,
+    bounds: Aabb,
 }
 
 struct Input<'a> {
     body: &'a Body,
     tris: Vec<Tri>,
-    min: Vec3,
-    max: Vec3,
+    bounds: Aabb,
 }
 
 impl<'a> Input<'a> {
@@ -132,28 +132,15 @@ impl<'a> Input<'a> {
                 else {
                     return degenerate(format!("face {:?} has a zero-area triangle", body.faces()[f as usize].id));
                 };
-                let (min, max) = bounds(p.iter().copied());
-                tris.push(Tri { face: f, v, segs, axis, ccw, min, max });
+                tris.push(Tri { face: f, v, segs, axis, ccw, bounds: bounds(p.iter().copied()) });
             }
         }
-        let (min, max) = bounds(body.vertices().iter().map(|v| v.point));
-        Ok(Self { body, tris, min, max })
+        Ok(Self { body, tris, bounds: bounds(body.vertices().iter().map(|v| v.point)) })
     }
 
     fn points(&self, t: usize) -> [Vec3; 3] {
         self.tris[t].v.map(|i| self.body.point(i))
     }
-}
-
-fn bounds(mut pts: impl Iterator<Item = Vec3>) -> (Vec3, Vec3) {
-    let first = pts.next().unwrap_or(Vec3::ZERO);
-    pts.fold((first, first), |(lo, hi), p| {
-        (Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)))
-    })
-}
-
-fn boxes_overlap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> bool {
-    a.0.x <= b.1.x && b.0.x <= a.1.x && a.0.y <= b.1.y && b.0.y <= a.1.y && a.0.z <= b.1.z && b.0.z <= a.1.z
 }
 
 /// An intersection point and a triangle of the crossed face whose plane it lies on.
@@ -201,8 +188,14 @@ impl Found {
 
 /// The target (`bodies[0]`) combined with the tools (`bodies[1..]`, pairwise disjoint) for the
 /// feature with ID `feature`. Target elements keep their IDs; tool elements get IDs derived from
-/// the feature and the tool's position, so the same body may serve as several inputs.
-pub fn boolean(feature: TopoId, kind: BooleanKind, bodies: &[&Body]) -> Result<Body, BrepError> {
+/// the feature and the tool's position, so the same body may serve as several inputs. With
+/// `through`, tools first reach past the target along that direction (see [`through_target`]).
+pub fn boolean(feature: TopoId, kind: BooleanKind, through: Option<Vec3>, bodies: &[&Body]) -> Result<Body, BrepError> {
+    let stretched = match (through, bodies.split_first()) {
+        (Some(dir), Some((target, tools))) => tools.iter().map(|t| through_target(target, t, dir)).collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
+    };
+    let bodies: Vec<&Body> = if through.is_some() { bodies.iter().copied().take(1).chain(&stretched).collect() } else { bodies.to_vec() };
     let inputs = bodies.iter().enumerate().map(|(x, b)| Input::new(x, b)).collect::<Result<Vec<_>, _>>()?;
     let mut found = Found {
         hits: BTreeMap::new(),
@@ -239,26 +232,43 @@ pub fn boolean(feature: TopoId, kind: BooleanKind, bodies: &[&Body]) -> Result<B
     assemble(feature, kind, &inputs, &found, &status)
 }
 
-/// Pairs of triangles of different parts with overlapping boxes, by sweeping along X. Target
-/// against tools, and tools against each other to prove them disjoint (D40).
-fn candidate_pairs(inputs: &[Input]) -> Vec<(TriRef, TriRef)> {
-    let mut all: Vec<TriRef> = inputs.iter().enumerate().flat_map(|(x, i)| (0..i.tris.len()).map(move |t| (x, t))).collect();
-    let tri = |r: TriRef| &inputs[r.0].tris[r.1];
-    all.sort_by(|&a, &b| tri(a).min.x.total_cmp(&tri(b).min.x).then(a.cmp(&b)));
-    let mut pairs = Vec::new();
-    let mut active: Vec<TriRef> = Vec::new();
-    for r in all {
-        let t = tri(r);
-        active.retain(|&o| tri(o).max.x >= t.min.x);
-        for &o in &active {
-            if o.0 != r.0 && boxes_overlap((t.min, t.max), (tri(o).min, tri(o).max)) {
-                pairs.push(if o.0 < r.0 { (o, r) } else { (r, o) });
-            }
-        }
-        active.push(r);
+/// `tool` stretched along `dir` so that it reaches past `target` on both sides by the target's own
+/// extent along `dir` (D40). The map is affine: faces stay planar, IDs stay, and a prism along
+/// `dir` keeps its section, so a hole stays through when the target grows thicker.
+fn through_target(target: &Body, tool: &Body, dir: Vec3) -> Result<Body, BrepError> {
+    let dd = dir.dot(dir);
+    if !(dd > 0.0 && dd.is_finite()) {
+        return degenerate("the `through` direction is zero");
     }
-    pairs.sort_unstable();
-    pairs
+    let span =
+        |b: &Body| b.vertices().iter().map(|v| v.point.dot(dir)).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), s| (lo.min(s), hi.max(s)));
+    let ((lo, hi), (from, to)) = (span(target), span(tool));
+    // [from, to] → [lo − (hi − lo), hi + (hi − lo)].
+    let k = 3.0 * (hi - lo) / (to - from);
+    let start = 2.0 * lo - hi;
+    let point = |p: Vec3| {
+        let s = p.dot(dir);
+        p + dir * ((start + (s - from) * k - s) / dd)
+    };
+    let normal = |n: Vec3| n + dir * ((1.0 / k - 1.0) * n.dot(dir) / dd);
+    Ok(tool.mapped(point, normal))
+}
+
+/// Pairs of triangles of different parts with overlapping boxes. Target against tools, and tools
+/// against each other to prove them disjoint (D40).
+fn candidate_pairs(inputs: &[Input]) -> Vec<(TriRef, TriRef)> {
+    let all: Vec<TriRef> = inputs.iter().enumerate().flat_map(|(x, i)| (0..i.tris.len()).map(move |t| (x, t))).collect();
+    let boxes: Vec<Aabb> = all.iter().map(|r| inputs[r.0].tris[r.1].bounds).collect();
+    overlapping_pairs(&boxes, |a| all[a].0).into_iter().map(|(a, b)| (all[a], all[b])).collect()
+}
+
+/// Whether two bodies are disjoint: their surfaces do not touch and neither lies inside the other.
+pub(crate) fn disjoint(a: &Body, b: &Body) -> Result<bool, BrepError> {
+    let inputs = [Input::new(0, a)?, Input::new(1, b)?];
+    if candidate_pairs(&inputs).into_iter().any(|(s, t)| !matches!(contact(&inputs, s, t), Ok(None))) {
+        return Ok(false);
+    }
+    Ok(!nested(&inputs, 0, 1)?)
 }
 
 enum Location {
@@ -428,14 +438,29 @@ fn sort_along_edge(body: &Body, e: Ix, on: &mut [Cross], hits: &BTreeMap<Cross, 
 fn check_nested_tools(inputs: &[Input]) -> Result<(), BrepError> {
     for j in 1..inputs.len() {
         for k in j + 1..inputs.len() {
-            if boxes_overlap((inputs[j].min, inputs[j].max), (inputs[k].min, inputs[k].max))
-                && (ray_inside(inputs, k, inputs[j].body.point(0))? || ray_inside(inputs, j, inputs[k].body.point(0))?)
-            {
+            if nested(inputs, j, k)? {
                 return degenerate(format!("tools {j} and {k} intersect"));
             }
         }
     }
     Ok(())
+}
+
+/// Whether a shell of part `j` lies inside part `k` or the other way round. The parts' surfaces
+/// must not touch.
+fn nested(inputs: &[Input], j: Part, k: Part) -> Result<bool, BrepError> {
+    if !overlap(inputs[j].bounds, inputs[k].bounds) {
+        return Ok(false);
+    }
+    for (a, b) in [(j, k), (k, j)] {
+        for v in inputs[a].body.shell_vertices() {
+            let p = inputs[a].body.point(v);
+            if overlap((p, p), inputs[b].bounds) && ray_inside(inputs, b, p)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// For every vertex of part `x`: whether it lies inside the other side. Each crossing of an edge
@@ -489,7 +514,7 @@ fn classify(inputs: &[Input], x: Part, found: &Found) -> Result<Vec<bool>, BrepE
         let others: Vec<Part> = if x == 0 { (1..inputs.len()).collect() } else { vec![0] };
         let mut inside = false;
         for y in others {
-            if boxes_overlap((p, p), (inputs[y].min, inputs[y].max)) && ray_inside(inputs, y, p)? {
+            if overlap((p, p), inputs[y].bounds) && ray_inside(inputs, y, p)? {
                 inside = true;
             }
         }
@@ -508,7 +533,7 @@ fn ray_inside(inputs: &[Input], y: Part, p: Vec3) -> Result<bool, BrepError> {
         let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
         let mut crossings = 0;
         for (t, tri) in inputs[y].tris.iter().enumerate() {
-            let (lo, hi) = (tri.min.to_array(), tri.max.to_array());
+            let (lo, hi) = (tri.bounds.0.to_array(), tri.bounds.1.to_array());
             if hi[axis] < c[axis] || c[u] < lo[u] || c[u] > hi[u] || c[v] < lo[v] || c[v] > hi[v] {
                 continue;
             }
