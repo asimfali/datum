@@ -2,6 +2,7 @@
 
 use rayon::prelude::*;
 
+use crate::id::IdMap;
 use crate::{Body, BrepError, Edge, Face, HalfEdge, Ix, Loop, Plane, TopoId, Vertex, in_order};
 
 /// A face to build: `loops[0]` is the outer boundary, counterclockwise seen from outside the
@@ -28,9 +29,9 @@ pub fn build(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>) -> Result<Body
     if let Some(w) = faces.windows(2).find(|w| w[0].id == w[1].id) {
         return Err(BrepError::Invalid(format!("duplicate face {:?}", w[0].id)));
     }
-    let vix = |id: TopoId| -> Result<Ix, BrepError> {
-        vertices.binary_search_by_key(&id, |v| v.id).map(|i| i as Ix).map_err(|_| BrepError::Invalid(format!("unknown vertex {id:?}")))
-    };
+    // Lookups only, never iterated: the map's order cannot reach the body.
+    let index: IdMap<Ix> = vertices.iter().enumerate().map(|(i, v)| (v.id, i as Ix)).collect();
+    let vix = |id: TopoId| -> Result<Ix, BrepError> { index.get(&id).copied().ok_or_else(|| BrepError::Invalid(format!("unknown vertex {id:?}"))) };
 
     // Every face's loops as vertex indices in canonical order, in parallel; then laid out.
     let canonical = |spec: &FaceSpec| -> Result<Vec<Vec<Ix>>, BrepError> {
@@ -92,30 +93,36 @@ pub fn build(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>) -> Result<Body
 /// reverse pair is found by binary search.
 fn link_edges(body: &mut Body) -> Result<(), BrepError> {
     let vid = |b: &Body, v: Ix| b.vertices[v as usize].id;
-    let mut directed: Vec<(Ix, Ix, Ix)> =
-        (0..body.half_edges.len() as Ix).map(|h| (body.half_edges[h as usize].origin, body.half_edges[body.next(h) as usize].origin, h)).collect();
-    directed.par_sort_unstable();
-    if let Some(w) = directed.windows(2).find(|w| (w[0].0, w[0].1) == (w[1].0, w[1].1)) {
-        return Err(BrepError::NonManifold(format!("edge {:?} → {:?} used twice in one direction", vid(body, w[0].0), vid(body, w[0].1))));
-    }
-    let twin = |&(a, b, _): &(Ix, Ix, Ix)| {
-        if a == b {
-            return Err(BrepError::Degenerate(format!("zero-length edge at {:?}", vid(body, a))));
-        }
-        directed
-            .binary_search_by(|&(x, y, _)| (x, y).cmp(&(b, a)))
-            .map(|t| directed[t].2)
-            .map_err(|_| BrepError::NotClosed(format!("edge {:?} → {:?} has no twin", vid(body, a), vid(body, b))))
-    };
-    let twins = in_order(directed.par_iter().map(twin))?;
-    // Vertex indices follow vertex IDs, so `a < b` picks the half-edge from the lower ID.
-    let mut edges: Vec<Edge> = directed
-        .par_iter()
-        .filter(|d| d.0 < d.1)
-        .map(|&(a, b, h)| Edge { id: TopoId::derive("edge").id(vid(body, a)).id(vid(body, b)).finish(), half: h })
+    // Uses of every edge, `(low, high, reversed, half-edge)`: sorted, the two uses of an edge are
+    // neighbours, the one from the lower vertex first. No search over millions of half-edges.
+    let mut uses: Vec<(Ix, Ix, bool, Ix)> = (0..body.half_edges.len() as Ix)
+        .into_par_iter()
+        .map(|h| {
+            let (a, b) = (body.half_edges[h as usize].origin, body.half_edges[body.next(h) as usize].origin);
+            (a.min(b), a.max(b), a > b, h)
+        })
         .collect();
-    for (&(_, _, h), t) in directed.iter().zip(twins) {
-        body.half_edges[h as usize].twin = t;
+    uses.par_sort_unstable();
+    if let Some(u) = uses.iter().find(|u| u.0 == u.1) {
+        return Err(BrepError::Degenerate(format!("zero-length edge at {:?}", vid(body, u.0))));
+    }
+    let ends = |u: &(Ix, Ix, bool, Ix)| if u.2 { (u.1, u.0) } else { (u.0, u.1) };
+    for (i, u) in uses.iter().enumerate().step_by(2) {
+        let (a, b) = ends(u);
+        let same = |k: usize| uses.get(k).is_some_and(|w| (w.0, w.1) == (u.0, u.1));
+        if !same(i + 1) {
+            return Err(BrepError::NotClosed(format!("edge {:?} → {:?} has no twin", vid(body, a), vid(body, b))));
+        }
+        if uses[i + 1].2 == u.2 || same(i + 2) {
+            return Err(BrepError::NonManifold(format!("edge {:?} → {:?} used twice in one direction", vid(body, a), vid(body, b))));
+        }
+    }
+    // Vertex indices follow vertex IDs, so the first use runs from the lower ID.
+    let mut edges: Vec<Edge> =
+        uses.par_chunks(2).map(|c| Edge { id: TopoId::derive("edge").id(vid(body, c[0].0)).id(vid(body, c[0].1)).finish(), half: c[0].3 }).collect();
+    for c in uses.chunks(2) {
+        body.half_edges[c[0].3 as usize].twin = c[1].3;
+        body.half_edges[c[1].3 as usize].twin = c[0].3;
     }
     edges.par_sort_unstable_by_key(|e| e.id);
     for (e, edge) in edges.iter().enumerate() {

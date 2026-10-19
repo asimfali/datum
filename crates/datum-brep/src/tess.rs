@@ -3,6 +3,7 @@
 use datum_math::{Sign, Vec2, orient2d};
 
 use rayon::prelude::*;
+use smallvec::{SmallVec, smallvec};
 
 use crate::{Body, BrepError, Ix, in_order};
 
@@ -14,10 +15,13 @@ pub struct Mesh {
     pub triangles: Vec<[Ix; 3]>,
 }
 
+/// Triangles of one face; small faces need no heap allocation.
+pub type Triangles = SmallVec<[[Ix; 3]; 2]>;
+
 /// Faces are triangulated in parallel and concatenated in face order.
 pub fn tessellate(body: &Body) -> Result<Mesh, BrepError> {
     let faces = in_order((0..body.faces().len() as Ix).into_par_iter().map(|f| triangulate_face(body, f)))?;
-    Ok(Mesh { positions: body.vertices().iter().map(|v| v.point).collect(), triangles: faces.concat() })
+    Ok(Mesh { positions: body.vertices().iter().map(|v| v.point).collect(), triangles: faces.into_iter().flatten().collect() })
 }
 
 /// Triangles of face `f` as vertex indices, counterclockwise seen from outside. No new vertices.
@@ -25,8 +29,13 @@ pub fn tessellate(body: &Body) -> Result<Mesh, BrepError> {
 /// piece is triangulated from its sorted vertices (de Berg et al., *Computational Geometry*,
 /// ch. 3). Every decision is an exact predicate; O(n log n) in the number of vertices, so faces
 /// with thousands of holes stay cheap (PAINS P4).
-pub fn triangulate_face(body: &Body, f: Ix) -> Result<Vec<[Ix; 3]>, BrepError> {
+pub fn triangulate_face(body: &Body, f: Ix) -> Result<Triangles, BrepError> {
     let face = &body.faces()[f as usize];
+    // A triangle is its own triangulation (terrain: millions of them).
+    if face.loop_count == 1 && body.loops()[face.first_loop as usize].len == 3 {
+        let h = body.loop_half_edges(face.first_loop);
+        return Ok(smallvec![[h.start, h.start + 1, h.start + 2].map(|h| body.half_edges()[h as usize].origin)]);
+    }
     // Dropping the dominant axis keeps the loops' turning sense when the other two axes stay in
     // cyclic order; a negative dominant component flips it, and swapping the two flips it back.
     let axis = face.plane.normal.dominant_axis();

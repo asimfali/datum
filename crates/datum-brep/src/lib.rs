@@ -9,6 +9,7 @@ mod body;
 mod build;
 mod id;
 mod prism;
+mod terrain;
 mod tess;
 mod validate;
 
@@ -16,7 +17,8 @@ pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vert
 pub use build::{FaceSpec, build};
 pub use id::{Origin, TopoId};
 pub use prism::{cuboid, prism};
-pub use tess::{Mesh, tessellate, triangulate_face};
+pub use terrain::{Grid, terrain};
+pub use tess::{Mesh, Triangles, tessellate, triangulate_face};
 
 /// Results of a parallel stage in input order, or the first error in input order: the outcome,
 /// error message included, does not depend on the thread count (C4).
