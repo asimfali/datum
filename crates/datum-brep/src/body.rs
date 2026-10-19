@@ -3,6 +3,8 @@
 use std::ops::Range;
 
 use datum_math::{Rigid, Vec3};
+use rayon::prelude::*;
+use smallvec::SmallVec;
 
 use crate::{FaceSpec, TopoId};
 
@@ -245,9 +247,11 @@ impl Body {
             .collect()
     }
 
+    /// Face hashes in parallel, then the body hash over them in face order.
     pub(crate) fn rehash(&mut self) {
-        for f in 0..self.faces.len() {
-            self.faces[f].hash = self.face_hash(f as Ix);
+        let hashes: Vec<[u8; 32]> = (0..self.faces.len() as Ix).into_par_iter().map(|f| self.face_hash(f)).collect();
+        for (face, hash) in self.faces.iter_mut().zip(hashes) {
+            face.hash = hash;
         }
         let mut h = blake3::Hasher::new();
         for f in &self.faces {
@@ -257,22 +261,24 @@ impl Body {
     }
 
     pub(crate) fn face_hash(&self, f: Ix) -> [u8; 32] {
+        // The bytes are gathered first and hashed in one call: the same hash as streaming them,
+        // without a streaming hasher per small face.
         let face = &self.faces[f as usize];
-        let mut h = blake3::Hasher::new();
-        h.update(&face.id.0.to_le_bytes());
+        let mut b: SmallVec<[u8; 512]> = SmallVec::new();
+        b.extend_from_slice(&face.id.0.to_le_bytes());
         for c in face.plane.origin.to_array().into_iter().chain(face.plane.normal.to_array()) {
-            h.update(&c.to_bits().to_le_bytes());
+            b.extend_from_slice(&c.to_bits().to_le_bytes());
         }
         for l in self.face_loops(f) {
-            h.update(&self.loops[l as usize].len.to_le_bytes());
+            b.extend_from_slice(&self.loops[l as usize].len.to_le_bytes());
             for he in self.loop_half_edges(l) {
                 let v = &self.vertices[self.half_edges[he as usize].origin as usize];
-                h.update(&v.id.0.to_le_bytes());
+                b.extend_from_slice(&v.id.0.to_le_bytes());
                 for c in v.point.to_array() {
-                    h.update(&c.to_bits().to_le_bytes());
+                    b.extend_from_slice(&c.to_bits().to_le_bytes());
                 }
             }
         }
-        *h.finalize().as_bytes()
+        *blake3::hash(&b).as_bytes()
     }
 }

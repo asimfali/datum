@@ -7,7 +7,7 @@
 
 use std::cmp::Ordering;
 
-use crate::exact::{Expr, Ring, sign};
+use crate::exact::{Approx, Expr, Ring, sign};
 use crate::{Sign, Vec3};
 
 /// A point: explicit coordinates or an implicit intersection.
@@ -18,19 +18,36 @@ pub enum Point {
 }
 
 /// The intersection of the line through `p, q` with the plane through the triangle `r, s, t`.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub struct Lpi {
     /// `p, q, r, s, t`, with `p, q` ordered so that the homogeneous `w` is positive.
     pts: [Vec3; 5],
+    /// Homogeneous coordinates in filter arithmetic, computed once: every predicate on the point
+    /// starts from them instead of rebuilding the plane and the line (Attene et al.).
+    pub(crate) filter: [Approx; 4],
+}
+
+/// Two points are the same definition: the cached filter values follow from `pts`.
+impl PartialEq for Lpi {
+    fn eq(&self, o: &Self) -> bool {
+        self.pts == o.pts
+    }
 }
 
 impl Lpi {
     /// `None` when the line is parallel to the plane or the triangle is degenerate.
     pub fn new(p: Vec3, q: Vec3, r: Vec3, s: Vec3, t: Vec3) -> Option<Self> {
-        let lpi = Self { pts: [p, q, r, s, t] };
-        match sign(&Denominator(&lpi)) {
+        let mut lpi = Self { pts: [p, q, r, s, t], filter: [Approx::input(0.0); 4] };
+        lpi.filter = lpi.homogeneous(&Approx::input);
+        let w = lpi.filter[3].sign().unwrap_or_else(|| sign(&Denominator(&lpi)));
+        match w {
             Sign::Positive => Some(lpi),
-            Sign::Negative => Some(Self { pts: [q, p, r, s, t] }),
+            // Swapping `p, q` negates the direction, `w` and `λ`; the point stays.
+            Sign::Negative => {
+                lpi.pts.swap(0, 1);
+                lpi.filter = lpi.homogeneous(&Approx::input);
+                Some(lpi)
+            }
             Sign::Zero => None,
         }
     }
@@ -50,7 +67,7 @@ impl Lpi {
         [sub(&q, &p), normal, p, r]
     }
 
-    fn homogeneous<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> [T; 4] {
+    pub(crate) fn homogeneous<T: Ring>(&self, lift: &impl Fn(f64) -> T) -> [T; 4] {
         let [dir, normal, p, r] = self.parts(lift);
         let w = dot(&normal, &dir);
         let lambda = dot(&normal, &sub(&r, &p));
@@ -81,7 +98,7 @@ impl Point {
                 let [x, y, z] = v.to_array().map(lift);
                 [x, y, z, T::one()]
             }
-            Self::Lpi(l) => l.homogeneous(lift),
+            Self::Lpi(l) => T::lpi(l, lift),
         }
     }
 }

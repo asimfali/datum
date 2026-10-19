@@ -2,7 +2,9 @@
 
 use datum_math::{Sign, Vec2, orient2d};
 
-use crate::{Body, BrepError, Ix};
+use rayon::prelude::*;
+
+use crate::{Body, BrepError, Ix, in_order};
 
 /// Triangle mesh sharing the body's vertices: `positions[i]` is vertex `i` of the body.
 #[derive(Clone, Debug, PartialEq)]
@@ -12,12 +14,10 @@ pub struct Mesh {
     pub triangles: Vec<[Ix; 3]>,
 }
 
+/// Faces are triangulated in parallel and concatenated in face order.
 pub fn tessellate(body: &Body) -> Result<Mesh, BrepError> {
-    let mut triangles = Vec::with_capacity(body.half_edges().len());
-    for f in 0..body.faces().len() as Ix {
-        triangles.extend(triangulate_face(body, f)?);
-    }
-    Ok(Mesh { positions: body.vertices().iter().map(|v| v.point).collect(), triangles })
+    let faces = in_order((0..body.faces().len() as Ix).into_par_iter().map(|f| triangulate_face(body, f)))?;
+    Ok(Mesh { positions: body.vertices().iter().map(|v| v.point).collect(), triangles: faces.concat() })
 }
 
 /// Triangles of face `f` as vertex indices, counterclockwise seen from outside. No new vertices.

@@ -18,6 +18,12 @@ pub use id::{Origin, TopoId};
 pub use prism::{cuboid, prism};
 pub use tess::{Mesh, tessellate, triangulate_face};
 
+/// Results of a parallel stage in input order, or the first error in input order: the outcome,
+/// error message included, does not depend on the thread count (C4).
+pub fn in_order<T: Send, E: Send>(results: impl rayon::iter::IndexedParallelIterator<Item = Result<T, E>>) -> Result<Vec<T>, E> {
+    results.collect::<Vec<_>>().into_iter().collect()
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BrepError {
     /// Input in a degenerate configuration the kernel refuses to approximate.

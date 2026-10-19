@@ -123,3 +123,24 @@ fn through_is_invariant_to_placement() {
         assert_close(r.volume(), reference.volume(), 1e-6);
     }
 }
+
+/// C4: the parallel stages give the same body, and the same error, on any number of threads.
+#[test]
+fn same_result_on_any_thread_count() {
+    let pins = grid(&pin(0.0, 5.0), [12, 9], 10.0).unwrap();
+    let plate = cuboid(id("plate"), Vec3::new(-5.0, -5.0, 0.0), Vec3::new(115.0, 85.0, 5.0)).unwrap();
+    // A second tool that touches the pins: refused, with one message whatever the scheduling.
+    let bar = cuboid(id("bar"), Vec3::new(-1.0, -1.0, -3.0), Vec3::new(90.0, 1.0, 8.0)).unwrap();
+    let run = |threads: usize| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| {
+            let ok = boolean(id("cut"), BooleanKind::Difference, Some(Vec3::new(0.0, 0.0, 1.0)), &[&plate, &pins]).unwrap();
+            let err = boolean(id("cut"), BooleanKind::Difference, None, &[&plate, &pins, &bar]).unwrap_err();
+            (ok.hash(), err)
+        })
+    };
+    let reference = run(1);
+    for threads in [2, 3, 7, 16] {
+        assert_eq!(run(threads), reference, "{threads} threads");
+    }
+}
