@@ -13,6 +13,9 @@ cargo fmt --all ${CI:+-- --check}
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 
+# The dev profile the tests just built (the kernel at opt-level 2): a release build of its own
+# was a third compilation of the workspace, the longest step on Windows CI. Rust keeps IEEE
+# float semantics at every opt level, so the hashes are the release ones.
 if [[ -d apps/datum-cli && -d tests/models ]]; then
-    cargo run -p datum-cli --release -- determinism-check tests/models
+    cargo run -p datum-cli -- determinism-check tests/models
 fi
