@@ -22,5 +22,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache keys on the dependencies only; a profile change (opt-level of the
+          # dependencies) then restored a "full match" built with other flags, and every
+          # dependency was rebuilt on every run without the cache ever being refreshed.
+          key: ${{ hashFiles('Cargo.toml') }}
       - run: scripts/check.sh
         shell: bash
