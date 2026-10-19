@@ -64,7 +64,10 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     println!("{:width$}  {:>16}  hash", "feature", "volume");
     for (node, r) in g.nodes().iter().zip(&e.results) {
         match r {
-            Ok(b) => println!("{:width$}  {:>16.6}  {}", node.name, b.volume(), hex8(b.hash())),
+            Ok(v) => match v.body() {
+                Some(b) => println!("{:width$}  {:>16.6}  {}", node.name, b.volume(), hex8(v.hash())),
+                None => println!("{:width$}  {:>16}  {}", node.name, "sketch", hex8(v.hash())),
+            },
             Err(err) => println!("{:width$}  FAILED: {err}", node.name),
         }
     }
@@ -86,7 +89,7 @@ fn final_bodies<'e>(g: &Graph, e: &'e Evaluation) -> Vec<&'e Body> {
             used[i as usize] = true;
         }
     }
-    e.results.iter().zip(used).filter(|(_, u)| !u).filter_map(|(r, _)| r.as_ref().ok().map(|b| b.as_ref())).collect()
+    e.results.iter().zip(used).filter(|(_, u)| !u).filter_map(|(r, _)| r.as_ref().ok().and_then(|v| v.body())).collect()
 }
 
 fn write_mesh(bodies: &[&Body], path: &Path) -> Result<(), String> {

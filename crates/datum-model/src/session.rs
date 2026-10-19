@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use datum_brep::{Body, Ix};
-use datum_graph::{BodyRef, Evaluation, Evaluator, Graph, NodeIx, Op};
+use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use serde_json::{Map, Value, json};
 
@@ -226,7 +226,8 @@ impl Session {
 
     fn body(&self, name: &str) -> Result<&Body, String> {
         let ix = self.find(name)?;
-        self.last.results[ix as usize].as_ref().map(BodyRef::as_ref).map_err(|e| format!("`{name}` failed: {e}"))
+        let value = self.last.results[ix as usize].as_ref().map_err(|e| format!("`{name}` failed: {e}"))?;
+        value.body().ok_or_else(|| format!("`{name}` is a sketch, not a body"))
     }
 
     fn inspect(&self) -> Value {
@@ -235,9 +236,18 @@ impl Session {
             .map(|(i, r)| {
                 let mut f = feature_json(&self.graph, i);
                 match r {
-                    Ok(b) => {
-                        let hash: String = b.hash()[..8].iter().map(|x| format!("{x:02x}")).collect();
-                        f.insert("status".into(), json!({"volume": b.volume(), "faces": b.faces().len(), "edges": b.edges().len(), "vertices": b.vertices().len(), "hash": hash}));
+                    Ok(v) => {
+                        let hash: String = v.hash()[..8].iter().map(|x| format!("{x:02x}")).collect();
+                        let status = match v.as_ref() {
+                            Feature::Body(b) => {
+                                json!({"volume": b.volume(), "faces": b.faces().len(), "edges": b.edges().len(), "vertices": b.vertices().len(), "hash": hash})
+                            }
+                            Feature::Sketch(s) => {
+                                let points: serde_json::Map<String, Value> = s.solved.points.iter().map(|(n, p)| (n.clone(), json!([p.x, p.y]))).collect();
+                                json!({"sketch": {"dof": s.solved.dof, "free_points": s.solved.free_points, "points": points}, "hash": hash})
+                            }
+                        };
+                        f.insert("status".into(), status);
                     }
                     Err(e) => {
                         f.insert("error".into(), Value::String(e.to_string()));

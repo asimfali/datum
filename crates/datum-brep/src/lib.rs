@@ -16,7 +16,7 @@ mod validate;
 pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vertex};
 pub use build::{FaceSpec, build};
 pub use id::{Origin, TopoId};
-pub use prism::{cuboid, prism};
+pub use prism::{ProfileLoop, Region, cuboid, extrude, prism};
 pub use terrain::{Grid, terrain};
 pub use tess::{Mesh, Triangles, tessellate, triangulate_face};
 
@@ -37,6 +37,10 @@ pub enum BrepError {
     Invalid(String),
     /// Valid input the kernel does not handle yet.
     Unsupported(String),
+    /// A referenced element is gone after a rebuild (§4.2, P5): the reference names it.
+    LostReference(String),
+    /// A sketch is malformed or its constraints cannot all hold.
+    Sketch(String),
 }
 
 impl fmt::Display for BrepError {
@@ -47,6 +51,8 @@ impl fmt::Display for BrepError {
             Self::NonManifold(m) => ("non-manifold", m),
             Self::Invalid(m) => ("invalid body", m),
             Self::Unsupported(m) => ("unsupported", m),
+            Self::LostReference(m) => ("lost reference", m),
+            Self::Sketch(m) => ("sketch", m),
         };
         write!(f, "{kind}: {msg}")
     }

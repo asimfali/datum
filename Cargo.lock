@@ -364,10 +364,12 @@ dependencies = [
  "criterion",
  "datum-brep",
  "datum-math",
+ "datum-sketch",
  "proptest",
  "rayon",
  "schemars",
  "serde",
+ "serde_json",
  "smallvec",
 ]
 

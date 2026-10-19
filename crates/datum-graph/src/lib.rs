@@ -18,11 +18,12 @@ use std::{
     },
 };
 
-use datum_brep::{Body, BrepError, TopoId};
-pub use datum_ops::Op;
+use datum_brep::{BrepError, TopoId};
+pub use datum_ops::{Op, Value};
 
 pub type NodeIx = u32;
-pub type BodyRef = Arc<Body>;
+/// A feature's value, shared between evaluations through the cache.
+pub type ValueRef = Arc<Value>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node {
@@ -116,7 +117,7 @@ impl std::error::Error for EvalError {}
 /// The outcome of one evaluation: a result per node, in node order.
 #[derive(Debug)]
 pub struct Evaluation {
-    pub results: Vec<Result<BodyRef, EvalError>>,
+    pub results: Vec<Result<ValueRef, EvalError>>,
     /// Nodes computed in this evaluation.
     pub computed: usize,
     /// Nodes taken from the cache.
@@ -127,7 +128,7 @@ pub struct Evaluation {
 /// for now; eviction comes when memory is measured (ARCHITECTURE §5.1).
 #[derive(Default)]
 pub struct Evaluator {
-    cache: Mutex<HashMap<[u8; 32], BodyRef>>,
+    cache: Mutex<HashMap<[u8; 32], ValueRef>>,
 }
 
 impl Evaluator {
@@ -163,7 +164,7 @@ impl Evaluator {
         Evaluation { results, computed: computed.into_inner(), reused: reused.into_inner() }
     }
 
-    fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], BodyRef>> {
+    fn cache(&self) -> std::sync::MutexGuard<'_, HashMap<[u8; 32], ValueRef>> {
         // A panic while holding the lock cannot leave the map half-updated: insert is atomic.
         self.cache.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -172,7 +173,7 @@ impl Evaluator {
 struct Run<'a> {
     graph: &'a Graph,
     evaluator: &'a Evaluator,
-    results: Vec<OnceLock<Result<BodyRef, EvalError>>>,
+    results: Vec<OnceLock<Result<ValueRef, EvalError>>>,
     pending: Vec<AtomicUsize>,
     dependents: Vec<Vec<NodeIx>>,
     computed: AtomicUsize,
@@ -200,7 +201,7 @@ impl<'a> Run<'a> {
         }
     }
 
-    fn eval_node(&self, i: usize) -> Result<BodyRef, EvalError> {
+    fn eval_node(&self, i: usize) -> Result<ValueRef, EvalError> {
         let node = &self.graph.nodes[i];
         let mut inputs = Vec::with_capacity(node.inputs.len());
         for &j in &node.inputs {
@@ -220,7 +221,7 @@ impl<'a> Run<'a> {
             self.reused.fetch_add(1, Ordering::Relaxed);
             return Ok(b);
         }
-        let refs: Vec<&Body> = inputs.iter().map(|b| b.as_ref()).collect();
+        let refs: Vec<&Value> = inputs.iter().map(|b| b.as_ref()).collect();
         let body = Arc::new(node.op.eval(node.id, &refs).map_err(EvalError::Op)?);
         self.computed.fetch_add(1, Ordering::Relaxed);
         self.evaluator.cache().insert(key, body.clone());

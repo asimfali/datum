@@ -17,7 +17,8 @@ fn chain_evaluates_and_keeps_volume() {
     let (g, last) = chain(10);
     let e = Evaluator::default().evaluate(&g);
     assert_eq!((e.computed, e.reused), (11, 0));
-    let (base, end) = (e.results[0].as_ref().unwrap().volume(), e.results[last as usize].as_ref().unwrap().volume());
+    let volume = |r: &Result<datum_graph::ValueRef, _>| r.as_ref().unwrap().body().unwrap().volume();
+    let (base, end) = (volume(&e.results[0]), volume(&e.results[last as usize]));
     assert!((end - base).abs() <= 1e-12 * base);
 }
 
