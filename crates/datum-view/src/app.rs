@@ -152,8 +152,10 @@ impl Viewer {
             for (name, p) in &params {
                 ui.label(name);
                 let text = self.edits.entry(name.clone()).or_default();
-                let r = ui.add(egui::TextEdit::singleline(text).desired_width(110.0));
-                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let r = ui.add(egui::TextEdit::singleline(text).desired_width(150.0));
+                // Applied when the field is left (Enter, Tab or a click elsewhere) changed. The
+                // field itself takes the Enter key, so asking for it here would never fire.
+                if r.lost_focus() && *text != definition(&p["definition"]) {
                     send.push((name.clone(), text.clone()));
                 }
                 match (p["value"].as_f64(), p["error"].as_str()) {
@@ -224,15 +226,20 @@ impl Viewer {
     }
 }
 
-/// How a parameter's definition shows in its field: a number as written, an expression as is.
+/// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
+/// expression as is.
 fn definition(v: &Json) -> String {
-    v.as_str().map_or_else(|| v.to_string(), str::to_string)
+    match (v.as_str(), v.as_f64()) {
+        (Some(e), _) => e.to_string(),
+        (None, Some(x)) if x.fract() == 0.0 && x.abs() < 1e15 => format!("{}", x as i64),
+        _ => v.to_string(),
+    }
 }
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.receive();
-        egui::Panel::left("datum_side").default_size(300.0).show(ui, |ui| self.side(ui));
+        egui::Panel::left("datum_side").default_size(340.0).show(ui, |ui| self.side(ui));
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| self.viewport(ui));
     }
