@@ -64,6 +64,15 @@ Design documents are currently in Russian:
 - [`CLAUDE.md`](CLAUDE.md): project rules (determinism, geometry, code style)
 - [`PAINS.md`](PAINS.md): real engineering pain points that drive priorities
 
+## Try it
+
+```bash
+cargo run --release -p datum-cli -- examples/rolled_perforation.json   # the viewer on a model
+cargo run --release -p datum-cli -- dxf examples/rolled_perforation.json --out blank.dxf
+```
+
+The viewer opens any model dropped on its window; parameters are edited on the side and the model rebuilds live. [`examples/`](examples) and [`tests/models/`](tests/models) hold models to start from; the format is a JSON feature graph (see `ARCHITECTURE.md` §6).
+
 ## Development
 
 ```bash
