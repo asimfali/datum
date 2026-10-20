@@ -8,11 +8,8 @@ use egui_wgpu::wgpu;
 use datum_graph::Value;
 
 use crate::camera::Camera;
-use crate::render::{Frame, Renderer};
+use crate::render::{Frame, Renderer, SAMPLES};
 use crate::scene::{Geometry, Part, Scene};
-
-/// Samples per pixel of pictures: the window's default.
-pub const SAMPLES: u32 = 4;
 
 /// A device without a window and a renderer, drawing `width × height`.
 struct Offscreen {
@@ -37,13 +34,13 @@ impl Offscreen {
         }))
         .map_err(|e| format!("the GPU device could not be opened: {e}"))?;
         let info = adapter.get_info();
-        let renderer = Renderer::new(&device, SAMPLES);
+        let renderer = Renderer::new(&device);
         Ok(Self { device, queue, adapter: format!("{} ({:?})", info.name, info.backend), renderer, width, height })
     }
 
-    /// Draws `frame` and returns the encoder, for a read-back to be appended.
-    fn draw(&mut self, frame: &Frame) -> wgpu::CommandEncoder {
-        self.renderer.draw(&self.device, &self.queue, frame, self.width, self.height)
+    /// Draws `frame`, multisampled if `smooth`, and returns the encoder, for a read-back to be appended.
+    fn draw(&mut self, frame: &Frame, smooth: bool) -> wgpu::CommandEncoder {
+        self.renderer.draw(&self.device, &self.queue, frame, self.width, self.height, smooth)
     }
 
     fn wait(&self, submission: wgpu::SubmissionIndex) -> Result<(), String> {
@@ -65,7 +62,7 @@ impl Offscreen {
 pub fn picture(scene: &Scene, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut o = Offscreen::new(width, height)?;
     let frame = o.frame(scene, &Arc::new(Geometry::new(scene, scene.anchor())), 1, camera);
-    let mut encoder = o.draw(&frame);
+    let mut encoder = o.draw(&frame, true);
     let row = width * 4;
     let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
     let read = o.device.create_buffer(&wgpu::BufferDescriptor {
@@ -109,8 +106,8 @@ pub fn frame_times(scene: &Scene, full: Geometry, width: u32, height: u32, frame
     let mut fitted = Camera::default();
     fitted.fit(scene.bounds, f64::from(width) / f64::from(height));
     let mut cases = Vec::new();
-    for samples in [SAMPLES, 1] {
-        o.renderer = Renderer::new(&o.device, samples);
+    for smooth in [true, false] {
+        let samples = if smooth { SAMPLES } else { 1 };
         for (distance, closeness) in [("whole", 1.0), ("close", 0.15), ("closer", 0.05)] {
             for (version, (content, geometry)) in contents.iter().enumerate() {
                 let mut times = Vec::with_capacity(frames as usize);
@@ -120,7 +117,7 @@ pub fn frame_times(scene: &Scene, full: Geometry, width: u32, height: u32, frame
                     camera.yaw += std::f64::consts::TAU * f64::from(k) / f64::from(frames.max(1));
                     let start = std::time::Instant::now();
                     let frame = o.frame(scene, geometry, version as u64 + 1, &camera);
-                    let encoder = o.draw(&frame);
+                    let encoder = o.draw(&frame, smooth);
                     let submission = o.queue.submit([encoder.finish()]);
                     o.wait(submission)?;
                     // The first frame uploads the geometry: not a frame of the turn.

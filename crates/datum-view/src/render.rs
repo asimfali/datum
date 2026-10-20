@@ -1,7 +1,7 @@
 //! Drawing on any wgpu device: shaded faces and B-rep edges with a depth buffer, into a picture
 //! of the renderer's own. The window shows that picture as an image, headless pictures read it
 //! back ([`crate::capture`]): one renderer, as in SolidCraft's viewport (`crates/gpu`). Having its
-//! own picture, the view chooses its multisampling at any time, apart from the window's.
+//! own picture, the view chooses its multisampling frame by frame, apart from the window's.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -68,10 +68,12 @@ pub struct Frame {
     pub eye: [f32; 3],
 }
 
+/// Samples per pixel of a smooth (multisampled) picture.
+pub const SAMPLES: u32 = 4;
+
 pub struct Renderer {
-    samples: u32,
-    triangles: wgpu::RenderPipeline,
-    lines: wgpu::RenderPipeline,
+    /// Triangles and lines, without multisampling and with it.
+    pipelines: [[wgpu::RenderPipeline; 2]; 2],
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     /// The uploaded geometry: its version, triangles and lines.
@@ -84,20 +86,20 @@ pub struct Renderer {
 /// Vertex and index buffers; `None` when empty.
 type Vertices = Option<(wgpu::Buffer, wgpu::Buffer)>;
 
-/// The picture, `width × height`, and the multisampled colour and the depth it is drawn with.
+/// The picture, `width × height`, and what it is drawn with: its depth; and multisampled colour,
+/// resolved into the picture, and depth. One picture either way: the window shows the same
+/// texture whether a frame is smooth or not.
 struct Target {
     width: u32,
     height: u32,
     picture: wgpu::Texture,
     view: wgpu::TextureView,
-    /// Drawn on and resolved into the picture; none without multisampling.
-    multisampled: Option<wgpu::TextureView>,
     depth: wgpu::TextureView,
+    multisampled: [wgpu::TextureView; 2],
 }
 
 impl Renderer {
-    /// Pipelines for `samples` per pixel (1: no multisampling).
-    pub fn new(device: &wgpu::Device, samples: u32) -> Self {
+    pub fn new(device: &wgpu::Device) -> Self {
         let module =
             device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("datum_view"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -125,7 +127,8 @@ impl Renderer {
             bind_group_layouts: &[Some(&layout)],
             immediate_size: 0,
         });
-        let pipeline = |vs: &str,
+        let pipeline = |samples: u32,
+                        vs: &str,
                         fs: &str,
                         stride: u64,
                         attributes: &[wgpu::VertexAttribute],
@@ -163,44 +166,44 @@ impl Renderer {
         // Faces are pushed back a little so that edges on them draw on top. Bodies are closed and
         // their triangles counterclockwise from outside: a triangle turned away is hidden anyway.
         let faces_back = wgpu::DepthBiasState { constant: 2, slope_scale: 1.5, clamp: 0.0 };
-        let triangles = pipeline(
-            "vs_tri",
-            "fs_tri",
-            TRIANGLE_VERTEX,
-            &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4],
-            wgpu::PrimitiveTopology::TriangleList,
-            Some(wgpu::Face::Back),
-            faces_back,
-        );
-        let lines = pipeline(
-            "vs_line",
-            "fs_line",
-            LINE_VERTEX,
-            &wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4],
-            wgpu::PrimitiveTopology::LineList,
-            None,
-            wgpu::DepthBiasState::default(),
-        );
-        Self { samples, triangles, lines, uniform, bind, buffers: None, visible: Default::default(), target: None }
+        let triangles = |samples| {
+            pipeline(
+                samples,
+                "vs_tri",
+                "fs_tri",
+                TRIANGLE_VERTEX,
+                &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Unorm8x4],
+                wgpu::PrimitiveTopology::TriangleList,
+                Some(wgpu::Face::Back),
+                faces_back,
+            )
+        };
+        let lines = |samples| {
+            pipeline(
+                samples,
+                "vs_line",
+                "fs_line",
+                LINE_VERTEX,
+                &wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4],
+                wgpu::PrimitiveTopology::LineList,
+                None,
+                wgpu::DepthBiasState::default(),
+            )
+        };
+        let pipelines = [1, SAMPLES].map(|n| [triangles(n), lines(n)]);
+        Self { pipelines, uniform, bind, buffers: None, visible: Default::default(), target: None }
     }
 
-    pub fn samples(&self) -> u32 {
-        self.samples
-    }
-
-    /// Draws `frame` into the picture, `width × height` (made anew when the size changes), and
-    /// returns the commands to submit, for a read-back to be appended.
-    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame, width: u32, height: u32) -> wgpu::CommandEncoder {
+    /// Draws `frame` into the picture, `width × height` (made anew when the size changes),
+    /// multisampled if `smooth`, and returns the commands to submit, for a read-back to be appended.
+    pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame, width: u32, height: u32, smooth: bool) -> wgpu::CommandEncoder {
         self.prepare(device, queue, frame);
         if self.target.as_ref().is_none_or(|t| (t.width, t.height) != (width, height)) {
-            self.target = Some(Target::new(device, width, height, self.samples));
+            self.target = Some(Target::new(device, width, height));
         }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("datum_view") });
         let Some(t) = &self.target else { return encoder };
-        let (view, resolve_target) = match &t.multisampled {
-            Some(m) => (m, Some(&t.view)),
-            None => (&t.view, None),
-        };
+        let (view, resolve_target, depth) = if smooth { (&t.multisampled[0], Some(&t.view), &t.multisampled[1]) } else { (&t.view, None, &t.depth) };
         let [r, g, b] = BACKGROUND;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("datum_view"),
@@ -214,7 +217,7 @@ impl Renderer {
                 },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &t.depth,
+                view: depth,
                 depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
                 stencil_ops: None,
             }),
@@ -222,7 +225,7 @@ impl Renderer {
             occlusion_query_set: None,
             multiview_mask: None,
         });
-        self.paint(&mut pass);
+        self.paint(&mut pass, &self.pipelines[usize::from(smooth)]);
         drop(pass);
         encoder
     }
@@ -259,10 +262,10 @@ impl Renderer {
         queue.write_buffer(&self.uniform, 0, &u);
     }
 
-    fn paint(&self, pass: &mut wgpu::RenderPass<'_>) {
+    fn paint(&self, pass: &mut wgpu::RenderPass<'_>, pipelines: &[wgpu::RenderPipeline; 2]) {
         let Some((_, tris, lines)) = &self.buffers else { return };
         pass.set_bind_group(0, &self.bind, &[]);
-        for ((pipeline, buffers), ranges) in [(&self.triangles, tris), (&self.lines, lines)].into_iter().zip(&self.visible) {
+        for ((pipeline, buffers), ranges) in pipelines.iter().zip([tris, lines]).zip(&self.visible) {
             if let Some((vertices, indices)) = buffers {
                 pass.set_pipeline(pipeline);
                 pass.set_vertex_buffer(0, vertices.slice(..));
@@ -301,7 +304,7 @@ fn visible(part: &Part, view_projection: &[f32; 16]) -> Vec<Range<u32>> {
 }
 
 impl Target {
-    fn new(device: &wgpu::Device, width: u32, height: u32, samples: u32) -> Self {
+    fn new(device: &wgpu::Device, width: u32, height: u32) -> Self {
         let texture = |format, samples, usage| {
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("datum_view_picture"),
@@ -316,9 +319,9 @@ impl Target {
         };
         let picture =
             texture(FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC);
-        let multisampled = (samples > 1).then(|| texture(FORMAT, samples, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default()));
-        let depth = texture(DEPTH, samples, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
-        Self { width, height, view: picture.create_view(&Default::default()), picture, multisampled, depth }
+        let attachment = |format, samples| texture(format, samples, wgpu::TextureUsages::RENDER_ATTACHMENT).create_view(&Default::default());
+        let (depth, multisampled) = (attachment(DEPTH, 1), [attachment(FORMAT, SAMPLES), attachment(DEPTH, SAMPLES)]);
+        Self { width, height, view: picture.create_view(&Default::default()), picture, depth, multisampled }
     }
 }
 

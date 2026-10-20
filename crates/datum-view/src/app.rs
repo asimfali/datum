@@ -13,7 +13,6 @@ use egui_wgpu::wgpu;
 use serde_json::{Value as Json, json};
 
 use crate::camera::Camera;
-use crate::capture::SAMPLES;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
 
@@ -104,7 +103,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     }
 }
 
-/// Geometry version, view-projection matrix, eye, and picture width, height and samples.
+/// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
 type Drawn = (u64, [f32; 16], [f32; 3], [u32; 3]);
 
 struct Viewer {
@@ -117,12 +116,13 @@ struct Viewer {
     /// GPU vertices of the current scene, their version, and the anchor they are relative to.
     geometry: Arc<Geometry>,
     version: u64,
-    /// Multisampling of the view: smooth edges, at about twice the GPU time on a weak card.
+    /// Multisampling of the view when the camera is still: smooth edges, at about twice the GPU
+    /// time on a weak card.
     smooth: bool,
-    /// Made on the first frame, and again when `smooth` changes.
+    /// Made on the first frame.
     renderer: Option<Renderer>,
-    /// The picture as an egui texture, and the size and samples it was registered with.
-    texture: Option<(egui::TextureId, [u32; 3])>,
+    /// The picture as an egui texture, and the size it was registered with.
+    texture: Option<(egui::TextureId, [u32; 2])>,
     /// What the picture shows: geometry version, camera matrices, size and samples.
     drawn: Option<Drawn>,
     /// Smoothed time between frames, and of the window's own work in a frame, milliseconds.
@@ -181,7 +181,8 @@ impl Viewer {
             }
             ui.weak("or drop a model (.json) on the window");
             ui.separator();
-            ui.checkbox(&mut self.smooth, "Smooth edges").on_hover_text("Multisampling (MSAA ×4). Off: about twice as fast on a weak GPU.");
+            ui.checkbox(&mut self.smooth, "Smooth edges")
+                .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
@@ -285,22 +286,26 @@ impl Viewer {
         let radius = m.scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
         let (view_projection, eye) = self.camera.matrices(anchor, aspect, radius);
         let ppp = ui.ctx().pixels_per_point();
-        let size = [rect.width(), rect.height(), 0.0].map(|x| (x * ppp).round() as u32);
-        let size = [size[0], size[1], if self.smooth { SAMPLES } else { 1 }];
-        if size[0] == 0 || size[1] == 0 {
+        let [w, h] = [rect.width(), rect.height()].map(|x| (x * ppp).round() as u32);
+        if w == 0 || h == 0 {
             return;
         }
-        if self.drawn != Some((self.version, view_projection, eye, size)) {
-            let renderer = match &mut self.renderer {
-                Some(r) if r.samples() == size[2] => r,
-                slot => slot.insert(Renderer::new(&rs.device, size[2])),
-            };
+        // While the camera moves, frames are drawn without multisampling, twice as fast on a weak
+        // GPU; once it stops, the view is drawn smooth again.
+        let moving = self.drawn.is_some_and(|d| (d.1, d.2) != (view_projection, eye));
+        let smooth_now = self.smooth && !moving;
+        let drawn = (self.version, view_projection, eye, [w, h, u32::from(smooth_now)]);
+        if self.drawn != Some(drawn) {
+            let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&rs.device));
             let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
-            let encoder = renderer.draw(&rs.device, &rs.queue, &frame, size[0], size[1]);
+            let encoder = renderer.draw(&rs.device, &rs.queue, &frame, w, h, smooth_now);
             // Submitted before egui's own commands of this frame, which show the picture.
             rs.queue.submit([encoder.finish()]);
+            if self.smooth && !smooth_now {
+                ui.ctx().request_repaint();
+            }
             if let Some(picture) = renderer.picture()
-                && self.texture.is_none_or(|t| t.1 != size)
+                && self.texture.is_none_or(|t| t.1 != [w, h])
             {
                 let view = picture.create_view(&Default::default());
                 let mut egui_renderer = rs.renderer.write();
@@ -311,9 +316,9 @@ impl Viewer {
                     }
                     None => egui_renderer.register_native_texture(&rs.device, &view, wgpu::FilterMode::Nearest),
                 };
-                self.texture = Some((id, size));
+                self.texture = Some((id, [w, h]));
             }
-            self.drawn = Some((self.version, view_projection, eye, size));
+            self.drawn = Some(drawn);
         }
         if let Some((id, _)) = self.texture {
             ui.painter().image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
