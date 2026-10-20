@@ -1,6 +1,6 @@
 //! Grid pattern: copies of a body in rows and columns, as one body (PAINS P4).
 
-use datum_brep::{ArcSpec, Body, BrepError, FaceSpec, Surface, TopoId, Vertex, build_with_arcs, in_order};
+use datum_brep::{Body, BrepError, Curve, CurveSpec, FaceSpec, Surface, TopoId, Vertex, build_with_curves, in_order};
 use datum_math::Vec3;
 use rayon::prelude::*;
 
@@ -34,22 +34,32 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
                 match &mut s.surface {
                     Surface::Plane(p) => p.origin = p.origin + o,
                     Surface::Cylinder(c) => c.origin = c.origin + o,
+                    Surface::Wall(w) => w.dev.origin = w.dev.origin + o,
                 }
                 s.loops.iter_mut().flatten().for_each(|v| *v = id(*v));
                 s
             })
             .collect();
-        let arcs: Vec<ArcSpec> = source
-            .arc_specs()
+        let arcs: Vec<CurveSpec> = source
+            .curve_specs()
             .into_iter()
-            .map(|a| ArcSpec { from: id(a.from), to: id(a.to), arc: datum_brep::Arc { center: a.arc.center + o, ..a.arc } })
+            .map(|a| {
+                let curve = match a.curve {
+                    Curve::Arc(arc) => Curve::Arc(datum_brep::Arc { center: arc.center + o, ..arc }),
+                    Curve::Rolled { mut piece, radius } => {
+                        piece.dev.origin = piece.dev.origin + o;
+                        Curve::Rolled { piece, radius }
+                    }
+                };
+                CurveSpec { from: id(a.from), to: id(a.to), curve }
+            })
             .collect();
         (vertices, faces, arcs)
     };
     let touching = |(a, b): (usize, usize)| -> Result<(), BrepError> {
         let body = |c: [u32; 2]| {
             let (v, f, a) = copy(c);
-            build_with_arcs(v, f, a)
+            build_with_curves(v, f, a)
         };
         if disjoint(&body(copies[a])?, &body(copies[b])?)? {
             Ok(())
@@ -67,5 +77,5 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
         faces.extend(f);
         arcs.extend(a);
     }
-    build_with_arcs(vertices, faces, arcs)
+    build_with_curves(vertices, faces, arcs)
 }

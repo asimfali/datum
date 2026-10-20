@@ -254,7 +254,7 @@ fn rolled_sheet_sector() {
     assert!(close(b.volume(), v), "{} vs {v}", b.volume());
     let convex = b.faces().iter().filter_map(|f| match f.surface {
         Surface::Cylinder(c) => Some(c.convex),
-        Surface::Plane(_) => None,
+        _ => None,
     });
     let mut convex: Vec<bool> = convex.collect();
     convex.sort();
@@ -294,7 +294,7 @@ fn arcs_far_away_and_turned() {
     far.validate().unwrap();
     assert_eq!((far.vertices().len(), far.edges().len(), far.faces().len()), (b.vertices().len(), b.edges().len(), b.faces().len()));
     assert!((far.volume() - b.volume()).abs() < 1e-8 * b.volume(), "{} vs {}", far.volume(), b.volume());
-    let rebuilt = build_with_arcs(far.vertices().to_vec(), specs(&far), far.arc_specs()).unwrap();
+    let rebuilt = build_with_curves(far.vertices().to_vec(), specs(&far), far.curve_specs()).unwrap();
     assert_eq!(rebuilt.hash(), far.hash());
     assert!(far.mapped(|p| p, |n| n).is_err(), "an affine map of arcs is refused");
 }
