@@ -54,6 +54,8 @@ struct Model {
     geometry: Arc<Geometry>,
     /// The last command's error, if it was refused.
     error: Option<String>,
+    /// A model was opened in this rebuild: the view fits it.
+    opened: bool,
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
     rebuild_ms: f64,
     scene_ms: f64,
@@ -69,11 +71,12 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         pending.extend(requests.try_iter());
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
-        let mut error = None;
+        let (mut error, mut opened) = (None, false);
         for r in pending {
             match r {
                 Request::Open(p) => {
                     latest.clear();
+                    opened = true;
                     if let Err(e) = session.execute("open", &json!({"path": p.display().to_string()})) {
                         error = Some(e);
                     }
@@ -96,7 +99,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, rebuild_ms, scene_ms }).is_err() {
+        if models.send(Model { inspect, scene, geometry, error, opened, rebuild_ms, scene_ms }).is_err() {
             return;
         }
         ctx.request_repaint();
@@ -167,7 +170,6 @@ impl Viewer {
     fn open(&mut self, path: PathBuf) {
         let _ = self.requests.send(Request::Open(path));
         self.busy = true;
-        self.fitted = false;
     }
 
     /// The toolbar: open a model by dialog; a `.json` dropped on the window opens too.
@@ -194,6 +196,8 @@ impl Viewer {
     fn receive(&mut self) {
         while let Ok(m) = self.models.try_recv() {
             self.busy = false;
+            // Fitted when it arrives, not when asked for: until then the view holds the last model.
+            self.fitted &= !m.opened;
             self.geometry = m.geometry.clone();
             self.version += 1;
             if let Some(p) = m.inspect["parameters"].as_object() {
@@ -277,7 +281,7 @@ impl Viewer {
         }
         let Some(m) = &self.model else { return };
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
-        // The first model is fitted once, where the view's shape is known.
+        // A model just opened is fitted once, where the view's shape is known.
         if r.double_clicked() || (!self.fitted && m.scene.bounds.is_some()) {
             self.camera.fit(m.scene.bounds, aspect);
             self.fitted = true;
@@ -402,6 +406,7 @@ mod tests {
                 scene: Scene::default(),
                 geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
                 error: None,
+                opened: false,
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
             }),

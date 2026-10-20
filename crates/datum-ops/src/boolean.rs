@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as Atomic};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
-use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, TopoId, Vertex, build, in_order, triangulate_face};
+use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, Surface, TopoId, Vertex, build, in_order, triangulate_face};
 use datum_math::{Exact, ExactScale, Lpi, Point, Sign, Vec3, cmp_axis, cmp_axis_filtered, orient2d_along, orient3d, orient3d_coords, ties};
 
 use rayon::iter::Either;
@@ -308,6 +308,9 @@ impl Found {
 /// the feature and the tool's position, so the same body may serve as several inputs. With
 /// `through`, tools first reach past the target along that direction (see [`through_target`]).
 pub fn boolean(feature: TopoId, kind: BooleanKind, through: Option<Vec3>, bodies: &[&Body]) -> Result<Body, BrepError> {
+    if bodies.iter().any(|b| b.has_curves()) {
+        return Err(curved());
+    }
     let stretched = match (through, bodies.split_first()) {
         (Some(dir), Some((target, tools))) => tools.iter().map(|t| through_target(target, t, dir)).collect::<Result<Vec<_>, _>>()?,
         _ => Vec::new(),
@@ -471,7 +474,12 @@ fn through_target(target: &Body, tool: &Body, dir: Vec3) -> Result<Body, BrepErr
         p + dir * ((start + (s - from) * k - s) / dd)
     };
     let normal = |n: Vec3| n + dir * ((1.0 / k - 1.0) * n.dot(dir) / dd);
-    Ok(tool.mapped(point, normal))
+    tool.mapped(point, normal)
+}
+
+/// Boolean operations cut plane faces only (D63); arcs and cylinders come in M5b.
+fn curved() -> BrepError {
+    BrepError::Unsupported("a Boolean operation on a body with arcs or cylinders".into())
 }
 
 /// Pairs of triangles of different parts with overlapping boxes. Target against tools, and tools
@@ -908,6 +916,7 @@ fn assemble_face(
 ) -> Result<FaceOut, BrepError> {
     let body = inputs[x].body;
     let face = &body.faces()[f as usize];
+    let Surface::Plane(plane) = face.surface else { return Err(curved()) };
     // A face that no cut reaches and no crossing splits is kept or dropped whole, as it is: most of
     // a large terrain or plate. Its vertices share one status.
     let half_edges = || body.face_loops(f).flat_map(|l| body.loop_half_edges(l)).map(|h| &body.half_edges()[h as usize]);
@@ -938,9 +947,9 @@ fn assemble_face(
                 ids
             })
             .collect();
-        let normal = if kind.flips(x) { -face.plane.normal } else { face.plane.normal };
+        let normal = if kind.flips(x) { -plane.normal } else { plane.normal };
         let id = out_id(feature, x, face.id);
-        return Ok((vertices, vec![(FaceSpec { id, plane: Plane { origin: face.plane.origin, normal }, loops }, false)]));
+        return Ok((vertices, vec![(FaceSpec { id, surface: Surface::Plane(Plane { origin: plane.origin, normal }), loops }, false)]));
     }
     let mut pieces: Vec<(Node, Node)> = found.face_cuts(x, f).collect();
     for l in body.face_loops(f) {
@@ -972,7 +981,7 @@ fn assemble_face(
     if pieces.is_empty() {
         return Ok((vertices, faces));
     }
-    let groups = group_loops(trace(pieces)?, face.plane.normal, &|n| found.point(inputs, n))?;
+    let groups = group_loops(trace(pieces)?, plane.normal, &|n| found.point(inputs, n))?;
     let several = groups.len() > 1;
     // A face may have thousands of loops (perforation): they are named in parallel.
     let name_loop = |lp: Vec<Node>| -> Result<(Vec<Vertex>, Vec<TopoId>), BrepError> {
@@ -1001,8 +1010,8 @@ fn assemble_face(
         }
         let own = out_id(feature, x, face.id);
         let id = if several { TopoId::derive("boolean.split").id(own).id(loops[0].iter().copied().min().unwrap_or(own)).finish() } else { own };
-        let normal = if kind.flips(x) { -face.plane.normal } else { face.plane.normal };
-        faces.push((FaceSpec { id, plane: Plane { origin: face.plane.origin, normal }, loops }, suspect));
+        let normal = if kind.flips(x) { -plane.normal } else { plane.normal };
+        faces.push((FaceSpec { id, surface: Surface::Plane(Plane { origin: plane.origin, normal }), loops }, suspect));
     }
     Ok((vertices, faces))
 }

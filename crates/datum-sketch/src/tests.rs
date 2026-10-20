@@ -198,3 +198,62 @@ proptest::proptest! {
         proptest::prop_assert!(r.points["q"].y > 0.0 && r.points["p"].y.abs() <= 1e-15);
     }
 }
+
+/// A slot drawn roughly: two lines tangent to two arcs, centres 10 apart, radius 2.5.
+fn slot() -> Sketch {
+    sketch(
+        r#"{
+        "points": {"l": [0, 0], "r": [9.7, 0.3], "a": [0.2, -2.3], "b": [9.6, -2.8], "c": [10.2, 2.1], "d": [-0.3, 2.6]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "top": {"from": "c", "to": "d"}, "axis": {"from": "l", "to": "r", "construction": true}},
+        "arcs": {"right": {"center": "r", "from": "b", "to": "c"}, "left": {"center": "l", "from": "d", "to": "a"}},
+        "constraints": [
+            {"type": "fix", "point": "l"},
+            {"type": "horizontal", "line": "axis"},
+            {"type": "length", "line": "axis", "value": 10},
+            {"type": "radius", "arc": "right", "value": 2.5},
+            {"type": "radius", "arc": "left", "value": 2.5},
+            {"type": "tangent", "curves": ["bottom", "right"]},
+            {"type": "tangent", "curves": ["top", "right"]},
+            {"type": "tangent", "curves": ["top", "left"]},
+            {"type": "tangent", "curves": ["left", "bottom"]}
+        ]}"#,
+    )
+}
+
+#[test]
+fn slot_is_fully_defined() {
+    let r = solve(&slot()).unwrap();
+    assert_eq!(r.dof, 0, "{:?}", r.free_points);
+    close(r.points["r"], [10.0, 0.0], 1e-12);
+    close(r.points["a"], [0.0, -2.5], 1e-12);
+    close(r.points["b"], [10.0, -2.5], 1e-12);
+    close(r.points["c"], [10.0, 2.5], 1e-12);
+    close(r.points["d"], [0.0, 2.5], 1e-12);
+}
+
+#[test]
+fn circles_and_tangent_lines() {
+    let s = sketch(
+        r#"{
+        "points": {"o": [0, 0], "a": [-8, -4.6], "b": [7, -5.3]},
+        "lines": {"floor": {"from": "a", "to": "b"}},
+        "circles": {"hole": {"center": "o", "diameter": "d"}},
+        "constraints": [{"type": "fix", "point": "o"}, {"type": "horizontal", "line": "floor"}, {"type": "tangent", "curves": ["floor", "hole"]}]
+        }"#,
+    );
+    let s = s.resolve(&|n| if n == "d" { Ok(10.0) } else { Err(datum_math::expr::ExprError::Unknown(n.into())) }).unwrap();
+    let r = solve(&s).unwrap();
+    // The line moves as little as it can: its ends straight down, give or take.
+    assert!((r.points["a"].y + 5.0).abs() < 1e-12 && (r.points["b"].y + 5.0).abs() < 1e-12, "{:?}", r.points);
+    // The line's ends slide along it: two degrees of freedom left.
+    assert_eq!(r.dof, 2);
+}
+
+#[test]
+fn arcs_and_circles_are_checked() {
+    let bad = |json: &str| matches!(solve(&sketch(json)), Err(SketchError::Invalid(_)));
+    assert!(bad(r#"{"points": {"c": [0, 0], "f": [1, 0]}, "arcs": {"x": {"center": "c", "from": "f", "to": "f"}}}"#));
+    assert!(bad(r#"{"points": {"c": [0, 0]}, "circles": {"x": {"center": "c", "diameter": 0}}}"#));
+    assert!(bad(r#"{"points": {"a": [0, 0], "b": [1, 0], "c": [0, 1]}, "lines": {"x": {"from": "a", "to": "b"}, "y": {"from": "a", "to": "c"}},
+        "constraints": [{"type": "tangent", "curves": ["x", "y"]}]}"#));
+}

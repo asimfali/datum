@@ -1,11 +1,11 @@
 //! Grid pattern: copies of a body in rows and columns, as one body (PAINS P4).
 
-use datum_brep::{Body, BrepError, FaceSpec, TopoId, Vertex, build, in_order};
+use datum_brep::{ArcSpec, Body, BrepError, FaceSpec, Surface, TopoId, Vertex, build_with_arcs, in_order};
 use datum_math::Vec3;
 use rayon::prelude::*;
 
 use crate::boolean::disjoint;
-use crate::bounds::{Aabb, bounds, overlapping_pairs};
+use crate::bounds::{Aabb, overlapping_pairs};
 
 /// `count[0] × count[1]` copies of `source`, copy `(i, j)` moved by `i·step[0] + j·step[1]`, as one
 /// body with a shell per copy. Copies must not touch: boxes first, then the exact test of the
@@ -21,7 +21,7 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
     let copies: Vec<[u32; 2]> = (0..count[1]).flat_map(|j| (0..count[0]).map(move |i| [i, j])).collect();
     let offset = |[i, j]: [u32; 2]| step[0] * f64::from(i) + step[1] * f64::from(j);
     // Rounding is monotone, so the moved box is exactly the box of the moved points.
-    let (lo, hi) = bounds(source.vertices().iter().map(|v| v.point));
+    let (lo, hi) = source.bounds();
     let boxes: Vec<Aabb> = copies.iter().map(|&c| (lo + offset(c), hi + offset(c))).collect();
     let copy = |c: [u32; 2]| {
         let o = offset(c);
@@ -31,17 +31,25 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
             .map(|f| {
                 let mut s = source.face_spec(f);
                 s.id = id(s.id);
-                s.plane.origin = s.plane.origin + o;
+                match &mut s.surface {
+                    Surface::Plane(p) => p.origin = p.origin + o,
+                    Surface::Cylinder(c) => c.origin = c.origin + o,
+                }
                 s.loops.iter_mut().flatten().for_each(|v| *v = id(*v));
                 s
             })
             .collect();
-        (vertices, faces)
+        let arcs: Vec<ArcSpec> = source
+            .arc_specs()
+            .into_iter()
+            .map(|a| ArcSpec { from: id(a.from), to: id(a.to), arc: datum_brep::Arc { center: a.arc.center + o, ..a.arc } })
+            .collect();
+        (vertices, faces, arcs)
     };
     let touching = |(a, b): (usize, usize)| -> Result<(), BrepError> {
         let body = |c: [u32; 2]| {
-            let (v, f) = copy(c);
-            build(v, f)
+            let (v, f, a) = copy(c);
+            build_with_arcs(v, f, a)
         };
         if disjoint(&body(copies[a])?, &body(copies[b])?)? {
             Ok(())
@@ -53,9 +61,11 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
     let parts = copies.par_iter().map(|&c| copy(c)).collect::<Vec<_>>();
     let mut vertices = Vec::with_capacity(copies.len() * source.vertices().len());
     let mut faces = Vec::with_capacity(copies.len() * source.faces().len());
-    for (v, f) in parts {
+    let mut arcs = Vec::new();
+    for (v, f, a) in parts {
         vertices.extend(v);
         faces.extend(f);
+        arcs.extend(a);
     }
-    build(vertices, faces)
+    build_with_arcs(vertices, faces, arcs)
 }

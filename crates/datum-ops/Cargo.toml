@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 datum-math = { workspace = true }
+libm = { workspace = true }
 datum-brep = { workspace = true }
 blake3 = { workspace = true }
 rayon = { workspace = true }

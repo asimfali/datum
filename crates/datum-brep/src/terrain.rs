@@ -3,7 +3,7 @@
 use datum_math::{Vec2, Vec3};
 use rayon::prelude::*;
 
-use crate::{Body, BrepError, FaceSpec, Plane, TopoId, Vertex, build};
+use crate::{Body, BrepError, FaceSpec, Plane, Surface, TopoId, Vertex, build};
 
 /// A regular grid of heights.
 #[derive(Clone, Copy, Debug)]
@@ -58,7 +58,7 @@ pub fn terrain(feature: TopoId, grid: &Grid, base: f64) -> Result<Body, BrepErro
         let (pa, pb, pc) = (at(a.0, a.1), at(b.0, b.1), at(c.0, c.1));
         FaceSpec {
             id: TopoId::derive("terrain.top").id(feature).index(a.0 as u64).index(a.1 as u64).index(k).finish(),
-            plane: Plane { origin: pa, normal: (pb - pa).cross(pc - pa) },
+            surface: Surface::Plane(Plane { origin: pa, normal: (pb - pa).cross(pc - pa) }),
             loops: vec![vec![node(a.0, a.1), node(b.0, b.1), node(c.0, c.1)]],
         }
     };
@@ -75,7 +75,7 @@ pub fn terrain(feature: TopoId, grid: &Grid, base: f64) -> Result<Body, BrepErro
         ids.extend(top);
         FaceSpec {
             id: TopoId::derive("terrain.side").id(feature).index(k).finish(),
-            plane: Plane { origin: corners[k as usize], normal },
+            surface: Surface::Plane(Plane { origin: corners[k as usize], normal }),
             loops: vec![ids],
         }
     };
@@ -85,7 +85,7 @@ pub fn terrain(feature: TopoId, grid: &Grid, base: f64) -> Result<Body, BrepErro
     faces.push(side(3, Vec3::new(-1.0, 0.0, 0.0), (0..ny).map(|j| node(0, j)).collect()));
     faces.push(FaceSpec {
         id: TopoId::derive("terrain.bottom").id(feature).finish(),
-        plane: Plane { origin: corners[0], normal: Vec3::new(0.0, 0.0, -1.0) },
+        surface: Surface::Plane(Plane { origin: corners[0], normal: Vec3::new(0.0, 0.0, -1.0) }),
         loops: vec![[0, 3, 2, 1].map(corner).to_vec()],
     });
     build(vertices, faces)

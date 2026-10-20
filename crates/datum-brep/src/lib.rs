@@ -7,6 +7,7 @@ use std::fmt;
 
 mod body;
 mod build;
+mod curve;
 mod id;
 mod prism;
 mod terrain;
@@ -14,11 +15,12 @@ mod tess;
 mod validate;
 
 pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vertex};
-pub use build::{FaceSpec, build};
+pub use build::{ArcSpec, FaceSpec, build, build_with_arcs};
+pub use curve::{Arc, Cylinder, Surface};
 pub use id::{Origin, TopoId};
-pub use prism::{ProfileLoop, Region, cuboid, extrude, prism};
+pub use prism::{ProfileArc, ProfileLoop, Region, cuboid, extrude, prism};
 pub use terrain::{Grid, terrain};
-pub use tess::{Mesh, Triangles, tessellate, triangulate_face, triangulate_face_delaunay};
+pub use tess::{FaceMesh, Mesh, Triangles, edge_points, face_mesh, tessellate, triangulate_face};
 
 /// Results of a parallel stage in input order, or the first error in input order: the outcome,
 /// error message included, does not depend on the thread count (C4).

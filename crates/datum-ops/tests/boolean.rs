@@ -49,7 +49,7 @@ fn square_tool(tag: &str, x: f64, y: f64, angle: f64) -> Body {
 #[test]
 fn hole_through_a_plate() {
     let p = plate();
-    let top = p.faces().iter().find(|f| f.plane.normal.z > 0.0).unwrap().id;
+    let top = p.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
     let r = run(Difference, &[&p, &square_tool("t", 30.0, 25.0, 0.37)]).unwrap();
     assert_close(r.volume(), 50_000.0 - 1_000.0, 1e-12);
     assert_eq!((r.faces().len(), r.loops().len()), (10, 12));

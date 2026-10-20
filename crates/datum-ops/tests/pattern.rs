@@ -1,7 +1,7 @@
 //! Grid pattern and through cuts (M2c): copies, stable IDs, contact checks, perforation.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use datum_brep::{Body, BrepError, TopoId, cuboid, prism, tessellate, triangulate_face, triangulate_face_delaunay};
+use datum_brep::{Body, BrepError, TopoId, cuboid, face_mesh, prism, tessellate, triangulate_face};
 use datum_math::{Rigid, Sign, Vec2, Vec3, incircle};
 use datum_ops::{BooleanKind, boolean, pattern_grid};
 
@@ -84,7 +84,7 @@ fn through_cuts_follow_the_target() {
     let section = pin(0.0, 1.0).volume();
     for thickness in [5.0, 12.0] {
         let plate = cuboid(id("plate"), Vec3::new(-5.0, -5.0, 0.0), Vec3::new(45.0, 35.0, thickness)).unwrap();
-        let top = plate.faces().iter().find(|f| f.plane.normal.z > 0.0).unwrap().id;
+        let top = plate.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
         let r = checked(boolean(id("cut"), BooleanKind::Difference, Some(Vec3::new(0.0, 0.0, 1.0)), &[&plate, &pins]));
         assert_close(r.volume(), plate.volume() - 20.0 * section * thickness, 1e-12);
         let f = r.faces().iter().position(|f| f.id == top).unwrap();
@@ -152,7 +152,7 @@ fn delaunay_removes_slivers() {
     let pins = grid(&pin(1.0, 4.0), [12, 10], 10.0).unwrap();
     let plate = cuboid(id("plate"), Vec3::new(-5.0, -5.0, 0.0), Vec3::new(115.0, 95.0, 5.0)).unwrap();
     let r = checked(boolean(id("cut"), BooleanKind::Difference, Some(Vec3::new(0.0, 0.0, 1.0)), &[&plate, &pins]));
-    let f = r.faces().iter().position(|f| f.plane.normal.z > 0.0).unwrap() as u32;
+    let f = r.faces().iter().position(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap() as u32;
     let xy = |v: u32| {
         let p = r.point(v);
         Vec2::new(p.x, p.y)
@@ -165,7 +165,8 @@ fn delaunay_removes_slivers() {
         })
     };
     let sweep = triangulate_face(&r, f).unwrap();
-    let fine = triangulate_face_delaunay(&r, f).unwrap();
+    let m = face_mesh(&r, f, true).unwrap();
+    let fine: Vec<[u32; 3]> = m.triangles.iter().map(|t| t.map(|k| m.vertices[k as usize])).collect();
     assert_eq!(fine.len(), sweep.len());
     let ((a0, p0), (a1, p1)) = (measure(&sweep), measure(&fine));
     assert_close(a1, a0, 1e-12);

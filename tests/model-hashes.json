@@ -37,6 +37,10 @@
     "placed": "aea4b8cdf98102d9747fde10aec75351371fe5d9e6f052f6dede1bc6ac2d8574",
     "slab": "78bd115c4e70f1e53f144303b2c6008af7210f014be1f968d9ddebcf50891646"
   },
+  "flange.json": {
+    "flange": "d67094b585954a55c6e0c49e259a7b9c00320562351645cf14c28bf9be11501b",
+    "outline": "d4092a6c6eccedc6609cf660c1d7443477ec9a6de36832b1a33cd02075ef53c4"
+  },
   "parametric.json": {
     "drilled": "d05ed88d25efdb653567dd62f7b5d984ee2e229491881a11bda83408963eff44",
     "first": "110706260cce18bd6a5ddec5dc369caacd4435915ff8d5c924bacd8eb62b4fb5",
@@ -85,6 +89,10 @@
     "pin": "d086d19bd39d7c3fcca238c63a09a7133543418c06862d89625d940154bbf7e6",
     "pins": "d9cdb53129b97334522846d183551ae2dfefb1a2eab11a86d95a8f986c377ad5",
     "plate": "39072f351ebabf2590a8622e909a436ef31a2ff434450244e43a6f5c805421d9"
+  },
+  "rolled_sheet.json": {
+    "profile": "93f223b58f3a1edd70dc750f06fa8871b06c27119d108057daa5ca30b20a1301",
+    "sheet": "bb4eb367c15f82374e95bd7e6db9e8ebe856c3231b7ff40f76ea56f21edc568f"
   },
   "sketch_plate.json": {
     "base": "f0b5a3bdbc2070a994d7f5e862e22e5c86ff686e71079d4b720771865b239f13",

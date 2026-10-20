@@ -1,0 +1,357 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "width": 120,
+    "height": 80,
+    "corner": 10,
+    "bore": 40,
+    "bolt": 9,
+    "t": 12
+  },
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "b0": [
+            10.0,
+            0
+          ],
+          "b1": [
+            110.0,
+            0
+          ],
+          "r0": [
+            120.0,
+            10.0
+          ],
+          "r1": [
+            120.0,
+            70.0
+          ],
+          "t0": [
+            110.0,
+            80.0
+          ],
+          "t1": [
+            10.0,
+            80.0
+          ],
+          "l0": [
+            0,
+            70.0
+          ],
+          "l1": [
+            0,
+            10.0
+          ],
+          "cbl": [
+            10.0,
+            10.0
+          ],
+          "cbr": [
+            110.0,
+            10.0
+          ],
+          "ctr": [
+            110.0,
+            70.0
+          ],
+          "ctl": [
+            10.0,
+            70.0
+          ],
+          "m": [
+            60,
+            40
+          ],
+          "h1": [
+            15,
+            15
+          ],
+          "h2": [
+            105,
+            15
+          ],
+          "h3": [
+            105,
+            65
+          ],
+          "h4": [
+            15,
+            65
+          ],
+          "s0": [
+            50,
+            65
+          ],
+          "s1": [
+            70,
+            65
+          ],
+          "s2": [
+            70,
+            71
+          ],
+          "s3": [
+            50,
+            71
+          ],
+          "sl": [
+            50,
+            68
+          ],
+          "sr": [
+            70,
+            68
+          ]
+        },
+        "lines": {
+          "bottom": {
+            "from": "b0",
+            "to": "b1"
+          },
+          "right": {
+            "from": "r0",
+            "to": "r1"
+          },
+          "top": {
+            "from": "t0",
+            "to": "t1"
+          },
+          "left": {
+            "from": "l0",
+            "to": "l1"
+          },
+          "slot_bottom": {
+            "from": "s0",
+            "to": "s1"
+          },
+          "slot_top": {
+            "from": "s2",
+            "to": "s3"
+          }
+        },
+        "arcs": {
+          "corner_br": {
+            "center": "cbr",
+            "from": "b1",
+            "to": "r0"
+          },
+          "corner_tr": {
+            "center": "ctr",
+            "from": "r1",
+            "to": "t0"
+          },
+          "corner_tl": {
+            "center": "ctl",
+            "from": "t1",
+            "to": "l0"
+          },
+          "corner_bl": {
+            "center": "cbl",
+            "from": "l1",
+            "to": "b0"
+          },
+          "slot_right": {
+            "center": "sr",
+            "from": "s1",
+            "to": "s2"
+          },
+          "slot_left": {
+            "center": "sl",
+            "from": "s3",
+            "to": "s0"
+          }
+        },
+        "circles": {
+          "bore": {
+            "center": "m",
+            "diameter": "bore"
+          },
+          "bolt1": {
+            "center": "h1",
+            "diameter": "bolt"
+          },
+          "bolt2": {
+            "center": "h2",
+            "diameter": "bolt"
+          },
+          "bolt3": {
+            "center": "h3",
+            "diameter": "bolt"
+          },
+          "bolt4": {
+            "center": "h4",
+            "diameter": "bolt"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "cbl"
+          },
+          {
+            "type": "horizontal",
+            "line": "bottom"
+          },
+          {
+            "type": "horizontal",
+            "line": "top"
+          },
+          {
+            "type": "vertical",
+            "line": "left"
+          },
+          {
+            "type": "vertical",
+            "line": "right"
+          },
+          {
+            "type": "length",
+            "line": "bottom",
+            "value": "width - 2 * corner"
+          },
+          {
+            "type": "length",
+            "line": "left",
+            "value": "height - 2 * corner"
+          },
+          {
+            "type": "radius",
+            "arc": "corner_br",
+            "value": "corner"
+          },
+          {
+            "type": "radius",
+            "arc": "corner_tr",
+            "value": "corner"
+          },
+          {
+            "type": "radius",
+            "arc": "corner_tl",
+            "value": "corner"
+          },
+          {
+            "type": "radius",
+            "arc": "corner_bl",
+            "value": "corner"
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "bottom",
+              "corner_br"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "right",
+              "corner_br"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "right",
+              "corner_tr"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "top",
+              "corner_tr"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "top",
+              "corner_tl"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "left",
+              "corner_tl"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "left",
+              "corner_bl"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "bottom",
+              "corner_bl"
+            ]
+          },
+          {
+            "type": "horizontal",
+            "line": "slot_bottom"
+          },
+          {
+            "type": "length",
+            "line": "slot_bottom",
+            "value": 20
+          },
+          {
+            "type": "radius",
+            "arc": "slot_right",
+            "value": 3
+          },
+          {
+            "type": "radius",
+            "arc": "slot_left",
+            "value": 3
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "slot_bottom",
+              "slot_right"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "slot_top",
+              "slot_right"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "slot_top",
+              "slot_left"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "slot_bottom",
+              "slot_left"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "flange",
+      "op": "extrude",
+      "inputs": [
+        "outline"
+      ],
+      "z0": 0,
+      "z1": "t"
+    }
+  ]
+}

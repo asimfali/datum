@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use datum_brep::{Body, Ix};
+use datum_brep::{Body, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use datum_math::expr::{Num, parameter_values};
@@ -149,8 +149,9 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "query_faces",
-        description: "Faces of a feature's body with their stable IDs, unit normals, plane offsets and areas. With `normal`, only faces \
-                      facing that direction within `tolerance_deg` (default 0.01°).",
+        description: "Faces of a feature's body with their stable IDs and areas: a plane face with its unit normal and offset, a \
+                      cylindrical one with its axis, radius and whether it is convex (a boss) or not (a hole). With `normal`, only \
+                      plane faces facing that direction within `tolerance_deg` (default 0.01°).",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -170,11 +171,18 @@ const COMMANDS: &[Command] = &[
                 .faces()
                 .iter()
                 .enumerate()
-                .filter(|(_, f)| want.is_none_or(|w| unit(f.plane.normal).dot(unit(w)) >= cos_tol))
+                .filter(|(_, f)| want.is_none_or(|w| f.surface.plane().is_some_and(|p| unit(p.normal).dot(unit(w)) >= cos_tol)))
                 .map(|(i, f)| {
-                    let n = unit(f.plane.normal);
-                    let a = b.face_area_vector(i as Ix);
-                    json!({"id": format!("{:?}", f.id), "normal": n, "offset": n.dot(f.plane.origin), "area": a.dot(a).sqrt()})
+                    let (id, area) = (format!("{:?}", f.id), b.face_area(i as Ix));
+                    match f.surface {
+                        Surface::Plane(p) => {
+                            let n = unit(p.normal);
+                            json!({"id": id, "normal": n, "offset": n.dot(p.origin), "area": area})
+                        }
+                        Surface::Cylinder(c) => {
+                            json!({"id": id, "cylinder": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "convex": c.convex}, "area": area})
+                        }
+                    }
                 })
                 .collect();
             Ok(json!({"count": faces.len(), "faces": faces}))

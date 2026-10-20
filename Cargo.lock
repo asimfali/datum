@@ -664,6 +664,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "datum-math",
+ "libm",
  "proptest",
  "rayon",
  "smallvec",
@@ -739,6 +740,7 @@ dependencies = [
  "datum-brep",
  "datum-math",
  "datum-sketch",
+ "libm",
  "proptest",
  "rayon",
  "schemars",

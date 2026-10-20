@@ -6,7 +6,8 @@ use datum_math::{Rigid, Vec3};
 use rayon::prelude::*;
 use smallvec::SmallVec;
 
-use crate::{FaceSpec, TopoId};
+use crate::curve::{self, Integrals, unit};
+use crate::{Arc, ArcSpec, BrepError, FaceSpec, Surface, TopoId};
 
 /// Index into one of a body's element vectors.
 pub type Ix = u32;
@@ -32,6 +33,9 @@ pub struct Edge {
     pub id: TopoId,
     /// The half-edge running from the edge's lower-ID vertex to its higher-ID one.
     pub half: Ix,
+    /// The edge's arc (see [`Body::edge_arc`]), an index into the body's arcs: a plane body's
+    /// edges stay small, and there are hundreds of thousands of them in a perforation.
+    pub arc: Option<Ix>,
 }
 
 /// A boundary cycle of a face: half-edges `first .. first + len`.
@@ -53,10 +57,11 @@ pub struct Plane {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Face {
     pub id: TopoId,
-    pub plane: Plane,
+    pub surface: Surface,
     pub first_loop: Ix,
     pub loop_count: Ix,
-    /// Merkle leaf: covers the face's ID, plane and loops (vertex IDs and points), not indices.
+    /// Merkle leaf: covers the face's ID, surface and loops (vertex IDs and points, arcs), not
+    /// indices.
     pub hash: [u8; 32],
 }
 
@@ -81,6 +86,8 @@ pub struct Body {
     pub(crate) edges: Vec<Edge>,
     pub(crate) loops: Vec<Loop>,
     pub(crate) faces: Vec<Face>,
+    /// Arcs of edges, in edge order.
+    pub(crate) arcs: Vec<Arc>,
     pub(crate) hash: [u8; 32],
 }
 
@@ -103,6 +110,11 @@ impl Body {
 
     pub fn faces(&self) -> &[Face] {
         &self.faces
+    }
+
+    /// The arc of an edge, from its lower-ID vertex; a straight edge has none.
+    pub fn edge_arc(&self, e: &Edge) -> Option<Arc> {
+        e.arc.map(|k| self.arcs[k as usize])
     }
 
     /// Canonical content hash: blake3 over the face hashes in face order.
@@ -155,59 +167,140 @@ impl Body {
         self.vertices.first().map_or(Vec3::ZERO, |v| v.point)
     }
 
+    /// The arcs of face `f` as its loops run them: the arc turning about its axis in the
+    /// direction of the loop, and its start and end.
+    fn face_arcs(&self, f: Ix) -> impl Iterator<Item = (Arc, Vec3, Vec3)> + '_ {
+        self.face_loops(f).flat_map(move |l| self.loop_half_edges(l)).filter_map(move |h| {
+            let edge = &self.edges[self.half_edges[h as usize].edge as usize];
+            let arc = self.edge_arc(edge)?;
+            let (u, v) = (self.point(self.half_edges[h as usize].origin), self.point(self.half_edges[self.next(h) as usize].origin));
+            Some((if edge.half == h { arc } else { arc.reversed() }, u, v))
+        })
+    }
+
+    /// Adds face `f`'s volume and moment terms to `acc`, relative to `o`, and returns its area
+    /// and area vector. A plane face is its fans, corrected by circular segments along its arcs;
+    /// a cylinder face is integrated along its arcs.
+    fn integrate_face(&self, f: Ix, o: Vec3, acc: &mut Integrals) -> (f64, Vec3) {
+        match &self.faces[f as usize].surface {
+            Surface::Plane(plane) => {
+                let mut area_vector = Vec3::ZERO;
+                self.fans(self.face_loops(f), o, |a, b, c| {
+                    let v = a.dot(b.cross(c));
+                    acc.six_v += v;
+                    acc.moment = acc.moment + (a + b + c) * v;
+                    area_vector = area_vector + (b - a).cross(c - a);
+                });
+                let mut seg = Integrals { area_vector: area_vector * 0.5, ..Integrals::default() };
+                let n = unit(plane.normal);
+                for (arc, u, v) in self.face_arcs(f) {
+                    curve::segment(&mut seg, &arc, arc.axis, u, v, n, o);
+                }
+                acc.six_v += seg.six_v;
+                acc.moment = acc.moment + seg.moment;
+                (seg.area_vector.dot(seg.area_vector).sqrt(), seg.area_vector)
+            }
+            Surface::Cylinder(c) => {
+                let mut cyl = Integrals::default();
+                curve::cylinder(&mut cyl, c, self.face_arcs(f), o);
+                acc.six_v += cyl.six_v;
+                acc.moment = acc.moment + cyl.moment;
+                (cyl.area, cyl.area_vector)
+            }
+        }
+    }
+
     /// Enclosed volume by the divergence theorem, relative to the first vertex so that the result
     /// does not degrade with distance from the origin. Fixed summation order: deterministic.
     pub fn volume(&self) -> f64 {
-        let mut sum = 0.0;
-        self.fans(0..self.loops.len() as Ix, self.reference(), |a, b, c| sum += a.dot(b.cross(c)));
-        sum / 6.0
+        let (o, mut acc) = (self.reference(), Integrals::default());
+        for f in 0..self.faces.len() as Ix {
+            self.integrate_face(f, o, &mut acc);
+        }
+        acc.six_v / 6.0
     }
 
-    /// Area vector of a face: its normal scaled by its area (holes subtracted).
+    /// Area vector of a face: its normal integrated over it (for a plane face, the normal scaled
+    /// by the area, holes subtracted).
     pub fn face_area_vector(&self, f: Ix) -> Vec3 {
-        let mut sum = Vec3::ZERO;
-        self.fans(self.face_loops(f), self.reference(), |a, b, c| sum = sum + (b - a).cross(c - a));
-        sum * 0.5
+        self.integrate_face(f, self.reference(), &mut Integrals::default()).1
+    }
+
+    /// Area of a face.
+    pub fn face_area(&self, f: Ix) -> f64 {
+        self.integrate_face(f, self.reference(), &mut Integrals::default()).0
     }
 
     /// Volume, surface area, centre of mass (uniform density) and bounding box.
     pub fn mass_properties(&self) -> MassProperties {
+        let (o, mut acc) = (self.reference(), Integrals::default());
+        let area = (0..self.faces.len() as Ix).map(|f| self.integrate_face(f, o, &mut acc).0).sum();
+        let centroid = if acc.six_v != 0.0 { o + acc.moment * (0.25 / acc.six_v) } else { o };
+        let (min, max) = self.bounds();
+        MassProperties { volume: acc.six_v / 6.0, area, centroid, min, max }
+    }
+
+    /// The bounding box: the vertices, and the points of arcs beyond them.
+    pub fn bounds(&self) -> (Vec3, Vec3) {
         let o = self.reference();
-        let (mut six_v, mut moment) = (0.0, Vec3::ZERO);
-        self.fans(0..self.loops.len() as Ix, o, |a, b, c| {
-            let v = a.dot(b.cross(c));
-            six_v += v;
-            moment = moment + (a + b + c) * v;
-        });
-        let area = (0..self.faces.len() as Ix).map(|f| self.face_area_vector(f)).map(|v| v.dot(v).sqrt()).sum();
-        let centroid = if six_v != 0.0 { o + moment * (0.25 / six_v) } else { o };
-        let mut min = o;
-        let mut max = o;
+        let (mut min, mut max) = (o, o);
         for v in &self.vertices {
             let p = v.point;
             min = Vec3::new(min.x.min(p.x), min.y.min(p.y), min.z.min(p.z));
             max = Vec3::new(max.x.max(p.x), max.y.max(p.y), max.z.max(p.z));
         }
-        MassProperties { volume: six_v / 6.0, area, centroid, min, max }
+        for e in &self.edges {
+            if let Some(arc) = &self.edge_arc(e) {
+                let he = &self.half_edges[e.half as usize];
+                arc.extend_bounds(self.point(he.origin), self.point(self.half_edges[he.twin as usize].origin), &mut min, &mut max);
+            }
+        }
+        (min, max)
+    }
+
+    /// Whether some face is curved or some edge an arc: operations on plane geometry only refuse
+    /// such bodies.
+    pub fn has_curves(&self) -> bool {
+        !self.arcs.is_empty() || self.faces.iter().any(|f| f.surface.plane().is_none())
     }
 
     /// The same body moved by `m`. Topology IDs are unchanged; hashes follow the new coordinates.
     pub fn transformed(&self, m: &Rigid) -> Body {
-        self.mapped(|p| m.apply(p), |n| m.apply_vector(n))
+        let mut b = self.clone();
+        for v in &mut b.vertices {
+            v.point = m.apply(v.point);
+        }
+        for f in &mut b.faces {
+            f.surface = match f.surface {
+                Surface::Plane(p) => Surface::Plane(Plane { origin: m.apply(p.origin), normal: m.apply_vector(p.normal) }),
+                Surface::Cylinder(c) => Surface::Cylinder(crate::Cylinder { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
+            };
+        }
+        for a in &mut b.arcs {
+            *a = Arc { center: m.apply(a.center), axis: m.apply_vector(a.axis), ..*a };
+        }
+        b.rehash();
+        b
     }
 
     /// The body under an affine map that keeps orientation: `point` maps points, `normal` maps
-    /// normals (by the inverse transpose). Planes stay planes; topology IDs are unchanged.
-    pub fn mapped(&self, point: impl Fn(Vec3) -> Vec3, normal: impl Fn(Vec3) -> Vec3) -> Body {
+    /// normals (by the inverse transpose). Planes stay planes; topology IDs are unchanged. Arcs
+    /// and cylinders would not stay circular: a body with them is refused.
+    pub fn mapped(&self, point: impl Fn(Vec3) -> Vec3, normal: impl Fn(Vec3) -> Vec3) -> Result<Body, BrepError> {
+        if self.has_curves() {
+            return Err(BrepError::Unsupported("an affine map of a body with arcs or cylinders".into()));
+        }
         let mut b = self.clone();
         for v in &mut b.vertices {
             v.point = point(v.point);
         }
         for f in &mut b.faces {
-            f.plane = Plane { origin: point(f.plane.origin), normal: normal(f.plane.normal) };
+            if let Surface::Plane(p) = &mut f.surface {
+                *p = Plane { origin: point(p.origin), normal: normal(p.normal) };
+            }
         }
         b.rehash();
-        b
+        Ok(b)
     }
 
     /// Face `f` as builder input.
@@ -217,7 +310,16 @@ impl Body {
             .face_loops(f)
             .map(|l| self.loop_half_edges(l).map(|h| self.vertices[self.half_edges[h as usize].origin as usize].id).collect())
             .collect();
-        FaceSpec { id: face.id, plane: face.plane, loops }
+        FaceSpec { id: face.id, surface: face.surface, loops }
+    }
+
+    /// The arcs of the body as builder input, each from its edge's lower-ID vertex.
+    pub fn arc_specs(&self) -> Vec<ArcSpec> {
+        let id = |h: Ix| self.vertices[self.half_edges[h as usize].origin as usize].id;
+        self.edges
+            .iter()
+            .filter_map(|e| Some(ArcSpec { from: id(e.half), to: id(self.half_edges[e.half as usize].twin), arc: self.edge_arc(e)? }))
+            .collect()
     }
 
     /// For every face, the lowest face index of its shell: faces joined by edges form a shell.
@@ -268,7 +370,8 @@ impl Body {
 
     /// Face hashes in parallel, then the body hash over them in face order.
     pub(crate) fn rehash(&mut self) {
-        let hashes: Vec<[u8; 32]> = (0..self.faces.len() as Ix).into_par_iter().map(|f| self.face_hash(f)).collect();
+        let arcs = !self.arcs.is_empty();
+        let hashes: Vec<[u8; 32]> = (0..self.faces.len() as Ix).into_par_iter().map(|f| self.face_hash(f, arcs)).collect();
         for (face, hash) in self.faces.iter_mut().zip(hashes) {
             face.hash = hash;
         }
@@ -279,22 +382,43 @@ impl Body {
         self.hash = *h.finalize().as_bytes();
     }
 
-    pub(crate) fn face_hash(&self, f: Ix) -> [u8; 32] {
+    /// The Merkle leaf of face `f`; `arcs` tells whether the body has arc edges at all, so that
+    /// plane bodies (perforations by the ten thousand) skip looking them up.
+    pub(crate) fn face_hash(&self, f: Ix, arcs: bool) -> [u8; 32] {
         // The bytes are gathered first and hashed in one call: the same hash as streaming them,
         // without a streaming hasher per small face.
         let face = &self.faces[f as usize];
         let mut b: SmallVec<[u8; 512]> = SmallVec::new();
         b.extend_from_slice(&face.id.0.to_le_bytes());
-        for c in face.plane.origin.to_array().into_iter().chain(face.plane.normal.to_array()) {
-            b.extend_from_slice(&c.to_bits().to_le_bytes());
+        let floats = |b: &mut SmallVec<[u8; 512]>, v: &[f64]| {
+            for c in v {
+                b.extend_from_slice(&c.to_bits().to_le_bytes());
+            }
+        };
+        match &face.surface {
+            // A plane hashes as before cylinders existed: pinned hashes of plane bodies stay.
+            Surface::Plane(p) => {
+                floats(&mut b, &p.origin.to_array());
+                floats(&mut b, &p.normal.to_array());
+            }
+            Surface::Cylinder(c) => {
+                b.extend_from_slice(b"cylinder");
+                floats(&mut b, &c.origin.to_array());
+                floats(&mut b, &c.axis.to_array());
+                floats(&mut b, &[c.radius]);
+                b.push(u8::from(c.convex));
+            }
         }
         for l in self.face_loops(f) {
             b.extend_from_slice(&self.loops[l as usize].len.to_le_bytes());
             for he in self.loop_half_edges(l) {
                 let v = &self.vertices[self.half_edges[he as usize].origin as usize];
                 b.extend_from_slice(&v.id.0.to_le_bytes());
-                for c in v.point.to_array() {
-                    b.extend_from_slice(&c.to_bits().to_le_bytes());
+                floats(&mut b, &v.point.to_array());
+                if let Some(a) = arcs.then(|| self.edge_arc(&self.edges[self.half_edges[he as usize].edge as usize])).flatten() {
+                    floats(&mut b, &a.center.to_array());
+                    floats(&mut b, &a.axis.to_array());
+                    floats(&mut b, &[a.radius]);
                 }
             }
         }

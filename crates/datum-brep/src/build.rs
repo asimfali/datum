@@ -3,15 +3,24 @@
 use rayon::prelude::*;
 
 use crate::id::IdMap;
-use crate::{Body, BrepError, Edge, Face, HalfEdge, Ix, Loop, Plane, TopoId, Vertex, in_order};
+use crate::{Arc, Body, BrepError, Edge, Face, HalfEdge, Ix, Loop, Surface, TopoId, Vertex, in_order};
 
 /// A face to build: `loops[0]` is the outer boundary, counterclockwise seen from outside the
 /// body; further loops are holes, clockwise.
 #[derive(Clone, Debug)]
 pub struct FaceSpec {
     pub id: TopoId,
-    pub plane: Plane,
+    pub surface: Surface,
     pub loops: Vec<Vec<TopoId>>,
+}
+
+/// An arc edge to build: the arc turns counterclockwise about its axis from vertex `from` to
+/// vertex `to`. Edges without one are straight.
+#[derive(Clone, Copy, Debug)]
+pub struct ArcSpec {
+    pub from: TopoId,
+    pub to: TopoId,
+    pub arc: Arc,
 }
 
 /// Builds a body in canonical order: vertices, faces and edges sorted by ID, each loop starting
@@ -19,7 +28,12 @@ pub struct FaceSpec {
 ///
 /// Structural errors found while linking are returned; the full [`Body::validate`] runs once per
 /// operation in `datum-ops` (debug builds).
-pub fn build(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>) -> Result<Body, BrepError> {
+pub fn build(vertices: Vec<Vertex>, faces: Vec<FaceSpec>) -> Result<Body, BrepError> {
+    build_with_arcs(vertices, faces, Vec::new())
+}
+
+/// [`build`] with arc edges: each of `arcs` names an edge of the faces by its two vertices.
+pub fn build_with_arcs(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>, arcs: Vec<ArcSpec>) -> Result<Body, BrepError> {
     // IDs are unique (checked below), so the parallel unstable sorts are deterministic.
     vertices.par_sort_unstable_by_key(|v| v.id);
     if let Some(w) = vertices.windows(2).find(|w| w[0].id == w[1].id) {
@@ -80,11 +94,12 @@ pub fn build(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>) -> Result<Body
         .par_iter()
         .zip(&face_loops)
         .enumerate()
-        .map(|(f, (spec, lps))| Face { id: spec.id, plane: spec.plane, first_loop: first_loop[f], loop_count: lps.len() as Ix, hash: [0; 32] })
+        .map(|(f, (spec, lps))| Face { id: spec.id, surface: spec.surface, first_loop: first_loop[f], loop_count: lps.len() as Ix, hash: [0; 32] })
         .collect();
 
-    let mut body = Body { vertices, half_edges, edges: Vec::new(), loops, faces: out_faces, hash: [0; 32] };
+    let mut body = Body { vertices, half_edges, edges: Vec::new(), loops, faces: out_faces, arcs: Vec::new(), hash: [0; 32] };
     link_edges(&mut body)?;
+    attach_arcs(&mut body, arcs)?;
     body.rehash();
     Ok(body)
 }
@@ -118,8 +133,10 @@ fn link_edges(body: &mut Body) -> Result<(), BrepError> {
         }
     }
     // Vertex indices follow vertex IDs, so the first use runs from the lower ID.
-    let mut edges: Vec<Edge> =
-        uses.par_chunks(2).map(|c| Edge { id: TopoId::derive("edge").id(vid(body, c[0].0)).id(vid(body, c[0].1)).finish(), half: c[0].3 }).collect();
+    let mut edges: Vec<Edge> = uses
+        .par_chunks(2)
+        .map(|c| Edge { id: TopoId::derive("edge").id(vid(body, c[0].0)).id(vid(body, c[0].1)).finish(), half: c[0].3, arc: None })
+        .collect();
     for c in uses.chunks(2) {
         body.half_edges[c[0].3 as usize].twin = c[1].3;
         body.half_edges[c[1].3 as usize].twin = c[0].3;
@@ -131,6 +148,33 @@ fn link_edges(body: &mut Body) -> Result<(), BrepError> {
         body.half_edges[t as usize].edge = e as Ix;
     }
     body.edges = edges;
+    Ok(())
+}
+
+/// Puts each arc on its edge, turned to run from the edge's lower-ID vertex.
+fn attach_arcs(body: &mut Body, mut arcs: Vec<ArcSpec>) -> Result<(), BrepError> {
+    if arcs.is_empty() {
+        return Ok(());
+    }
+    let key = |a: &ArcSpec| (a.from.min(a.to), a.from.max(a.to));
+    arcs.sort_unstable_by_key(key);
+    if let Some(w) = arcs.windows(2).find(|w| key(&w[0]) == key(&w[1])) {
+        return Err(BrepError::Invalid(format!("two arcs between {:?} and {:?}", w[0].from, w[0].to)));
+    }
+    let mut found = 0;
+    for e in 0..body.edges.len() {
+        let he = &body.half_edges[body.edges[e].half as usize];
+        let ends = (body.vertices[he.origin as usize].id, body.vertices[body.half_edges[he.twin as usize].origin as usize].id);
+        if let Ok(k) = arcs.binary_search_by_key(&ends, key) {
+            let a = &arcs[k];
+            body.edges[e].arc = Some(body.arcs.len() as Ix);
+            body.arcs.push(if a.from == ends.0 { a.arc } else { a.arc.reversed() });
+            found += 1;
+        }
+    }
+    if found != arcs.len() {
+        return Err(BrepError::Invalid("an arc names no edge of the faces".into()));
+    }
     Ok(())
 }
 

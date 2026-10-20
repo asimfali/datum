@@ -30,6 +30,40 @@ enum Eq {
     /// Point, line, distance, and the side of the line the point was drawn on.
     PointLine(usize, usize, f64, f64),
     Angle(usize, usize, f64),
+    /// An arc's centre and ends: the ends at one distance.
+    ArcEnds(usize, usize, usize),
+    /// Centre, a point on the circle, radius.
+    Radius(usize, usize, f64),
+    /// Line, centre, radius, and the side of the line the centre was drawn on.
+    LineCircle(usize, usize, Rad, f64),
+    /// Two circles by centre and radius; touching outside, or inside with the sign of `r1 − r2`
+    /// as drawn.
+    CircleCircle(usize, Rad, usize, Rad, Contact),
+    /// A line and an arc meeting at a point: line, centre, the point. The radius there is
+    /// across the line. (Distance from the centre would be flat to first order at the point.)
+    LineArcAt(usize, usize, usize),
+    /// Two arcs meeting at a point: centres and the point, on one straight line.
+    ArcArcAt(usize, usize, usize),
+}
+
+/// The radius of an arc (the distance from its centre to its start) or of a circle (a value).
+#[derive(Clone, Copy)]
+enum Rad {
+    Point(usize),
+    Value(f64),
+}
+
+#[derive(Clone, Copy)]
+enum Contact {
+    Outside,
+    Inside(f64),
+}
+
+/// A curve a tangency names: a line, or a circle by centre and radius, with the points that
+/// end it.
+enum Curve {
+    Line(usize),
+    Circle(usize, Rad, Vec<usize>),
 }
 
 /// An independent system: points tied by constraints, and those constraints.
@@ -38,8 +72,7 @@ pub(crate) struct Group {
     pub constraints: Vec<usize>,
 }
 
-pub(crate) struct Equations<'a> {
-    sketch: &'a Sketch,
+pub(crate) struct Equations {
     /// Point names, in name order: point `p` is `names[p]`.
     pub names: Vec<String>,
     /// Coordinates as drawn.
@@ -47,6 +80,8 @@ pub(crate) struct Equations<'a> {
     /// Line ends.
     lines: Vec<(usize, usize)>,
     eqs: Vec<Eq>,
+    /// How messages name each equation: the constraint, or the arc whose ends it ties.
+    described: Vec<String>,
     fixed: Vec<bool>,
     /// Points no constraint ties: they keep their coordinates and both degrees of freedom.
     pub unconstrained: Vec<usize>,
@@ -60,8 +95,8 @@ const RANK: f64 = 1e-10;
 /// A null-space component above this marks a point that can still move.
 const MOVES: f64 = 1e-8;
 
-impl<'a> Equations<'a> {
-    pub fn new(sketch: &'a Sketch) -> Result<Self, SketchError> {
+impl Equations {
+    pub fn new(sketch: &Sketch) -> Result<Self, SketchError> {
         let invalid = |m: String| Err(SketchError::Invalid(m));
         let names: Vec<String> = sketch.points.keys().cloned().collect();
         let start: Vec<Vec2> = sketch.points.values().copied().collect();
@@ -79,6 +114,27 @@ impl<'a> Equations<'a> {
             lines.push((a, b));
         }
         let line = |n: &str| line_names.binary_search_by(|x| x.as_str().cmp(n)).map_err(|_| SketchError::Invalid(format!("unknown line `{n}`")));
+        let mut arcs = Vec::with_capacity(sketch.arcs.len());
+        for (n, a) in &sketch.arcs {
+            let (c, f, t) = (point(&a.center)?, point(&a.from)?, point(&a.to)?);
+            if c == f || c == t || f == t || start[c] == start[f] || start[c] == start[t] {
+                return invalid(format!("arc `{n}` needs a centre and two different ends away from it"));
+            }
+            arcs.push((c, f, t));
+        }
+        let mut circles = Vec::with_capacity(sketch.circles.len());
+        for (n, c) in &sketch.circles {
+            circles.push((
+                point(&c.center)?,
+                c.diameter
+                    .value()
+                    .filter(|d| d.is_finite() && *d > 0.0)
+                    .ok_or_else(|| SketchError::Invalid(format!("circle `{n}` needs a positive diameter")))?,
+            ));
+        }
+        let arc_names: Vec<&String> = sketch.arcs.keys().collect();
+        let circle_names: Vec<&String> = sketch.circles.keys().collect();
+        let find = |names: &[&String], n: &str| names.binary_search_by(|x| x.as_str().cmp(n)).ok();
         let (lo, hi) = start
             .iter()
             .fold(([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]), |(lo, hi), p| ([lo[0].min(p.x), lo[1].min(p.y)], [hi[0].max(p.x), hi[1].max(p.y)]));
@@ -86,11 +142,13 @@ impl<'a> Equations<'a> {
         let diagonal = if start.is_empty() { 0.0 } else { ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2)).sqrt() };
         // The size of the sketch: as drawn, or as dimensioned when everything was drawn at one spot.
         let largest = sketch.constraints.iter().fold(0.0f64, |m, c| match c {
-            Constraint::Distance { value, .. } | Constraint::Length { value, .. } | Constraint::PointLine { value, .. } => {
-                m.max(value.value().unwrap_or(0.0).abs())
-            }
+            Constraint::Distance { value, .. }
+            | Constraint::Length { value, .. }
+            | Constraint::PointLine { value, .. }
+            | Constraint::Radius { value, .. } => m.max(value.value().unwrap_or(0.0).abs()),
             _ => m,
         });
+        let largest = circles.iter().fold(largest, |m, c| m.max(c.1));
         let size = if diagonal > 0.0 {
             diagonal
         } else if largest > 0.0 {
@@ -152,9 +210,68 @@ impl<'a> Equations<'a> {
                     let (a, b) = two(lines)?;
                     Eq::Angle(a, b, degrees.to_radians())
                 }
+                Constraint::Radius { arc, value } => {
+                    let k = find(&arc_names, arc).ok_or_else(|| SketchError::Invalid(format!("unknown arc `{arc}`")))?;
+                    Eq::Radius(arcs[k].0, arcs[k].1, positive(value)?)
+                }
+                Constraint::Tangent { curves } => {
+                    let curve = |n: &str| -> Result<Curve, SketchError> {
+                        let found = [
+                            line_names.binary_search_by(|x| x.as_str().cmp(n)).ok().map(Curve::Line),
+                            find(&arc_names, n).map(|a| Curve::Circle(arcs[a].0, Rad::Point(arcs[a].1), vec![arcs[a].1, arcs[a].2])),
+                            find(&circle_names, n).map(|c| Curve::Circle(circles[c].0, Rad::Value(0.5 * circles[c].1 / size), Vec::new())),
+                        ];
+                        let mut found = found.into_iter().flatten();
+                        match (found.next(), found.next()) {
+                            (Some(c), None) => Ok(c),
+                            (None, _) => Err(SketchError::Invalid(format!("{}: unknown curve `{n}`", c.describe(k)))),
+                            (Some(_), Some(_)) => Err(SketchError::Invalid(format!("{}: `{n}` names two curves", c.describe(k)))),
+                        }
+                    };
+                    let drawn = |r: Rad, centre: usize| match r {
+                        Rad::Point(p) => ((start[p].x - start[centre].x).hypot(start[p].y - start[centre].y)) / size,
+                        Rad::Value(v) => v,
+                    };
+                    match (curve(&curves[0])?, curve(&curves[1])?) {
+                        (Curve::Line(_), Curve::Line(_)) => return invalid(format!("{}: two lines cannot touch", c.describe(k))),
+                        (Curve::Line(l), Curve::Circle(centre, _, ends)) | (Curve::Circle(centre, _, ends), Curve::Line(l))
+                            if ends.iter().any(|e| [lines[l].0, lines[l].1].contains(e)) =>
+                        {
+                            let at = ends.iter().copied().find(|e| [lines[l].0, lines[l].1].contains(e)).unwrap_or(centre);
+                            Eq::LineArcAt(l, centre, at)
+                        }
+                        (Curve::Circle(c1, _, e1), Curve::Circle(c2, _, e2)) if e1.iter().any(|e| e2.contains(e)) => {
+                            let at = e1.iter().copied().find(|e| e2.contains(e)).unwrap_or(c1);
+                            Eq::ArcArcAt(c1, c2, at)
+                        }
+                        (Curve::Line(l), Curve::Circle(centre, r, _)) | (Curve::Circle(centre, r, _), Curve::Line(l)) => {
+                            let (a, b) = lines[l];
+                            let (d, q) =
+                                ([start[b].x - start[a].x, start[b].y - start[a].y], [start[centre].x - start[a].x, start[centre].y - start[a].y]);
+                            let side = if d[0] * q[1] - d[1] * q[0] < 0.0 { -1.0 } else { 1.0 };
+                            Eq::LineCircle(l, centre, r, side)
+                        }
+                        (Curve::Circle(c1, r1, _), Curve::Circle(c2, r2, _)) => {
+                            // Outside or inside, whichever the drawing is closer to.
+                            let dist = (start[c2].x - start[c1].x).hypot(start[c2].y - start[c1].y) / size;
+                            let (a, b) = (drawn(r1, c1), drawn(r2, c2));
+                            let contact = if (dist - (a + b)).abs() <= (dist - (a - b).abs()).abs() {
+                                Contact::Outside
+                            } else {
+                                Contact::Inside((a - b).signum())
+                            };
+                            Eq::CircleCircle(c1, r1, c2, r2, contact)
+                        }
+                    }
+                }
             });
         }
-        let mut eq = Self { sketch, names, start, lines, eqs, fixed, unconstrained: Vec::new(), centre, size };
+        let mut described: Vec<String> = sketch.constraints.iter().enumerate().map(|(k, c)| c.describe(k)).collect();
+        for ((n, _), &(c, f, t)) in sketch.arcs.iter().zip(&arcs) {
+            eqs.push(Eq::ArcEnds(c, f, t));
+            described.push(format!("arc `{n}` (its ends at one distance from the centre)"));
+        }
+        let mut eq = Self { names, start, lines, eqs, described, fixed, unconstrained: Vec::new(), centre, size };
         let tied = eq.tied_points();
         eq.unconstrained = (0..eq.names.len()).filter(|&p| !tied[p] && !eq.fixed[p]).collect();
         Ok(eq)
@@ -163,14 +280,23 @@ impl<'a> Equations<'a> {
     /// The points each constraint involves.
     fn involved(&self, k: usize) -> Vec<usize> {
         let l = |i: usize| [self.lines[i].0, self.lines[i].1];
-        match (self.eqs[k], &self.sketch.constraints[k]) {
-            (Eq::Coincident(a, b) | Eq::Distance(a, b, _), _) => vec![a, b],
-            (Eq::Horizontal(i) | Eq::Vertical(i) | Eq::Length(i, _), _) => l(i).to_vec(),
-            (Eq::Parallel(i, j) | Eq::Perpendicular(i, j) | Eq::Collinear(i, j) | Eq::Equal(i, j) | Eq::Angle(i, j, _), _) => {
+        let r = |c: usize, r: Rad| match r {
+            Rad::Point(p) => vec![c, p],
+            Rad::Value(_) => vec![c],
+        };
+        match self.eqs[k] {
+            Eq::Coincident(a, b) | Eq::Distance(a, b, _) | Eq::Radius(a, b, _) => vec![a, b],
+            Eq::Horizontal(i) | Eq::Vertical(i) | Eq::Length(i, _) => l(i).to_vec(),
+            Eq::Parallel(i, j) | Eq::Perpendicular(i, j) | Eq::Collinear(i, j) | Eq::Equal(i, j) | Eq::Angle(i, j, _) => {
                 l(i).into_iter().chain(l(j)).collect()
             }
-            (Eq::PointLine(p, i, _, _), _) => [p].into_iter().chain(l(i)).collect(),
-            (Eq::Fix, _) => Vec::new(),
+            Eq::PointLine(p, i, _, _) => [p].into_iter().chain(l(i)).collect(),
+            Eq::ArcEnds(c, f, t) => vec![c, f, t],
+            Eq::LineCircle(i, c, rad, _) => l(i).into_iter().chain(r(c, rad)).collect(),
+            Eq::CircleCircle(c1, r1, c2, r2, _) => r(c1, r1).into_iter().chain(r(c2, r2)).collect(),
+            Eq::LineArcAt(i, c, p) => l(i).into_iter().chain([c, p]).collect(),
+            Eq::ArcArcAt(c1, c2, p) => vec![c1, c2, p],
+            Eq::Fix => Vec::new(),
         }
     }
 
@@ -274,7 +400,7 @@ impl<'a> Equations<'a> {
                 let rest: Vec<usize> = g.constraints.iter().copied().filter(|&c| c != k).collect();
                 self.fit(g, &rest).is_some()
             })
-            .map(|&k| self.sketch.constraints[k].describe(k))
+            .map(|&k| self.described[k].clone())
             .collect()
     }
 
@@ -360,6 +486,52 @@ impl<'a> Equations<'a> {
                     g.push((a, neg(toward)));
                     emit(side * cross(d.u, q) - value, &g);
                 }
+                Eq::ArcEnds(c, f, t) => {
+                    let (uf, df) = unit_from(at(c), at(f));
+                    let (ut, dt) = unit_from(at(c), at(t));
+                    emit(df - dt, &[(f, uf), (c, sub(ut, uf)), (t, neg(ut))]);
+                }
+                Eq::Radius(c, f, value) => {
+                    let (u, d) = unit_from(at(c), at(f));
+                    emit(d - value, &[(f, u), (c, neg(u))]);
+                }
+                Eq::LineCircle(l, c, rad, side) => {
+                    let (a, _) = self.lines[l];
+                    let d = self.dir(l, &at);
+                    let q = sub(at(c), at(a));
+                    let mut g = self.through1(l, &d, [side * q[1], -side * q[0]]).to_vec();
+                    let toward = [-side * d.u[1], side * d.u[0]];
+                    g.push((c, toward));
+                    g.push((a, neg(toward)));
+                    let r = radius(rad, c, &at, -1.0, &mut g);
+                    emit(side * cross(d.u, q) - r, &g);
+                }
+                Eq::CircleCircle(c1, r1, c2, r2, contact) => {
+                    let (u, dist) = unit_from(at(c1), at(c2));
+                    let mut g = vec![(c2, u), (c1, neg(u))];
+                    // Outside: dist − (r1 + r2); inside: dist − s·(r1 − r2).
+                    let (s1, s2) = match contact {
+                        Contact::Outside => (-1.0, -1.0),
+                        Contact::Inside(s) => (-s, s),
+                    };
+                    let a = radius(r1, c1, &at, s1, &mut g);
+                    let b = radius(r2, c2, &at, s2, &mut g);
+                    emit(dist + s1 * a + s2 * b, &g);
+                }
+                Eq::LineArcAt(l, c, p) => {
+                    let d = self.dir(l, &at);
+                    let (w, len) = unit_from(at(c), at(p));
+                    let mut g = self.through1(l, &d, w).to_vec();
+                    let gp = across(w, d.u, len);
+                    g.push((p, gp));
+                    g.push((c, neg(gp)));
+                    emit(dot(d.u, w), &g);
+                }
+                Eq::ArcArcAt(c1, c2, p) => {
+                    let ((w1, l1), (w2, l2)) = (unit_from(at(c1), at(p)), unit_from(at(c2), at(p)));
+                    let (g1, g2) = (across(w1, [w2[1], -w2[0]], l1), across(w2, [-w1[1], w1[0]], l2));
+                    emit(cross(w1, w2), &[(p, [g1[0] + g2[0], g1[1] + g2[1]]), (c1, neg(g1)), (c2, neg(g2))]);
+                }
                 Eq::Angle(i, j, target) => {
                     let (di, dj) = (self.dir(i, &at), self.dir(j, &at));
                     let (s, c) = (cross(di.u, dj.u), dot(di.u, dj.u));
@@ -394,6 +566,33 @@ impl<'a> Equations<'a> {
         let [x, y] = self.through1(i, &di, gi);
         let [z, w] = self.through1(j, &dj, gj);
         [x, y, z, w]
+    }
+}
+
+/// The unit vector from `a` to `b` and the distance.
+fn unit_from(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
+    let d = sub(b, a);
+    let len = norm(d);
+    ([d[0] / len, d[1] / len], len)
+}
+
+/// Gradient with respect to the far end of a unit vector `w` of length-`len` difference, given
+/// the gradient `gw` with respect to `w`: `(I − w wᵀ) gw / len`.
+fn across(w: [f64; 2], gw: [f64; 2], len: f64) -> [f64; 2] {
+    let k = dot(gw, w);
+    [(gw[0] - w[0] * k) / len, (gw[1] - w[1] * k) / len]
+}
+
+/// The radius `rad` of the circle around `c`, its gradient times `scale` added to `g`.
+fn radius(rad: Rad, c: usize, at: &impl Fn(usize) -> [f64; 2], scale: f64, g: &mut Vec<(usize, [f64; 2])>) -> f64 {
+    match rad {
+        Rad::Point(p) => {
+            let (u, d) = unit_from(at(c), at(p));
+            g.push((p, [scale * u[0], scale * u[1]]));
+            g.push((c, [-scale * u[0], -scale * u[1]]));
+            d
+        }
+        Rad::Value(v) => v,
     }
 }
 

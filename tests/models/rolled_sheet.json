@@ -1,0 +1,102 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "radius": 500.0,
+    "thickness": 3.0,
+    "length": 800
+  },
+  "features": [
+    {
+      "name": "profile",
+      "op": "sketch",
+      "plane": {
+        "origin": [
+          0,
+          0,
+          0
+        ],
+        "x_axis": [
+          1,
+          0,
+          0
+        ],
+        "normal": [
+          0,
+          -1,
+          0
+        ]
+      },
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            -450
+          ],
+          "a": [
+            250.00000000000006,
+            -16.987298107780703
+          ],
+          "b": [
+            251.50000000000006,
+            -14.389221896427387
+          ],
+          "c": [
+            -251.4999999999999,
+            -14.38922189642733
+          ],
+          "d": [
+            -249.9999999999999,
+            -16.987298107780646
+          ]
+        },
+        "lines": {
+          "start": {
+            "from": "a",
+            "to": "b"
+          },
+          "end": {
+            "from": "c",
+            "to": "d"
+          }
+        },
+        "arcs": {
+          "outer": {
+            "center": "o",
+            "from": "b",
+            "to": "c"
+          },
+          "inner": {
+            "center": "o",
+            "from": "a",
+            "to": "d"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "radius",
+            "arc": "inner",
+            "value": "radius"
+          },
+          {
+            "type": "radius",
+            "arc": "outer",
+            "value": "radius + thickness"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sheet",
+      "op": "extrude",
+      "inputs": [
+        "profile"
+      ],
+      "z0": 0,
+      "z1": "length"
+    }
+  ]
+}
