@@ -13,6 +13,20 @@ pub struct ProfileArc {
     pub ccw: bool,
 }
 
+impl ProfileArc {
+    /// The angle the arc turns around its centre from `a` to `b`: in `(0, 2π]` counterclockwise,
+    /// in `[−2π, 0)` clockwise. The same point twice is a full circle.
+    pub fn turn(&self, a: Vec2, b: Vec2) -> f64 {
+        let (u, v) = (Vec2::new(a.x - self.center.x, a.y - self.center.y), Vec2::new(b.x - self.center.x, b.y - self.center.y));
+        let t = libm::atan2(u.x * v.y - u.y * v.x, u.x * v.x + u.y * v.y);
+        match (self.ccw, t) {
+            (true, t) if t <= 0.0 => t + std::f64::consts::TAU,
+            (false, t) if t >= 0.0 => t - std::f64::consts::TAU,
+            (_, t) => t,
+        }
+    }
+}
+
 /// A closed loop of a region and the IDs its extrusion (or cut) gives: for each point the
 /// vertices at the start and at the end, for each edge from point `k` to `k + 1` the side face,
 /// and the edge's arc if it is one (`arcs` empty: all straight). A loop only looked at, such as
@@ -60,15 +74,8 @@ impl ProfileLoop {
                 let chord = 0.5 * (a.x * b.y - a.y * b.x);
                 chord
                     + self.arc(k).map_or(0.0, |arc| {
-                        let (u, v) = (Vec2::new(a.x - arc.center.x, a.y - arc.center.y), Vec2::new(b.x - arc.center.x, b.y - arc.center.y));
-                        let turn = libm::atan2(u.x * v.y - u.y * v.x, u.x * v.x + u.y * v.y);
-                        let phi = if arc.ccw {
-                            if turn <= 0.0 { turn + std::f64::consts::TAU } else { turn }
-                        } else if turn >= 0.0 {
-                            std::f64::consts::TAU - turn
-                        } else {
-                            -turn
-                        };
+                        let u = Vec2::new(a.x - arc.center.x, a.y - arc.center.y);
+                        let phi = arc.turn(a, b).abs();
                         let r2 = u.x * u.x + u.y * u.y;
                         0.5 * r2 * (phi - libm::sin(phi)) * if arc.ccw { 1.0 } else { -1.0 }
                     })

@@ -1,8 +1,8 @@
 //! C3 (PAINS P4): a 100 × 100 grid of pins cut through a plate in one Boolean operation, and the
 //! tessellation of the drilled plate. Then the way a sheet is usually punched: square punches on
 //! the axes, a plain difference, the punch as thick as the sheet (every face meets a face of the
-//! sheet) or longer; and round holes of the same pitch cut by a sketch profile (M5b). Each on one
-//! thread and on all threads.
+//! sheet) or longer; and round holes of the same pitch cut by a sketch profile (M5b), in a flat
+//! sheet and in a rolled one, in its development (M5c). Each on one thread and on all threads.
 #![allow(clippy::expect_used)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -90,6 +90,34 @@ fn round_holes(c: &mut Criterion) {
     group.finish();
 }
 
+/// The same grid of holes in a quarter of a tube 3 thick, inner radius 700, 1100 long, cut in its
+/// development from outside.
+fn rolled_holes(c: &mut Criterion) {
+    let (r, t) = (700.0, 3.0);
+    let json = |v: serde_json::Value| serde_json::from_value::<Op>(v).expect("op");
+    let profile = json(serde_json::json!({"op": "sketch", "sketch": {
+        "points": {"o": [0, 0], "a": [r, 0], "b": [r + t, 0], "c": [0, r + t], "d": [0, r]},
+        "lines": {"start": {"from": "a", "to": "b"}, "end": {"from": "c", "to": "d"}},
+        "arcs": {"outer": {"center": "o", "from": "b", "to": "c"}, "inner": {"center": "o", "from": "a", "to": "d"}}
+    }}))
+    .eval(TopoId::derive("profile").finish(), &[])
+    .expect("profile");
+    let sheet = json(serde_json::json!({"op": "extrude", "z0": 0, "z1": 1100})).eval(TopoId::derive("sheet").finish(), &[&profile]).expect("sheet");
+    let outer =
+        sheet.body().and_then(|b| b.faces().iter().find(|f| matches!(f.surface, datum_brep::Surface::Cylinder(c) if c.convex))).expect("outer").id;
+    let sketch = json(serde_json::json!({"op": "sketch", "face": format!("{outer:?}"), "k_factor": 0.44,
+        "sketch": {"points": {"c": [15, 15]}, "circles": {"hole": {"center": "c", "diameter": 5}}}}))
+    .eval(TopoId::derive("holes").finish(), &[&sheet])
+    .expect("sketch");
+    let cut = json(serde_json::json!({"op": "cut", "pattern": {"count": [100, 100], "step": [[10, 0], [0, 10]]}}));
+    let mut group = c.benchmark_group("cut_rolled_10000");
+    group.sample_size(10);
+    for (name, pool) in pools() {
+        group.bench_function(&name, |b| b.iter(|| pool.install(|| cut.eval(TopoId::derive("cut").finish(), &[&sheet, &sketch]).expect("cut"))));
+    }
+    group.finish();
+}
+
 fn tessellate_drilled(c: &mut Criterion) {
     let (plate, pins) = plate_and_pins(100);
     let drilled = drill(&plate, &pins);
@@ -101,5 +129,5 @@ fn tessellate_drilled(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, perforation, tessellate_drilled, punched, round_holes);
+criterion_group!(benches, perforation, tessellate_drilled, punched, round_holes, rolled_holes);
 criterion_main!(benches);

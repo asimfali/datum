@@ -179,6 +179,12 @@ impl Rigid {
         Self { rot, shift: origin }
     }
 
+    /// The motion taking world coordinates to those in the frame with axes `x, y, z`
+    /// (orthonormal, right-handed) at `origin`: the inverse of [`Rigid::frame`].
+    pub fn into_frame(origin: Vec3, x: Vec3, y: Vec3, z: Vec3) -> Self {
+        Self { rot: [x, y, z], shift: Vec3::new(-x.dot(origin), -y.dot(origin), -z.dot(origin)) }
+    }
+
     /// The motion that applies `self` first, then `next`.
     pub fn then(self, next: Self) -> Self {
         let col = |i: usize| Vec3::new(self.rot[0].to_array()[i], self.rot[1].to_array()[i], self.rot[2].to_array()[i]);
