@@ -108,3 +108,10 @@ fn standard_views_follow_drawing_conventions() {
     right_up("left", [0.0, -1.0, 0.0], [0.0, 0.0, 1.0]);
     assert!(Camera::view("isometric").is_err());
 }
+
+/// A model ending in an unfold still shows its sheet: the blank is for export.
+#[test]
+fn an_unfold_does_not_hide_the_sheet() {
+    let s = scene("rolled_perforation.json");
+    assert!(!s.bodies.is_empty() && s.bounds.is_some());
+}
