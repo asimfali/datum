@@ -83,8 +83,20 @@ pub struct Renderer {
     target: Option<Target>,
 }
 
-/// Vertex and index buffers; `None` when empty.
-type Vertices = Option<(wgpu::Buffer, wgpu::Buffer)>;
+/// The blocks of one kind of primitive.
+type Vertices = Vec<Block>;
+
+/// Vertex and index buffers of consecutive chunks, no larger than the device allows: a model of
+/// ten million triangles needs several (wgpu's default limit is 256 MB a buffer).
+struct Block {
+    vertices: wgpu::Buffer,
+    indices: wgpu::Buffer,
+    /// The block's indices in the part, and the first of its vertices (its indices count from 0
+    /// in the part's numbering).
+    first_index: u32,
+    end_index: u32,
+    first_vertex: u32,
+}
 
 /// The picture, `width × height`, and what it is drawn with: its depth; and multisampled colour,
 /// resolved into the picture, and depth. One picture either way: the window shows the same
@@ -248,11 +260,24 @@ impl Renderer {
                 queue.write_buffer(&b, 0, bytes);
                 b
             };
-            let part = |p: &Part| {
-                let indices: Vec<u8> = p.indices.iter().flat_map(|i| i.to_le_bytes()).collect();
-                (!p.indices.is_empty()).then(|| (buffer(&p.vertices, wgpu::BufferUsages::VERTEX), buffer(&indices, wgpu::BufferUsages::INDEX)))
+            let limit = device.limits().max_buffer_size;
+            let part = |p: &Part, stride: u64| {
+                split(p, stride, limit)
+                    .into_iter()
+                    .map(|(idx, vtx)| {
+                        let indices: Vec<u8> = p.indices[idx.start as usize..idx.end as usize].iter().flat_map(|i| i.to_le_bytes()).collect();
+                        let vertices = &p.vertices[(u64::from(vtx.start) * stride) as usize..(u64::from(vtx.end) * stride) as usize];
+                        Block {
+                            vertices: buffer(vertices, wgpu::BufferUsages::VERTEX),
+                            indices: buffer(&indices, wgpu::BufferUsages::INDEX),
+                            first_index: idx.start,
+                            end_index: idx.end,
+                            first_vertex: vtx.start,
+                        }
+                    })
+                    .collect::<Vec<_>>()
             };
-            self.buffers = Some((frame.version, part(&frame.geometry.triangles), part(&frame.geometry.lines)));
+            self.buffers = Some((frame.version, part(&frame.geometry.triangles, TRIANGLE_VERTEX), part(&frame.geometry.lines, LINE_VERTEX)));
         }
         self.visible = [&frame.geometry.triangles, &frame.geometry.lines].map(|p| visible(p, &frame.view_projection));
         let mut u = Vec::with_capacity(80);
@@ -265,17 +290,40 @@ impl Renderer {
     fn paint(&self, pass: &mut wgpu::RenderPass<'_>, pipelines: &[wgpu::RenderPipeline; 2]) {
         let Some((_, tris, lines)) = &self.buffers else { return };
         pass.set_bind_group(0, &self.bind, &[]);
-        for ((pipeline, buffers), ranges) in pipelines.iter().zip([tris, lines]).zip(&self.visible) {
-            if let Some((vertices, indices)) = buffers {
-                pass.set_pipeline(pipeline);
-                pass.set_vertex_buffer(0, vertices.slice(..));
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+        for ((pipeline, blocks), ranges) in pipelines.iter().zip([tris, lines]).zip(&self.visible) {
+            pass.set_pipeline(pipeline);
+            for b in blocks {
+                pass.set_vertex_buffer(0, b.vertices.slice(..));
+                pass.set_index_buffer(b.indices.slice(..), wgpu::IndexFormat::Uint32);
                 for r in ranges {
-                    pass.draw_indexed(r.clone(), 0, 0..1);
+                    let (start, end) = (r.start.max(b.first_index), r.end.min(b.end_index));
+                    if start < end {
+                        pass.draw_indexed(start - b.first_index..end - b.first_index, -(b.first_vertex as i32), 0..1);
+                    }
                 }
             }
         }
     }
+}
+
+/// Runs of whole chunks of `part`, each within `limit` bytes of vertices (`stride` each) and of
+/// indices: their index and vertex ranges.
+fn split(part: &Part, stride: u64, limit: u64) -> Vec<(Range<u32>, Range<u32>)> {
+    let mut runs = Vec::new();
+    let (mut first, mut last) = ((0u32, 0u32), (0u32, 0u32));
+    for c in &part.chunks {
+        if u64::from(c.vertex_end - first.1) * stride > limit || u64::from(c.end - first.0) * 4 > limit {
+            if last.0 > first.0 {
+                runs.push((first.0..last.0, first.1..last.1));
+            }
+            first = last;
+        }
+        last = (c.end, c.vertex_end);
+    }
+    if last.0 > first.0 {
+        runs.push((first.0..last.0, first.1..last.1));
+    }
+    runs
 }
 
 /// Index ranges of the chunks of `part` that may be in view of `view_projection` (column-major),
@@ -336,13 +384,23 @@ mod tests {
 
     /// Three unit cubes of primitives along X, ten apart; the anchor is the origin.
     fn part() -> Part {
-        let chunk = |x: f32, end| Chunk { lo: [x, 0.0, 0.0], hi: [x + 1.0, 1.0, 1.0], end };
+        let chunk = |x: f32, end| Chunk { lo: [x, 0.0, 0.0], hi: [x + 1.0, 1.0, 1.0], end, vertex_end: 0 };
         Part { vertices: Vec::new(), indices: Vec::new(), chunks: vec![chunk(0.0, 30), chunk(10.0, 60), chunk(20.0, 90)] }
     }
 
     fn ranges(camera: &Camera) -> Vec<Range<u32>> {
         let (view_projection, _) = camera.matrices(Vec3::ZERO, 1.0, 30.0);
         visible(&part(), &view_projection)
+    }
+
+    /// Blocks of whole chunks, each within the limit: 30 indices and 10 vertices a chunk.
+    #[test]
+    fn large_parts_are_split() {
+        let chunk = |k: u32| Chunk { lo: [0.0; 3], hi: [1.0; 3], end: 30 * k, vertex_end: 10 * k };
+        let p = Part { vertices: Vec::new(), indices: Vec::new(), chunks: (1..=5).map(chunk).collect() };
+        assert_eq!(split(&p, 4, 1 << 20), [(0..150, 0..50)]);
+        // 30 indices are 120 bytes: two chunks a block, the last alone.
+        assert_eq!(split(&p, 4, 240), [(0..60, 0..20), (60..120, 20..40), (120..150, 40..50)]);
     }
 
     #[test]

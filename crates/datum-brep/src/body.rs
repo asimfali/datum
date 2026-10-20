@@ -240,6 +240,14 @@ impl Body {
         MassProperties { volume: acc.six_v / 6.0, area, centroid, min, max }
     }
 
+    /// How far a chord may stray from an arc when the body is drawn or exported: a ten-thousandth
+    /// of its size. A display tolerance; the model never sees it.
+    pub fn chord(&self) -> f64 {
+        let (lo, hi) = self.bounds();
+        let d = hi - lo;
+        1e-4 * d.dot(d).sqrt()
+    }
+
     /// The bounding box: the vertices, and the points of arcs beyond them.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         let o = self.reference();

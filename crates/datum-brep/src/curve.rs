@@ -70,9 +70,12 @@ pub struct Arc {
     pub radius: f64,
 }
 
-/// Segments per full turn of an arc drawn or exported as a polyline: a chord deviates from the
-/// circle by 0.12 % of the radius. For the screen and STL only; the model keeps the arc.
-const SEGMENTS: f64 = 64.0;
+/// Chords per full turn of an arc drawn or exported as a polyline: at least enough to look round
+/// (12, three arcs of a circle in four each), at most 64 (0.12 % of the radius off the circle).
+/// Between them, as many as keep the chords within the body's own tolerance (see
+/// [`crate::Body::chord`]): a hole of 5 mm in a sheet of 2 m needs no 64. For the screen and STL
+/// only; the model keeps the arc.
+const SEGMENTS: [f64; 2] = [12.0, 64.0];
 
 impl Arc {
     /// The same arc run the other way: from the second vertex to the first.
@@ -97,11 +100,14 @@ impl Arc {
         self.center + d * c + self.axis.cross(d) * s
     }
 
-    /// Points of the arc from `from` to `to` for drawing, both ends excluded: chords of at most
-    /// `1/SEGMENTS` of a turn.
-    pub fn inner_points(&self, from: Vec3, to: Vec3) -> impl Iterator<Item = Vec3> + '_ {
+    /// Points of the arc from `from` to `to` for drawing, both ends excluded: chords off the arc
+    /// by at most `chord` (within [`SEGMENTS`] a turn).
+    pub fn inner_points(&self, from: Vec3, to: Vec3, chord: f64) -> impl Iterator<Item = Vec3> + '_ {
         let sweep = self.sweep(from, to);
-        let n = (sweep / TAU * SEGMENTS).ceil().max(1.0) as usize;
+        // A chord over angle `a` is `r·(1 − cos(a/2))` off the arc.
+        let per_turn = if chord < self.radius { std::f64::consts::PI / libm::acos(1.0 - chord / self.radius) } else { 0.0 };
+        let per_turn = per_turn.ceil().clamp(SEGMENTS[0], SEGMENTS[1]);
+        let n = (sweep / TAU * per_turn).ceil().max(1.0) as usize;
         (1..n).map(move |k| self.at(from, sweep * k as f64 / n as f64))
     }
 
