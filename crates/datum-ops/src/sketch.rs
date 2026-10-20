@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use datum_brep::{Body, BrepError, ProfileArc, ProfileLoop, Region, TopoId, extrude};
+use datum_brep::{Body, BrepError, Curve, Cylinder, Development, Ix, ProfileArc, ProfileLoop, Region, Surface, TopoId, extrude};
 use datum_math::{Rigid, Vec2, Vec3};
 use datum_sketch::{Arc, Circle, Line, Sketch, Solved, solve};
 use schemars::JsonSchema;
@@ -21,8 +21,11 @@ pub struct SketchPlane {
 /// A solved sketch in its place: the value of a sketch feature.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
-    /// Origin and the X, Y, Z axes of the sketch plane, Z its normal.
+    /// Origin and the X, Y, Z axes of the sketch plane, Z its normal. On a cylinder face, the
+    /// plane touching the face at the sketch's origin; the sketch lies on the face (`developed`).
     pub frame: [Vec3; 4],
+    /// On a cylinder face, where the sketch lies (boxed: most sketches are on planes).
+    pub developed: Option<Box<Developed>>,
     pub solved: Solved,
     pub lines: BTreeMap<String, Line>,
     pub arcs: BTreeMap<String, Arc>,
@@ -31,6 +34,121 @@ pub struct Placed {
     /// The face the sketch lies on, if it was placed on one.
     pub face: Option<TopoId>,
     pub hash: [u8; 32],
+}
+
+/// A sketch on a cylinder face of a rolled sheet (M5c, D68): its coordinates are the sheet's
+/// development, lengths along the neutral layer as on the blank before rolling. X runs along `u`,
+/// Y along `v`, or against it (`mirrored`) on the face that sees the axis, so that seen from
+/// outside the face the sketch is drawn as on a plane face.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Developed {
+    pub dev: Development,
+    pub mirrored: bool,
+    /// The radius of the sketch's face.
+    pub radius: f64,
+    /// The angle the sheet spans about the axis from `dev.start`.
+    pub span: f64,
+}
+
+impl Developed {
+    /// Sketch coordinates to the development's and back.
+    pub fn uv(&self, p: Vec2) -> Vec2 {
+        if self.mirrored { Vec2::new(p.x, -p.y) } else { p }
+    }
+
+    /// The point at `p` of the sketch, `r` from the axis.
+    pub fn point(&self, p: Vec2, r: f64) -> Vec3 {
+        self.dev.point(self.uv(p), r)
+    }
+
+    /// The sketch coordinates of `q`, and its distance from the axis. The turn about the axis
+    /// is cut opposite the middle of the sheet.
+    pub fn flat(&self, q: Vec3) -> (Vec2, f64) {
+        let (p, r) = self.dev.unroll(q, 0.5 * self.span * self.dev.neutral);
+        (self.uv(p), r)
+    }
+
+    /// An arc of the sketch in the development's coordinates, or the other way.
+    pub fn arc(&self, a: ProfileArc) -> ProfileArc {
+        ProfileArc { center: self.uv(a.center), ccw: a.ccw != self.mirrored }
+    }
+}
+
+/// Whether two cylinders share their axis, exactly: as the faces of one extruded profile do.
+pub(crate) fn coaxial(a: &Cylinder, b: &Cylinder) -> bool {
+    a.axis.cross(b.axis) == Vec3::ZERO && (a.origin - b.origin).cross(b.axis) == Vec3::ZERO
+}
+
+/// The face across a rolled sheet from cylinder face `f`: the nearest coaxial cylinder face
+/// facing the other way, on the side of the body.
+/// None if there is none, or two at the same distance.
+pub(crate) fn opposite_cylinder(body: &Body, f: usize) -> Option<(Ix, Cylinder)> {
+    let Surface::Cylinder(c) = body.faces()[f].surface else { return None };
+    let mut found: Vec<(Ix, Cylinder)> = (0..body.faces().len())
+        .filter_map(|g| match body.faces()[g].surface {
+            Surface::Cylinder(o) if g != f && coaxial(&o, &c) && o.convex != c.convex && (o.radius < c.radius) == c.convex => Some((g as Ix, o)),
+            _ => None,
+        })
+        .collect();
+    found.sort_by(|a, b| (a.1.radius - c.radius).abs().total_cmp(&(b.1.radius - c.radius).abs()));
+    match found[..] {
+        [one] => Some(one),
+        [a, b, ..] if a.1.radius != b.1.radius => Some(a),
+        _ => None,
+    }
+}
+
+/// Where a sketch on cylinder face `f` lies, its neutral layer at `k` of the thickness from the
+/// inside. The development is the sheet's, whichever side the sketch is on: its axis and origin
+/// those of the inner face, `u` zero where that face starts turning about the axis, `v` zero
+/// across the axis from the world origin (as on a plane face).
+fn unrolled(body: &Body, f: usize, c: &Cylinder, k: f64) -> Result<Developed, BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("a sketch on a cylinder face: {m}"));
+    if !(0.0..=1.0).contains(&k) {
+        return Err(BrepError::Degenerate(format!("a K-factor lies between 0 and 1, got {k}")));
+    }
+    let (g, other) = opposite_cylinder(body, f).ok_or_else(|| unsupported("no face across the sheet (a coaxial cylinder facing the other way)"))?;
+    let (inside, inner, outer) = if c.convex { (g, other, *c) } else { (f as Ix, *c, other) };
+    let axis = inner.axis * (1.0 / inner.axis.dot(inner.axis).sqrt());
+    let across = |q: Vec3| {
+        let w = q - inner.origin;
+        w - axis * w.dot(axis)
+    };
+    // The inner face's outline turns about the axis and back: from its least turn, the sheet.
+    let l = body.faces()[inside as usize].first_loop;
+    let first = body.point(body.half_edges()[body.loop_half_edges(l).start as usize].origin);
+    let (mut turn, mut least, mut most, mut start) = (0.0f64, 0.0f64, 0.0f64, across(first));
+    for h in body.loop_half_edges(l) {
+        let he = &body.half_edges()[h as usize];
+        let edge = &body.edges()[he.edge as usize];
+        let (u, v) = (body.point(he.origin), body.point(body.half_edges()[body.next(h) as usize].origin));
+        match body.edge_curve(edge) {
+            // Along the axis: the sheet's edge, unless the cylinder goes on past it (a tube cut
+            // into faces).
+            None => {
+                let across = body.loops()[body.half_edges()[he.twin as usize].loop_ix as usize].face;
+                if matches!(body.faces()[across as usize].surface, Surface::Cylinder(o) if coaxial(&o, &inner) && o.convex == inner.convex) {
+                    return Err(unsupported("the face is part of a closed tube: a development needs the sheet's edge"));
+                }
+            }
+            Some(Curve::Arc(arc)) => {
+                let arc = if edge.half == h { arc } else { arc.reversed() };
+                turn += arc.sweep(u, v) * arc.axis.dot(axis).signum();
+            }
+            Some(Curve::Rolled { .. }) => return Err(unsupported("the face's outline is a cut")),
+        }
+        if turn < least {
+            (least, start) = (turn, across(v));
+        }
+        most = most.max(turn);
+    }
+    if turn.abs() > std::f64::consts::PI {
+        return Err(unsupported("the face closes around the axis: a development needs the sheet's edge"));
+    }
+    let start = start * (1.0 / start.dot(start).sqrt());
+    let dev =
+        Development { origin: inner.origin - axis * inner.origin.dot(axis), axis, start, neutral: inner.radius + k * (outer.radius - inner.radius) };
+    Ok(Developed { dev, mirrored: !c.convex, radius: c.radius, span: most - least })
 }
 
 /// The diameter of circle `c`, a number once the sketch is resolved.
@@ -52,10 +170,13 @@ fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
 }
 
 /// Solves `sketch` and places it: on the XY plane, on `plane`, or on the face with ID `face` of
-/// `host`. On a face, the origin is the world origin projected onto the face's plane and X the
-/// world axis least along the normal, projected: on a top face sketch coordinates are world X and
-/// Y. The frame follows the face's plane only. A face gone after a rebuild is a lost reference.
-pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, &str)>) -> Result<Placed, BrepError> {
+/// `host`. On a plane face, the origin is the world origin projected onto the face's plane and X
+/// the world axis least along the normal, projected: on a top face sketch coordinates are world X
+/// and Y. The frame follows the face's plane only. On a cylinder face of a rolled sheet the
+/// sketch lies in the sheet's development (see [`Developed`]) with its neutral layer at
+/// `k_factor` of the thickness. A face gone after a rebuild is a lost reference.
+pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, &str)>, k_factor: Option<f64>) -> Result<Placed, BrepError> {
+    let mut developed = None;
     let (frame, on) = match (plane, face) {
         (Some(_), Some(_)) => return Err(BrepError::Sketch("give a plane or a face, not both".into())),
         (Some(p), None) => (frame(p.origin, p.x_axis, p.normal)?, None),
@@ -65,13 +186,23 @@ pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, 
                 .faces()
                 .binary_search_by_key(&id, |f| f.id)
                 .map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the input body")))?;
-            let Some(&plane) = body.faces()[f].surface.plane() else {
-                return Err(BrepError::Unsupported("a sketch on a curved face".into()));
-            };
-            let n = unit(plane.normal).ok_or_else(|| BrepError::Degenerate("the face has no normal".into()))?;
-            let axes = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)];
-            let x = axes.into_iter().min_by(|a, b| a.dot(n).abs().total_cmp(&b.dot(n).abs())).unwrap_or(axes[0]);
-            (frame(n * n.dot(plane.origin), x, n)?, Some(id))
+            match body.faces()[f].surface {
+                Surface::Plane(_) if k_factor.is_some() => return Err(BrepError::Sketch("`k_factor` is for a sketch on a cylinder face".into())),
+                Surface::Plane(plane) => {
+                    let n = unit(plane.normal).ok_or_else(|| BrepError::Degenerate("the face has no normal".into()))?;
+                    let axes = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)];
+                    let x = axes.into_iter().min_by(|a, b| a.dot(n).abs().total_cmp(&b.dot(n).abs())).unwrap_or(axes[0]);
+                    (frame(n * n.dot(plane.origin), x, n)?, Some(id))
+                }
+                Surface::Cylinder(c) => {
+                    let k = k_factor.ok_or_else(|| BrepError::Sketch("a sketch on a cylinder face needs the sheet's `k_factor`".into()))?;
+                    let d = unrolled(body, f, &c, k)?;
+                    developed = Some(d);
+                    let r = d.dev.radial(0.0);
+                    (frame(d.point(Vec2::new(0.0, 0.0), c.radius), d.dev.axis.cross(r), if c.convex { r } else { -r })?, Some(id))
+                }
+                Surface::Wall(_) => return Err(BrepError::Unsupported("a sketch on the wall of a cut".into())),
+            }
         }
         (None, None) => ([Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)], None),
     };
@@ -111,8 +242,17 @@ pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, 
     if let Some(id) = on {
         bytes(&id.0.to_le_bytes());
     }
+    if let Some(d) = &developed {
+        bytes(b"developed");
+        let [o, a, s] = [d.dev.origin, d.dev.axis, d.dev.start].map(Vec3::to_array);
+        for c in o.into_iter().chain(a).chain(s).chain([d.dev.neutral, d.radius, d.span]) {
+            bytes(&c.to_bits().to_le_bytes());
+        }
+        bytes(&[u8::from(d.mirrored)]);
+    }
     Ok(Placed {
         face: on,
+        developed: developed.map(Box::new),
         frame,
         solved,
         lines: sketch.lines.clone(),
@@ -128,6 +268,9 @@ pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, 
 /// named by their lines and arcs, vertices by their points (§4.2), a circle's by its name:
 /// renaming nothing keeps every ID through edits of the sketch.
 pub fn extrude_sketch(feature: TopoId, s: &Placed, z0: f64, z1: f64) -> Result<Body, BrepError> {
+    if s.developed.is_some() {
+        return Err(BrepError::Unsupported("an extrusion of a sketch on a cylinder face".into()));
+    }
     let mut loops = profile_loops(feature, s)?;
     // Each loop with the name its caps would be named by: its lowest point.
     let inside = |a: &Found, b: &Found| a.ring.winding(b.ring.points[0]) != 0;

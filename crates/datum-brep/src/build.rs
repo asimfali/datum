@@ -3,7 +3,7 @@
 use rayon::prelude::*;
 
 use crate::id::IdMap;
-use crate::{Arc, Body, BrepError, Edge, Face, HalfEdge, Ix, Loop, Surface, TopoId, Vertex, in_order};
+use crate::{Body, BrepError, Curve, Edge, Face, HalfEdge, Ix, Loop, Surface, TopoId, Vertex, in_order};
 
 /// A face to build: `loops[0]` is the outer boundary, counterclockwise seen from outside the
 /// body; further loops are holes, clockwise.
@@ -14,13 +14,13 @@ pub struct FaceSpec {
     pub loops: Vec<Vec<TopoId>>,
 }
 
-/// An arc edge to build: the arc turns counterclockwise about its axis from vertex `from` to
-/// vertex `to`. Edges without one are straight.
+/// A curved edge to build: the curve runs from vertex `from` to vertex `to` (an arc
+/// counterclockwise about its axis). Edges without one are straight.
 #[derive(Clone, Copy, Debug)]
-pub struct ArcSpec {
+pub struct CurveSpec {
     pub from: TopoId,
     pub to: TopoId,
-    pub arc: Arc,
+    pub curve: Curve,
 }
 
 /// Builds a body in canonical order: vertices, faces and edges sorted by ID, each loop starting
@@ -29,26 +29,29 @@ pub struct ArcSpec {
 /// Structural errors found while linking are returned; the full [`Body::validate`] runs once per
 /// operation in `datum-ops` (debug builds).
 pub fn build(vertices: Vec<Vertex>, faces: Vec<FaceSpec>) -> Result<Body, BrepError> {
-    build_with_arcs(vertices, faces, Vec::new())
+    build_with_curves(vertices, faces, Vec::new())
 }
 
-/// [`build`] with arc edges: each of `arcs` names an edge of the faces by its two vertices.
-pub fn build_with_arcs(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>, arcs: Vec<ArcSpec>) -> Result<Body, BrepError> {
+/// [`build`] with curved edges: each of `curves` names an edge of the faces by its two vertices.
+pub fn build_with_curves(mut vertices: Vec<Vertex>, faces: Vec<FaceSpec>, curves: Vec<CurveSpec>) -> Result<Body, BrepError> {
     // IDs are unique (checked below), so the parallel unstable sorts are deterministic.
     vertices.par_sort_unstable_by_key(|v| v.id);
     if let Some(w) = vertices.windows(2).find(|w| w[0].id == w[1].id) {
         return Err(BrepError::Invalid(format!("duplicate vertex {:?}", w[0].id)));
     }
-    faces.par_sort_unstable_by_key(|f| f.id);
-    if let Some(w) = faces.windows(2).find(|w| w[0].id == w[1].id) {
-        return Err(BrepError::Invalid(format!("duplicate face {:?}", w[0].id)));
+    // Faces are large (a surface and loops): their order is sorted, not they.
+    let mut order: Vec<(TopoId, Ix)> = faces.iter().enumerate().map(|(i, f)| (f.id, i as Ix)).collect();
+    order.par_sort_unstable();
+    if let Some(w) = order.windows(2).find(|w| w[0].0 == w[1].0) {
+        return Err(BrepError::Invalid(format!("duplicate face {:?}", w[0].0)));
     }
+    let faces: Vec<&FaceSpec> = order.iter().map(|&(_, i)| &faces[i as usize]).collect();
     // Lookups only, never iterated: the map's order cannot reach the body.
     let index: IdMap<Ix> = vertices.iter().enumerate().map(|(i, v)| (v.id, i as Ix)).collect();
     let vix = |id: TopoId| -> Result<Ix, BrepError> { index.get(&id).copied().ok_or_else(|| BrepError::Invalid(format!("unknown vertex {id:?}"))) };
 
     // Every face's loops as vertex indices in canonical order, in parallel; then laid out.
-    let canonical = |spec: &FaceSpec| -> Result<Vec<Vec<Ix>>, BrepError> {
+    let canonical = |spec: &&FaceSpec| -> Result<Vec<Vec<Ix>>, BrepError> {
         let (outer, holes) = spec.loops.split_first().ok_or_else(|| BrepError::Degenerate(format!("face {:?} has no loops", spec.id)))?;
         let mut holes: Vec<Vec<TopoId>> = holes.iter().map(|l| rotate_to_min(l)).collect();
         holes.sort_unstable_by_key(|l| l.first().copied());
@@ -97,9 +100,9 @@ pub fn build_with_arcs(mut vertices: Vec<Vertex>, mut faces: Vec<FaceSpec>, arcs
         .map(|(f, (spec, lps))| Face { id: spec.id, surface: spec.surface, first_loop: first_loop[f], loop_count: lps.len() as Ix, hash: [0; 32] })
         .collect();
 
-    let mut body = Body { vertices, half_edges, edges: Vec::new(), loops, faces: out_faces, arcs: Vec::new(), hash: [0; 32] };
+    let mut body = Body { vertices, half_edges, edges: Vec::new(), loops, faces: out_faces, curves: Vec::new(), hash: [0; 32] };
     link_edges(&mut body)?;
-    attach_arcs(&mut body, arcs)?;
+    attach_curves(&mut body, curves)?;
     body.rehash();
     Ok(body)
 }
@@ -135,7 +138,7 @@ fn link_edges(body: &mut Body) -> Result<(), BrepError> {
     // Vertex indices follow vertex IDs, so the first use runs from the lower ID.
     let mut edges: Vec<Edge> = uses
         .par_chunks(2)
-        .map(|c| Edge { id: TopoId::derive("edge").id(vid(body, c[0].0)).id(vid(body, c[0].1)).finish(), half: c[0].3, arc: None })
+        .map(|c| Edge { id: TopoId::derive("edge").id(vid(body, c[0].0)).id(vid(body, c[0].1)).finish(), half: c[0].3, curve: None })
         .collect();
     for c in uses.chunks(2) {
         body.half_edges[c[0].3 as usize].twin = c[1].3;
@@ -151,29 +154,32 @@ fn link_edges(body: &mut Body) -> Result<(), BrepError> {
     Ok(())
 }
 
-/// Puts each arc on its edge, turned to run from the edge's lower-ID vertex.
-fn attach_arcs(body: &mut Body, mut arcs: Vec<ArcSpec>) -> Result<(), BrepError> {
-    if arcs.is_empty() {
+/// Puts each curve on its edge, turned to run from the edge's lower-ID vertex.
+fn attach_curves(body: &mut Body, curves: Vec<CurveSpec>) -> Result<(), BrepError> {
+    if curves.is_empty() {
         return Ok(());
     }
-    let key = |a: &ArcSpec| (a.from.min(a.to), a.from.max(a.to));
-    arcs.sort_unstable_by_key(key);
-    if let Some(w) = arcs.windows(2).find(|w| key(&w[0]) == key(&w[1])) {
-        return Err(BrepError::Invalid(format!("two arcs between {:?} and {:?}", w[0].from, w[0].to)));
+    // Each curve's edge, by its two vertex IDs: the keys are sorted, not the large curves.
+    let mut keys: Vec<((TopoId, TopoId), Ix)> = curves.iter().enumerate().map(|(i, a)| ((a.from.min(a.to), a.from.max(a.to)), i as Ix)).collect();
+    keys.par_sort_unstable();
+    if let Some(w) = keys.windows(2).find(|w| w[0].0 == w[1].0) {
+        let (a, b) = w[0].0;
+        return Err(BrepError::Invalid(format!("two curves between {a:?} and {b:?}")));
     }
+    body.curves.reserve_exact(curves.len());
     let mut found = 0;
     for e in 0..body.edges.len() {
         let he = &body.half_edges[body.edges[e].half as usize];
         let ends = (body.vertices[he.origin as usize].id, body.vertices[body.half_edges[he.twin as usize].origin as usize].id);
-        if let Ok(k) = arcs.binary_search_by_key(&ends, key) {
-            let a = &arcs[k];
-            body.edges[e].arc = Some(body.arcs.len() as Ix);
-            body.arcs.push(if a.from == ends.0 { a.arc } else { a.arc.reversed() });
+        if let Ok(k) = keys.binary_search_by_key(&ends, |k| k.0) {
+            let a = &curves[keys[k].1 as usize];
+            body.edges[e].curve = Some(body.curves.len() as Ix);
+            body.curves.push(if a.from == ends.0 { a.curve } else { a.curve.reversed() });
             found += 1;
         }
     }
-    if found != arcs.len() {
-        return Err(BrepError::Invalid("an arc names no edge of the faces".into()));
+    if found != curves.len() {
+        return Err(BrepError::Invalid("a curve names no edge of the faces".into()));
     }
     Ok(())
 }

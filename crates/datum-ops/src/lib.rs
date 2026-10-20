@@ -18,7 +18,7 @@ use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use sketch::{Placed, SketchPlane, extrude_sketch, place};
+pub use sketch::{Developed, Placed, SketchPlane, extrude_sketch, place};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -52,13 +52,18 @@ pub enum Op {
     /// `origin + (i·step[0], j·step[1])` with height `heights[j·count[0] + i]`. No inputs.
     Terrain { origin: Vec2, step: [f64; 2], count: [u32; 2], heights: Vec<f64>, base: f64 },
     /// A sketch (points, lines, constraints), solved and placed: on the XY plane, on `plane`, or
-    /// on the face with ID `face` of the input body. No input, or the body holding the face.
+    /// on the face with ID `face` of the input body. On a cylinder face of a rolled sheet, the
+    /// sketch lies in the sheet's development, lengths along its neutral layer at `k_factor` of
+    /// the thickness from the inside (0.5: the middle): coordinates of the flat blank. No input,
+    /// or the body holding the face.
     Sketch {
         sketch: datum_sketch::Sketch,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         plane: Option<SketchPlane>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
     },
     /// The closed profiles of the input sketch swept from `z0` to `z1` along its normal; a loop
     /// inside another is a hole. One input: a sketch.
@@ -182,7 +187,12 @@ impl Op {
             Self::PatternGrid { count, step } => {
                 Self::PatternGrid { count: [r(&count[0], "count")?, r(&count[1], "count")?], step: [r3(&step[0], "step")?, r3(&step[1], "step")?] }
             }
-            Self::Sketch { sketch, plane, face } => Self::Sketch { sketch: sketch.resolve(lookup)?, plane: *plane, face: face.clone() },
+            Self::Sketch { sketch, plane, face, k_factor } => Self::Sketch {
+                sketch: sketch.resolve(lookup)?,
+                plane: *plane,
+                face: face.clone(),
+                k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()?,
+            },
             Self::Extrude { z0, z1 } => Self::Extrude { z0: r(z0, "z0")?, z1: r(z1, "z1")? },
             Self::Cut { pattern } => Self::Cut {
                 pattern: match pattern {
@@ -276,13 +286,13 @@ impl Op {
             Self::Terrain { origin, step, count, heights, base } => {
                 terrain(feature, &Grid { origin: *origin, step: *step, count: *count, heights }, *base)?
             }
-            Self::Sketch { sketch, plane, face } => {
+            Self::Sketch { sketch, plane, face, k_factor } => {
                 let host = match (inputs.first(), face) {
                     (Some(b), Some(f)) => Some((*b, f.as_str())),
                     (None, None) => None,
                     _ => return Err(BrepError::Sketch("a sketch on a face takes the body as its input and the face ID as `face`".into())),
                 };
-                return Ok(Value::Sketch(place(sketch, plane.as_ref(), host)?));
+                return Ok(Value::Sketch(place(sketch, plane.as_ref(), host, k_factor.as_ref().map(num).transpose()?)?));
             }
             Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, num(z0)?, num(z1)?)?,
             Self::Cut { pattern } => {
