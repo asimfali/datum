@@ -33,11 +33,12 @@ pub struct FaceMesh {
 
 /// Faces are triangulated in parallel and concatenated in face order.
 pub fn tessellate(body: &Body) -> Result<Mesh, BrepError> {
+    let chord = if body.has_curves() { body.chord() } else { 0.0 };
     // A plane face without arcs is its vertices; only curved ones bring points of their own.
     let faces = in_order(
         (0..body.faces().len() as Ix)
             .into_par_iter()
-            .map(|f| if curved(body, f) { face_mesh(body, f, false).map(|m| Err(Box::new(m))) } else { triangulate_face(body, f).map(Ok) }),
+            .map(|f| if curved(body, f) { face_mesh(body, f, false, chord).map(|m| Err(Box::new(m))) } else { triangulate_face(body, f).map(Ok) }),
     )?;
     let mut positions: Vec<Vec3> = body.vertices().iter().map(|v| v.point).collect();
     let mut triangles = Vec::new();
@@ -111,10 +112,11 @@ fn plane_triangles(body: &Body, f: Ix, delaunay: bool) -> Result<(Vec<Ix>, Vec<[
     Ok((ids, tris))
 }
 
-/// Face `f` as triangles, flipped to constrained Delaunay if `delaunay`. The sweep leaves slivers
+/// Face `f` as triangles, flipped to constrained Delaunay if `delaunay`, arcs as chords at most
+/// `chord` off (see [`Body::chord`]). The sweep leaves slivers
 /// across the whole face, which a GPU fills slowly (a perforated panel close up: 290 ms a
 /// frame); Boolean operations do not mind them and skip the flips, which cost more than the sweep.
-pub fn face_mesh(body: &Body, f: Ix, delaunay: bool) -> Result<FaceMesh, BrepError> {
+pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceMesh, BrepError> {
     let face = &body.faces()[f as usize];
     if let Surface::Plane(plane) = face.surface
         && !curved(body, f)
@@ -148,7 +150,7 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool) -> Result<FaceMesh, BrepErr
                 let sweep = arc.sweep(u, v);
                 // On a cylinder an arc runs across the axis: θ turns with it.
                 let turn = frame.as_ref().map_or(0.0, |fr| sweep * fr.axis.dot(arc.axis).signum());
-                let inner: Vec<Vec3> = arc.inner_points(u, v).collect();
+                let inner: Vec<Vec3> = arc.inner_points(u, v, chord).collect();
                 let n = inner.len() + 1;
                 for (k, p) in inner.into_iter().enumerate() {
                     points.push(p);
@@ -210,15 +212,15 @@ impl Projection {
     }
 }
 
-/// Points of edge `e` from its lower-ID vertex to the other: its ends, and points along it if it
-/// is an arc.
-pub fn edge_points(body: &Body, e: Ix) -> Vec<Vec3> {
+/// Points of edge `e` from its lower-ID vertex to the other: its ends, and points along it, at
+/// most `chord` off, if it is an arc.
+pub fn edge_points(body: &Body, e: Ix, chord: f64) -> Vec<Vec3> {
     let edge = &body.edges()[e as usize];
     let he = &body.half_edges()[edge.half as usize];
     let (u, v) = (body.point(he.origin), body.point(body.half_edges()[he.twin as usize].origin));
     let mut pts = vec![u];
     if let Some(arc) = &body.edge_arc(edge) {
-        pts.extend(arc.inner_points(u, v));
+        pts.extend(arc.inner_points(u, v, chord));
     }
     pts.push(v);
     pts

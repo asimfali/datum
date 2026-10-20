@@ -28,12 +28,13 @@ pub struct BodyMesh {
 
 impl BodyMesh {
     pub fn new(body: &Body) -> Self {
+        let chord = if body.has_curves() { body.chord() } else { 0.0 };
         let f32s = |n: Vec3| [n.x as f32, n.y as f32, n.z as f32];
         let faces: Vec<Self> = (0..body.faces().len() as Ix)
             .into_par_iter()
             .map(|f| {
                 // A face that cannot be triangulated is left out of the picture, not the program.
-                let Ok(m) = face_mesh(body, f, true) else { return Self { triangles: Vec::new(), normals: Vec::new(), edges: Vec::new() } };
+                let Ok(m) = face_mesh(body, f, true, chord) else { return Self { triangles: Vec::new(), normals: Vec::new(), edges: Vec::new() } };
                 let corners = |t: &[u32; 3], v: &[Vec3]| t.map(|k| v[k as usize]);
                 Self {
                     triangles: m.triangles.iter().map(|t| corners(t, &m.points)).collect(),
@@ -52,7 +53,7 @@ impl BodyMesh {
         // threshold; the model never sees it.
         let normal = |h: Ix, p: Vec3| body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface.normal_at(p);
         for (e, edge) in body.edges().iter().enumerate() {
-            let pts = edge_points(body, e as Ix);
+            let pts = edge_points(body, e as Ix, chord);
             let p = pts[0];
             if normal(edge.half, p).dot(normal(body.half_edges()[edge.half as usize].twin, p)) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
@@ -145,13 +146,14 @@ pub struct Part {
     pub chunks: Vec<Chunk>,
 }
 
-/// Primitives close together, by their bounds (relative to the anchor) and where their indices end;
-/// they start where the previous chunk's end.
+/// Primitives close together, by their bounds (relative to the anchor) and where their indices
+/// and their own vertices end; they start where the previous chunk's end.
 #[derive(Clone, Copy, Debug)]
 pub struct Chunk {
     pub lo: [f32; 3],
     pub hi: [f32; 3],
     pub end: u32,
+    pub vertex_end: u32,
 }
 
 /// Primitives per chunk: small enough to leave out most of a large model close up, large enough
@@ -168,7 +170,7 @@ impl Part {
         let chunks: Vec<(Vec<u8>, Vec<u32>, Chunk)> = order
             .par_chunks(CHUNK)
             .map(|run| {
-                let mut c = Chunk { lo: [f32::INFINITY; 3], hi: [f32::NEG_INFINITY; 3], end: 0 };
+                let mut c = Chunk { lo: [f32::INFINITY; 3], hi: [f32::NEG_INFINITY; 3], end: 0, vertex_end: 0 };
                 let (mut vertices, mut indices) = (Vec::new(), Vec::with_capacity(run.len() * K));
                 // Lookups only: the order of vertices is the order of corners.
                 let mut seen: HashMap<[u8; N], u32> = HashMap::with_capacity(run.len() * K);
@@ -195,6 +197,7 @@ impl Part {
             part.vertices.extend_from_slice(&vertices);
             part.indices.extend(indices.iter().map(|i| i + base));
             c.end = part.indices.len() as u32;
+            c.vertex_end = (part.vertices.len() / N) as u32;
             part.chunks.push(c);
         }
         part

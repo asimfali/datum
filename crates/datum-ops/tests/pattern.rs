@@ -165,7 +165,7 @@ fn delaunay_removes_slivers() {
         })
     };
     let sweep = triangulate_face(&r, f).unwrap();
-    let m = face_mesh(&r, f, true).unwrap();
+    let m = face_mesh(&r, f, true, 0.0).unwrap();
     let fine: Vec<[u32; 3]> = m.triangles.iter().map(|t| t.map(|k| m.vertices[k as usize])).collect();
     assert_eq!(fine.len(), sweep.len());
     let ((a0, p0), (a1, p1)) = (measure(&sweep), measure(&fine));

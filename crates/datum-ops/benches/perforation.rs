@@ -1,13 +1,14 @@
 //! C3 (PAINS P4): a 100 × 100 grid of pins cut through a plate in one Boolean operation, and the
 //! tessellation of the drilled plate. Then the way a sheet is usually punched: square punches on
 //! the axes, a plain difference, the punch as thick as the sheet (every face meets a face of the
-//! sheet) or longer. Each on one thread and on all threads.
+//! sheet) or longer; and round holes of the same pitch cut by a sketch profile (M5b). Each on one
+//! thread and on all threads.
 #![allow(clippy::expect_used)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use datum_brep::{Body, TopoId, cuboid, tessellate};
 use datum_math::{Rigid, Vec3};
-use datum_ops::{BooleanKind, boolean, pattern_grid};
+use datum_ops::{BooleanKind, Op, Value, boolean, pattern_grid};
 use rayon::ThreadPool;
 
 fn pools() -> Vec<(String, ThreadPool)> {
@@ -68,6 +69,27 @@ fn punched(c: &mut Criterion) {
     }
 }
 
+/// The sheet of `sheet_and_punches` with an `n × n` grid of Ø5 holes at pitch 10, cut by one
+/// circle of a sketch on its top face.
+fn round_holes(c: &mut Criterion) {
+    let n = 100;
+    let side = 10.0 * f64::from(n) + 20.0;
+    let sheet = Value::Body(cuboid(TopoId::derive("sheet").finish(), Vec3::ZERO, Vec3::new(side, side, 3.0)).expect("sheet"));
+    let top = sheet.body().and_then(|b| b.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0))).expect("top").id;
+    let json = |v: serde_json::Value| serde_json::from_value::<Op>(v).expect("op");
+    let sketch = json(
+        serde_json::json!({"op": "sketch", "face": format!("{top:?}"), "sketch": {"points": {"c": [15, 15]}, "circles": {"hole": {"center": "c", "diameter": 5}}}}),
+    );
+    let sketch = sketch.eval(TopoId::derive("holes").finish(), &[&sheet]).expect("sketch");
+    let cut = json(serde_json::json!({"op": "cut", "pattern": {"count": [n, n], "step": [[10, 0], [0, 10]]}}));
+    let mut group = c.benchmark_group("cut_round_10000");
+    group.sample_size(10);
+    for (name, pool) in pools() {
+        group.bench_function(&name, |b| b.iter(|| pool.install(|| cut.eval(TopoId::derive("cut").finish(), &[&sheet, &sketch]).expect("cut"))));
+    }
+    group.finish();
+}
+
 fn tessellate_drilled(c: &mut Criterion) {
     let (plate, pins) = plate_and_pins(100);
     let drilled = drill(&plate, &pins);
@@ -79,5 +101,5 @@ fn tessellate_drilled(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, perforation, tessellate_drilled, punched);
+criterion_group!(benches, perforation, tessellate_drilled, punched, round_holes);
 criterion_main!(benches);

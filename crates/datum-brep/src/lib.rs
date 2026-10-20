@@ -10,6 +10,7 @@ mod build;
 mod curve;
 mod id;
 mod prism;
+mod profile;
 mod terrain;
 mod tess;
 mod validate;
@@ -18,7 +19,8 @@ pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vert
 pub use build::{ArcSpec, FaceSpec, build, build_with_arcs};
 pub use curve::{Arc, Cylinder, Surface};
 pub use id::{Origin, TopoId};
-pub use prism::{ProfileArc, ProfileLoop, Region, cuboid, extrude, prism};
+pub use prism::{Region, cuboid, extrude, prism};
+pub use profile::{ProfileArc, ProfileLoop};
 pub use terrain::{Grid, terrain};
 pub use tess::{FaceMesh, Mesh, Triangles, edge_points, face_mesh, tessellate, triangulate_face};
 
