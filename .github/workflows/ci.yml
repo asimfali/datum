@@ -1,9 +1,18 @@
 name: CI
 
+# Actions minutes are limited (2000 a month, Windows counted double), so CI runs once per merge,
+# not on every push to a pull request: before a PR the same checks run locally, on Linux and on
+# Windows. A PR can still be checked by hand (workflow_dispatch). Documentation changes skip CI.
 on:
   push:
     branches: [main]
-  pull_request:
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+# A newer push to main supersedes a run still in progress.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,5 +31,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache keys on the dependencies only; a profile change (opt-level of the
+          # dependencies) then restored a "full match" built with other flags, and every
+          # dependency was rebuilt on every run without the cache ever being refreshed.
+          key: ${{ hashFiles('Cargo.toml') }}
       - run: scripts/check.sh
         shell: bash
