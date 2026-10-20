@@ -1,0 +1,333 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "radius": 700.0,
+    "t": 3.0,
+    "length": 1100.0,
+    "k": 0.44,
+    "nx": 100,
+    "ny": 100,
+    "hole": 5,
+    "pitch": 10,
+    "margin": 15
+  },
+  "features": [
+    {
+      "name": "profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "a": [
+            500,
+            0
+          ],
+          "b": [
+            503,
+            0
+          ],
+          "c": [
+            0,
+            503
+          ],
+          "d": [
+            0,
+            500
+          ]
+        },
+        "lines": {
+          "start": {
+            "from": "a",
+            "to": "b"
+          },
+          "end": {
+            "from": "c",
+            "to": "d"
+          },
+          "base": {
+            "from": "o",
+            "to": "a",
+            "construction": true
+          },
+          "side": {
+            "from": "o",
+            "to": "d",
+            "construction": true
+          }
+        },
+        "arcs": {
+          "outer": {
+            "center": "o",
+            "from": "b",
+            "to": "c"
+          },
+          "inner": {
+            "center": "o",
+            "from": "a",
+            "to": "d"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "horizontal",
+            "line": "base"
+          },
+          {
+            "type": "horizontal",
+            "line": "start"
+          },
+          {
+            "type": "vertical",
+            "line": "side"
+          },
+          {
+            "type": "vertical",
+            "line": "end"
+          },
+          {
+            "type": "radius",
+            "arc": "inner",
+            "value": "radius"
+          },
+          {
+            "type": "radius",
+            "arc": "outer",
+            "value": "radius + t"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sheet",
+      "op": "extrude",
+      "inputs": [
+        "profile"
+      ],
+      "z0": 0,
+      "z1": "length"
+    },
+    {
+      "name": "holes",
+      "op": "sketch",
+      "inputs": [
+        "sheet"
+      ],
+      "face": "5dbe804f4d82b3ba67524b27b0a1b656",
+      "k_factor": "k",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "m": [
+            15,
+            0
+          ],
+          "c": [
+            15,
+            15
+          ]
+        },
+        "lines": {
+          "along": {
+            "from": "o",
+            "to": "m",
+            "construction": true
+          },
+          "up": {
+            "from": "m",
+            "to": "c",
+            "construction": true
+          }
+        },
+        "circles": {
+          "hole": {
+            "center": "c",
+            "diameter": "hole"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "horizontal",
+            "line": "along"
+          },
+          {
+            "type": "vertical",
+            "line": "up"
+          },
+          {
+            "type": "length",
+            "line": "along",
+            "value": "margin"
+          },
+          {
+            "type": "length",
+            "line": "up",
+            "value": "margin"
+          }
+        ]
+      }
+    },
+    {
+      "name": "perforated",
+      "op": "cut",
+      "inputs": [
+        "sheet",
+        "holes"
+      ],
+      "pattern": {
+        "count": [
+          "nx",
+          "ny"
+        ],
+        "step": [
+          [
+            "pitch",
+            0
+          ],
+          [
+            0,
+            "pitch"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "slots",
+      "op": "sketch",
+      "inputs": [
+        "perforated"
+      ],
+      "face": "e8db53c70c37a19c8de5d1a716d13b45",
+      "k_factor": "k",
+      "sketch": {
+        "points": {
+          "pa": [
+            42.121320344,
+            -1047.121320344
+          ],
+          "pb": [
+            63.334523779,
+            -1025.908116908
+          ],
+          "pc": [
+            59.091883092,
+            -1021.665476221
+          ],
+          "pd": [
+            37.878679656,
+            -1042.878679656
+          ],
+          "pl": [
+            40.0,
+            -1045.0
+          ],
+          "pr": [
+            61.213203436,
+            -1023.786796564
+          ],
+          "qa": [
+            87.878679656,
+            -1047.121320344
+          ],
+          "qb": [
+            109.091883092,
+            -1068.334523779
+          ],
+          "qc": [
+            113.334523779,
+            -1064.091883092
+          ],
+          "qd": [
+            92.121320344,
+            -1042.878679656
+          ],
+          "ql": [
+            90.0,
+            -1045.0
+          ],
+          "qr": [
+            111.213203436,
+            -1066.213203436
+          ]
+        },
+        "lines": {
+          "plow": {
+            "from": "pa",
+            "to": "pb"
+          },
+          "phigh": {
+            "from": "pc",
+            "to": "pd"
+          },
+          "qlow": {
+            "from": "qa",
+            "to": "qb"
+          },
+          "qhigh": {
+            "from": "qc",
+            "to": "qd"
+          }
+        },
+        "arcs": {
+          "pright": {
+            "center": "pr",
+            "from": "pb",
+            "to": "pc"
+          },
+          "pleft": {
+            "center": "pl",
+            "from": "pd",
+            "to": "pa"
+          },
+          "qright": {
+            "center": "qr",
+            "from": "qb",
+            "to": "qc"
+          },
+          "qleft": {
+            "center": "ql",
+            "from": "qd",
+            "to": "qa"
+          }
+        }
+      }
+    },
+    {
+      "name": "slotted",
+      "op": "cut",
+      "inputs": [
+        "perforated",
+        "slots"
+      ],
+      "pattern": {
+        "count": [
+          6,
+          1
+        ],
+        "step": [
+          [
+            100,
+            0
+          ],
+          [
+            0,
+            50
+          ]
+        ]
+      }
+    }
+  ]
+}

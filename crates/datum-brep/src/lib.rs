@@ -16,8 +16,8 @@ mod tess;
 mod validate;
 
 pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vertex};
-pub use build::{ArcSpec, FaceSpec, build, build_with_arcs};
-pub use curve::{Arc, Cylinder, Surface};
+pub use build::{CurveSpec, FaceSpec, build, build_with_curves};
+pub use curve::{Arc, Curve, Cylinder, Development, Rolled, Surface};
 pub use id::{Origin, TopoId};
 pub use prism::{Region, cuboid, extrude, prism};
 pub use profile::{ProfileArc, ProfileLoop};

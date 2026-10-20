@@ -96,11 +96,23 @@ impl Scene {
                 Value::Body(b) => s.bodies.push(cache.get(b)),
                 Value::Sketch(p) => {
                     let [o, x, y, _] = p.frame;
-                    let at = |name: &str| p.solved.points.get(name).map(|q| o + x * q.x + y * q.y);
-                    s.sketch_lines.extend(p.lines.values().filter_map(|l| Some([at(&l.from)?, at(&l.to)?])));
-                    // Arcs and circles as chords, in the sketch's plane.
-                    let place = |q: Vec2| o + x * q.x + y * q.y;
+                    // In the sketch's plane, or on its cylinder face.
+                    let place = |q: Vec2| match &p.developed {
+                        None => o + x * q.x + y * q.y,
+                        Some(d) => d.point(q, d.radius),
+                    };
                     let pts = &p.solved.points;
+                    // On a cylinder face a line bends with the face: 64 chords a turn.
+                    for l in p.lines.values() {
+                        let (Some(&a), Some(&b)) = (pts.get(&l.from), pts.get(&l.to)) else { continue };
+                        let n = p.developed.as_ref().map_or(1, |d| ((b.x - a.x).abs() / d.dev.neutral / TAU * 64.0).ceil().max(1.0) as usize);
+                        let at = |k: usize| {
+                            let t = k as f64 / n as f64;
+                            place(Vec2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+                        };
+                        s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
+                    }
+                    // Arcs and circles as chords.
                     let arcs = p.arcs.values().filter_map(|a| {
                         let (c, f, t) = (*pts.get(&a.center)?, *pts.get(&a.from)?, *pts.get(&a.to)?);
                         let start = libm::atan2(f.y - c.y, f.x - c.x);

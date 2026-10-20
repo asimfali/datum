@@ -4,7 +4,7 @@
 use datum_math::{Sign, Vec2, Vec3, orient2d};
 
 use crate::profile::touch;
-use crate::{Arc, ArcSpec, Body, BrepError, Cylinder, FaceSpec, Plane, ProfileLoop, Surface, TopoId, Vertex, build_with_arcs};
+use crate::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Plane, ProfileLoop, Surface, TopoId, Vertex, build_with_curves};
 
 /// A region: an outer loop, the holes in it, and the IDs of its start and end caps.
 #[derive(Clone, Debug)]
@@ -84,7 +84,11 @@ pub fn extrude(regions: &[Region], z0: f64, z1: f64) -> Result<Body, BrepError> 
                         let radius = (a.x - arc.center.x).hypot(a.y - arc.center.y);
                         let axis = Vec3::new(0.0, 0.0, if arc.ccw { 1.0 } else { -1.0 });
                         for (layer, z) in [(0, z0), (1, z1)] {
-                            arcs.push(ArcSpec { from: v[layer], to: w[layer], arc: Arc { center: base(arc.center, z), axis, radius } });
+                            arcs.push(CurveSpec {
+                                from: v[layer],
+                                to: w[layer],
+                                curve: Curve::Arc(Arc { center: base(arc.center, z), axis, radius }),
+                            });
                         }
                         // The loop has the region on its left: an arc turning left bulges out.
                         Surface::Cylinder(Cylinder { origin: base(arc.center, z0), axis: Vec3::new(0.0, 0.0, 1.0), radius, convex: arc.ccw })
@@ -94,7 +98,7 @@ pub fn extrude(regions: &[Region], z0: f64, z1: f64) -> Result<Body, BrepError> 
             }
         }
     }
-    build_with_arcs(vertices, faces, arcs)
+    build_with_curves(vertices, faces, arcs)
 }
 
 /// Prism over `polygon` (either orientation) from `z0` to `z1`, with IDs derived from `feature`.
