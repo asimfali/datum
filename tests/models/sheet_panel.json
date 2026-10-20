@@ -1,0 +1,220 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "t": 1.5,
+    "r": 2,
+    "k": 0.44,
+    "width": 1000,
+    "hole": 8,
+    "nx": 20,
+    "ny": 40,
+    "pitch": 24
+  },
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            20,
+            0
+          ],
+          "c": [
+            50,
+            30
+          ],
+          "d": [
+            550,
+            30
+          ],
+          "e": [
+            550,
+            15
+          ]
+        },
+        "lines": {
+          "lip": {
+            "from": "a",
+            "to": "b"
+          },
+          "slope": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "c",
+            "to": "d"
+          },
+          "flange": {
+            "from": "d",
+            "to": "e"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "a"
+          },
+          {
+            "type": "horizontal",
+            "line": "lip"
+          },
+          {
+            "type": "horizontal",
+            "line": "top"
+          },
+          {
+            "type": "vertical",
+            "line": "flange"
+          },
+          {
+            "type": "length",
+            "line": "lip",
+            "value": 20
+          },
+          {
+            "type": "length",
+            "line": "top",
+            "value": 500
+          },
+          {
+            "type": "length",
+            "line": "flange",
+            "value": 15
+          },
+          {
+            "type": "angle",
+            "lines": [
+              "lip",
+              "slope"
+            ],
+            "degrees": 45
+          },
+          {
+            "type": "length",
+            "line": "slope",
+            "value": "30 * sqrt(2)"
+          }
+        ]
+      }
+    },
+    {
+      "name": "panel",
+      "op": "sheet",
+      "inputs": [
+        "path"
+      ],
+      "thickness": "t",
+      "radius": "r",
+      "side": "left",
+      "z0": 0,
+      "z1": "width"
+    },
+    {
+      "name": "holes",
+      "op": "sketch",
+      "inputs": [
+        "panel"
+      ],
+      "face": "a74f070c9540456ba4eff18f504ddc1d",
+      "sketch": {
+        "points": {
+          "h": [
+            80,
+            -30
+          ]
+        },
+        "circles": {
+          "hole": {
+            "center": "h",
+            "diameter": "hole"
+          }
+        }
+      }
+    },
+    {
+      "name": "perforated",
+      "op": "cut",
+      "inputs": [
+        "panel",
+        "holes"
+      ],
+      "pattern": {
+        "count": [
+          "nx",
+          "ny"
+        ],
+        "step": [
+          [
+            "pitch",
+            0
+          ],
+          [
+            0,
+            "-pitch"
+          ]
+        ]
+      }
+    },
+    {
+      "name": "lip_holes",
+      "op": "sketch",
+      "inputs": [
+        "perforated"
+      ],
+      "face": "51e275807e62592396a1b3d31435de42",
+      "sketch": {
+        "points": {
+          "h": [
+            8,
+            -100
+          ]
+        },
+        "circles": {
+          "hole": {
+            "center": "h",
+            "diameter": 6
+          }
+        }
+      }
+    },
+    {
+      "name": "fixing",
+      "op": "cut",
+      "inputs": [
+        "perforated",
+        "lip_holes"
+      ],
+      "pattern": {
+        "count": [
+          1,
+          5
+        ],
+        "step": [
+          [
+            0,
+            0
+          ],
+          [
+            0,
+            -200
+          ]
+        ]
+      }
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "inputs": [
+        "fixing"
+      ],
+      "face": "a74f070c9540456ba4eff18f504ddc1d",
+      "k_factor": "k"
+    }
+  ]
+}

@@ -770,6 +770,7 @@ dependencies = [
  "datum-graph",
  "datum-math",
  "datum-model",
+ "datum-ops",
  "eframe",
  "egui",
  "egui-wgpu",

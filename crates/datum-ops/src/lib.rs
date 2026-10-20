@@ -5,6 +5,7 @@ mod boolean;
 mod bounds;
 mod cut;
 mod pattern;
+mod sheet;
 mod sketch;
 mod unfold;
 
@@ -19,6 +20,7 @@ use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+pub use sheet::{Sheet, Side, sheet};
 pub use sketch::{Developed, Placed, SketchPlane, extrude_sketch, place};
 pub use unfold::{Flat, FlatPiece, unfold};
 
@@ -79,10 +81,23 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pattern: Option<CutPattern>,
     },
-    /// The flat blank of a rolled sheet: the outline and the cuts of the cylinder face with ID
-    /// `face` in the sheet's development, its neutral layer at `k_factor` of the thickness (the
-    /// K-factor the cuts were sketched with), seen from outside, its corner at the origin. Exported
-    /// as DXF. One input: the body.
+    /// Sheet metal from the input sketch's path: its lines (an open chain, from point `start` or
+    /// else from its end named first) given `thickness` on `side` of the path (looking along it),
+    /// bent at every corner with inner `radius`, and extruded from `z0` to `z1` along the sketch's
+    /// normal. One input: a sketch.
+    Sheet {
+        thickness: Num,
+        radius: Num,
+        side: Side,
+        z0: Num,
+        z1: Num,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        start: Option<String>,
+    },
+    /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
+    /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
+    /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
+    /// from that face's side, its corner at the origin. Exported as DXF. One input: the body.
     Unfold { face: String, k_factor: Num },
 }
 
@@ -177,6 +192,7 @@ impl Op {
             Self::Extrude { .. } => "extrude",
             Self::Cut { .. } => "cut",
             Self::Unfold { .. } => "unfold",
+            Self::Sheet { .. } => "sheet",
         }
     }
 
@@ -185,7 +201,7 @@ impl Op {
         match self {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
             Self::Sketch { .. } => 0..=1,
-            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Extrude { .. } | Self::Unfold { .. } => 1..=1,
+            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Extrude { .. } | Self::Unfold { .. } | Self::Sheet { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
             Self::Cut { .. } => 2..=2,
         }
@@ -221,6 +237,14 @@ impl Op {
                 },
             },
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
+            Self::Sheet { thickness, radius, side, z0, z1, start } => Self::Sheet {
+                thickness: r(thickness, "thickness")?,
+                radius: r(radius, "radius")?,
+                side: *side,
+                z0: r(z0, "z0")?,
+                z1: r(z1, "z1")?,
+                start: start.clone(),
+            },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
     }
@@ -265,6 +289,10 @@ impl Op {
                 num(value(k_factor));
                 h.update(face.as_bytes());
             }
+            // `Debug` spells every field exactly, as for a sketch.
+            Self::Sheet { .. } => {
+                h.update(format!("{self:?}").as_bytes());
+            }
         }
     }
 
@@ -274,11 +302,11 @@ impl Op {
         if !self.arity().contains(&values.len()) {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
         }
-        // Every operation but `extrude` and `cut` takes bodies; a cut takes a body and a sketch.
+        // Every operation but `extrude`, `sheet` and `cut` takes bodies; a cut takes a body and a sketch.
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
-            Self::Extrude { .. } => Vec::new(),
+            Self::Extrude { .. } | Self::Sheet { .. } => Vec::new(),
             Self::Cut { .. } => {
                 vec![values[0].body().ok_or_else(|| BrepError::Sketch("cut takes a body first, then a sketch on one of its faces".into()))?]
             }
@@ -318,6 +346,10 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, num(z0)?, num(z1)?)?,
+            Self::Sheet { thickness, radius, side, z0, z1, start } => {
+                let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
+                sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
+            }
             Self::Cut { pattern } => {
                 let grid = match pattern {
                     None => ProfileGrid::ONE,
