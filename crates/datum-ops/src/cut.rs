@@ -172,7 +172,7 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed, grid: ProfileGrid) -
                         Surface::Plane(Plane { origin: at(a, 0.0), normal: z.cross(d) })
                     }
                     Some(arc) => {
-                        let radius = (a.x - arc.center.x).hypot(a.y - arc.center.y);
+                        let radius = libm::hypot(a.x - arc.center.x, a.y - arc.center.y);
                         let axis = if arc.ccw { *z } else { -*z };
                         for (layer, depth) in [(0, 0.0), (1, bottom)] {
                             let arc = Arc { center: at(arc.center, depth), axis, radius };

@@ -139,7 +139,7 @@ impl ProfileLoop {
         for (k, &p) in self.points.iter().enumerate() {
             add(p, 0.0);
             if let Some(arc) = self.arc(k) {
-                add(arc.center, (p.x - arc.center.x).hypot(p.y - arc.center.y));
+                add(arc.center, libm::hypot(p.x - arc.center.x, p.y - arc.center.y));
             }
         }
         (lo, hi)

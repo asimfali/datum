@@ -16,6 +16,8 @@ mod export;
 
 const USAGE: &str = "usage:
   datum build <model.json> [--out <file.stl|file.obj>]   evaluate a model, export its final bodies
+  datum dxf <model.json> --out <file.dxf> [--feature <name>]
+                                                        flat blank of an unfold feature as DXF (R12)
   datum determinism-check <model.json|dir>...           same result on 1, 4 and 16 threads (C4)
   datum view <model.json>                               window: the model in 3D, parameters to edit
   datum <model.json>                                    the same (a model dropped on datum.exe)
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
 fn run(args: &[String]) -> Result<(), String> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => cmd_build(rest),
+        Some((cmd, rest)) if cmd == "dxf" => cmd_dxf(rest),
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
         Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest),
         Some((cmd, rest)) if cmd == "bench-view" => cmd_bench_view(rest),
@@ -79,9 +82,10 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     println!("{:width$}  {:>16}  hash", "feature", "volume");
     for (node, r) in g.nodes().iter().zip(&e.results) {
         match r {
-            Ok(v) => match v.body() {
-                Some(b) => println!("{:width$}  {:>16.6}  {}", node.name, b.volume(), hex8(v.hash())),
-                None => println!("{:width$}  {:>16}  {}", node.name, "sketch", hex8(v.hash())),
+            Ok(v) => match (v.body(), v.flat()) {
+                (Some(b), _) => println!("{:width$}  {:>16.6}  {}", node.name, b.volume(), hex8(v.hash())),
+                (_, Some(f)) => println!("{:width$}  {:>16}  {}", node.name, format!("flat {:.1}×{:.1}", f.size.x, f.size.y), hex8(v.hash())),
+                _ => println!("{:width$}  {:>16}  {}", node.name, "sketch", hex8(v.hash())),
             },
             Err(err) => println!("{:width$}  FAILED: {err}", node.name),
         }
@@ -95,6 +99,37 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
         0 => Ok(()),
         n => Err(format!("{n} feature(s) failed")),
     }
+}
+
+/// The flat blank of an unfold feature as DXF: the one named, or the model's only one.
+fn cmd_dxf(args: &[String]) -> Result<(), String> {
+    let (model, out, feature) = match args {
+        [m, o, out] if o == "--out" => (m, out, None),
+        [m, o, out, f, name] if o == "--out" && f == "--feature" => (m, out, Some(name.as_str())),
+        _ => return Err(USAGE.into()),
+    };
+    let g = load(Path::new(model))?;
+    let e = Evaluator::default().evaluate(&g);
+    let flats: Vec<_> = g
+        .nodes()
+        .iter()
+        .zip(&e.results)
+        .filter_map(|(n, r)| Some((n.name.as_str(), r.as_ref().ok()?.flat()?)))
+        .filter(|(n, _)| feature.is_none_or(|f| f == *n))
+        .collect();
+    let (name, flat) = match flats[..] {
+        [one] => one,
+        [] => {
+            return Err(
+                feature.map_or_else(|| "the model has no unfold feature".into(), |f| format!("`{f}` is not an unfold feature that succeeded"))
+            );
+        }
+        _ => return Err(format!("unfold features: {}; choose one with --feature", flats.iter().map(|f| f.0).collect::<Vec<_>>().join(", "))),
+    };
+    std::fs::write(out, flat.dxf()).map_err(|e| format!("{out}: {e}"))?;
+    let [lines, arcs, circles] = flat.counts();
+    println!("{name}: {:.3} × {:.3} mm, {lines} lines, {arcs} arcs, {circles} circles → {out}", flat.size.x, flat.size.y);
+    Ok(())
 }
 
 fn cmd_snapshot(args: &[String]) -> Result<(), String> {

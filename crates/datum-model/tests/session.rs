@@ -126,3 +126,21 @@ fn parameters_drive_the_model() {
     assert_eq!(volume(&mut t, "row"), 3.0 * 40.0 * 40.0 * 6.0);
     assert_eq!(datum_model::to_json(t.graph()), datum_model::to_json(s.graph()));
 }
+
+/// The flat blank of the rolled reference sheet goes out as DXF; a body is no blank.
+#[test]
+fn export_dxf() {
+    let mut s = Session::default();
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/rolled_perforation.json");
+    run(&mut s, "open", json!({"path": model.display().to_string()}));
+    let blank =
+        &run(&mut s, "inspect", json!({}))["features"].as_array().unwrap().iter().find(|f| f["name"] == "blank").unwrap()["status"]["flat"].clone();
+    assert_eq!((blank["lines"].as_u64(), blank["arcs"].as_u64(), blank["circles"].as_u64()), (Some(28), Some(24), Some(100)));
+    let path = std::env::temp_dir().join(format!("datum-blank-{}.dxf", std::process::id()));
+    let r = run(&mut s, "export_dxf", json!({"name": "blank", "path": path.display().to_string()}));
+    assert_eq!(r["pieces"], 152);
+    let dxf = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(dxf.matches("\nCIRCLE\n").count(), 100);
+    assert!(s.execute("export_dxf", &json!({"name": "sheet", "path": path.display().to_string()})).unwrap_err().contains("not an unfold"));
+}

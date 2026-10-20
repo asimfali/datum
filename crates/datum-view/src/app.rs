@@ -43,6 +43,8 @@ fn title(path: Option<&std::path::Path>) -> String {
 enum Request {
     Open(PathBuf),
     SetParameter(String, Json),
+    /// Write the flat blank of an unfold feature as DXF.
+    ExportDxf(String, PathBuf),
 }
 
 /// What the background thread hands the window after each rebuild.
@@ -83,6 +85,11 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 }
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
+                }
+                Request::ExportDxf(name, path) => {
+                    if let Err(e) = session.execute("export_dxf", &json!({"name": name, "path": path.display().to_string()})) {
+                        error = Some(e);
+                    }
                 }
             }
         }
@@ -248,11 +255,25 @@ impl Viewer {
         }
         ui.separator();
         ui.heading("Features");
+        let mut export = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let name = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
                 match f["error"].as_str() {
+                    // A flat blank: its size, and its DXF for the turret press.
+                    None if f["status"]["flat"].is_object() => {
+                        let flat = &f["status"]["flat"];
+                        ui.horizontal(|ui| {
+                            let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
+                            ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
+                            if ui.button("DXF…").clicked()
+                                && let Some(p) = rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name(format!("{name}.dxf")).save_file()
+                            {
+                                export = Some((name.to_string(), p));
+                            }
+                        });
+                    }
                     None => {
                         ui.label(format!("✔ {name}  ·  {op}"));
                     }
@@ -263,6 +284,10 @@ impl Viewer {
                 }
             }
         });
+        if let Some((name, path)) = export {
+            let _ = self.requests.send(Request::ExportDxf(name, path));
+            self.busy = true;
+        }
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {

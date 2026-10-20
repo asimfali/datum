@@ -102,7 +102,7 @@ pub(crate) fn opposite_cylinder(body: &Body, f: usize) -> Option<(Ix, Cylinder)>
 /// inside. The development is the sheet's, whichever side the sketch is on: its axis and origin
 /// those of the inner face, `u` zero where that face starts turning about the axis, `v` zero
 /// across the axis from the world origin (as on a plane face).
-fn unrolled(body: &Body, f: usize, c: &Cylinder, k: f64) -> Result<Developed, BrepError> {
+pub(crate) fn unrolled(body: &Body, f: usize, c: &Cylinder, k: f64) -> Result<Developed, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("a sketch on a cylinder face: {m}"));
     if !(0.0..=1.0).contains(&k) {
         return Err(BrepError::Degenerate(format!("a K-factor lies between 0 and 1, got {k}")));
@@ -161,6 +161,15 @@ fn unit(v: Vec3) -> Option<Vec3> {
     (len > 0.0 && len.is_finite()).then(|| v * (1.0 / len))
 }
 
+/// The face of `body` with the ID written `id` (hex), and the ID. A face gone after a rebuild is
+/// a lost reference.
+pub(crate) fn find_face(body: &Body, id: &str) -> Result<(usize, TopoId), BrepError> {
+    let id = u128::from_str_radix(id, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{id}` is not a face ID")))?;
+    let f =
+        body.faces().binary_search_by_key(&id, |f| f.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the input body")))?;
+    Ok((f, id))
+}
+
 /// The frame with normal `z` and X axis along `x` projected into the plane.
 fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
     let bad = || BrepError::Degenerate("the sketch plane needs a normal and an X axis not along it".into());
@@ -181,11 +190,7 @@ pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, 
         (Some(_), Some(_)) => return Err(BrepError::Sketch("give a plane or a face, not both".into())),
         (Some(p), None) => (frame(p.origin, p.x_axis, p.normal)?, None),
         (None, Some((body, id))) => {
-            let id = u128::from_str_radix(id, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{id}` is not a face ID")))?;
-            let f = body
-                .faces()
-                .binary_search_by_key(&id, |f| f.id)
-                .map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the input body")))?;
+            let (f, id) = find_face(body, id)?;
             match body.faces()[f].surface {
                 Surface::Plane(_) if k_factor.is_some() => return Err(BrepError::Sketch("`k_factor` is for a sketch on a cylinder face".into())),
                 Surface::Plane(plane) => {

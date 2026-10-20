@@ -94,6 +94,8 @@ impl Scene {
         for v in values {
             match v {
                 Value::Body(b) => s.bodies.push(cache.get(b)),
+                // A flat blank is for export (DXF), not drawn in the 3D scene.
+                Value::Flat(_) => {}
                 Value::Sketch(p) => {
                     let [o, x, y, _] = p.frame;
                     // In the sketch's plane, or on its cylinder face.
@@ -117,7 +119,7 @@ impl Scene {
                         let (c, f, t) = (*pts.get(&a.center)?, *pts.get(&a.from)?, *pts.get(&a.to)?);
                         let start = libm::atan2(f.y - c.y, f.x - c.x);
                         let sweep = (libm::atan2(t.y - c.y, t.x - c.x) - start).rem_euclid(TAU);
-                        Some((c, (f.x - c.x).hypot(f.y - c.y), start, if sweep == 0.0 { TAU } else { sweep }))
+                        Some((c, libm::hypot(f.x - c.x, f.y - c.y), start, if sweep == 0.0 { TAU } else { sweep }))
                     });
                     let circles = p.circles.values().filter_map(|k| Some((*pts.get(&k.center)?, 0.5 * k.diameter.value()?, 0.0, TAU)));
                     for (c, r, start, sweep) in arcs.chain(circles) {
