@@ -101,11 +101,11 @@ fn what_a_cut_refuses() {
     assert!(matches!(cut(&plate, &side, circle(30.0, 1.5, 10.0), serde_json::Value::Null), Err(BrepError::Unsupported(_))));
 }
 
-/// Principle 8: turned by an odd angle and far from the origin, the same holes and volume. The
+/// Principle 8: turned by an odd angle and 10⁷ m (in mm) from the origin, the same holes and volume. The
 /// sketch's frame on the turned face is its own: the holes are placed in it.
 #[test]
 fn far_away_and_turned() {
-    let m = Rigid::rotation(Vec3::new(1.0, 2.0, 3.0), 0.7).then(Rigid::translation(Vec3::new(1e6, -3e6, 2e6)));
+    let m = Rigid::rotation(Vec3::new(1.0, 2.0, 3.0), 0.7).then(Rigid::translation(Vec3::new(1e10, -3e9, 2e9)));
     let plate = cuboid(id("plate"), Vec3::ZERO, Vec3::new(200.0, 120.0, 3.0)).unwrap().transformed(&m);
     let top = face(&plate, m.apply_vector(Vec3::new(0.0, 0.0, 1.0)));
     let target = Value::Body(plate.clone());

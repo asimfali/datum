@@ -116,11 +116,11 @@ fn through_is_invariant_to_placement() {
         (ids, b.edges().len(), b.loops().len())
     };
     let reference = cut(&Rigid::IDENTITY);
-    for shift in [1e3, 1e6, 1e7] {
+    for shift in [1e3, 1e6, 1e7, 1e10] {
         let m = Rigid::rotation(Vec3::new(0.3, -0.5, 0.8), 0.731).then(Rigid::translation(Vec3::new(shift, -0.7 * shift, 0.3 * shift)));
         let r = cut(&m);
         assert_eq!(topology(&r), topology(&reference), "shift {shift}");
-        assert_close(r.volume(), reference.volume(), 1e-6);
+        assert_close(r.volume(), reference.volume(), 1e-6 + 64.0 * f64::EPSILON * shift);
     }
 }
 

@@ -126,7 +126,7 @@ fn moving_far_away_keeps_topology_and_volume() {
             b.faces().iter().map(|f| f.id).collect::<Vec<_>>(),
         )
     };
-    for offset in [0.0, 1e3, 1e6, 1e7] {
+    for offset in [0.0, 1e3, 1e6, 1e7, 1e10] {
         let m = Rigid::rotation(Vec3::new(0.3, -0.5, 0.8), 0.7366).then(Rigid::translation(Vec3::new(1.0, 0.6, -0.3) * offset));
         let moved = b.transformed(&m);
         moved.validate().unwrap();
