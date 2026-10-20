@@ -15,10 +15,10 @@
 
 use std::cmp::Ordering;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as Atomic};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, TopoId, Vertex, build, in_order, triangulate_face};
-use datum_math::{Lpi, Point, Sign, Vec3, cmp_axis, orient2d_along, orient3d, orient3d_coords, ties};
+use datum_math::{Exact, ExactScale, Lpi, Point, Sign, Vec3, cmp_axis, cmp_axis_filtered, orient2d_along, orient3d, orient3d_coords, ties};
 
 use rayon::iter::Either;
 use rayon::prelude::*;
@@ -422,20 +422,30 @@ fn lead(same: &[(Node, Node)], n: Node) -> Node {
 fn coinciding(mut nodes: Vec<Node>, still: impl Fn(Node) -> Point + Sync) -> Vec<(Node, Node)> {
     nodes.par_sort_unstable();
     nodes.dedup();
-    let cmp = |a: &Node, b: &Node| {
-        let (p, q) = (still(*a), still(*b));
-        (0..3).map(|axis| cmp_axis(&p, &q, axis)).find(|o| o.is_ne()).unwrap_or(Ordering::Equal)
+    let points: Vec<Point> = nodes.par_iter().map(|&n| still(n)).collect();
+    // Ties are the rule here (points of one column share a coordinate), and the filter cannot
+    // settle them: each point's exact coordinates are made once, when first needed.
+    let scale = ExactScale::of(points.iter());
+    let exact: Vec<OnceLock<Exact>> = (0..points.len()).map(|_| OnceLock::new()).collect();
+    let exact = |i: usize| exact[i].get_or_init(|| scale.exact(&points[i]));
+    let cmp = |i: usize, j: usize| {
+        (0..3)
+            .map(|axis| cmp_axis_filtered(&points[i], &points[j], axis).unwrap_or_else(|| exact(i).cmp_axis(exact(j), axis)))
+            .find(|o| o.is_ne())
+            .unwrap_or(Ordering::Equal)
     };
-    nodes.par_sort_by(|a, b| cmp(a, b).then(a.cmp(b)));
+    let mut order: Vec<usize> = (0..nodes.len()).collect();
+    // `nodes` is sorted: index order is node order.
+    order.par_sort_by(|&i, &j| cmp(i, j).then(i.cmp(&j)));
     let mut same = Vec::new();
     let mut start = 0;
-    for i in 1..=nodes.len() {
-        if i == nodes.len() || cmp(&nodes[start], &nodes[i]).is_ne() {
+    for k in 1..=order.len() {
+        if k == order.len() || cmp(order[start], order[k]).is_ne() {
             // Within equal points the group is sorted by node: its first node leads.
-            if i - start > 1 {
-                same.extend(nodes[start..i].iter().map(|&n| (n, nodes[start])));
+            if k - start > 1 {
+                same.extend(order[start..k].iter().map(|&i| (nodes[i], nodes[order[start]])));
             }
-            start = i;
+            start = k;
         }
     }
     same.par_sort_unstable();
@@ -1147,11 +1157,20 @@ fn group_loops(loops: Vec<Vec<Node>>, normal: Vec3, point: &(impl Fn(Node) -> Po
 }
 
 /// Turning sense of a simple loop in projection along `axis`: the sign at its lowest vertex.
+/// "Lowest" is taken in the actual geometry first, by `u` and then `v`: such a vertex ends the
+/// loop's extreme segment and stays extreme under the perturbation. Only vertices that coincide
+/// in both are told apart by the perturbation, which is far slower than the filter.
 fn loop_sign(lp: &[Node], axis: usize, point: &(impl Fn(Node) -> Point + Sync)) -> Result<Sign, BrepError> {
     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
     let n = lp.len();
     let pts: Vec<Point> = lp.iter().map(|&x| point(x)).collect();
-    let lowest = (0..n).min_by(|&a, &b| cmp_axis(&pts[a], &pts[b], u).then_with(|| cmp_axis(&pts[a], &pts[b], v))).unwrap_or(0);
+    let still: Vec<Point> = pts.iter().map(Point::still).collect();
+    let lowest = (0..n)
+        .min_by(|&a, &b| {
+            let lex = |p: &[Point]| cmp_axis(&p[a], &p[b], u).then_with(|| cmp_axis(&p[a], &p[b], v));
+            lex(&still).then_with(|| lex(&pts))
+        })
+        .unwrap_or(0);
     match orient2d_along(&pts[(lowest + n - 1) % n], &pts[lowest], &pts[(lowest + 1) % n], axis) {
         Sign::Zero => degenerate("a face loop folds back on itself"),
         s => Ok(s),

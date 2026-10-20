@@ -9,7 +9,7 @@ pub mod expr;
 mod implicit;
 
 pub use exact::{exact_fallbacks, perturbed_signs, ties};
-pub use implicit::{Lpi, Point, cmp_axis, orient2d_along, orient3d};
+pub use implicit::{Exact, ExactScale, Lpi, Point, cmp_axis, cmp_axis_filtered, orient2d_along, orient3d};
 
 use std::ops::{Add, Mul, Neg, Sub};
 

@@ -1,5 +1,7 @@
 //! C3 (PAINS P4): a 100 × 100 grid of pins cut through a plate in one Boolean operation, and the
-//! tessellation of the drilled plate. Each on one thread and on all threads.
+//! tessellation of the drilled plate. Then the way a sheet is usually punched: square punches on
+//! the axes, a plain difference, the punch as thick as the sheet (every face meets a face of the
+//! sheet) or longer. Each on one thread and on all threads.
 #![allow(clippy::expect_used)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -39,6 +41,33 @@ fn perforation(c: &mut Criterion) {
     group.finish();
 }
 
+/// A 3 mm sheet and an `n × n` grid of 5 mm square punches from `z0` to `z1`, as in
+/// `examples/perforated_panel.json`.
+fn sheet_and_punches(n: u32, z0: f64, z1: f64) -> (Body, Body) {
+    let id = |s: &str| TopoId::derive(s).finish();
+    let side = 10.0 * f64::from(n) + 20.0;
+    let sheet = cuboid(id("sheet"), Vec3::ZERO, Vec3::new(side, side, 3.0)).expect("sheet");
+    let punch = cuboid(id("punch"), Vec3::new(12.5, 12.5, z0), Vec3::new(17.5, 17.5, z1)).expect("punch");
+    let punches = pattern_grid(id("grid"), &punch, [n, n], [Vec3::new(10.0, 0.0, 0.0), Vec3::new(0.0, 10.0, 0.0)]).expect("pattern");
+    (sheet, punches)
+}
+
+fn punched(c: &mut Criterion) {
+    for (group, z0, z1) in [("punch_flush_10000", 0.0, 3.0), ("punch_long_10000", -1.0, 4.0)] {
+        let (sheet, punches) = sheet_and_punches(100, z0, z1);
+        let mut group = c.benchmark_group(group);
+        group.sample_size(10);
+        for (name, pool) in pools() {
+            group.bench_function(&name, |b| {
+                b.iter(|| {
+                    pool.install(|| boolean(TopoId::derive("punch").finish(), BooleanKind::Difference, None, &[&sheet, &punches]).expect("boolean"))
+                })
+            });
+        }
+        group.finish();
+    }
+}
+
 fn tessellate_drilled(c: &mut Criterion) {
     let (plate, pins) = plate_and_pins(100);
     let drilled = drill(&plate, &pins);
@@ -50,5 +79,5 @@ fn tessellate_drilled(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, perforation, tessellate_drilled);
+criterion_group!(benches, perforation, tessellate_drilled, punched);
 criterion_main!(benches);

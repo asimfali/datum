@@ -7,7 +7,9 @@
 
 use std::cmp::Ordering;
 
-use crate::exact::{Approx, Expr, Lift, Ring, Still, sign};
+use num_bigint::BigInt;
+
+use crate::exact::{Approx, Expr, Lift, Ring, Scale, Still, filtered, perturbed, sign};
 use crate::{Sign, Vec3};
 
 /// A point: explicit coordinates or an implicit intersection.
@@ -33,6 +35,13 @@ pub struct Lpi {
     /// Homogeneous coordinates in filter arithmetic, computed once: every predicate on the point
     /// starts from them instead of rebuilding the plane and the line (Attene et al.).
     pub(crate) filter: [Approx; 4],
+    /// The end of the line that lies exactly in the plane, if one does: then that end is the
+    /// point in the actual geometry. A punch's edge ending in a face of the sheet makes such
+    /// points by the thousand; predicates on them take the fast paths of input vertices, and
+    /// only a tie goes to the perturbation, which still sees the line and the plane. An index
+    /// into `pts` (0 or 1), not the coordinates: points are copied by the million, and their
+    /// size shows in the C3 benchmark.
+    site: Option<u8>,
 }
 
 /// Two points are the same definition: the cached filter values follow from the inputs.
@@ -69,23 +78,41 @@ impl Lpi {
             centre: centre.unwrap_or(Vec3::ZERO),
             moving: [p.1.is_some(), r.1.is_some()],
             filter: [Approx::input(0.0); 4],
+            site: None,
         };
         lpi.filter = lpi.homogeneous(&Still(Approx::input));
         let w = lpi.filter[3].sign().unwrap_or_else(|| sign(&Denominator(&lpi)));
         match w {
-            Sign::Positive => Some(lpi),
+            Sign::Positive => {}
             // Swapping `p, q` negates the direction, `w` and `λ`; the point stays.
             Sign::Negative => {
                 lpi.pts.swap(0, 1);
                 lpi.filter = lpi.homogeneous(&Still(Approx::input));
-                Some(lpi)
             }
-            Sign::Zero => None,
+            Sign::Zero => return None,
         }
+        let [p, q, r, s, t] = lpi.pts;
+        // An end `e` is the point when `(x, y, z) = e·w`; the filter rules that out cheaply in
+        // nearly every case, and `robust` decides the rest.
+        let off = |e: Vec3| (0..3).any(|i| (lpi.filter[i] - Approx::input(e.to_array()[i]) * lpi.filter[3]).sign().is_some_and(|s| s != Sign::Zero));
+        lpi.site = [p, q].into_iter().position(|e| !off(e) && crate::orient3d_coords(r, s, t, e) == Sign::Zero).map(|i| i as u8);
+        // On an input vertex the filter is exact: `(x, y, z, 1)`.
+        if let Some(v) = lpi.site() {
+            lpi.filter = [v.x, v.y, v.z, 1.0].map(Approx::input);
+        }
+        Some(lpi)
+    }
+
+    /// The line's end that is the point in the actual geometry, if one is.
+    fn site(&self) -> Option<Vec3> {
+        self.site.map(|i| self.pts[i as usize])
     }
 
     /// Rounded coordinates, for output only: decisions never read them.
     pub fn approx(&self) -> Vec3 {
+        if let Some(v) = self.site() {
+            return v;
+        }
         let [p, q, r, s, t] = self.pts;
         let n = (s - r).cross(t - r);
         p + (q - p) * (n.dot(r - p) / n.dot(q - p))
@@ -166,11 +193,12 @@ impl Point {
         }
     }
 
-    /// Coordinates when the point is an input vertex: the fast paths of the predicates.
+    /// Exact coordinates in the actual geometry, when known without arithmetic: an input vertex,
+    /// or an intersection at the end of its line. The fast paths of the predicates.
     fn site(&self) -> Option<Vec3> {
         match self {
             Self::Explicit(v) | Self::Moved(v, _) => Some(*v),
-            Self::Lpi(_) => None,
+            Self::Lpi(l) => l.site(),
         }
     }
 }
@@ -181,10 +209,9 @@ impl Point {
 pub fn orient3d(a: &Point, b: &Point, c: &Point, d: &Point) -> Sign {
     let pts = [a, b, c, d];
     if let [Some(a), Some(b), Some(c), Some(d)] = pts.map(Point::site) {
+        // An exact zero on the coordinates goes straight to the perturbation.
         let s = crate::orient3d_coords(a, b, c, d);
-        if s != Sign::Zero || !pts.iter().any(|p| p.moves()) {
-            return s;
-        }
+        return if s == Sign::Zero && pts.iter().any(|p| p.moves()) { perturbed(&Orient3d(pts)) } else { s };
     }
     sign(&Orient3d(pts))
 }
@@ -198,9 +225,7 @@ pub fn orient2d_along(a: &Point, b: &Point, c: &Point, axis: usize) -> Sign {
         let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
         let p = |p: Vec3| crate::Vec2::new(p.to_array()[u], p.to_array()[v]);
         let s = crate::orient2d(p(a), p(b), p(c));
-        if s != Sign::Zero || !pts.iter().any(|p| p.moves()) {
-            return s;
-        }
+        return if s == Sign::Zero && pts.iter().any(|p| p.moves()) { perturbed(&Orient2d { pts, axis }) } else { s };
     }
     sign(&Orient2d { pts, axis })
 }
@@ -213,11 +238,53 @@ pub fn cmp_axis(a: &Point, b: &Point, axis: usize) -> Ordering {
         if o != Ordering::Equal || !(a.moves() || b.moves()) {
             return o;
         }
+        return ordering(perturbed(&CmpAxis { pts: [a, b], axis }));
     }
-    match sign(&CmpAxis { pts: [a, b], axis }) {
+    ordering(sign(&CmpAxis { pts: [a, b], axis }))
+}
+
+fn ordering(s: Sign) -> Ordering {
+    match s {
         Sign::Negative => Ordering::Less,
         Sign::Zero => Ordering::Equal,
         Sign::Positive => Ordering::Greater,
+    }
+}
+
+/// [`cmp_axis`] for points that do not move, when the `f64` filter settles it; `None` when the
+/// coordinates may be equal and only [`Exact`] can tell.
+pub fn cmp_axis_filtered(a: &Point, b: &Point, axis: usize) -> Option<Ordering> {
+    debug_assert!(!a.moves() && !b.moves(), "still points only");
+    if let (Some(x), Some(y)) = (a.site(), b.site()) {
+        return x.to_array()[axis].partial_cmp(&y.to_array()[axis]);
+    }
+    filtered(&CmpAxis { pts: [a, b], axis }).map(ordering)
+}
+
+/// One integer scale for a whole set of points (see [`Exact`]).
+pub struct ExactScale(Scale);
+
+impl ExactScale {
+    pub fn of<'a>(points: impl Iterator<Item = &'a Point>) -> Self {
+        Self(Scale::of(points.flat_map(Point::inputs)))
+    }
+
+    /// Exact homogeneous coordinates of `p`, which must not move.
+    pub fn exact(&self, p: &Point) -> Exact {
+        debug_assert!(!p.moves(), "still points only");
+        Exact(p.homogeneous(&Still(|x| self.0.lift(x))))
+    }
+}
+
+/// Exact homogeneous coordinates of a still point, lifted with the scale of its set: computed
+/// once, then compared with the others of the set by two products. Sorting many points with equal
+/// coordinates (a perforation's columns) would otherwise recompute both points at every tie.
+pub struct Exact([BigInt; 4]);
+
+impl Exact {
+    /// [`cmp_axis`] of the two points (`w > 0` for both).
+    pub fn cmp_axis(&self, other: &Exact, axis: usize) -> Ordering {
+        (&self.0[axis] * &other.0[3]).cmp(&(&other.0[axis] * &self.0[3]))
     }
 }
 
