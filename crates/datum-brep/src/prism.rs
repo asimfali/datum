@@ -1,81 +1,10 @@
 //! Extrusions: plane regions, possibly with holes and arcs, swept along Z; the prism as the
 //! simplest one.
 
-use datum_math::{Arc2, Sign, Vec2, Vec3, arcs_touch, orient2d, segment_touches_arc};
+use datum_math::{Sign, Vec2, Vec3, orient2d};
 
-use crate::tess::segments_touch;
-use crate::{Arc, ArcSpec, Body, BrepError, Cylinder, FaceSpec, Plane, Surface, TopoId, Vertex, build_with_arcs};
-
-/// A profile edge that is an arc around `center`: counterclockwise (seen from +Z) when `ccw`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ProfileArc {
-    pub center: Vec2,
-    pub ccw: bool,
-}
-
-/// A closed loop of a region and the IDs its extrusion gives: for each point the vertices at the
-/// start and at the end, for each edge from point `k` to `k + 1` the side face, and the edge's
-/// arc if it is one (`arcs` empty: all straight).
-#[derive(Clone, Debug)]
-pub struct ProfileLoop {
-    pub points: Vec<Vec2>,
-    pub vertices: Vec<[TopoId; 2]>,
-    pub sides: Vec<TopoId>,
-    pub arcs: Vec<Option<ProfileArc>>,
-}
-
-impl ProfileLoop {
-    /// The same loop the other way round, each edge keeping its side ID and arc.
-    fn reversed(&self) -> Self {
-        let n = self.points.len();
-        let mut r = self.clone();
-        r.points.reverse();
-        r.vertices.reverse();
-        // New edge k runs from old point n−1−k to n−2−k: old edge n−2−k.
-        let old = |k: usize| (2 * n - 2 - k) % n;
-        r.sides = (0..n).map(|k| self.sides[old(k)]).collect();
-        r.arcs = (0..self.arcs.len()).map(|k| self.arcs[old(k)].map(|a| ProfileArc { ccw: !a.ccw, ..a })).collect();
-        r
-    }
-
-    fn arc(&self, k: usize) -> Option<ProfileArc> {
-        self.arcs.get(k).copied().flatten()
-    }
-
-    /// Whether the loop runs counterclockwise. A polygon: the turn at its lowest point, exact. With
-    /// arcs: the sign of the area, chords and circular segments, in `f64`. The loop was found
-    /// simple by exact predicates before, and a simple loop's area is far from zero: rounding
-    /// cannot flip its sign.
-    fn counterclockwise(&self) -> bool {
-        let p = &self.points;
-        let n = p.len();
-        if self.arcs.iter().all(Option::is_none) {
-            let i = (0..n).min_by(|&a, &b| p[a].y.total_cmp(&p[b].y).then(p[a].x.total_cmp(&p[b].x))).unwrap_or(0);
-            return orient2d(p[(i + n - 1) % n], p[i], p[(i + 1) % n]) == Sign::Positive;
-        }
-        let area: f64 = (0..n)
-            .map(|k| {
-                let (a, b) = (p[k], p[(k + 1) % n]);
-                let chord = 0.5 * (a.x * b.y - a.y * b.x);
-                chord
-                    + self.arc(k).map_or(0.0, |arc| {
-                        let (u, v) = (Vec2::new(a.x - arc.center.x, a.y - arc.center.y), Vec2::new(b.x - arc.center.x, b.y - arc.center.y));
-                        let turn = libm::atan2(u.x * v.y - u.y * v.x, u.x * v.x + u.y * v.y);
-                        let phi = if arc.ccw {
-                            if turn <= 0.0 { turn + std::f64::consts::TAU } else { turn }
-                        } else if turn >= 0.0 {
-                            std::f64::consts::TAU - turn
-                        } else {
-                            -turn
-                        };
-                        let r2 = u.x * u.x + u.y * u.y;
-                        0.5 * r2 * (phi - libm::sin(phi)) * if arc.ccw { 1.0 } else { -1.0 }
-                    })
-            })
-            .sum();
-        area > 0.0
-    }
-}
+use crate::profile::touch;
+use crate::{Arc, ArcSpec, Body, BrepError, Cylinder, FaceSpec, Plane, ProfileLoop, Surface, TopoId, Vertex, build_with_arcs};
 
 /// A region: an outer loop, the holes in it, and the IDs of its start and end caps.
 #[derive(Clone, Debug)]
@@ -83,20 +12,6 @@ pub struct Region {
     pub outer: ProfileLoop,
     pub holes: Vec<ProfileLoop>,
     pub caps: [TopoId; 2],
-}
-
-/// An edge of a profile for the touch checks: a segment, or an arc counterclockwise.
-enum Piece {
-    Segment(Vec2, Vec2),
-    Arc(Arc2),
-}
-
-fn touch(a: &Piece, b: &Piece) -> bool {
-    match (a, b) {
-        (Piece::Segment(p, q), Piece::Segment(r, s)) => segments_touch(*p, *q, *r, *s),
-        (Piece::Segment(p, q), Piece::Arc(c)) | (Piece::Arc(c), Piece::Segment(p, q)) => segment_touches_arc(*p, *q, c),
-        (Piece::Arc(c), Piece::Arc(d)) => arcs_touch(c, d),
-    }
 }
 
 /// The regions (in the XY plane, loops in either orientation) swept from `z0` to `z1`, with the
@@ -122,21 +37,7 @@ pub fn extrude(regions: &[Region], z0: f64, z1: f64) -> Result<Body, BrepError> 
             return degenerate("an arc of zero radius".into());
         }
     }
-    let edges: Vec<(Piece, usize, usize)> = loops
-        .iter()
-        .enumerate()
-        .flat_map(|(li, l)| {
-            (0..l.points.len()).map(move |k| {
-                let (a, b) = (l.points[k], l.points[(k + 1) % l.points.len()]);
-                let piece = match l.arc(k) {
-                    None => Piece::Segment(a, b),
-                    Some(arc) if arc.ccw => Piece::Arc(Arc2 { center: arc.center, from: a, to: b }),
-                    Some(arc) => Piece::Arc(Arc2 { center: arc.center, from: b, to: a }),
-                };
-                (piece, li, k)
-            })
-        })
-        .collect();
+    let edges: Vec<_> = loops.iter().enumerate().flat_map(|(li, l)| (0..l.points.len()).map(move |k| (l.piece(k), li, k))).collect();
     // Edges touch only their neighbours in the same loop, at the shared point.
     for (i, a) in edges.iter().enumerate() {
         for b in &edges[i + 1..] {

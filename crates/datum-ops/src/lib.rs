@@ -3,6 +3,7 @@
 
 mod boolean;
 mod bounds;
+mod cut;
 mod pattern;
 mod sketch;
 
@@ -10,6 +11,7 @@ use std::borrow::Cow;
 use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
+pub use cut::{ProfileGrid, cut};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
@@ -61,6 +63,23 @@ pub enum Op {
     /// The closed profiles of the input sketch swept from `z0` to `z1` along its normal; a loop
     /// inside another is a hole. One input: a sketch.
     Extrude { z0: Num, z1: Num },
+    /// The closed profiles of a sketch on a plane face of the body cut through the body,
+    /// perpendicular to the face, to the opposite face: holes, slots, any outline of lines and
+    /// arcs. With `pattern`, every profile is repeated, copy `(i, j)` moved by
+    /// `i·step[0] + j·step[1]` in the sketch's coordinates, as punches on a turret press. Two
+    /// inputs: the body, then the sketch.
+    Cut {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pattern: Option<CutPattern>,
+    },
+}
+
+/// Copies of a cut's profiles in the sketch's coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CutPattern {
+    pub count: [Num; 2],
+    pub step: [[Num; 2]; 2],
 }
 
 fn zero() -> Num {
@@ -135,6 +154,7 @@ impl Op {
             Self::Terrain { .. } => "terrain",
             Self::Sketch { .. } => "sketch",
             Self::Extrude { .. } => "extrude",
+            Self::Cut { .. } => "cut",
         }
     }
 
@@ -145,6 +165,7 @@ impl Op {
             Self::Sketch { .. } => 0..=1,
             Self::Transform { .. } | Self::PatternGrid { .. } | Self::Extrude { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
+            Self::Cut { .. } => 2..=2,
         }
     }
 
@@ -163,6 +184,15 @@ impl Op {
             }
             Self::Sketch { sketch, plane, face } => Self::Sketch { sketch: sketch.resolve(lookup)?, plane: *plane, face: face.clone() },
             Self::Extrude { z0, z1 } => Self::Extrude { z0: r(z0, "z0")?, z1: r(z1, "z1")? },
+            Self::Cut { pattern } => Self::Cut {
+                pattern: match pattern {
+                    None => None,
+                    Some(p) => {
+                        let r2 = |v: &[Num; 2], field: &str| -> Result<[Num; 2], String> { Ok([r(&v[0], field)?, r(&v[1], field)?]) };
+                        Some(CutPattern { count: r2(&p.count, "count")?, step: [r2(&p.step[0], "step")?, r2(&p.step[1], "step")?] })
+                    }
+                },
+            },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
     }
@@ -202,6 +232,7 @@ impl Op {
                 h.update(format!("{self:?}").as_bytes());
             }
             Self::Extrude { z0, z1 } => [value(z0), value(z1)].into_iter().for_each(num),
+            Self::Cut { pattern } => pattern.iter().flat_map(|p| p.count.iter().chain(p.step.iter().flatten())).map(value).for_each(num),
         }
     }
 
@@ -211,11 +242,14 @@ impl Op {
         if !self.arity().contains(&values.len()) {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
         }
-        // Every operation but `extrude` takes bodies.
+        // Every operation but `extrude` and `cut` takes bodies; a cut takes a body and a sketch.
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
             Self::Extrude { .. } => Vec::new(),
+            Self::Cut { .. } => {
+                vec![values[0].body().ok_or_else(|| BrepError::Sketch("cut takes a body first, then a sketch on one of its faces".into()))?]
+            }
             _ => values
                 .iter()
                 .enumerate()
@@ -251,6 +285,16 @@ impl Op {
                 return Ok(Value::Sketch(place(sketch, plane.as_ref(), host)?));
             }
             Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, num(z0)?, num(z1)?)?,
+            Self::Cut { pattern } => {
+                let grid = match pattern {
+                    None => ProfileGrid::ONE,
+                    Some(p) => {
+                        let v2 = |v: &[Num; 2]| -> Result<Vec2, BrepError> { Ok(Vec2::new(num(&v[0])?, num(&v[1])?)) };
+                        ProfileGrid { count: [count(&p.count[0])?, count(&p.count[1])?], step: [v2(&p.step[0])?, v2(&p.step[1])?] }
+                    }
+                };
+                cut(feature, inputs[0], sketch(1)?, grid)?
+            }
         };
         if cfg!(debug_assertions) {
             body.validate()?;

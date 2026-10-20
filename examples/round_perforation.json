@@ -1,0 +1,189 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "nx": 100,
+    "ny": 50,
+    "pitch_x": 10,
+    "pitch_y": 12,
+    "hole": 5,
+    "margin": 15,
+    "t": 3,
+    "w": "2 * margin + (nx - 1) * pitch_x",
+    "h": "2 * margin + (ny - 1) * pitch_y"
+  },
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            1000,
+            0
+          ],
+          "c": [
+            1000,
+            600
+          ],
+          "d": [
+            0,
+            600
+          ]
+        },
+        "lines": {
+          "bottom": {
+            "from": "a",
+            "to": "b"
+          },
+          "right": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "c",
+            "to": "d"
+          },
+          "left": {
+            "from": "d",
+            "to": "a"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "a"
+          },
+          {
+            "type": "horizontal",
+            "line": "bottom"
+          },
+          {
+            "type": "vertical",
+            "line": "right"
+          },
+          {
+            "type": "horizontal",
+            "line": "top"
+          },
+          {
+            "type": "vertical",
+            "line": "left"
+          },
+          {
+            "type": "length",
+            "line": "bottom",
+            "value": "w"
+          },
+          {
+            "type": "length",
+            "line": "left",
+            "value": "h"
+          }
+        ]
+      }
+    },
+    {
+      "name": "panel",
+      "op": "extrude",
+      "inputs": [
+        "outline"
+      ],
+      "z0": 0,
+      "z1": "t"
+    },
+    {
+      "name": "holes",
+      "op": "sketch",
+      "inputs": [
+        "panel"
+      ],
+      "face": "c99f4eaa5db5dd9d7e08cafe324f59ba",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "m": [
+            15,
+            0
+          ],
+          "c": [
+            15,
+            15
+          ]
+        },
+        "lines": {
+          "along": {
+            "from": "o",
+            "to": "m",
+            "construction": true
+          },
+          "up": {
+            "from": "m",
+            "to": "c",
+            "construction": true
+          }
+        },
+        "circles": {
+          "hole": {
+            "center": "c",
+            "diameter": "hole"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "horizontal",
+            "line": "along"
+          },
+          {
+            "type": "vertical",
+            "line": "up"
+          },
+          {
+            "type": "length",
+            "line": "along",
+            "value": "margin"
+          },
+          {
+            "type": "length",
+            "line": "up",
+            "value": "margin"
+          }
+        ]
+      }
+    },
+    {
+      "name": "perforated",
+      "op": "cut",
+      "inputs": [
+        "panel",
+        "holes"
+      ],
+      "pattern": {
+        "count": [
+          "nx",
+          "ny"
+        ],
+        "step": [
+          [
+            "pitch_x",
+            0
+          ],
+          [
+            0,
+            "pitch_y"
+          ]
+        ]
+      }
+    }
+  ]
+}
