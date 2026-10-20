@@ -8,103 +8,129 @@ use egui_wgpu::wgpu;
 use datum_graph::Value;
 
 use crate::camera::Camera;
-use crate::render::{Frame, Renderer};
-use crate::scene::{Geometry, Scene};
+use crate::render::{Frame, Renderer, SAMPLES};
+use crate::scene::{Geometry, Part, Scene};
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
-const SAMPLES: u32 = 4;
-/// The viewport's background.
-pub const BACKGROUND: [f64; 3] = [0.93, 0.94, 0.96];
+/// A device without a window and a renderer, drawing `width × height`.
+struct Offscreen {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    adapter: String,
+    renderer: Renderer,
+    width: u32,
+    height: u32,
+}
 
-/// A device without a window: any adapter wgpu finds, software ones included.
-fn device() -> Result<(wgpu::Device, wgpu::Queue), String> {
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
-        .map_err(|e| format!("no GPU adapter, not even a software one: {e}"))?;
-    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-        label: Some("datum_view_headless"),
-        required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
-        ..Default::default()
-    }))
-    .map_err(|e| format!("the GPU device could not be opened: {e}"))
+impl Offscreen {
+    /// Any adapter wgpu finds, software ones included; the fastest first.
+    fn new(width: u32, height: u32) -> Result<Self, String> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let options = wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
+        let adapter = pollster::block_on(instance.request_adapter(&options)).map_err(|e| format!("no GPU adapter, not even a software one: {e}"))?;
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("datum_view_headless"),
+            required_limits: wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits()),
+            ..Default::default()
+        }))
+        .map_err(|e| format!("the GPU device could not be opened: {e}"))?;
+        let info = adapter.get_info();
+        let renderer = Renderer::new(&device);
+        Ok(Self { device, queue, adapter: format!("{} ({:?})", info.name, info.backend), renderer, width, height })
+    }
+
+    /// Draws `frame`, multisampled if `smooth`, and returns the encoder, for a read-back to be appended.
+    fn draw(&mut self, frame: &Frame, smooth: bool) -> wgpu::CommandEncoder {
+        self.renderer.draw(&self.device, &self.queue, frame, self.width, self.height, smooth)
+    }
+
+    fn wait(&self, submission: wgpu::SubmissionIndex) -> Result<(), String> {
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None })
+            .map(|_| ())
+            .map_err(|e| format!("waiting for the GPU: {e}"))
+    }
+
+    /// The camera's frame of `geometry` (relative to the scene's anchor).
+    fn frame(&self, scene: &Scene, geometry: &Arc<Geometry>, version: u64, camera: &Camera) -> Frame {
+        let radius = scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
+        let (view_projection, eye) = camera.matrices(scene.anchor(), f64::from(self.width) / f64::from(self.height), radius);
+        Frame { version, geometry: geometry.clone(), view_projection, eye }
+    }
 }
 
 /// RGBA pixels, `width × height`, of `scene` seen by `camera`.
 pub fn picture(scene: &Scene, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>, String> {
-    let (device, queue) = device()?;
-    let anchor = scene.anchor();
-    let radius = scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
-    let (view_projection, eye) = camera.matrices(anchor, f64::from(width) / f64::from(height), radius);
-    let frame = Frame { version: 1, geometry: Arc::new(Geometry::new(scene, anchor)), view_projection, eye };
-    let mut renderer = Renderer::new(&device, FORMAT, DEPTH, SAMPLES);
-    let size = wgpu::Extent3d { width, height, depth_or_array_layers: 1 };
-    let texture = |format, samples, usage| {
-        device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("datum_view_capture"),
-            size,
-            mip_level_count: 1,
-            sample_count: samples,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        })
-    };
-    let resolved = texture(FORMAT, 1, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
-    let multisampled = texture(FORMAT, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
-    let depth = texture(DEPTH, SAMPLES, wgpu::TextureUsages::RENDER_ATTACHMENT);
-    let (resolved_view, ms_view, depth_view) =
-        (resolved.create_view(&Default::default()), multisampled.create_view(&Default::default()), depth.create_view(&Default::default()));
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("datum_view_capture") });
-    renderer.prepare(&device, &queue, &frame);
-    {
-        let [r, g, b] = BACKGROUND;
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("datum_view_capture"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &ms_view,
-                depth_slice: None,
-                resolve_target: Some(&resolved_view),
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }), store: wgpu::StoreOp::Discard },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth_view,
-                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Discard }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        renderer.paint(&mut pass);
-    }
+    let mut o = Offscreen::new(width, height)?;
+    let frame = o.frame(scene, &Arc::new(Geometry::new(scene, scene.anchor())), 1, camera);
+    let mut encoder = o.draw(&frame, true);
     let row = width * 4;
     let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-    let read = device.create_buffer(&wgpu::BufferDescriptor {
+    let read = o.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("datum_view_read"),
         size: u64::from(padded) * u64::from(height),
         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
+    let picture = o.renderer.picture().ok_or("nothing was drawn")?;
     encoder.copy_texture_to_buffer(
-        resolved.as_image_copy(),
+        picture.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
             buffer: &read,
             layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(padded), rows_per_image: Some(height) },
         },
-        size,
+        wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
     );
-    let submission = queue.submit([encoder.finish()]);
+    let submission = o.queue.submit([encoder.finish()]);
     let slice = read.slice(..);
     let (tx, rx) = std::sync::mpsc::channel();
     slice.map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    device.poll(wgpu::PollType::Wait { submission_index: Some(submission), timeout: None }).map_err(|e| format!("waiting for the picture: {e}"))?;
+    o.wait(submission)?;
     rx.recv().map_err(|e| e.to_string())?.map_err(|e| format!("reading the picture back: {e}"))?;
     let data = slice.get_mapped_range().map_err(|e| format!("reading the picture back: {e}"))?;
     Ok(data.chunks(padded as usize).take(height as usize).flat_map(|r| &r[..row as usize]).copied().collect())
+}
+
+/// GPU time per frame of `scene` (its geometry `full`, relative to its anchor), `width × height`: the median of `frames` frames on a full turn
+/// around it, for the whole model in view and closer and closer up, with faces and edges together and apart,
+/// with multisampling and without.
+/// Returns the adapter and `(case, milliseconds)`.
+pub fn frame_times(scene: &Scene, full: Geometry, width: u32, height: u32, frames: u32) -> Result<(String, Vec<(String, f64)>), String> {
+    let mut o = Offscreen::new(width, height)?;
+    let contents = [
+        ("faces + edges", Arc::new(full.clone())),
+        ("faces", Arc::new(Geometry { lines: Part::default(), ..full.clone() })),
+        ("edges", Arc::new(Geometry { triangles: Part::default(), ..full })),
+    ];
+    let mut fitted = Camera::default();
+    fitted.fit(scene.bounds, f64::from(width) / f64::from(height));
+    let mut cases = Vec::new();
+    for smooth in [true, false] {
+        let samples = if smooth { SAMPLES } else { 1 };
+        for (distance, closeness) in [("whole", 1.0), ("close", 0.15), ("closer", 0.05)] {
+            for (version, (content, geometry)) in contents.iter().enumerate() {
+                let mut times = Vec::with_capacity(frames as usize);
+                for k in 0..=frames {
+                    let mut camera = fitted;
+                    camera.distance *= closeness;
+                    camera.yaw += std::f64::consts::TAU * f64::from(k) / f64::from(frames.max(1));
+                    let start = std::time::Instant::now();
+                    let frame = o.frame(scene, geometry, version as u64 + 1, &camera);
+                    let encoder = o.draw(&frame, smooth);
+                    let submission = o.queue.submit([encoder.finish()]);
+                    o.wait(submission)?;
+                    // The first frame uploads the geometry: not a frame of the turn.
+                    if k > 0 {
+                        times.push(start.elapsed().as_secs_f64() * 1e3);
+                    }
+                }
+                times.sort_by(f64::total_cmp);
+                cases.push((format!("msaa {samples}, {distance}, {content}"), times.get(times.len() / 2).copied().unwrap_or(0.0)));
+            }
+        }
+    }
+    Ok((o.adapter, cases))
 }
 
 /// A PNG of `values` (bodies and sketches) in standard view `view`, fitted to fill the picture:

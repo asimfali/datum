@@ -116,12 +116,94 @@ impl Scene {
     }
 }
 
+/// GPU vertices of one kind, each once, and the indices that make primitives of them. The
+/// primitives run along a Morton curve through the scene and are cut into chunks with bounds:
+/// close up only the chunks in view are drawn, and a vertex shared by neighbouring primitives is
+/// processed once.
+#[derive(Clone, Default)]
+pub struct Part {
+    pub vertices: Vec<u8>,
+    pub indices: Vec<u32>,
+    pub chunks: Vec<Chunk>,
+}
+
+/// Primitives close together, by their bounds (relative to the anchor) and where their indices end;
+/// they start where the previous chunk's end.
+#[derive(Clone, Copy, Debug)]
+pub struct Chunk {
+    pub lo: [f32; 3],
+    pub hi: [f32; 3],
+    pub end: u32,
+}
+
+/// Primitives per chunk: small enough to leave out most of a large model close up, large enough
+/// that testing chunks against the view costs nothing.
+const CHUNK: usize = 4096;
+
+impl Part {
+    /// The part of primitives `(group, item)` keyed by `order` (a Morton code first), each with
+    /// corners `corners(group, item)`: vertex bytes, a position (3 × f32) first. Chunks are made
+    /// in parallel, each with its own vertices: one shared across a chunk's border is repeated.
+    fn new<const N: usize, const K: usize>(mut order: Vec<(u64, u32, u32)>, corners: impl Fn(u32, u32) -> [[u8; N]; K] + Sync) -> Self {
+        // `(group, item)` is unique: the order is total.
+        order.par_sort_unstable();
+        let chunks: Vec<(Vec<u8>, Vec<u32>, Chunk)> = order
+            .par_chunks(CHUNK)
+            .map(|run| {
+                let mut c = Chunk { lo: [f32::INFINITY; 3], hi: [f32::NEG_INFINITY; 3], end: 0 };
+                let (mut vertices, mut indices) = (Vec::new(), Vec::with_capacity(run.len() * K));
+                // Lookups only: the order of vertices is the order of corners.
+                let mut seen: HashMap<[u8; N], u32> = HashMap::with_capacity(run.len() * K);
+                for &(_, group, item) in run {
+                    for v in corners(group, item) {
+                        for k in 0..3 {
+                            let x = f32::from_le_bytes([v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]]);
+                            c.lo[k] = c.lo[k].min(x);
+                            c.hi[k] = c.hi[k].max(x);
+                        }
+                        let next = (vertices.len() / N) as u32;
+                        indices.push(*seen.entry(v).or_insert_with(|| {
+                            vertices.extend_from_slice(&v);
+                            next
+                        }));
+                    }
+                }
+                (vertices, indices, c)
+            })
+            .collect();
+        let mut part = Self::default();
+        for (vertices, indices, mut c) in chunks {
+            let base = (part.vertices.len() / N) as u32;
+            part.vertices.extend_from_slice(&vertices);
+            part.indices.extend(indices.iter().map(|i| i + base));
+            c.end = part.indices.len() as u32;
+            part.chunks.push(c);
+        }
+        part
+    }
+}
+
+/// The Morton code of `p` in the box from `lo` of size `size`: 21 bits per axis, interleaved.
+fn morton(p: Vec3, lo: Vec3, size: Vec3) -> u64 {
+    const MAX: f64 = ((1u64 << 21) - 1) as f64;
+    let spread = |x: f64, lo: f64, size: f64| {
+        let mut v = if size > 0.0 { ((x - lo) / size * MAX).clamp(0.0, MAX) as u64 } else { 0 };
+        v = (v | v << 32) & 0x001f_0000_0000_ffff;
+        v = (v | v << 16) & 0x001f_0000_ff00_00ff;
+        v = (v | v << 8) & 0x100f_00f0_0f00_f00f;
+        v = (v | v << 4) & 0x10c3_0c30_c30c_30c3;
+        (v | v << 2) & 0x1249_2492_4924_9249
+    };
+    spread(p.x, lo.x, size.x) | spread(p.y, lo.y, size.y) << 1 | spread(p.z, lo.z, size.z) << 2
+}
+
 /// GPU vertices, relative to an anchor.
+#[derive(Clone, Default)]
 pub struct Geometry {
-    /// Per vertex: position (3 × f32), normal (3 × f32), colour (4 × u8).
-    pub triangles: Vec<u8>,
-    /// Per vertex: position (3 × f32), colour (4 × u8); pairs make segments.
-    pub lines: Vec<u8>,
+    /// Per vertex: position (3 × f32), normal (3 × f32), colour (4 × u8); triples of indices.
+    pub triangles: Part,
+    /// Per vertex: position (3 × f32), colour (4 × u8); pairs of indices.
+    pub lines: Part,
 }
 
 pub const TRIANGLE_VERTEX: u64 = 28;
@@ -131,6 +213,15 @@ const BODY: [u8; 4] = [168, 182, 199, 255];
 const EDGE: [u8; 4] = [32, 36, 44, 255];
 const SKETCH: [u8; 4] = [214, 96, 32, 255];
 
+/// A vertex's bytes: `floats`, then `colour`.
+fn vertex<const N: usize>(floats: &[f32], colour: [u8; 4]) -> [u8; N] {
+    let mut v = [0u8; N];
+    for (chunk, f) in v.as_chunks_mut::<4>().0.iter_mut().zip(floats.iter().map(|f| f.to_le_bytes()).chain([colour])) {
+        *chunk = f;
+    }
+    v
+}
+
 impl Geometry {
     /// Vertices of `scene` relative to `anchor`: subtracted in `f64`, then rounded (D24).
     pub fn new(scene: &Scene, anchor: Vec3) -> Self {
@@ -138,32 +229,28 @@ impl Geometry {
             let d = p - anchor;
             [d.x as f32, d.y as f32, d.z as f32]
         };
-        let mut triangles = Vec::new();
-        let mut lines = Vec::new();
-        let push = |out: &mut Vec<u8>, floats: &[f32], colour: [u8; 4]| {
-            for f in floats {
-                out.extend_from_slice(&f.to_le_bytes());
-            }
-            out.extend_from_slice(&colour);
+        let (lo, hi) = scene.bounds.unwrap_or((Vec3::ZERO, Vec3::ZERO));
+        let key = |points: &[Vec3], group: usize, item: usize| {
+            let c = points.iter().fold(Vec3::ZERO, |s, &p| s + p) * (1.0 / points.len() as f64);
+            (morton(c, lo, hi - lo), group as u32, item as u32)
         };
-        for m in &scene.bodies {
-            for (t, n) in m.triangles.iter().zip(&m.normals) {
-                for &p in t {
-                    let p = rel(p);
-                    push(&mut triangles, &[p[0], p[1], p[2], n[0], n[1], n[2]], BODY);
-                }
-            }
-            for e in &m.edges {
-                for &p in e {
-                    push(&mut lines, &rel(p), EDGE);
-                }
-            }
-        }
-        for e in &scene.sketch_lines {
-            for &p in e {
-                push(&mut lines, &rel(p), SKETCH);
-            }
-        }
+        let bodies = &scene.bodies;
+        let triangles = bodies.iter().enumerate().flat_map(|(b, m)| m.triangles.iter().enumerate().map(move |(i, t)| key(t, b, i))).collect();
+        let triangles = Part::new(triangles, |b, i| {
+            let (m, i) = (&bodies[b as usize], i as usize);
+            let n = m.normals[i];
+            m.triangles[i].map(|p| {
+                let p = rel(p);
+                vertex::<28>(&[p[0], p[1], p[2], n[0], n[1], n[2]], BODY)
+            })
+        });
+        // Sketch lines are the group after the bodies.
+        let edges = |g: usize| if g < bodies.len() { &bodies[g].edges } else { &scene.sketch_lines };
+        let lines = (0..=bodies.len()).flat_map(|g| edges(g).iter().enumerate().map(move |(i, e)| key(e, g, i))).collect::<Vec<_>>();
+        let lines = Part::new(lines, |g, i| {
+            let colour = if (g as usize) < bodies.len() { EDGE } else { SKETCH };
+            edges(g as usize)[i as usize].map(|p| vertex::<16>(&rel(p), colour))
+        });
         Self { triangles, lines }
     }
 }

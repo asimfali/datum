@@ -675,6 +675,7 @@ version = "0.1.0"
 dependencies = [
  "datum-brep",
  "datum-graph",
+ "datum-math",
  "datum-mcp",
  "datum-model",
  "datum-view",

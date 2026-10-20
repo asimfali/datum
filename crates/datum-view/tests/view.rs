@@ -54,7 +54,7 @@ fn far_models_are_drawn_relative_to_an_anchor() {
     let g = Geometry::new(&s, anchor);
     let (lo, hi) = s.bounds.unwrap();
     let half = ((hi - lo) * 0.5).to_array().into_iter().fold(0.0f64, f64::max) as f32;
-    for v in g.triangles.chunks(TRIANGLE_VERTEX as usize) {
+    for v in g.triangles.vertices.chunks(TRIANGLE_VERTEX as usize) {
         let x = f32::from_le_bytes([v[0], v[1], v[2], v[3]]);
         assert!(x.abs() <= half * 1.0001, "{x} beyond {half}");
     }
@@ -78,7 +78,7 @@ fn headless_picture() {
     };
     assert_eq!(rgba.len(), (w * h * 4) as usize);
     let at = |x: u32, y: u32| &rgba[((y * w + x) * 4) as usize..((y * w + x) * 4 + 3) as usize];
-    let background = datum_view::capture::BACKGROUND.map(|c| (c * 255.0).round() as u8);
+    let background = datum_view::render::BACKGROUND.map(|c| (c * 255.0).round() as u8);
     assert_eq!(at(0, 0), background);
     assert_eq!(at(w - 1, h - 1), background);
     assert_ne!(at(w / 2, h / 2), background);

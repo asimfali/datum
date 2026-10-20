@@ -1,6 +1,7 @@
 //! The viewer window: the model in 3D, its features and their state, and its parameters to
 //! edit. Edits go through the same commands as the CLI and MCP (§6.1) and rebuild in a background
-//! thread; the view keeps the last good model meanwhile.
+//! thread; the view keeps the last good model meanwhile. The 3D view is the renderer's own
+//! picture, drawn again only when the camera, the model or the view's size changes.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -12,16 +13,13 @@ use egui_wgpu::wgpu;
 use serde_json::{Value as Json, json};
 
 use crate::camera::Camera;
-use crate::capture::BACKGROUND;
-use crate::render::{Frame, Renderer};
+use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        depth_buffer: 24,
-        multisampling: SAMPLES as u16,
         viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
@@ -30,9 +28,6 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
         options,
         Box::new(move |cc| {
             let rs = cc.wgpu_render_state.as_ref().ok_or("the window has no wgpu renderer")?;
-            let depth = egui_wgpu::depth_format_from_bits(24, 0).unwrap_or(wgpu::TextureFormat::Depth24Plus);
-            let renderer = Renderer::new(&rs.device, rs.target_format, depth, SAMPLES);
-            rs.renderer.write().callback_resources.insert(renderer);
             let info = rs.adapter.get_info();
             let adapter = format!("{} ({:?})", info.name, info.backend);
             Ok(Box::new(Viewer::new(path, cc.egui_ctx.clone(), adapter)))
@@ -40,8 +35,6 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())
 }
-
-const SAMPLES: u32 = 4;
 
 fn title(path: Option<&std::path::Path>) -> String {
     path.map_or_else(|| "Datum".into(), |p| format!("Datum — {}", p.display()))
@@ -110,6 +103,9 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     }
 }
 
+/// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
+type Drawn = (u64, [f32; 16], [f32; 3], [u32; 3]);
+
 struct Viewer {
     requests: Sender<Request>,
     models: Receiver<Model>,
@@ -120,6 +116,15 @@ struct Viewer {
     /// GPU vertices of the current scene, their version, and the anchor they are relative to.
     geometry: Arc<Geometry>,
     version: u64,
+    /// Multisampling of the view when the camera is still: smooth edges, at about twice the GPU
+    /// time on a weak card.
+    smooth: bool,
+    /// Made on the first frame.
+    renderer: Option<Renderer>,
+    /// The picture as an egui texture, and the size it was registered with.
+    texture: Option<(egui::TextureId, [u32; 2])>,
+    /// What the picture shows: geometry version, camera matrices, size and samples.
+    drawn: Option<Drawn>,
     /// Smoothed time between frames, and of the window's own work in a frame, milliseconds.
     frame_ms: f64,
     ui_ms: f64,
@@ -144,6 +149,10 @@ impl Viewer {
             fitted: false,
             geometry,
             version: 0,
+            smooth: true,
+            renderer: None,
+            texture: None,
+            drawn: None,
             frame_ms: 0.0,
             ui_ms: 0.0,
             adapter,
@@ -171,6 +180,9 @@ impl Viewer {
                 self.open(p);
             }
             ui.weak("or drop a model (.json) on the window");
+            ui.separator();
+            ui.checkbox(&mut self.smooth, "Smooth edges")
+                .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
@@ -249,7 +261,7 @@ impl Viewer {
         });
     }
 
-    fn viewport(&mut self, ui: &mut egui::Ui) {
+    fn viewport(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let d = r.drag_delta();
         if r.dragged_by(egui::PointerButton::Primary) {
@@ -273,13 +285,48 @@ impl Viewer {
         let anchor = m.scene.anchor();
         let radius = m.scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
         let (view_projection, eye) = self.camera.matrices(anchor, aspect, radius);
-        let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
-        ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, Paint(frame)));
+        let ppp = ui.ctx().pixels_per_point();
+        let [w, h] = [rect.width(), rect.height()].map(|x| (x * ppp).round() as u32);
+        if w == 0 || h == 0 {
+            return;
+        }
+        // While the camera moves, frames are drawn without multisampling, twice as fast on a weak
+        // GPU; once it stops, the view is drawn smooth again.
+        let moving = self.drawn.is_some_and(|d| (d.1, d.2) != (view_projection, eye));
+        let smooth_now = self.smooth && !moving;
+        let drawn = (self.version, view_projection, eye, [w, h, u32::from(smooth_now)]);
+        if self.drawn != Some(drawn) {
+            let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&rs.device));
+            let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
+            let encoder = renderer.draw(&rs.device, &rs.queue, &frame, w, h, smooth_now);
+            // Submitted before egui's own commands of this frame, which show the picture.
+            rs.queue.submit([encoder.finish()]);
+            if self.smooth && !smooth_now {
+                ui.ctx().request_repaint();
+            }
+            if let Some(picture) = renderer.picture()
+                && self.texture.is_none_or(|t| t.1 != [w, h])
+            {
+                let view = picture.create_view(&Default::default());
+                let mut egui_renderer = rs.renderer.write();
+                let id = match self.texture {
+                    Some((id, _)) => {
+                        egui_renderer.update_egui_texture_from_wgpu_texture(&rs.device, &view, wgpu::FilterMode::Nearest, id);
+                        id
+                    }
+                    None => egui_renderer.register_native_texture(&rs.device, &view, wgpu::FilterMode::Nearest),
+                };
+                self.texture = Some((id, [w, h]));
+            }
+            self.drawn = Some(drawn);
+        }
+        if let Some((id, _)) = self.texture {
+            ui.painter().image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        }
         // What the view costs, to tell a slow frame from a slow rebuild.
         let dt = f64::from(ui.input(|i| i.unstable_dt)) * 1e3;
         self.frame_ms = smooth(self.frame_ms, dt);
-        let (tris, lines) =
-            (m.geometry.triangles.len() as u64 / crate::scene::TRIANGLE_VERTEX / 3, m.geometry.lines.len() as u64 / crate::scene::LINE_VERTEX / 2);
+        let (tris, lines) = (m.geometry.triangles.indices.len() / 3, m.geometry.lines.indices.len() / 2);
         let status = format!(
             "{}frame {:.1} ms (ui {:.1}) · rebuild {:.0} ms · scene {:.0} ms · {tris} triangles · {lines} edges\n{}",
             if self.busy { "rebuilding…  " } else { "" },
@@ -315,39 +362,18 @@ fn definition(v: &Json) -> String {
 }
 
 impl eframe::App for Viewer {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
         self.receive();
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| self.viewport(ui));
+        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
+            if let Some(rs) = frame.wgpu_render_state() {
+                self.viewport(ui, rs);
+            }
+        });
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
-    }
-}
-
-/// A frame of the view as an egui paint callback.
-struct Paint(Frame);
-
-impl egui_wgpu::CallbackTrait for Paint {
-    fn prepare(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        _screen: &egui_wgpu::ScreenDescriptor,
-        _encoder: &mut wgpu::CommandEncoder,
-        resources: &mut egui_wgpu::CallbackResources,
-    ) -> Vec<wgpu::CommandBuffer> {
-        if let Some(r) = resources.get_mut::<Renderer>() {
-            r.prepare(device, queue, &self.0);
-        }
-        Vec::new()
-    }
-
-    fn paint(&self, _info: egui::PaintCallbackInfo, pass: &mut wgpu::RenderPass<'static>, resources: &egui_wgpu::CallbackResources) {
-        if let Some(r) = resources.get::<Renderer>() {
-            r.paint(pass);
-        }
     }
 }
 
@@ -384,6 +410,10 @@ mod tests {
             fitted: true,
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
             version: 0,
+            smooth: true,
+            renderer: None,
+            texture: None,
+            drawn: None,
             frame_ms: 0.0,
             ui_ms: 0.0,
             adapter: String::new(),
