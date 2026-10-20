@@ -1,11 +1,13 @@
 # Datum
 
+**English** | [Русский](README.ru.md)
+
 **Design Automation Toolkit for Universal Modeling**
 <br><sub>under the hood: *Distributed Architecture for Topology-based Unified Modeling*</sub>
 
 A parametric solid-modeling kernel built from scratch in Rust to use **every CPU core** while staying **bit-for-bit deterministic**.
 
-> **Status:** early proof of concept, pre-M0. Nothing is usable yet.
+> **Status:** the proof of concept is complete (M0–M5). Datum now grows into an open CAD system, starting with sheet metal. It is not yet a tool for daily work: models are built as JSON feature graphs (by hand, by script or by an AI agent over MCP), and the viewer edits their parameters live.
 
 ## Why
 
@@ -56,10 +58,35 @@ Coordinates 10⁷ m from the origin (in mm) keep every topology: no modeling box
 | M4 | Viewer with live parameter editing; large scenes on modest GPUs |
 | M5 | Arcs and cylinders; cuts by sketch profiles; perforation of a rolled sheet in its development; flat blank as a graph node, DXF export |
 
+## Roadmap
+
+Priorities come from real engineering pain points ([`PAINS.md`](PAINS.md)), not from feature parity with commercial CAD. The full plan is in [`ROADMAP.md`](ROADMAP.md) (in Russian).
+
+| Stage | Scope |
+|---|---|
+| M6 | Sheet metal from a sketched path: thickness, bends at corners, rolling on arcs; exact flat pattern; cuts sketched on any face, across bends too; DXF |
+| M7 | Modeling in the window: sketches and features created interactively; context actions under the cursor (face → extrude, sheet edge → flange); command forms and user macros described in JSON |
+| M8 | Sheet metal features: flange on edge, hem, corner reliefs, bend on a sketch line, hand-bend slots |
+| M9 | Stamping: nonlinear sheet deformation as a graph node (FEM), flat pattern with thinning and springback |
+| M10 | Robust editing: reference recovery on real scenarios; Booleans with curved faces; coplanar cases |
+
+Later: drawings through CADCraft (a 2D CAD on the same stack), assemblies, wiring and piping with bills of materials, lightweight models for the shop floor, fillets, data exchange.
+
+## Contributing
+
+Datum is built in the open, and every kind of help counts:
+
+- **Feedback** — what hurts in your CAD every day, and what you would want instead. Engineers' real pain points shape the plan.
+- **Stars** — they help other engineers find the project.
+- **Issues** — bugs, models that fail to rebuild, ideas.
+- **Pull requests** — welcome when they follow the project's principles (determinism, exact predicates, no hidden tolerances; see [`CLAUDE.md`](CLAUDE.md)). For anything large, open an issue first so we can discuss the approach.
+- **Unconventional ideas** — welcome. Datum itself started from questioning how CAD kernels are usually built.
+
 ## Documentation
 
-Design documents are currently in Russian:
+Design documents are in Russian:
 
+- [`ROADMAP.md`](ROADMAP.md): the development plan
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): goals, data structures, algorithms, decision log
 - [`CLAUDE.md`](CLAUDE.md): project rules (determinism, geometry, code style)
 - [`PAINS.md`](PAINS.md): real engineering pain points that drive priorities
