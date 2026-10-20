@@ -1,15 +1,16 @@
 name: CI
 
-# Actions minutes are limited (2000 a month, Windows counted double), so CI runs once per merge,
-# not on every push to a pull request: before a PR the same checks run locally, on Linux and on
-# Windows. A PR can still be checked by hand (workflow_dispatch). Documentation changes skip CI.
+# The repository is public: Actions minutes are free, so every pull request is checked, on
+# Linux and on Windows, and main after each merge. Documentation changes skip CI.
 on:
   push:
     branches: [main]
     paths-ignore: ['**.md']
+  pull_request:
+    paths-ignore: ['**.md']
   workflow_dispatch:
 
-# A newer push to main supersedes a run still in progress.
+# A newer push to the same branch or pull request supersedes a run still in progress.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
