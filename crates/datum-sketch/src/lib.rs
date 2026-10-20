@@ -1,5 +1,5 @@
-//! Datum sketches (M3, D53–D55): points and line segments in a plane, constraints between them,
-//! and the solver that places them.
+//! Datum sketches (M3, D53–D55; arcs and circles M5, D63): points, line segments, arcs and
+//! circles in a plane, constraints between them, and the solver that places them.
 //!
 //! A sketch is data: points with the coordinates they were drawn at, lines between named points,
 //! constraints by name. [`solve`] moves the points as little as possible from those coordinates
@@ -27,6 +27,7 @@ use equations::{Equations, Group};
 
 /// A sketch in its own plane. In JSON:
 /// `{"points": {"a": [0, 0], …}, "lines": {"bottom": {"from": "a", "to": "b"}, …},
+///   "arcs": {"end": {"center": "c", "from": "b", "to": "d"}}, "circles": {"hole": {"center": "h", "diameter": 5}},
 ///   "constraints": [{"type": "horizontal", "line": "bottom"}, …]}`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -37,6 +38,12 @@ pub struct Sketch {
     /// Segments between named points.
     #[serde(default)]
     pub lines: BTreeMap<String, Line>,
+    /// Arcs between named points, counterclockwise around a named centre: dimensioned by radius.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub arcs: BTreeMap<String, Arc>,
+    /// Circles around named points: dimensioned by diameter, as on a drawing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub circles: BTreeMap<String, Circle>,
     #[serde(default)]
     pub constraints: Vec<Constraint>,
 }
@@ -47,6 +54,28 @@ pub struct Line {
     pub from: String,
     pub to: String,
     /// A construction line guides other geometry but bounds no profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub construction: bool,
+}
+
+/// An arc counterclockwise around `center` from `from` to `to`. Its ends stay at one distance
+/// from the centre.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Arc {
+    pub center: String,
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub construction: bool,
+}
+
+/// A circle around the point `center`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Circle {
+    pub center: String,
+    pub diameter: Num,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub construction: bool,
 }
@@ -102,6 +131,16 @@ pub enum Constraint {
         lines: [String; 2],
         degrees: Num,
     },
+    /// Radius of an arc.
+    Radius {
+        arc: String,
+        value: Num,
+    },
+    /// A line, arc or circle touching an arc or circle, on the side it was drawn: a line's
+    /// distance from the centre is the radius; two circles touch outside or inside each other.
+    Tangent {
+        curves: [String; 2],
+    },
 }
 
 impl Sketch {
@@ -109,11 +148,15 @@ impl Sketch {
     /// values from `lookup`. An error names the constraint.
     pub fn resolve(&self, lookup: &impl Fn(&str) -> Result<f64, ExprError>) -> Result<Sketch, String> {
         let mut s = self.clone();
+        for (name, c) in &mut s.circles {
+            c.diameter = Num::Value(c.diameter.resolve(lookup).map_err(|e| format!("circle `{name}`: {e}"))?);
+        }
         for (k, c) in s.constraints.iter_mut().enumerate() {
             let describe = c.describe(k);
             if let Constraint::Distance { value, .. }
             | Constraint::Length { value, .. }
             | Constraint::PointLine { value, .. }
+            | Constraint::Radius { value, .. }
             | Constraint::Angle { degrees: value, .. } = c
             {
                 *value = Num::Value(value.resolve(lookup).map_err(|e| format!("{describe}: {e}"))?);
@@ -125,7 +168,7 @@ impl Sketch {
 
 impl Constraint {
     /// How a message names the constraint: its position and what it ties.
-    fn describe(&self, k: usize) -> String {
+    pub(crate) fn describe(&self, k: usize) -> String {
         let (kind, what) = match self {
             Self::Coincident { points } => ("coincident", points.join(", ")),
             Self::Horizontal { line } => ("horizontal", line.clone()),
@@ -139,6 +182,8 @@ impl Constraint {
             Self::Length { line, value } => ("length", format!("{line} = {value}")),
             Self::PointLine { point, line, value } => ("point_line", format!("{point}, {line} = {value}")),
             Self::Angle { lines, degrees } => ("angle", format!("{} = {degrees}°", lines.join(", "))),
+            Self::Radius { arc, value } => ("radius", format!("{arc} = {value}")),
+            Self::Tangent { curves } => ("tangent", curves.join(", ")),
         };
         format!("#{k} {kind} ({what})")
     }

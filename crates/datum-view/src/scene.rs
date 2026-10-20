@@ -4,11 +4,12 @@
 //! steadily as a bolt.
 
 use std::collections::HashMap;
+use std::f64::consts::TAU;
 use std::sync::Arc;
 
-use datum_brep::{Body, Ix, triangulate_face_delaunay};
+use datum_brep::{Body, Ix, edge_points, face_mesh};
 use datum_graph::Value;
-use datum_math::Vec3;
+use datum_math::{Vec2, Vec3};
 use rayon::prelude::*;
 
 /// Cosine of the smallest angle between face normals at an edge drawn as a line (20°).
@@ -19,45 +20,44 @@ const SHARP: f64 = 0.939_692_620_785_908_4;
 pub struct BodyMesh {
     /// Corners of each triangle, counterclockwise seen from outside.
     pub triangles: Vec<[Vec3; 3]>,
-    /// The face normal of each triangle, unit length.
-    pub normals: Vec<[f32; 3]>,
-    /// B-rep edges (not triangle edges): what an engineer reads a part by.
+    /// The surface normal at each corner, unit length: flat on planes, round on cylinders.
+    pub normals: Vec<[[f32; 3]; 3]>,
+    /// B-rep edges (not triangle edges), arcs as chords: what an engineer reads a part by.
     pub edges: Vec<[Vec3; 2]>,
 }
 
 impl BodyMesh {
     pub fn new(body: &Body) -> Self {
-        let faces: Vec<(Vec<[Vec3; 3]>, [f32; 3])> = (0..body.faces().len() as Ix)
+        let f32s = |n: Vec3| [n.x as f32, n.y as f32, n.z as f32];
+        let faces: Vec<Self> = (0..body.faces().len() as Ix)
             .into_par_iter()
             .map(|f| {
-                let n = body.faces()[f as usize].plane.normal;
-                let len = n.dot(n).sqrt();
-                let normal = if len > 0.0 { [(n.x / len) as f32, (n.y / len) as f32, (n.z / len) as f32] } else { [0.0; 3] };
                 // A face that cannot be triangulated is left out of the picture, not the program.
-                let tris = triangulate_face_delaunay(body, f).map(|t| t.iter().map(|t| t.map(|v| body.point(v))).collect()).unwrap_or_default();
-                (tris, normal)
+                let Ok(m) = face_mesh(body, f, true) else { return Self { triangles: Vec::new(), normals: Vec::new(), edges: Vec::new() } };
+                let corners = |t: &[u32; 3], v: &[Vec3]| t.map(|k| v[k as usize]);
+                Self {
+                    triangles: m.triangles.iter().map(|t| corners(t, &m.points)).collect(),
+                    normals: m.triangles.iter().map(|t| corners(t, &m.normals).map(f32s)).collect(),
+                    edges: Vec::new(),
+                }
             })
             .collect();
         let mut mesh = Self { triangles: Vec::new(), normals: Vec::new(), edges: Vec::new() };
-        for (tris, normal) in faces {
-            mesh.normals.extend(std::iter::repeat_n(normal, tris.len()));
-            mesh.triangles.extend(tris);
+        for f in faces {
+            mesh.triangles.extend(f.triangles);
+            mesh.normals.extend(f.normals);
         }
         // Edges where the surface turns: between nearly coplanar faces (a terrain's cells, a
-        // split face) an edge says nothing on screen. A display threshold; the model never sees it.
-        let normal = |h: Ix| {
-            let n = body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].plane.normal;
-            n * (1.0 / n.dot(n).sqrt())
-        };
-        mesh.edges = body
-            .edges()
-            .iter()
-            .filter(|e| normal(e.half).dot(normal(body.half_edges()[e.half as usize].twin)) < SHARP)
-            .map(|e| {
-                let he = &body.half_edges()[e.half as usize];
-                [body.point(he.origin), body.point(body.half_edges()[he.twin as usize].origin)]
-            })
-            .collect();
+        // split face) or along the seams of a cylinder an edge says nothing on screen. A display
+        // threshold; the model never sees it.
+        let normal = |h: Ix, p: Vec3| body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface.normal_at(p);
+        for (e, edge) in body.edges().iter().enumerate() {
+            let pts = edge_points(body, e as Ix);
+            let p = pts[0];
+            if normal(edge.half, p).dot(normal(body.half_edges()[edge.half as usize].twin, p)) < SHARP {
+                mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
+            }
+        }
         mesh
     }
 }
@@ -97,6 +97,24 @@ impl Scene {
                     let [o, x, y, _] = p.frame;
                     let at = |name: &str| p.solved.points.get(name).map(|q| o + x * q.x + y * q.y);
                     s.sketch_lines.extend(p.lines.values().filter_map(|l| Some([at(&l.from)?, at(&l.to)?])));
+                    // Arcs and circles as chords, in the sketch's plane.
+                    let place = |q: Vec2| o + x * q.x + y * q.y;
+                    let pts = &p.solved.points;
+                    let arcs = p.arcs.values().filter_map(|a| {
+                        let (c, f, t) = (*pts.get(&a.center)?, *pts.get(&a.from)?, *pts.get(&a.to)?);
+                        let start = libm::atan2(f.y - c.y, f.x - c.x);
+                        let sweep = (libm::atan2(t.y - c.y, t.x - c.x) - start).rem_euclid(TAU);
+                        Some((c, (f.x - c.x).hypot(f.y - c.y), start, if sweep == 0.0 { TAU } else { sweep }))
+                    });
+                    let circles = p.circles.values().filter_map(|k| Some((*pts.get(&k.center)?, 0.5 * k.diameter.value()?, 0.0, TAU)));
+                    for (c, r, start, sweep) in arcs.chain(circles) {
+                        let n = (sweep / TAU * 64.0).ceil().max(1.0) as usize;
+                        let at = |k: usize| {
+                            let (sn, cs) = libm::sincos(start + sweep * k as f64 / n as f64);
+                            place(Vec2::new(c.x + r * cs, c.y + r * sn))
+                        };
+                        s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
+                    }
                 }
             }
         }
@@ -238,9 +256,9 @@ impl Geometry {
         let triangles = bodies.iter().enumerate().flat_map(|(b, m)| m.triangles.iter().enumerate().map(move |(i, t)| key(t, b, i))).collect();
         let triangles = Part::new(triangles, |b, i| {
             let (m, i) = (&bodies[b as usize], i as usize);
-            let n = m.normals[i];
-            m.triangles[i].map(|p| {
-                let p = rel(p);
+            let (t, n) = (m.triangles[i], m.normals[i]);
+            [0, 1, 2].map(|k| {
+                let (p, n) = (rel(t[k]), n[k]);
                 vertex::<28>(&[p[0], p[1], p[2], n[0], n[1], n[2]], BODY)
             })
         });

@@ -174,3 +174,127 @@ proptest! {
         prop_assert_eq!(prism(id("prop"), &poly, -h / 2.0, h / 2.0).unwrap().hash(), b.hash());
     }
 }
+
+/// A loop of `n` points with IDs from `tag`; arcs as given.
+fn ring(tag: &str, points: Vec<Vec2>, arcs: Vec<Option<ProfileArc>>) -> ProfileLoop {
+    let n = points.len();
+    let vid = |layer: u64, k: usize| TopoId::derive(tag).index(layer).index(k as u64).finish();
+    ProfileLoop {
+        points,
+        vertices: (0..n).map(|k| [vid(0, k), vid(1, k)]).collect(),
+        sides: (0..n).map(|k| TopoId::derive(tag).tag("side").index(k as u64).finish()).collect(),
+        arcs,
+    }
+}
+
+/// A circle as three arcs, counterclockwise.
+fn circle(tag: &str, c: Vec2, r: f64) -> ProfileLoop {
+    let at = |k: usize| {
+        let (s, co) = libm::sincos(std::f64::consts::TAU * k as f64 / 3.0);
+        Vec2::new(c.x + r * co, c.y + r * s)
+    };
+    ring(tag, (0..3).map(at).collect(), vec![Some(ProfileArc { center: c, ccw: true }); 3])
+}
+
+fn square(tag: &str, side: f64) -> ProfileLoop {
+    let pts = [(0.0, 0.0), (side, 0.0), (side, side), (0.0, side)].map(|(x, y)| Vec2::new(x, y)).to_vec();
+    ring(tag, pts, Vec::new())
+}
+
+fn region(outer: ProfileLoop, holes: Vec<ProfileLoop>) -> Region {
+    Region { outer, holes, caps: [id("cap0"), id("cap1")] }
+}
+
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-12 * b.abs().max(1.0)
+}
+
+#[test]
+fn cylinder_volume_area_centroid_and_bounds() {
+    let b = extrude(&[region(circle("c", Vec2::new(1.0, -2.0), 2.0), Vec::new())], 0.0, 3.0).unwrap();
+    b.validate().unwrap();
+    assert_eq!((b.vertices().len(), b.edges().len(), b.faces().len()), (6, 9, 5));
+    let pi = std::f64::consts::PI;
+    let m = b.mass_properties();
+    assert!(close(m.volume, pi * 4.0 * 3.0), "{}", m.volume);
+    assert!(close(m.area, 2.0 * pi * 4.0 + 2.0 * pi * 2.0 * 3.0), "{}", m.area);
+    let c = m.centroid - Vec3::new(1.0, -2.0, 1.5);
+    assert!(c.dot(c).sqrt() < 1e-12, "{:?}", m.centroid);
+    let (lo, hi) = (m.min - Vec3::new(-1.0, -4.0, 0.0), m.max - Vec3::new(3.0, 0.0, 3.0));
+    assert!(lo.dot(lo) < 1e-24 && hi.dot(hi) < 1e-24, "{:?} {:?}", m.min, m.max);
+    // The chords of the mesh lie inside the circle: a little less volume, by 0.16 % at 64 a turn.
+    let mesh = mesh_volume(&tessellate(&b).unwrap());
+    assert!(mesh < m.volume && mesh > m.volume * 0.998, "{mesh}");
+}
+
+#[test]
+fn plate_with_a_round_hole() {
+    let b = extrude(&[region(square("sq", 10.0), vec![circle("h", Vec2::new(4.0, 5.0), 1.5)])], 0.0, 2.0).unwrap();
+    b.validate().unwrap();
+    let m = b.mass_properties();
+    let pi = std::f64::consts::PI;
+    let hole = pi * 1.5 * 1.5;
+    assert!(close(m.volume, (100.0 - hole) * 2.0), "{}", m.volume);
+    assert!(close(m.area, 2.0 * (100.0 - hole) + 4.0 * 10.0 * 2.0 + 2.0 * pi * 1.5 * 2.0), "{}", m.area);
+    // The hole is left of centre: the centre of mass moves right.
+    let x = (100.0 * 5.0 - hole * 4.0) / (100.0 - hole);
+    assert!(close(m.centroid.x, x) && close(m.centroid.y, 5.0) && close(m.centroid.z, 1.0), "{:?}", m.centroid);
+}
+
+/// The profile of a rolled sheet: a ring sector between radii 100 and 103, over 90°.
+#[test]
+fn rolled_sheet_sector() {
+    let (r, big) = (100.0, 103.0);
+    let pts = vec![Vec2::new(r, 0.0), Vec2::new(big, 0.0), Vec2::new(0.0, big), Vec2::new(0.0, r)];
+    let o = Vec2::new(0.0, 0.0);
+    let arcs = vec![None, Some(ProfileArc { center: o, ccw: true }), None, Some(ProfileArc { center: o, ccw: false })];
+    let b = extrude(&[region(ring("sheet", pts, arcs), Vec::new())], 0.0, 500.0).unwrap();
+    b.validate().unwrap();
+    let v = std::f64::consts::FRAC_PI_4 * (big * big - r * r) * 500.0;
+    assert!(close(b.volume(), v), "{} vs {v}", b.volume());
+    let convex = b.faces().iter().filter_map(|f| match f.surface {
+        Surface::Cylinder(c) => Some(c.convex),
+        Surface::Plane(_) => None,
+    });
+    let mut convex: Vec<bool> = convex.collect();
+    convex.sort();
+    assert_eq!(convex, [false, true], "the inner face sees the axis, the outer one turns away");
+}
+
+/// A slot: two lines and two half circles; the ends' circles do not touch the lines elsewhere.
+#[test]
+fn slot() {
+    let (l, r) = (10.0, 2.5);
+    let pts = vec![Vec2::new(0.0, -r), Vec2::new(l, -r), Vec2::new(l, r), Vec2::new(0.0, r)];
+    let arcs =
+        vec![None, Some(ProfileArc { center: Vec2::new(l, 0.0), ccw: true }), None, Some(ProfileArc { center: Vec2::new(0.0, 0.0), ccw: true })];
+    let b = extrude(&[region(ring("slot", pts, arcs), Vec::new())], 0.0, 1.0).unwrap();
+    b.validate().unwrap();
+    assert!(close(b.volume(), 2.0 * r * l + std::f64::consts::PI * r * r), "{}", b.volume());
+}
+
+#[test]
+fn arcs_that_touch_are_refused() {
+    // A hole across the plate's edge, and a hole crossing another. (Exact tangency is not a case:
+    // the vertices of a circle are rounded, and the arcs' radii with them.)
+    let across = extrude(&[region(square("sq", 10.0), vec![circle("h", Vec2::new(1.4, 5.0), 1.5)])], 0.0, 1.0);
+    assert!(matches!(across, Err(BrepError::Degenerate(_))), "{across:?}");
+    let crossing =
+        extrude(&[region(square("sq", 10.0), vec![circle("a", Vec2::new(4.0, 5.0), 1.5), circle("b", Vec2::new(6.0, 5.0), 1.5)])], 0.0, 1.0);
+    assert!(matches!(crossing, Err(BrepError::Degenerate(_))), "{crossing:?}");
+}
+
+/// Principle 8 with arcs: far away and turned, the same topology, volume and hashes of the
+/// same rebuild.
+#[test]
+fn arcs_far_away_and_turned() {
+    let b = extrude(&[region(square("sq", 10.0), vec![circle("h", Vec2::new(4.0, 5.0), 1.5)])], 0.0, 2.0).unwrap();
+    let m = Rigid::rotation(Vec3::new(1.0, 2.0, 3.0), 0.7).then(Rigid::translation(Vec3::new(1e7, -3e6, 2e6)));
+    let far = b.transformed(&m);
+    far.validate().unwrap();
+    assert_eq!((far.vertices().len(), far.edges().len(), far.faces().len()), (b.vertices().len(), b.edges().len(), b.faces().len()));
+    assert!((far.volume() - b.volume()).abs() < 1e-8 * b.volume(), "{} vs {}", far.volume(), b.volume());
+    let rebuilt = build_with_arcs(far.vertices().to_vec(), specs(&far), far.arc_specs()).unwrap();
+    assert_eq!(rebuilt.hash(), far.hash());
+    assert!(far.mapped(|p| p, |n| n).is_err(), "an affine map of arcs is refused");
+}

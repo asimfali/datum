@@ -85,7 +85,7 @@ fn dimensions_keep_ids() {
 #[test]
 fn pocket_on_a_face() {
     let plate = Value::Body(cuboid(id("plate"), Vec3::ZERO, Vec3::new(40.0, 30.0, 8.0)).unwrap());
-    let top = plate.body().unwrap().faces().iter().find(|f| f.plane.normal.z > 0.0).unwrap().id;
+    let top = plate.body().unwrap().faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
     let square = serde_json::json!({
         "points": {"p": [5, 5], "q": [15, 5], "r": [15, 12], "s": [5, 12]},
         "lines": {"l1": {"from": "p", "to": "q"}, "l2": {"from": "q", "to": "r"}, "l3": {"from": "r", "to": "s"}, "l4": {"from": "s", "to": "p"}}

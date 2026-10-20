@@ -4,10 +4,12 @@
 //! coordinates, and [`orient3d`], [`orient2d_along`], [`cmp_axis`] on [`Point`]s, which may be
 //! implicit intersections (D38). Constructions (new coordinates) are plain `f64`, rounded once.
 
+mod arc;
 mod exact;
 pub mod expr;
 mod implicit;
 
+pub use arc::{Arc2, arcs_touch, inside_circle, segment_touches_arc};
 pub use exact::{exact_fallbacks, perturbed_signs, ties};
 pub use implicit::{Exact, ExactScale, Lpi, Point, cmp_axis, cmp_axis_filtered, orient2d_along, orient3d};
 
