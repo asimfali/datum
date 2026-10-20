@@ -219,7 +219,7 @@ fn unfold(b: &Body, on: &str, k: f64) -> Result<datum_ops::Flat, BrepError> {
 
 /// The blank is the neutral layer's rectangle, the holes where they were sketched: from outside
 /// as sketched, from inside with Y turned back. Slots keep their lines and arcs; circles are one
-/// entity each, as a punch.
+/// entity each, as a punch. Unfolded about the inner face, the blank is seen from inside.
 #[test]
 fn the_flat_blank() {
     use datum_ops::FlatPiece;
@@ -254,8 +254,15 @@ fn the_flat_blank() {
     }
     // Sketched from inside at (300, −200): at (300, 200) on the blank.
     assert!(centres.iter().any(|c| (c.0 - 300.0).abs() < 1e-9 && (c.1 - 200.0).abs() < 1e-9), "{centres:?}");
-    // The same blank, whichever face it is unfolded about.
-    assert_eq!(unfold(&both, &side(&both, false), 0.44).unwrap().hash, flat.hash);
+    // Seen from inside, the same blank mirrored: X runs the other way.
+    let inside = unfold(&both, &side(&both, false), 0.44).unwrap();
+    assert!(close(inside.size.x, flat.size.x, 1e-12) && close(inside.size.y, flat.size.y, 1e-12));
+    for p in &inside.pieces {
+        if let FlatPiece::Circle { center, .. } = *p {
+            let mirrored = (flat.size.x - center.x, center.y);
+            assert!(centres.iter().any(|c| (c.0 - mirrored.0).abs() < 1e-9 && (c.1 - mirrored.1).abs() < 1e-9), "{center:?}");
+        }
+    }
     // Another K-factor than the cuts': refused, not stretched.
     assert!(matches!(unfold(&both, &side(&both, true), 0.5), Err(BrepError::Unsupported(_))));
 

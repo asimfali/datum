@@ -45,6 +45,8 @@ enum Request {
     SetParameter(String, Json),
     /// Write the flat blank of an unfold feature as DXF.
     ExportDxf(String, PathBuf),
+    /// Change fields of a feature (`edit`).
+    Edit(String, Json),
 }
 
 /// What the background thread hands the window after each rebuild.
@@ -85,6 +87,12 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 }
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
+                }
+                Request::Edit(name, mut fields) => {
+                    fields["name"] = json!(name);
+                    if let Err(e) = session.execute("edit", &fields) {
+                        error = Some(e);
+                    }
                 }
                 Request::ExportDxf(name, path) => {
                     if let Err(e) = session.execute("export_dxf", &json!({"name": name, "path": path.display().to_string()})) {
@@ -255,7 +263,7 @@ impl Viewer {
         }
         ui.separator();
         ui.heading("Features");
-        let mut export = None;
+        let (mut export, mut edit) = (None, None);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let name = f["name"].as_str().unwrap_or_default();
@@ -274,6 +282,17 @@ impl Viewer {
                             }
                         });
                     }
+                    // Sheet metal: the side of the path its thickness lies on, flipped by a click.
+                    None if op == "sheet" => {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("✔ {name}  ·  {op}"));
+                            let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
+                            let label = serde_json::to_value(side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+                            if ui.button(format!("⇄ {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
+                                edit = Some((name.to_string(), json!({"side": side.next()})));
+                            }
+                        });
+                    }
                     None => {
                         ui.label(format!("✔ {name}  ·  {op}"));
                     }
@@ -284,6 +303,10 @@ impl Viewer {
                 }
             }
         });
+        if let Some((name, fields)) = edit {
+            let _ = self.requests.send(Request::Edit(name, fields));
+            self.busy = true;
+        }
         if let Some((name, path)) = export {
             let _ = self.requests.send(Request::ExportDxf(name, path));
             self.busy = true;
@@ -413,17 +436,16 @@ mod tests {
 
     use super::*;
 
-    /// The side panel of a real model: every parameter's definition shows whole in its field.
-    #[test]
-    fn expressions_show_whole() {
+    /// A viewer showing reference model `model`, and the requests it sends.
+    fn viewer(model: &str) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
         let mut session = Session::default();
-        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/parametric.json");
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         let inspect = session.execute("inspect", &json!({})).unwrap();
-        let (requests, _inbox) = channel();
+        let (requests, inbox) = channel();
         let (_outbox, models) = channel();
         let edits = inspect["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
-        let mut v = Viewer {
+        let v = Viewer {
             requests,
             models,
             model: Some(Model {
@@ -449,6 +471,13 @@ mod tests {
             adapter: String::new(),
             edits,
         };
+        (v, inbox)
+    }
+
+    /// The side panel of a real model: every parameter's definition shows whole in its field.
+    #[test]
+    fn expressions_show_whole() {
+        let (mut v, _inbox) = viewer("parametric.json");
         // Layout needs no GPU; only a picture of the panel (`DATUM_VIEW_SHOT=file.png`) does.
         let shot = std::env::var_os("DATUM_VIEW_SHOT");
         let builder = egui_kittest::Harness::builder().with_size([360.0, 420.0]);
@@ -466,5 +495,19 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
+    }
+
+    /// A sheet's thickness side flips with one click: left, right, middle.
+    #[test]
+    fn the_side_of_a_sheet_flips() {
+        let (mut v, inbox) = viewer("sheet_panel.json");
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 600.0]).build_ui(|ui| {
+            egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+        });
+        h.run();
+        h.get_by_label("⇄ left").click();
+        h.run();
+        let sent = inbox.try_recv();
+        assert!(matches!(&sent, Ok(Request::Edit(name, fields)) if name == "panel" && *fields == json!({"side": "right"})), "an edit of the side");
     }
 }
