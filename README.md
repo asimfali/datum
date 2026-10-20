@@ -34,16 +34,27 @@ The long-term goal is an open CAD system for professional engineers, built aroun
 
 All comparisons are within Datum itself: sequential vs parallel.
 
-## Roadmap
+## Status
+
+The proof of concept is complete: stages M0–M5 are done, and C1–C4 hold (Ryzen 5 3600 under WSL, 6 logical cores; 1 thread vs 6):
+
+| # | Result |
+|---|---|
+| C1 | 1000 independent bodies: 230 → 61 ms (×3.8) |
+| C2 | Editing the last of 200 features: 0.14 ms over the operation itself |
+| C3 | 10 000-hole plate by one Boolean: 1.55 → 0.50 s (×3.1); terrain of 10⁶ triangles with a pit: 3.38 → 1.28 s (×2.6); 10 000 holes in a rolled sheet: 432 → 172 ms (×2.5) |
+| C4 | Hashes identical on 1/4/16 threads and between Linux and Windows |
+
+Coordinates 10⁷ m from the origin (in mm) keep every topology: no modeling box.
 
 | Stage | Scope |
 |---|---|
 | M0 | Workspace, math, half-edge B-rep, primitives, validation, volume, canonical hash, STL/OBJ export, CLI |
 | M1 | Feature graph: memoization, early cutoff, parallel scheduler; JSON model format; MCP server; determinism tests (C1, C2, C4) |
 | M2 | Parallel Boolean operations on polyhedra (C3) |
-| M3 | 2D sketches with a constraint solver; extrude, cut, patterns |
-| M4 | Viewer with live parameter editing |
-| M5 | Cylindrical surfaces |
+| M3 | 2D sketches with a constraint solver; extrude, cut, patterns; parameters and expressions |
+| M4 | Viewer with live parameter editing; large scenes on modest GPUs |
+| M5 | Arcs and cylinders; cuts by sketch profiles; perforation of a rolled sheet in its development; flat blank as a graph node, DXF export |
 
 ## Documentation
 

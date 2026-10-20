@@ -192,11 +192,12 @@ fn what_a_rolled_cut_refuses() {
     assert!(matches!(closed, Err(BrepError::Unsupported(_))), "{closed:?}");
 }
 
-/// Principle 8: turned by an odd angle and far from the origin, the same holes and volume. The
-/// development's `v` starts across the axis from the world origin: here, far along the axis.
+/// Principle 8: turned by an odd angle and 10⁷ m (in mm) from the origin, the same holes, and the
+/// volume up to the rounding of coordinates that far out (about ε·|p| each). The development's
+/// `v` starts across the axis from the world origin: here, far along the axis.
 #[test]
 fn far_away_and_turned() {
-    let m = Rigid::rotation(Vec3::new(1.0, 2.0, 3.0), 0.7).then(Rigid::translation(Vec3::new(1e6, -3e6, 2e6)));
+    let m = Rigid::rotation(Vec3::new(1.0, 2.0, 3.0), 0.7).then(Rigid::translation(Vec3::new(1e10, -3e9, 2e9)));
     let s = sheet().transformed(&m);
     let target = Value::Body(s.clone());
     let empty = op(serde_json::json!({"op": "sketch", "face": side(&s, true), "k_factor": 0.5, "sketch": {}})).eval(id("frame"), &[&target]).unwrap();
@@ -205,7 +206,8 @@ fn far_away_and_turned() {
     let r = cut_by("cut", &s, &side(&s, true), 0.5, circle(20.0, v0 + 20.0, 10.0), serde_json::json!({"count": [4, 3], "step": [[45, 0], [0, 35]]}))
         .unwrap();
     assert_eq!(r.faces().len(), 6 + 12 * 3);
-    assert!(close(r.volume(), holed(12.0 * 25.0 * PI, 0.5), 1e-9), "{} vs {}", r.volume(), holed(12.0 * 25.0 * PI, 0.5));
+    let far = 64.0 * f64::EPSILON * 1e10 / L;
+    assert!(close(r.volume(), holed(12.0 * 25.0 * PI, 0.5), 1e-9 + far), "{} vs {}", r.volume(), holed(12.0 * 25.0 * PI, 0.5));
     mesh_agrees(&r);
 }
 

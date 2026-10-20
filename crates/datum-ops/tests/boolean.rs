@@ -28,7 +28,10 @@ fn run(kind: BooleanKind, bodies: &[&Body]) -> Result<Body, BrepError> {
         .map(|t| (m.positions[t[0] as usize] - o).dot((m.positions[t[1] as usize] - o).cross(m.positions[t[2] as usize] - o)))
         .sum::<f64>()
         / 6.0;
-    assert_close(mesh_volume, b.volume(), 1e-9);
+    // Both sum the same faces in another way: they agree to the rounding of the coordinates,
+    // about ε·|p| for a body of unit size `|p|` from the origin.
+    let far = o.dot(o).sqrt();
+    assert_close(mesh_volume, b.volume(), 1e-9 + 64.0 * f64::EPSILON * far);
     Ok(b)
 }
 
@@ -142,11 +145,11 @@ fn invariant_to_placement() {
         (f, v, b.edges().len(), b.loops().len())
     };
     let reference = run(Difference, &[&p, &t, &u]).unwrap();
-    for shift in [1e3, 1e6, 1e7] {
+    for shift in [1e3, 1e6, 1e7, 1e10] {
         let m = Rigid::rotation(Vec3::new(0.3, -0.5, 0.8), 0.731).then(Rigid::translation(Vec3::new(shift, -0.7 * shift, 0.3 * shift)));
         let r = run(Difference, &[&p.transformed(&m), &t.transformed(&m), &u.transformed(&m)]).unwrap();
         assert_eq!(topology(&r), topology(&reference), "shift {shift}");
-        assert_close(r.volume(), reference.volume(), 1e-6);
+        assert_close(r.volume(), reference.volume(), 1e-6 + 64.0 * f64::EPSILON * shift);
     }
 }
 
