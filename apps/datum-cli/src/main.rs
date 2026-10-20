@@ -154,10 +154,14 @@ fn cmd_bench_view(args: &[String]) -> Result<(), String> {
         rebuild.as_secs_f64() * 1e3,
         tessellation.as_secs_f64() * 1e3
     );
-    let (adapter, cases) = datum_view::capture::frame_times(&scene, w, h, frames)?;
+    let start = Instant::now();
+    let geometry = datum_view::scene::Geometry::new(&scene, scene.anchor());
+    let vertices = geometry.triangles.vertices.len() as u64 / datum_view::scene::TRIANGLE_VERTEX;
+    println!("GPU geometry {:.0} ms: {vertices} triangle vertices", start.elapsed().as_secs_f64() * 1e3);
+    let (adapter, cases) = datum_view::capture::frame_times(&scene, geometry, w, h, frames)?;
     println!("{adapter}, {w}×{h}, median of {frames} frames:");
     for (case, ms) in cases {
-        println!("  {case:<24} {ms:>8.2} ms");
+        println!("  {case:<36} {ms:>8.2} ms");
     }
     Ok(())
 }
