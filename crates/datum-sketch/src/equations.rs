@@ -229,7 +229,7 @@ impl Equations {
                         }
                     };
                     let drawn = |r: Rad, centre: usize| match r {
-                        Rad::Point(p) => ((start[p].x - start[centre].x).hypot(start[p].y - start[centre].y)) / size,
+                        Rad::Point(p) => (libm::hypot(start[p].x - start[centre].x, start[p].y - start[centre].y)) / size,
                         Rad::Value(v) => v,
                     };
                     match (curve(&curves[0])?, curve(&curves[1])?) {
@@ -253,7 +253,7 @@ impl Equations {
                         }
                         (Curve::Circle(c1, r1, _), Curve::Circle(c2, r2, _)) => {
                             // Outside or inside, whichever the drawing is closer to.
-                            let dist = (start[c2].x - start[c1].x).hypot(start[c2].y - start[c1].y) / size;
+                            let dist = libm::hypot(start[c2].x - start[c1].x, start[c2].y - start[c1].y) / size;
                             let (a, b) = (drawn(r1, c1), drawn(r2, c2));
                             let contact = if (dist - (a + b)).abs() <= (dist - (a - b).abs()).abs() {
                                 Contact::Outside

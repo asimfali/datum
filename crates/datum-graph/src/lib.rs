@@ -159,9 +159,11 @@ pub struct Evaluation {
 
 impl Evaluation {
     /// Values of the features nothing else uses: what the model ends in. Failed ones are left out.
+    /// An unfold uses nothing up: its blank is made for export, the sheet stays what the model
+    /// ends in.
     pub fn final_values(&self, graph: &Graph) -> Vec<&Value> {
         let mut used = vec![false; graph.nodes.len()];
-        for n in &graph.nodes {
+        for n in graph.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. })) {
             for &i in &n.inputs {
                 used[i as usize] = true;
             }

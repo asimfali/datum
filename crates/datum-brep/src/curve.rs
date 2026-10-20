@@ -165,9 +165,9 @@ impl Rolled {
     pub(crate) fn measure(&self) -> (f64, f64, f64) {
         let (f, g) = (self.from, self.to);
         match self.arc {
-            None => (0.0, 0.0, (g.x - f.x).hypot(g.y - f.y)),
+            None => (0.0, 0.0, libm::hypot(g.x - f.x, g.y - f.y)),
             Some(a) => {
-                let rho = (f.x - a.center.x).hypot(f.y - a.center.y);
+                let rho = libm::hypot(f.x - a.center.x, f.y - a.center.y);
                 let turn = a.turn(f, g).abs();
                 (rho, turn, rho * turn)
             }
@@ -195,7 +195,7 @@ impl Rolled {
     /// about the axis at its two ends along it.
     fn extend_bounds(&self, r: f64, lo: &mut Vec3, hi: &mut Vec3) {
         let (f, g) = (self.from, self.to);
-        let rho = self.arc.map_or(0.0, |a| (f.x - a.center.x).hypot(f.y - a.center.y));
+        let rho = self.arc.map_or(0.0, |a| libm::hypot(f.x - a.center.x, f.y - a.center.y));
         let (mut u, mut v) = ([f.x.min(g.x), f.x.max(g.x)], [f.y.min(g.y), f.y.max(g.y)]);
         if let Some(a) = self.arc {
             u = [u[0].min(a.center.x - rho), u[1].max(a.center.x + rho)];

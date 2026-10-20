@@ -81,7 +81,7 @@ pub fn extrude(regions: &[Region], z0: f64, z1: f64) -> Result<Body, BrepError> 
                 let surface = match l.arc(k) {
                     None => Surface::Plane(Plane { origin: base(a, z0), normal: Vec3::new(b.y - a.y, a.x - b.x, 0.0) }),
                     Some(arc) => {
-                        let radius = (a.x - arc.center.x).hypot(a.y - arc.center.y);
+                        let radius = libm::hypot(a.x - arc.center.x, a.y - arc.center.y);
                         let axis = Vec3::new(0.0, 0.0, if arc.ccw { 1.0 } else { -1.0 });
                         for (layer, z) in [(0, z0), (1, z1)] {
                             arcs.push(CurveSpec {

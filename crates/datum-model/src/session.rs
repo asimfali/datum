@@ -49,6 +49,18 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "export_dxf",
+        description: "Write the flat blank of an `unfold` feature as DXF (R12: lines, arcs, circles on layer 0, mm) to `path`.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name", "path"]}),
+        run: |s, p| {
+            let name = text(p, "name")?;
+            let flat = s.value(name)?.flat().ok_or_else(|| format!("`{name}` is not an unfold"))?;
+            let path = PathBuf::from(text(p, "path")?);
+            std::fs::write(&path, flat.dxf()).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(json!({"written": path.display().to_string(), "width": flat.size.x, "height": flat.size.y, "pieces": flat.pieces.len()}))
+        },
+    },
+    Command {
         name: "save",
         description: "Save the model as canonical JSON. Without `path`: to the file it was opened from.",
         params: || json!({"type": "object", "properties": {"path": {"type": "string"}}}),
@@ -276,7 +288,7 @@ impl Session {
     }
 
     fn body(&self, name: &str) -> Result<&Body, String> {
-        self.value(name)?.body().ok_or_else(|| format!("`{name}` is a sketch, not a body"))
+        self.value(name)?.body().ok_or_else(|| format!("`{name}` is not a body"))
     }
 
     fn inspect(&self) -> Value {
@@ -294,6 +306,10 @@ impl Session {
                             Feature::Sketch(s) => {
                                 let points: serde_json::Map<String, Value> = s.solved.points.iter().map(|(n, p)| (n.clone(), json!([p.x, p.y]))).collect();
                                 json!({"sketch": {"dof": s.solved.dof, "free_points": s.solved.free_points, "points": points}, "hash": hash})
+                            }
+                            Feature::Flat(f) => {
+                                let [lines, arcs, circles] = f.counts();
+                                json!({"flat": {"width": f.size.x, "height": f.size.y, "lines": lines, "arcs": arcs, "circles": circles}, "hash": hash})
                             }
                         };
                         f.insert("status".into(), status);

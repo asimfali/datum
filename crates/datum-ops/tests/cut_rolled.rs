@@ -208,3 +208,66 @@ fn far_away_and_turned() {
     assert!(close(r.volume(), holed(12.0 * 25.0 * PI, 0.5), 1e-9), "{} vs {}", r.volume(), holed(12.0 * 25.0 * PI, 0.5));
     mesh_agrees(&r);
 }
+
+/// The blank of `b` unfolded at `k` about face `on`.
+fn unfold(b: &Body, on: &str, k: f64) -> Result<datum_ops::Flat, BrepError> {
+    let v = op(serde_json::json!({"op": "unfold", "face": on, "k_factor": k})).eval(id("unfold"), &[&Value::Body(b.clone())])?;
+    Ok(v.flat().unwrap().clone())
+}
+
+/// The blank is the neutral layer's rectangle, the holes where they were sketched: from outside
+/// as sketched, from inside with Y turned back. Slots keep their lines and arcs; circles are one
+/// entity each, as a punch.
+#[test]
+fn the_flat_blank() {
+    use datum_ops::FlatPiece;
+    let s = sheet();
+    let plain = unfold(&s, &side(&s, false), 0.44).unwrap();
+    let width = FRAC_PI_2 * (R + 0.44 * T);
+    assert!(close(plain.size.x, width, 1e-12) && close(plain.size.y, L, 1e-12), "{:?}", plain.size);
+    assert_eq!(plain.counts(), [4, 0, 0]);
+
+    let holes =
+        cut_by("holes", &s, &side(&s, true), 0.44, circle(20.0, 20.0, 10.0), serde_json::json!({"count": [4, 3], "step": [[45, 0], [0, 35]]}))
+            .unwrap();
+    let both = cut_by("slots", &holes, &side(&holes, false), 0.44, hole_and_slot_below(), serde_json::Value::Null).unwrap();
+    let flat = unfold(&both, &side(&both, true), 0.44).unwrap();
+    // 4 sides; 12 holes and one inside; the slot's 2 lines and 2 arcs.
+    assert_eq!(flat.counts(), [4 + 2, 2, 13]);
+    let centres: Vec<(f64, f64)> = flat
+        .pieces
+        .iter()
+        .filter_map(|p| match *p {
+            FlatPiece::Circle { center, radius } => Some((center.x, center.y, radius)),
+            _ => None,
+        })
+        .map(|(x, y, r)| {
+            assert!(close(r, 5.0, 1e-12));
+            (x, y)
+        })
+        .collect();
+    for (i, j) in (0..4).flat_map(|i| (0..3).map(move |j| (i, j))) {
+        let want = (20.0 + 45.0 * f64::from(i), 20.0 + 35.0 * f64::from(j));
+        assert!(centres.iter().any(|c| (c.0 - want.0).abs() < 1e-9 && (c.1 - want.1).abs() < 1e-9), "no hole at {want:?}");
+    }
+    // Sketched from inside at (300, −200): at (300, 200) on the blank.
+    assert!(centres.iter().any(|c| (c.0 - 300.0).abs() < 1e-9 && (c.1 - 200.0).abs() < 1e-9), "{centres:?}");
+    // The same blank, whichever face it is unfolded about.
+    assert_eq!(unfold(&both, &side(&both, false), 0.44).unwrap().hash, flat.hash);
+    // Another K-factor than the cuts': refused, not stretched.
+    assert!(matches!(unfold(&both, &side(&both, true), 0.5), Err(BrepError::Unsupported(_))));
+
+    let dxf = flat.dxf();
+    assert!(dxf.starts_with("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n") && dxf.ends_with("0\nENDSEC\n0\nEOF\n"));
+    assert_eq!((dxf.matches("\nCIRCLE\n").count(), dxf.matches("\nARC\n").count(), dxf.matches("\nLINE\n").count()), (13, 2, 6));
+}
+
+/// A hole Ø10 at (300, −200) and a slot 20 × 6 at (340…360, −200), sketched from inside.
+fn hole_and_slot_below() -> serde_json::Value {
+    serde_json::json!({
+        "points": {"h": [300, -200], "a": [340, -203], "b": [360, -203], "c": [360, -197], "d": [340, -197], "l": [340, -200], "r": [360, -200]},
+        "lines": {"low": {"from": "a", "to": "b"}, "high": {"from": "c", "to": "d"}},
+        "arcs": {"right": {"center": "r", "from": "b", "to": "c"}, "left": {"center": "l", "from": "d", "to": "a"}},
+        "circles": {"hole": {"center": "h", "diameter": 10}}
+    })
+}

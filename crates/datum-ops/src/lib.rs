@@ -6,6 +6,7 @@ mod bounds;
 mod cut;
 mod pattern;
 mod sketch;
+mod unfold;
 
 use std::borrow::Cow;
 use std::ops::RangeInclusive;
@@ -19,6 +20,7 @@ pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sketch::{Developed, Placed, SketchPlane, extrude_sketch, place};
+pub use unfold::{Flat, FlatPiece, unfold};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -77,6 +79,11 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pattern: Option<CutPattern>,
     },
+    /// The flat blank of a rolled sheet: the outline and the cuts of the cylinder face with ID
+    /// `face` in the sheet's development, its neutral layer at `k_factor` of the thickness (the
+    /// K-factor the cuts were sketched with), seen from outside, its corner at the origin. Exported
+    /// as DXF. One input: the body.
+    Unfold { face: String, k_factor: Num },
 }
 
 /// Copies of a cut's profiles in the sketch's coordinates.
@@ -119,6 +126,7 @@ fn count(n: &Num) -> Result<u32, BrepError> {
 pub enum Value {
     Body(Body),
     Sketch(Placed),
+    Flat(Flat),
 }
 
 impl Value {
@@ -127,20 +135,28 @@ impl Value {
         match self {
             Self::Body(b) => b.hash(),
             Self::Sketch(s) => s.hash,
+            Self::Flat(f) => f.hash,
         }
     }
 
     pub fn body(&self) -> Option<&Body> {
         match self {
             Self::Body(b) => Some(b),
-            Self::Sketch(_) => None,
+            Self::Sketch(_) | Self::Flat(_) => None,
         }
     }
 
     pub fn sketch(&self) -> Option<&Placed> {
         match self {
             Self::Sketch(s) => Some(s),
-            Self::Body(_) => None,
+            Self::Body(_) | Self::Flat(_) => None,
+        }
+    }
+
+    pub fn flat(&self) -> Option<&Flat> {
+        match self {
+            Self::Flat(f) => Some(f),
+            Self::Body(_) | Self::Sketch(_) => None,
         }
     }
 }
@@ -160,6 +176,7 @@ impl Op {
             Self::Sketch { .. } => "sketch",
             Self::Extrude { .. } => "extrude",
             Self::Cut { .. } => "cut",
+            Self::Unfold { .. } => "unfold",
         }
     }
 
@@ -168,7 +185,7 @@ impl Op {
         match self {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
             Self::Sketch { .. } => 0..=1,
-            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Extrude { .. } => 1..=1,
+            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Extrude { .. } | Self::Unfold { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
             Self::Cut { .. } => 2..=2,
         }
@@ -203,6 +220,7 @@ impl Op {
                     }
                 },
             },
+            Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
     }
@@ -243,6 +261,10 @@ impl Op {
             }
             Self::Extrude { z0, z1 } => [value(z0), value(z1)].into_iter().for_each(num),
             Self::Cut { pattern } => pattern.iter().flat_map(|p| p.count.iter().chain(p.step.iter().flatten())).map(value).for_each(num),
+            Self::Unfold { face, k_factor } => {
+                num(value(k_factor));
+                h.update(face.as_bytes());
+            }
         }
     }
 
@@ -294,6 +316,7 @@ impl Op {
                 };
                 return Ok(Value::Sketch(place(sketch, plane.as_ref(), host, k_factor.as_ref().map(num).transpose()?)?));
             }
+            Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, num(z0)?, num(z1)?)?,
             Self::Cut { pattern } => {
                 let grid = match pattern {
