@@ -215,6 +215,8 @@ impl SketchEdit {
         for (n, v) in &patch {
             self.json["sketch"]["points"][n] = v.clone();
         }
+        // Without the cursor's pin: what is still free shows blue again.
+        self.solve();
         Some(json!({"name": self.feature, "points": patch}))
     }
 
@@ -578,6 +580,8 @@ mod tests {
         assert!(near(&patch["points"]["c"][0], 12.0) && near(&patch["points"]["c"][1], 7.0), "{patch}");
         assert!(near(&patch["points"]["d"][1], 7.0), "{patch}");
         assert!(patch["points"].get("a").is_none(), "{patch}");
+        // Let go, the height is free again: the cursor's pin is gone.
+        assert_eq!(e.placed.as_ref().map(|p| p.solved.dof), Ok(1));
         // A defined point does not drag.
         e.hover = Some(Pick::Point("b".into()));
         assert!(!e.start_drag());

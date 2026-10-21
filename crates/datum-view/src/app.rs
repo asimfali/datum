@@ -110,12 +110,9 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = std::time::Instant::now();
         let (graph, evaluation) = (session.graph(), session.evaluation());
-        let shown: Vec<(&str, &datum_graph::Value)> = evaluation
-            .finals(graph)
+        let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing.as_deref())
             .into_iter()
-            .map(|i| (graph.nodes()[i as usize].name.as_str(), &evaluation.results[i as usize]))
-            .filter(|(n, _)| editing.as_deref() != Some(*n))
-            .filter_map(|(n, r)| Some((n, r.as_deref().ok()?)))
+            .filter_map(|i| Some((graph.nodes()[i as usize].name.as_str(), evaluation.results[i as usize].as_deref().ok()?)))
             .collect();
         let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
         let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
@@ -134,6 +131,19 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         }
         ctx.request_repaint();
     }
+}
+
+/// The features the view shows: what the model ends in, but the sketch being edited (the window
+/// draws it) in place of itself shows its input, the body it lies on.
+fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<datum_graph::NodeIx> {
+    let edited = editing.and_then(|n| graph.find(n));
+    let mut v: Vec<datum_graph::NodeIx> = evaluation.finals(graph).into_iter().filter(|i| Some(*i) != edited).collect();
+    if let Some(e) = edited {
+        v.extend(&graph.nodes()[e as usize].inputs);
+        v.sort_unstable();
+        v.dedup();
+    }
+    v
 }
 
 /// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
@@ -342,6 +352,12 @@ impl Viewer {
                 }
                 Err(e) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
             };
+            // What the sketch breaks downstream: why the model behind did not change.
+            for f in m.inspect["features"].as_array().into_iter().flatten().filter(|f| f["name"] != sk.feature.as_str()) {
+                if let (Some(name), Some(e)) = (f["name"].as_str(), f["error"].as_str()) {
+                    ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}: {e}"));
+                }
+            }
             ui.checkbox(&mut sk.names, "Names");
             ui.weak("Drag a blue point · click to select, Shift to add · Del removes · Esc clears, then leaves");
             done = ui.button("Done").clicked();
@@ -600,7 +616,12 @@ impl Viewer {
             let painter = ui.painter();
             sk.hover = offset.and_then(|(x, y)| sk.hit(x, y, h, |t| crate::sketch::label_size(painter, t)));
         }
+        // A drag starts a few pixels from where the button went down: what is there is dragged.
         if r.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+                let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
+                sk.hover = sk.hit(x, y, h, |t| crate::sketch::label_size(ui.painter(), t));
+            }
             sk.start_drag();
         }
         if sk.drag.is_some() {
@@ -809,6 +830,25 @@ mod tests {
         v.sync_sketch();
         assert!(v.sketch.is_none());
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
+    }
+
+    /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.
+    #[test]
+    fn the_face_a_sketch_is_on_stays_in_view() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let faces = session.execute("query_faces", &json!({"name": "plate", "normal": [0, 0, 1]})).unwrap();
+        let top = faces["faces"][0]["id"].clone();
+        session.execute("add", &json!({"name": "sketch1", "op": "sketch", "inputs": ["plate"], "face": top, "sketch": {"points": {}}})).unwrap();
+        let names = |editing: Option<&str>| {
+            shown(session.graph(), session.evaluation(), editing)
+                .into_iter()
+                .map(|i| session.graph().nodes()[i as usize].name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(None), ["sketch1"]);
+        assert_eq!(names(Some("sketch1")), ["plate"]);
     }
 
     /// A sheet's thickness side flips with one click: left, right, middle.
