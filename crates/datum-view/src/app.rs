@@ -194,6 +194,9 @@ struct Viewer {
     edits: BTreeMap<String, String>,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
+    /// A newer release, once the background check finds one: its version and page.
+    update: Receiver<(String, String)>,
+    newer: Option<(String, String)>,
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
@@ -208,8 +211,16 @@ impl Viewer {
     fn new(path: Option<PathBuf>, ctx: egui::Context, adapter: String) -> Self {
         let (requests, inbox) = channel();
         let (outbox, models) = channel();
+        let repaint = ctx.clone();
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
+        let (found, update) = channel();
+        std::thread::spawn(move || {
+            if let Some(n) = crate::update::newer() {
+                let _ = found.send(n);
+                repaint.request_repaint();
+            }
+        });
         let mut v = Self {
             requests,
             models,
@@ -228,6 +239,8 @@ impl Viewer {
             adapter,
             edits: BTreeMap::new(),
             path: None,
+            update,
+            newer: None,
             sketch: None,
             entering: None,
             library: crate::templates::library(),
@@ -342,6 +355,13 @@ impl Viewer {
                 self.save(ui, true);
             }
             ui.separator();
+            if let Ok(n) = self.update.try_recv() {
+                self.newer = Some(n);
+            }
+            if let Some((version, url)) = &self.newer {
+                ui.hyperlink_to(format!("⬆ Datum {version} is out"), url).on_hover_text("Its page: what is new, and the download");
+                ui.separator();
+            }
             ui.checkbox(&mut self.smooth, "Smooth edges")
                 .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
             ui.separator();
@@ -1052,6 +1072,8 @@ mod tests {
             adapter: String::new(),
             edits,
             path: None,
+            update: channel().1,
+            newer: None,
             sketch: None,
             entering: None,
             library: crate::templates::library(),
