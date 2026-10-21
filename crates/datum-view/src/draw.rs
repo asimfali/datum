@@ -702,6 +702,8 @@ mod tests {
             json["face"] = json!(format!("{top:?}"));
             Some(std::sync::Arc::new(datum_graph::Value::Body(plate)))
         } else {
+            // A plane whose projected origin lies far from what the tests draw, so it snaps to nothing.
+            json["plane"] = json!({"origin": [-1000, -1000, 0], "x_axis": [1, 0, 0], "normal": [0, 0, 1]});
             input
         };
         let mut e = SketchEdit::new("s".into(), Context { id, input }, json, BTreeMap::new(), None);
@@ -777,6 +779,19 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
+    }
+
+    /// A line started by the model's origin starts at it: the sketch is tied to the origin.
+    #[test]
+    fn lines_start_at_the_origin() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.json.as_object_mut().unwrap().remove("plane");
+        e.solve();
+        e.draft.tool = Tool::Line;
+        assert!(click_at(&mut e, [0.2, -0.1], false).is_none(), "the origin is a point already");
+        assert_eq!(e.draft.chain.as_ref().unwrap().point, "origin");
+        let p = click_at(&mut e, [10.0, 0.2], false).unwrap();
+        assert_eq!(p["lines"]["l1"], json!({"from": "origin", "to": "p1"}), "{p}");
     }
 
     /// Esc ends the command at once: the chain half drawn goes, the tool, and its cursor.

@@ -18,6 +18,11 @@ pub struct SketchPlane {
     pub normal: Vec3,
 }
 
+/// The name of the point every plane sketch has where the model's origin projects onto its
+/// plane (D93): fixed, to dimension from, as Inventor projects the part's centre point. Not
+/// part of the sketch's hash: the plane says where it is.
+pub const ORIGIN: &str = "origin";
+
 /// An edge or vertex of the input body projected into a sketch (D87), by ID. `at` keeps where
 /// its points were when the sketch was drawn, in sketch coordinates: a vertex's point; a line's
 /// start and end; an arc's centre, start and end. Sides (a point above a line, a circle inside or
@@ -345,6 +350,23 @@ pub fn place(
         }
         (None, None) => ([Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)], None),
     };
+    if sketch.points.contains_key(ORIGIN) {
+        return Err(BrepError::Sketch(format!("`{ORIGIN}` is the model's origin projected into the sketch: name the point otherwise")));
+    }
+    // The model's origin on the plane; a sketch in a sheet's development has its own.
+    let with_origin;
+    let sketch = match &developed {
+        Some(_) => sketch,
+        None => {
+            let [o, x, y, _] = frame;
+            let mut s = sketch.clone();
+            // `0 − …`: no negative zero for an origin on the plane's own.
+            s.points.insert(ORIGIN.into(), Vec2::new(0.0 - o.dot(x), 0.0 - o.dot(y)));
+            s.constraints.push(Constraint::Fix { point: ORIGIN.into(), at: None });
+            with_origin = s;
+            &with_origin
+        }
+    };
     let with_projections;
     let mut now = BTreeMap::new();
     let sketch = match body {
@@ -365,7 +387,7 @@ pub fn place(
     for c in frame.iter().flat_map(|v| v.to_array()) {
         bytes(&c.to_bits().to_le_bytes());
     }
-    for (name, p) in &solved.points {
+    for (name, p) in solved.points.iter().filter(|(n, _)| n.as_str() != ORIGIN) {
         bytes(name.as_bytes());
         bytes(&[p.x.to_bits().to_le_bytes(), p.y.to_bits().to_le_bytes()].concat());
     }

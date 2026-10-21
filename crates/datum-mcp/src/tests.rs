@@ -212,10 +212,12 @@ fn rename_follows_into_a_sheet() {
         "add",
         json!({"name": "bent", "op": "sheet", "inputs": ["path"], "thickness": 1, "radius": 1, "side": "left", "z0": 0, "z1": 10, "start": "a"}),
     );
-    let r = execute(&mut s, "rename_in_sketch", json!({"name": "path", "from": "a", "to": "origin"}));
+    let r = execute(&mut s, "rename_in_sketch", json!({"name": "path", "from": "a", "to": "start"}));
     assert_eq!(r["failed"], json!([]), "{r}");
     let m = tool(&mut s, "inspect_model", json!({})).1;
-    assert_eq!(feature(&m, "bent")["start"], "origin");
+    assert_eq!(feature(&m, "bent")["start"], "start");
+    // `origin` is the model's origin in every sketch: no point is renamed to it.
+    assert!(tool(&mut s, "execute", json!({"command": "rename_in_sketch", "params": {"name": "path", "from": "b", "to": "origin"}})).0);
 }
 
 /// Each change is one step back; a command that fails changes nothing.

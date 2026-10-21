@@ -22,7 +22,7 @@ pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, sheet};
-pub use sketch::{Developed, Placed, Projection, SketchPlane, extrude_sketch, place, profile_regions};
+pub use sketch::{Developed, ORIGIN, Placed, Projection, SketchPlane, extrude_sketch, place, profile_regions};
 pub use unfold::{Flat, FlatPiece, unfold};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.

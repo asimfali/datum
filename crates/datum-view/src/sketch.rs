@@ -282,6 +282,8 @@ impl SketchEdit {
         let sketch = &self.json["sketch"];
         for p in &self.selected {
             match p {
+                // The model's origin is no point of the sketch's to remove.
+                Pick::Point(n) if n == datum_ops::ORIGIN => {}
                 Pick::Point(n) => remove("points", n),
                 Pick::Curve(n) => {
                     let key = ["lines", "arcs", "circles"].into_iter().find(|k| sketch[k].get(n).is_some()).unwrap_or("lines");
@@ -555,6 +557,13 @@ impl SketchEdit {
                     painter.galley(r.min, galley, NAME);
                 }
             }
+        }
+        // The model's origin: its axes, faint, to the edges of the view.
+        if let Some(o) = p.solved.points.get(datum_ops::ORIGIN) {
+            let at = screen([o.x, o.y]);
+            let faint = egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(40, 40, 50, 70));
+            painter.line_segment([egui::pos2(rect.left(), at.y), egui::pos2(rect.right(), at.y)], faint);
+            painter.line_segment([egui::pos2(at.x, rect.top()), egui::pos2(at.x, rect.bottom())], faint);
         }
         for (n, v) in &p.solved.points {
             let pick = self.projection_of(n).map_or(Pick::Point(n.clone()), Pick::Projection);
