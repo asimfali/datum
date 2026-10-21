@@ -1,0 +1,4 @@
+# Windows builds carry the C runtime in themselves: a portable program needs no
+# vcruntime140.dll, which a clean machine may lack.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

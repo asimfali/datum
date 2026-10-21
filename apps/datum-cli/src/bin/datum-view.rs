@@ -8,6 +8,6 @@ fn main() {
     // A model given (dropped on the program, or opened with it) is shown.
     let model = std::env::args().nth(1).map(PathBuf::from);
     if let Err(e) = datum_view::run(model) {
-        datum_view::log::write(&format!("the window failed: {e}"));
+        datum_view::log::fail(&format!("Datum could not open its window: {e}"));
     }
 }
