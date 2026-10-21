@@ -59,6 +59,8 @@ struct Model {
     geometry: Arc<Geometry>,
     /// The last command's error, if it was refused.
     error: Option<String>,
+    /// What the commands of this rebuild changed beyond what they were asked: a body's shape.
+    notes: Vec<String>,
     /// A model was opened in this rebuild: the view fits it.
     opened: bool,
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
@@ -82,6 +84,14 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
         let (mut error, mut opened) = (None, false);
+        let mut notes = Vec::new();
+        // A body whose shape an edit changed (pieces, through holes): worth a word.
+        let mut note = |reply: &Json| {
+            for c in reply["shape_changed"].as_array().into_iter().flatten() {
+                let says = |s: &Json| format!("{} piece(s), {} through hole(s)", s["pieces"], s["through_holes"]);
+                notes.push(format!("{} changed shape: {} → {}", c["feature"].as_str().unwrap_or_default(), says(&c["before"]), says(&c["after"])));
+            }
+        };
         for r in pending {
             match r {
                 Request::Open(p) => {
@@ -94,17 +104,17 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
                 }
-                Request::Command(command, params) => {
-                    if let Err(e) = session.execute(command, &params) {
-                        error = Some(e);
-                    }
-                }
+                Request::Command(command, params) => match session.execute(command, &params) {
+                    Ok(reply) => note(&reply),
+                    Err(e) => error = Some(e),
+                },
                 Request::Editing(name) => editing = name,
             }
         }
         for (name, value) in latest {
-            if let Err(e) = session.execute("set_parameter", &json!({"name": name, "value": value})) {
-                error = Some(e);
+            match session.execute("set_parameter", &json!({"name": name, "value": value})) {
+                Ok(reply) => note(&reply),
+                Err(e) => error = Some(e),
             }
         }
         let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
@@ -126,7 +136,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, opened, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
+        if models.send(Model { inspect, scene, geometry, error, notes, opened, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
             return;
         }
         ctx.request_repaint();
@@ -341,6 +351,9 @@ impl Viewer {
         };
         if let Some(e) = &m.error {
             ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+        }
+        for n in &m.notes {
+            ui.colored_label(egui::Color32::from_rgb(190, 120, 0), format!("⚠ {n}"));
         }
         let mut done = false;
         if let Some(sk) = &mut self.sketch {
@@ -747,6 +760,7 @@ mod tests {
                 scene: Scene::default(),
                 geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
                 error: None,
+                notes: Vec::new(),
                 opened: false,
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,

@@ -42,6 +42,9 @@ pub struct SketchEdit {
     /// Parameter values, for the expressions of dimensions.
     pub params: BTreeMap<String, f64>,
     pub placed: Result<Placed, String>,
+    /// The regions the profiles bound, as triangles in sketch coordinates: filled, holes left
+    /// open, so a hole pushed out of its outline shows as the disc it becomes.
+    pub fill: Vec<[[f64; 2]; 3]>,
     pub camera: SketchCamera,
     pub hover: Option<Pick>,
     pub selected: Vec<Pick>,
@@ -61,6 +64,7 @@ const PROJECTED: egui::Color32 = egui::Color32::from_rgb(150, 110, 20);
 const SELECTED: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 const DIMENSION: egui::Color32 = egui::Color32::from_rgb(20, 120, 60);
 const NAME: egui::Color32 = egui::Color32::from_rgb(110, 110, 120);
+const FILL: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(60, 110, 200, 45);
 
 /// A label as shown: its pixel offset from the middle of the picture, and its size.
 pub type Laid = (Label, (f64, f64), (f64, f64));
@@ -86,8 +90,19 @@ impl SketchEdit {
             center: [0.0; 2],
             half_height: 50.0,
         };
-        let mut s =
-            Self { feature, context, json, params, placed: Err(String::new()), camera, hover: None, selected: Vec::new(), drag: None, names: true };
+        let mut s = Self {
+            feature,
+            context,
+            json,
+            params,
+            placed: Err(String::new()),
+            fill: Vec::new(),
+            camera,
+            hover: None,
+            selected: Vec::new(),
+            drag: None,
+            names: true,
+        };
         s.solve();
         s.fit(scene);
         s
@@ -134,7 +149,14 @@ impl SketchEdit {
 
     /// Solves and places the sketch as the model would.
     pub fn solve(&mut self) {
-        self.placed = self.placed_with(None);
+        self.set(self.placed_with(None));
+    }
+
+    /// Takes a solution, and the regions its profiles bound: the model's own (the regions an
+    /// extrusion would sweep), triangulated as a face of a body one unit thick.
+    fn set(&mut self, placed: Result<Placed, String>) {
+        self.fill = placed.as_ref().ok().and_then(|p| fill(self.context.id, p)).unwrap_or_default();
+        self.placed = placed;
     }
 
     /// The sketch solved and placed, with point `pin.0` held at `pin.1` if given (a drag).
@@ -196,7 +218,8 @@ impl SketchEdit {
             let t = (p[0] - at.x) * d.x + (p[1] - at.y) * d.y;
             tries.push([at.x + d.x * t, at.y + d.y * t]);
         }
-        self.placed = tries.into_iter().map(|q| self.placed_with(Some((&n, q)))).find(Result::is_ok).unwrap_or(plain);
+        let placed = tries.into_iter().map(|q| self.placed_with(Some((&n, q)))).find(Result::is_ok).unwrap_or(plain);
+        self.set(placed);
     }
 
     /// Ends the drag: `edit_sketch` parameters writing every own point where it now stands, or
@@ -436,6 +459,15 @@ impl SketchEdit {
                 DEFINED
             }
         };
+        let mut regions = egui::Mesh::default();
+        for t in &self.fill {
+            let base = regions.vertices.len() as u32;
+            for &q in t {
+                regions.colored_vertex(screen(q), FILL);
+            }
+            regions.add_triangle(base, base + 1, base + 2);
+        }
+        painter.add(egui::Shape::mesh(regions));
         let laid = self.laid_out(height, |t| label_size(painter, t));
         let to_rect = |(x, y): (f64, f64), (w, h): (f64, f64)| {
             egui::Rect::from_center_size(rect.center() + egui::vec2(x as f32, y as f32), egui::vec2(w as f32, h as f32))
@@ -509,6 +541,20 @@ impl SketchEdit {
             painter.galley(r.min + egui::vec2(2.0, 1.0), painter.layout_no_wrap(l.text, LABEL, c), c);
         }
     }
+}
+
+/// Triangles of the regions `p`'s profiles bound, in its coordinates; None when the profiles
+/// bound none (open, branching or touching loops).
+fn fill(feature: TopoId, p: &Placed) -> Option<Vec<[[f64; 2]; 3]>> {
+    let regions = datum_ops::profile_regions(feature, p).ok()?;
+    let body = datum_brep::extrude(&regions, 0.0, 1.0).ok()?;
+    let chord = if body.has_curves() { body.chord() } else { 0.0 };
+    let mut out = Vec::new();
+    for f in (0..body.faces().len()).filter(|&f| body.faces()[f].surface.plane().is_some_and(|q| q.normal.z > 0.0)) {
+        let m = datum_brep::face_mesh(&body, f as datum_brep::Ix, false, chord).ok()?;
+        out.extend(m.triangles.iter().map(|t| t.map(|k| [m.points[k as usize].x, m.points[k as usize].y])));
+    }
+    Some(out)
 }
 
 /// The font of dimension labels.
@@ -606,6 +652,24 @@ mod tests {
         }
         // The width is given: the corner slides up its side to the cursor's height.
         assert!((first.x - 12.0).abs() < 1e-9 && (first.y - 7.0).abs() < 1e-9, "{first:?}");
+    }
+
+    /// The plate's region is filled with its holes open; pushed out of the outline, a hole is
+    /// a region of its own.
+    #[test]
+    fn regions_are_filled_holes_open() {
+        let area = |e: &SketchEdit| {
+            e.fill.iter().map(|t| 0.5 * ((t[1][0] - t[0][0]) * (t[2][1] - t[0][1]) - (t[2][0] - t[0][0]) * (t[1][1] - t[0][1])).abs()).sum::<f64>()
+        };
+        let mut e = edit();
+        assert!((area(&e) - 48.0).abs() < 1e-9, "{}", area(&e));
+        e.json["sketch"]["points"]["h"] = json!([6, 2]);
+        e.json["sketch"]["circles"] = json!({"hole": {"center": "h", "diameter": 2}});
+        e.solve();
+        assert!(area(&e) < 48.0 - 3.0, "the hole is open: {}", area(&e));
+        e.json["sketch"]["points"]["h"] = json!([30, 2]);
+        e.solve();
+        assert!(area(&e) > 48.0 + 3.0, "outside, a disc: {}", area(&e));
     }
 
     #[test]

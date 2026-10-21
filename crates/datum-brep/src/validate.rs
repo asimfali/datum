@@ -118,11 +118,25 @@ impl Body {
 
     /// `V − E + 2F − L = 2(S − G)` with `S` shells and genus `G ≥ 0`.
     fn check_euler(&self) -> Result<(), BrepError> {
-        let shells = self.face_shells().iter().enumerate().filter(|&(f, &root)| root == f as Ix).count() as i64;
-        let chi = self.vertices.len() as i64 - self.edges.len() as i64 + 2 * self.faces.len() as i64 - self.loops.len() as i64;
+        let (shells, chi) = self.shells_and_euler();
         if chi % 2 != 0 || chi > 2 * shells {
             return invalid(format!("Euler–Poincaré fails: V − E + 2F − L = {chi} with {shells} shell(s)"));
         }
         Ok(())
+    }
+
+    /// Shells `S` and `V − E + 2F − L`.
+    fn shells_and_euler(&self) -> (i64, i64) {
+        let shells = self.face_shells().iter().enumerate().filter(|&(f, &root)| root == f as Ix).count() as i64;
+        let chi = self.vertices.len() as i64 - self.edges.len() as i64 + 2 * self.faces.len() as i64 - self.loops.len() as i64;
+        (shells, chi)
+    }
+
+    /// The body's shape in two counts, from its topology alone: its shells (separate pieces, or
+    /// cavities) and its genus (through holes: `G = S − (V − E + 2F − L) / 2`). A plate with two
+    /// holes is (1, 2); the same plate with its holes pushed outside, two discs beside it, (3, 0).
+    pub fn shape(&self) -> (usize, usize) {
+        let (shells, chi) = self.shells_and_euler();
+        (shells as usize, (shells - chi / 2).max(0) as usize)
     }
 }

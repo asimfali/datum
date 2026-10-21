@@ -418,7 +418,14 @@ impl Session {
         // A command changes the model whole or not at all: one that fails halfway leaves it as
         // it was, and each change is one step of `undo`.
         let before = self.graph.clone();
-        let result = (c.run)(self, p);
+        let results_before = self.last.results.clone();
+        let mut result = (c.run)(self, p);
+        if let Ok(reply) = &mut result {
+            let changed = self.shape_changes(&before, &results_before);
+            if !changed.is_empty() {
+                reply["shape_changed"] = json!(changed);
+            }
+        }
         match (&result, self.graph == before) {
             (_, true) => {}
             (Err(_), false) => {
@@ -438,6 +445,26 @@ impl Session {
             }
         }
         result
+    }
+
+    /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
+    /// a hole pushed out of its plate becomes a disc beside it, which no dimension shows.
+    fn shape_changes(&self, graph_before: &Graph, before: &[Result<datum_graph::ValueRef, datum_graph::EvalError>]) -> Vec<Value> {
+        let shape = |(shells, holes): (usize, usize)| json!({"pieces": shells, "through_holes": holes});
+        self.graph
+            .nodes()
+            .iter()
+            .zip(&self.last.results)
+            .filter_map(|(n, now)| {
+                let old = graph_before.find(&n.name).and_then(|i| before.get(i as usize))?.as_ref().ok()?;
+                let now = now.as_ref().ok()?;
+                if std::sync::Arc::ptr_eq(old, now) {
+                    return None;
+                }
+                let (a, b) = (old.body()?.shape(), now.body()?.shape());
+                (a != b).then(|| json!({"feature": n.name, "before": shape(a), "after": shape(b)}))
+            })
+            .collect()
     }
 
     /// One step back (`undo`) or forward.

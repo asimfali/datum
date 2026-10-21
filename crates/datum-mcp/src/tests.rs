@@ -253,3 +253,20 @@ fn undo_redo_and_whole_commands() {
     let m = tool(&mut s, "inspect_model", json!({})).1;
     assert_eq!(m["features"][0]["status"]["sketch"]["frame"]["normal"], json!([0.0, 0.0, 1.0]));
 }
+
+/// An edit that turns holes into discs beside the plate says so: no dimension shows it.
+#[test]
+fn shape_changes_are_reported() {
+    let mut s = Server::default();
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+    execute(&mut s, "open", json!({"path": model.display().to_string()}));
+    // Narrower than the holes are apart: both end up outside the plate.
+    let r = execute(&mut s, "set_parameter", json!({"name": "w", "value": 30}));
+    let change = json!([{"feature": "plate", "before": {"pieces": 1, "through_holes": 2}, "after": {"pieces": 3, "through_holes": 0}}]);
+    assert_eq!(r["shape_changed"], change, "{r}");
+    // A dimension that keeps the shape says nothing more.
+    let r = execute(&mut s, "set_parameter", json!({"name": "h", "value": 45}));
+    assert!(r.get("shape_changed").is_none(), "{r}");
+    let r = execute(&mut s, "undo", json!({}));
+    assert!(r.get("shape_changed").is_none(), "undo is no edit to report: {r}");
+}
