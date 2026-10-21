@@ -62,6 +62,9 @@ const SELECTED: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 const DIMENSION: egui::Color32 = egui::Color32::from_rgb(20, 120, 60);
 const NAME: egui::Color32 = egui::Color32::from_rgb(110, 110, 120);
 
+/// A label as shown: its pixel offset from the middle of the picture, and its size.
+pub type Laid = (Label, (f64, f64), (f64, f64));
+
 /// A dimension's or reference dimension's label: what it picks, where, and its text.
 pub struct Label {
     pub pick: Pick,
@@ -357,8 +360,8 @@ impl SketchEdit {
     /// The labels as shown in a picture `height` tall: each at its pixel offset from the middle,
     /// with its size (`size` of its text, padded). One that would cover an earlier one moves
     /// down until it does not: two dimensions between the same points both read.
-    pub fn laid_out(&self, height: f64, size: impl Fn(&str) -> (f64, f64)) -> Vec<(Label, (f64, f64), (f64, f64))> {
-        let mut placed: Vec<(Label, (f64, f64), (f64, f64))> = Vec::new();
+    pub fn laid_out(&self, height: f64, size: impl Fn(&str) -> (f64, f64)) -> Vec<Laid> {
+        let mut placed: Vec<Laid> = Vec::new();
         for l in self.labels() {
             let (w, h) = size(&l.text);
             let (x, mut y) = self.camera.offset(l.at, height);
