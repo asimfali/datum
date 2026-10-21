@@ -305,7 +305,7 @@ impl Session {
                             }
                             Feature::Sketch(s) => {
                                 let points: serde_json::Map<String, Value> = s.solved.points.iter().map(|(n, p)| (n.clone(), json!([p.x, p.y]))).collect();
-                                json!({"sketch": {"dof": s.solved.dof, "free_points": s.solved.free_points, "points": points}, "hash": hash})
+                                json!({"sketch": {"dof": s.solved.dof, "free_points": s.solved.free_points, "points": points, "measures": s.solved.measures}, "hash": hash})
                             }
                             Feature::Flat(f) => {
                                 let [lines, arcs, circles] = f.counts();

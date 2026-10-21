@@ -46,6 +46,9 @@ pub struct Sketch {
     pub circles: BTreeMap<String, Circle>,
     #[serde(default)]
     pub constraints: Vec<Constraint>,
+    /// Reference dimensions by name: measured on the solved sketch, they constrain nothing.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub measures: BTreeMap<String, Measure>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -117,6 +120,16 @@ pub enum Constraint {
         points: [String; 2],
         value: Num,
     },
+    /// Distance along the sketch's X axis, on the side the second point was drawn.
+    HorizontalDistance {
+        points: [String; 2],
+        value: Num,
+    },
+    /// Distance along the sketch's Y axis, on the side the second point was drawn.
+    VerticalDistance {
+        points: [String; 2],
+        value: Num,
+    },
     Length {
         line: String,
         value: Num,
@@ -141,6 +154,44 @@ pub enum Constraint {
     Tangent {
         curves: [String; 2],
     },
+    /// The point on a curve: on the line through a segment, or on the circle of an arc or circle.
+    On {
+        point: String,
+        curve: String,
+    },
+    /// The point halfway along a segment.
+    Midpoint {
+        point: String,
+        line: String,
+    },
+    /// Two points mirrored in the line through a segment.
+    Symmetric {
+        points: [String; 2],
+        line: String,
+    },
+    /// Arcs or circles of one radius; two circles' diameters are given, so not both.
+    EqualRadius {
+        curves: [String; 2],
+    },
+    /// Arcs or circles around one centre.
+    Concentric {
+        curves: [String; 2],
+    },
+}
+
+/// A reference dimension: what it measures, as the dimension constraint of the same name would
+/// fix it. Lengths in the sketch's units, angles in degrees counterclockwise from the first line
+/// to the second, from 0 up to 360.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Measure {
+    Distance { points: [String; 2] },
+    HorizontalDistance { points: [String; 2] },
+    VerticalDistance { points: [String; 2] },
+    Length { line: String },
+    PointLine { point: String, line: String },
+    Angle { lines: [String; 2] },
+    Radius { arc: String },
 }
 
 impl Sketch {
@@ -154,6 +205,8 @@ impl Sketch {
         for (k, c) in s.constraints.iter_mut().enumerate() {
             let describe = c.describe(k);
             if let Constraint::Distance { value, .. }
+            | Constraint::HorizontalDistance { value, .. }
+            | Constraint::VerticalDistance { value, .. }
             | Constraint::Length { value, .. }
             | Constraint::PointLine { value, .. }
             | Constraint::Radius { value, .. }
@@ -179,11 +232,18 @@ impl Constraint {
             Self::Equal { lines } => ("equal", lines.join(", ")),
             Self::Fix { point } => ("fix", point.clone()),
             Self::Distance { points, value } => ("distance", format!("{} = {value}", points.join(", "))),
+            Self::HorizontalDistance { points, value } => ("horizontal_distance", format!("{} = {value}", points.join(", "))),
+            Self::VerticalDistance { points, value } => ("vertical_distance", format!("{} = {value}", points.join(", "))),
             Self::Length { line, value } => ("length", format!("{line} = {value}")),
             Self::PointLine { point, line, value } => ("point_line", format!("{point}, {line} = {value}")),
             Self::Angle { lines, degrees } => ("angle", format!("{} = {degrees}°", lines.join(", "))),
             Self::Radius { arc, value } => ("radius", format!("{arc} = {value}")),
             Self::Tangent { curves } => ("tangent", curves.join(", ")),
+            Self::On { point, curve } => ("on", format!("{point}, {curve}")),
+            Self::Midpoint { point, line } => ("midpoint", format!("{point}, {line}")),
+            Self::Symmetric { points, line } => ("symmetric", format!("{} about {line}", points.join(", "))),
+            Self::EqualRadius { curves } => ("equal_radius", curves.join(", ")),
+            Self::Concentric { curves } => ("concentric", curves.join(", ")),
         };
         format!("#{k} {kind} ({what})")
     }
@@ -218,6 +278,8 @@ pub struct Solved {
     pub dof: usize,
     /// Points that can still move, in name order.
     pub free_points: Vec<String>,
+    /// The values of the reference dimensions, by name.
+    pub measures: BTreeMap<String, f64>,
 }
 
 /// Places the points so that every constraint holds, moving them as little as possible from the
@@ -238,7 +300,13 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
         free.extend(r.free);
     }
     free.sort_unstable();
-    Ok(Solved { points: eq.names.iter().cloned().zip(points).collect(), dof, free_points: free.into_iter().map(|p| eq.names[p].clone()).collect() })
+    let measures = eq.measures(&points);
+    Ok(Solved {
+        points: eq.names.iter().cloned().zip(points).collect(),
+        dof,
+        free_points: free.into_iter().map(|p| eq.names[p].clone()).collect(),
+        measures,
+    })
 }
 
 struct GroupResult {

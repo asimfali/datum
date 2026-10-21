@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use crate::solver::{self, Fit};
 use datum_math::expr::Num;
 
-use crate::{Constraint, Sketch, SketchError};
+use crate::{Constraint, Measure, Sketch, SketchError};
 
 /// A constraint with names resolved: point and line indices, values normalised.
 #[derive(Clone, Copy)]
@@ -26,6 +26,9 @@ enum Eq {
     /// No equation: the point is not a variable.
     Fix,
     Distance(usize, usize, f64),
+    /// Two points, the axis (0 for X, 1 for Y), the distance along it, and the side the second
+    /// point was drawn on.
+    AxisDistance(usize, usize, usize, f64, f64),
     Length(usize, f64),
     /// Point, line, distance, and the side of the line the point was drawn on.
     PointLine(usize, usize, f64, f64),
@@ -44,6 +47,12 @@ enum Eq {
     LineArcAt(usize, usize, usize),
     /// Two arcs meeting at a point: centres and the point, on one straight line.
     ArcArcAt(usize, usize, usize),
+    /// A point halfway along a line.
+    Midpoint(usize, usize),
+    /// Two points mirrored in a line: their middle on it, the segment between them across it.
+    Symmetric(usize, usize, usize),
+    /// Two arcs by centre and start: one radius.
+    EqualRadius(usize, usize, usize, usize),
 }
 
 /// The radius of an arc (the distance from its centre to its start) or of a circle (a value).
@@ -79,8 +88,12 @@ pub(crate) struct Equations {
     pub start: Vec<Vec2>,
     /// Line ends.
     lines: Vec<(usize, usize)>,
+    /// The constraints and arcs, then the reference dimensions: `eqs[..active]` are solved.
     eqs: Vec<Eq>,
-    /// How messages name each equation: the constraint, or the arc whose ends it ties.
+    active: usize,
+    /// The reference dimensions' names, for `eqs[active..]`.
+    measure_names: Vec<String>,
+    /// How messages name each solved equation: the constraint, or the arc whose ends it ties.
     described: Vec<String>,
     fixed: Vec<bool>,
     /// Points no constraint ties: they keep their coordinates and both degrees of freedom.
@@ -143,6 +156,8 @@ impl Equations {
         // The size of the sketch: as drawn, or as dimensioned when everything was drawn at one spot.
         let largest = sketch.constraints.iter().fold(0.0f64, |m, c| match c {
             Constraint::Distance { value, .. }
+            | Constraint::HorizontalDistance { value, .. }
+            | Constraint::VerticalDistance { value, .. }
             | Constraint::Length { value, .. }
             | Constraint::PointLine { value, .. }
             | Constraint::Radius { value, .. } => m.max(value.value().unwrap_or(0.0).abs()),
@@ -155,6 +170,29 @@ impl Equations {
             largest
         } else {
             1.0
+        };
+        // The side of line `l` point `p` was drawn on, and the side along `axis` of `b` from `a`.
+        let side = |p: usize, l: usize| {
+            let (a, b) = lines[l];
+            let (d, q) = ([start[b].x - start[a].x, start[b].y - start[a].y], [start[p].x - start[a].x, start[p].y - start[a].y]);
+            if d[0] * q[1] - d[1] * q[0] < 0.0 { -1.0 } else { 1.0 }
+        };
+        let along = |a: usize, b: usize, axis: usize| {
+            let d = if axis == 0 { start[b].x - start[a].x } else { start[b].y - start[a].y };
+            if d < 0.0 { -1.0 } else { 1.0 }
+        };
+        let curve = |what: &str, n: &str| -> Result<Curve, SketchError> {
+            let found = [
+                line_names.binary_search_by(|x| x.as_str().cmp(n)).ok().map(Curve::Line),
+                find(&arc_names, n).map(|a| Curve::Circle(arcs[a].0, Rad::Point(arcs[a].1), vec![arcs[a].1, arcs[a].2])),
+                find(&circle_names, n).map(|c| Curve::Circle(circles[c].0, Rad::Value(0.5 * circles[c].1 / size), Vec::new())),
+            ];
+            let mut found = found.into_iter().flatten();
+            match (found.next(), found.next()) {
+                (Some(c), None) => Ok(c),
+                (None, _) => Err(SketchError::Invalid(format!("{what}: unknown curve `{n}`"))),
+                (Some(_), Some(_)) => Err(SketchError::Invalid(format!("{what}: `{n}` names two curves"))),
+            }
         };
         let mut fixed = vec![false; names.len()];
         let mut eqs = Vec::with_capacity(sketch.constraints.len());
@@ -194,13 +232,15 @@ impl Equations {
                     Eq::Fix
                 }
                 Constraint::Distance { points, value } => Eq::Distance(point(&points[0])?, point(&points[1])?, positive(value)?),
+                Constraint::HorizontalDistance { points, value } | Constraint::VerticalDistance { points, value } => {
+                    let axis = usize::from(matches!(c, Constraint::VerticalDistance { .. }));
+                    let (a, b) = (point(&points[0])?, point(&points[1])?);
+                    Eq::AxisDistance(a, b, axis, positive(value)?, along(a, b, axis))
+                }
                 Constraint::Length { line: l, value } => Eq::Length(line(l)?, positive(value)?),
                 Constraint::PointLine { point: p, line: l, value } => {
                     let (p, l) = (point(p)?, line(l)?);
-                    let (a, b) = lines[l];
-                    let (d, q) = ([start[b].x - start[a].x, start[b].y - start[a].y], [start[p].x - start[a].x, start[p].y - start[a].y]);
-                    let side = if d[0] * q[1] - d[1] * q[0] < 0.0 { -1.0 } else { 1.0 };
-                    Eq::PointLine(p, l, positive(value)?, side)
+                    Eq::PointLine(p, l, positive(value)?, side(p, l))
                 }
                 Constraint::Angle { lines, degrees } => {
                     let degrees = number(degrees)?;
@@ -214,20 +254,28 @@ impl Equations {
                     let k = find(&arc_names, arc).ok_or_else(|| SketchError::Invalid(format!("unknown arc `{arc}`")))?;
                     Eq::Radius(arcs[k].0, arcs[k].1, positive(value)?)
                 }
+                Constraint::On { point: p, curve: n } => match (point(p)?, curve(&c.describe(k), n)?) {
+                    (p, Curve::Line(l)) => Eq::PointLine(p, l, 0.0, 1.0),
+                    (p, Curve::Circle(centre, Rad::Point(f), _)) => Eq::ArcEnds(centre, f, p),
+                    (p, Curve::Circle(centre, Rad::Value(r), _)) => Eq::Radius(centre, p, r),
+                },
+                Constraint::Midpoint { point: p, line: l } => Eq::Midpoint(point(p)?, line(l)?),
+                Constraint::Symmetric { points, line: l } => Eq::Symmetric(point(&points[0])?, point(&points[1])?, line(l)?),
+                Constraint::EqualRadius { curves } => match (curve(&c.describe(k), &curves[0])?, curve(&c.describe(k), &curves[1])?) {
+                    (Curve::Circle(c1, Rad::Point(f1), _), Curve::Circle(c2, Rad::Point(f2), _)) => Eq::EqualRadius(c1, f1, c2, f2),
+                    (Curve::Circle(c1, Rad::Point(f1), _), Curve::Circle(_, Rad::Value(r), _))
+                    | (Curve::Circle(_, Rad::Value(r), _), Curve::Circle(c1, Rad::Point(f1), _)) => Eq::Radius(c1, f1, r),
+                    (Curve::Circle(_, Rad::Value(_), _), Curve::Circle(_, Rad::Value(_), _)) => {
+                        return invalid(format!("{}: both diameters are given; give them one value", c.describe(k)));
+                    }
+                    _ => return invalid(format!("{}: a line has no radius", c.describe(k))),
+                },
+                Constraint::Concentric { curves } => match (curve(&c.describe(k), &curves[0])?, curve(&c.describe(k), &curves[1])?) {
+                    (Curve::Circle(c1, ..), Curve::Circle(c2, ..)) => Eq::Coincident(c1, c2),
+                    _ => return invalid(format!("{}: a line has no centre", c.describe(k))),
+                },
                 Constraint::Tangent { curves } => {
-                    let curve = |n: &str| -> Result<Curve, SketchError> {
-                        let found = [
-                            line_names.binary_search_by(|x| x.as_str().cmp(n)).ok().map(Curve::Line),
-                            find(&arc_names, n).map(|a| Curve::Circle(arcs[a].0, Rad::Point(arcs[a].1), vec![arcs[a].1, arcs[a].2])),
-                            find(&circle_names, n).map(|c| Curve::Circle(circles[c].0, Rad::Value(0.5 * circles[c].1 / size), Vec::new())),
-                        ];
-                        let mut found = found.into_iter().flatten();
-                        match (found.next(), found.next()) {
-                            (Some(c), None) => Ok(c),
-                            (None, _) => Err(SketchError::Invalid(format!("{}: unknown curve `{n}`", c.describe(k)))),
-                            (Some(_), Some(_)) => Err(SketchError::Invalid(format!("{}: `{n}` names two curves", c.describe(k)))),
-                        }
-                    };
+                    let curve = |n: &str| curve(&c.describe(k), n);
                     let drawn = |r: Rad, centre: usize| match r {
                         Rad::Point(p) => (libm::hypot(start[p].x - start[centre].x, start[p].y - start[centre].y)) / size,
                         Rad::Value(v) => v,
@@ -245,11 +293,7 @@ impl Equations {
                             Eq::ArcArcAt(c1, c2, at)
                         }
                         (Curve::Line(l), Curve::Circle(centre, r, _)) | (Curve::Circle(centre, r, _), Curve::Line(l)) => {
-                            let (a, b) = lines[l];
-                            let (d, q) =
-                                ([start[b].x - start[a].x, start[b].y - start[a].y], [start[centre].x - start[a].x, start[centre].y - start[a].y]);
-                            let side = if d[0] * q[1] - d[1] * q[0] < 0.0 { -1.0 } else { 1.0 };
-                            Eq::LineCircle(l, centre, r, side)
+                            Eq::LineCircle(l, centre, r, side(centre, l))
                         }
                         (Curve::Circle(c1, r1, _), Curve::Circle(c2, r2, _)) => {
                             // Outside or inside, whichever the drawing is closer to.
@@ -271,7 +315,31 @@ impl Equations {
             eqs.push(Eq::ArcEnds(c, f, t));
             described.push(format!("arc `{n}` (its ends at one distance from the centre)"));
         }
-        let mut eq = Self { names, start, lines, eqs, described, fixed, unconstrained: Vec::new(), centre, size };
+        let active = eqs.len();
+        let arc = |n: &str| find(&arc_names, n).map(|a| arcs[a]).ok_or_else(|| SketchError::Invalid(format!("unknown arc `{n}`")));
+        let mut measure_names = Vec::with_capacity(sketch.measures.len());
+        for (n, m) in &sketch.measures {
+            eqs.push(match m {
+                Measure::Distance { points } => Eq::Distance(point(&points[0])?, point(&points[1])?, 0.0),
+                Measure::HorizontalDistance { points } | Measure::VerticalDistance { points } => {
+                    let axis = usize::from(matches!(m, Measure::VerticalDistance { .. }));
+                    let (a, b) = (point(&points[0])?, point(&points[1])?);
+                    Eq::AxisDistance(a, b, axis, 0.0, along(a, b, axis))
+                }
+                Measure::Length { line: l } => Eq::Length(line(l)?, 0.0),
+                Measure::PointLine { point: p, line: l } => {
+                    let (p, l) = (point(p)?, line(l)?);
+                    Eq::PointLine(p, l, 0.0, side(p, l))
+                }
+                Measure::Angle { lines } => Eq::Angle(line(&lines[0])?, line(&lines[1])?, 0.0),
+                Measure::Radius { arc: a } => {
+                    let (c, f, _) = arc(a)?;
+                    Eq::Radius(c, f, 0.0)
+                }
+            });
+            measure_names.push(n.clone());
+        }
+        let mut eq = Self { names, start, lines, eqs, active, measure_names, described, fixed, unconstrained: Vec::new(), centre, size };
         let tied = eq.tied_points();
         eq.unconstrained = (0..eq.names.len()).filter(|&p| !tied[p] && !eq.fixed[p]).collect();
         Ok(eq)
@@ -285,7 +353,7 @@ impl Equations {
             Rad::Value(_) => vec![c],
         };
         match self.eqs[k] {
-            Eq::Coincident(a, b) | Eq::Distance(a, b, _) | Eq::Radius(a, b, _) => vec![a, b],
+            Eq::Coincident(a, b) | Eq::Distance(a, b, _) | Eq::AxisDistance(a, b, ..) | Eq::Radius(a, b, _) => vec![a, b],
             Eq::Horizontal(i) | Eq::Vertical(i) | Eq::Length(i, _) => l(i).to_vec(),
             Eq::Parallel(i, j) | Eq::Perpendicular(i, j) | Eq::Collinear(i, j) | Eq::Equal(i, j) | Eq::Angle(i, j, _) => {
                 l(i).into_iter().chain(l(j)).collect()
@@ -296,13 +364,16 @@ impl Equations {
             Eq::CircleCircle(c1, r1, c2, r2, _) => r(c1, r1).into_iter().chain(r(c2, r2)).collect(),
             Eq::LineArcAt(i, c, p) => l(i).into_iter().chain([c, p]).collect(),
             Eq::ArcArcAt(c1, c2, p) => vec![c1, c2, p],
+            Eq::Midpoint(p, i) => [p].into_iter().chain(l(i)).collect(),
+            Eq::Symmetric(a, b, i) => [a, b].into_iter().chain(l(i)).collect(),
+            Eq::EqualRadius(c1, f1, c2, f2) => vec![c1, f1, c2, f2],
             Eq::Fix => Vec::new(),
         }
     }
 
     fn tied_points(&self) -> Vec<bool> {
         let mut tied = vec![false; self.names.len()];
-        for k in 0..self.eqs.len() {
+        for k in 0..self.active {
             for p in self.involved(k) {
                 tied[p] = true;
             }
@@ -322,8 +393,8 @@ impl Equations {
             x
         }
         // Each constraint belongs to the group of its first point.
-        let owner: Vec<Option<usize>> = (0..self.eqs.len()).map(|k| self.involved(k).first().copied()).collect();
-        for k in 0..self.eqs.len() {
+        let owner: Vec<Option<usize>> = (0..self.active).map(|k| self.involved(k).first().copied()).collect();
+        for k in 0..self.active {
             let pts = self.involved(k);
             for &q in pts.iter().skip(1) {
                 let (a, b) = (root(&mut parent, pts[0]), root(&mut parent, q));
@@ -404,6 +475,30 @@ impl Equations {
             .collect()
     }
 
+    /// The reference dimensions measured at the solved `points`, by name.
+    pub fn measures(&self, points: &[Vec2]) -> std::collections::BTreeMap<String, f64> {
+        let all = Group { points: (0..self.names.len()).collect(), constraints: Vec::new() };
+        let x: Vec<f64> = points.iter().flat_map(|p| [(p.x - self.centre[0]) / self.size, (p.y - self.centre[1]) / self.size]).collect();
+        let mut r = Vec::new();
+        self.measure_names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let k = self.active + i;
+                // Each measure is its dimension's equation with the value 0.
+                self.residuals(&all, &[k], &x, &mut r, None);
+                let v = match self.eqs[k] {
+                    Eq::Angle(..) => {
+                        let deg = r[0].to_degrees();
+                        if deg < 0.0 { deg + 360.0 } else { deg }
+                    }
+                    _ => r[0] * self.size,
+                };
+                (n.clone(), v)
+            })
+            .collect()
+    }
+
     /// Residuals of the constraints `use_` at `x`, and with `jac` their gradients as sparse rows
     /// over the group's coordinates.
     fn residuals(&self, g: &Group, use_: &[usize], x: &[f64], r: &mut Vec<f64>, mut jac: Option<&mut Vec<Vec<(usize, f64)>>>) {
@@ -470,6 +565,41 @@ impl Equations {
                     let len = norm(d);
                     let u = [d[0] / len, d[1] / len];
                     emit(len - value, &[(b, u), (a, neg(u))]);
+                }
+                Eq::AxisDistance(a, b, axis, value, side) => {
+                    let mut d = [0.0; 2];
+                    d[axis] = side;
+                    emit(side * (at(b)[axis] - at(a)[axis]) - value, &[(b, d), (a, neg(d))]);
+                }
+                Eq::Midpoint(p, l) => {
+                    let (a, b) = self.lines[l];
+                    let (pp, pa, pb) = (at(p), at(a), at(b));
+                    for i in 0..2 {
+                        let mut d = [0.0; 2];
+                        d[i] = 1.0;
+                        let half = [-0.5 * d[0], -0.5 * d[1]];
+                        emit(pp[i] - 0.5 * (pa[i] + pb[i]), &[(p, d), (a, half), (b, half)]);
+                    }
+                }
+                Eq::Symmetric(p, q, l) => {
+                    let (a, _) = self.lines[l];
+                    let d = self.dir(l, &at);
+                    let (pp, pq) = (at(p), at(q));
+                    // The middle of the two points on the line…
+                    let m = sub([0.5 * (pp[0] + pq[0]), 0.5 * (pp[1] + pq[1])], at(a));
+                    let toward = [-d.u[1], d.u[0]];
+                    let mut g = self.through1(l, &d, [m[1], -m[0]]).to_vec();
+                    g.extend([(p, [0.5 * toward[0], 0.5 * toward[1]]), (q, [0.5 * toward[0], 0.5 * toward[1]]), (a, neg(toward))]);
+                    emit(cross(d.u, m), &g);
+                    // …and the segment between them across it.
+                    let w = sub(pq, pp);
+                    let mut g = self.through1(l, &d, w).to_vec();
+                    g.extend([(q, d.u), (p, neg(d.u))]);
+                    emit(dot(d.u, w), &g);
+                }
+                Eq::EqualRadius(c1, f1, c2, f2) => {
+                    let ((u1, r1), (u2, r2)) = (unit_from(at(c1), at(f1)), unit_from(at(c2), at(f2)));
+                    emit(r1 - r2, &[(f1, u1), (c1, neg(u1)), (f2, neg(u2)), (c2, u2)]);
                 }
                 Eq::Length(l, value) => {
                     let (a, b) = self.lines[l];
