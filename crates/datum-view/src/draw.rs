@@ -143,6 +143,12 @@ impl Draft {
         busy
     }
 
+    /// Esc: ends the command, as in Inventor: what is half drawn goes, the tool is Select.
+    pub fn escape(&mut self) {
+        self.cancel();
+        self.tool = Tool::Select;
+    }
+
     /// Where a click at pixel offset `(dx, dy)` would land, `free` (Shift) without snaps.
     pub fn spot(&self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) -> Spot {
         let at = edit.camera.at(dx, dy, height);
@@ -632,6 +638,17 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
+    }
+
+    /// Esc ends the command at once: the chain half drawn goes, and so does the tool.
+    #[test]
+    fn escape_ends_the_command() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        assert!(e.draft.chain.is_some());
+        e.draft.escape();
+        assert!(e.draft.chain.is_none() && e.draft.tool == Tool::Select);
     }
 
     #[test]

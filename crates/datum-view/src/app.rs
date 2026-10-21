@@ -375,7 +375,7 @@ impl Viewer {
             ui.horizontal_wrapped(|ui| {
                 for (tool, label, hint) in [
                     (Tool::Select, "Select", "Select and drag (Esc)"),
-                    (Tool::Line, "Line", "Lines in a chain; T or a drag from its end: a tangent arc (L)"),
+                    (Tool::Line, "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends (L)"),
                     (Tool::Arc, "Arc", "Centre, start, end (A)"),
                     (Tool::Circle, "Circle", "Centre, then a point on it (C)"),
                     (Tool::Point, "Point", "A point (P)"),
@@ -395,7 +395,7 @@ impl Viewer {
             });
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point · click to select, Shift to add · Del removes · Esc clears, then leaves",
-                _ => "Click to place · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc cancels, then back to Select",
+                _ => "Click to place · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc ends the command",
             });
             done = ui.button("Done").clicked();
             ui.separator();
@@ -690,8 +690,8 @@ impl Viewer {
                 let d = r.drag_delta();
                 sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
             }
-            if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) && !draft.cancel() {
-                draft.tool = Tool::Select;
+            if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                draft.escape();
             }
             sk.draft = draft;
             let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
