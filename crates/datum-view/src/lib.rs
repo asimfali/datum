@@ -4,6 +4,7 @@
 mod app;
 pub mod camera;
 pub mod capture;
+mod draw;
 pub mod render;
 pub mod scene;
 mod sketch;

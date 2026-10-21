@@ -20,7 +20,7 @@ use datum_math::expr::Num;
 
 mod session;
 
-pub use session::Session;
+pub use session::{Session, patch_sketch};
 
 use datum_graph::{Graph, GraphError, NodeIx, Op};
 use serde::{Deserialize, Serialize};

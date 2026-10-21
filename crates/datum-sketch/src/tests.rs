@@ -26,10 +26,10 @@ fn rectangle(w: f64, h: f64, scale: f64) -> Sketch {
     }
     s.constraints = vec![
         Constraint::Fix { point: "a".into(), at: None },
-        Constraint::Horizontal { line: "bottom".into() },
-        Constraint::Horizontal { line: "top".into() },
-        Constraint::Vertical { line: "left".into() },
-        Constraint::Vertical { line: "right".into() },
+        Constraint::Horizontal { line: Some("bottom".into()), points: None },
+        Constraint::Horizontal { line: Some("top".into()), points: None },
+        Constraint::Vertical { line: Some("left".into()), points: None },
+        Constraint::Vertical { line: Some("right".into()), points: None },
         Constraint::Length { line: "bottom".into(), value: (w * scale).into() },
         Constraint::Length { line: "left".into(), value: (h * scale).into() },
     ];
@@ -142,8 +142,8 @@ fn same_result_on_any_thread_count() {
         s.lines.extend(r.lines);
         s.constraints.extend(r.constraints.into_iter().map(|c| match c {
             Constraint::Fix { point, at } => Constraint::Fix { point: format!("{point}{k}"), at },
-            Constraint::Horizontal { line } => Constraint::Horizontal { line: format!("{line}{k}") },
-            Constraint::Vertical { line } => Constraint::Vertical { line: format!("{line}{k}") },
+            Constraint::Horizontal { line, points } => Constraint::Horizontal { line: line.map(|l| format!("{l}{k}")), points },
+            Constraint::Vertical { line, points } => Constraint::Vertical { line: line.map(|l| format!("{l}{k}")), points },
             Constraint::Length { line, value } => Constraint::Length { line: format!("{line}{k}"), value },
             c => c,
         }));
@@ -380,4 +380,17 @@ fn measures_constrain_nothing() {
     assert!((r.measures["height"] - (c.y - b.y)).abs() < 1e-12);
     // From the bottom (→) to the left side (↓), counterclockwise: three quarters of a turn.
     assert!((r.measures["corner"] - 270.0).abs() < 1e-9, "{:?}", r.measures);
+}
+
+/// Horizontal and vertical take two points as well as a line: a centre level with a corner.
+#[test]
+fn points_level_and_plumb() {
+    let s = sketch(
+        r#"{"points": {"o": [0, 0], "c": [3.2, 4.1], "e": [7.9, 0.4]},
+            "constraints": [{"type": "fix", "point": "o"}, {"type": "horizontal", "points": ["o", "e"]}, {"type": "vertical", "points": ["o", "c"]}]}"#,
+    );
+    let r = solve(&s).unwrap();
+    assert!(r.points["e"].y.abs() < 1e-12 && r.points["c"].x.abs() < 1e-12, "{:?}", r.points);
+    let bad = r#"{"points": {"o": [0, 0]}, "constraints": [{"type": "horizontal"}]}"#;
+    assert!(matches!(solve(&sketch(bad)), Err(SketchError::Invalid(m)) if m.contains("a line or two points")));
 }

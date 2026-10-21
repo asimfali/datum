@@ -155,74 +155,7 @@ const COMMANDS: &[Command] = &[
             if op.get("op") != Some(&json!("sketch")) {
                 return Err(format!("`{}` is not a sketch", text(p, "name")?));
             }
-            let merge = |target: &mut Map<String, Value>, key: &str, patch: Option<&Value>| -> Result<(), String> {
-                let Some(patch) = patch else { return Ok(()) };
-                let patch = patch.as_object().ok_or_else(|| format!("`{key}` must be an object"))?;
-                let entries = target.entry(key).or_insert_with(|| json!({}));
-                let entries = entries.as_object_mut().ok_or_else(|| format!("`{key}` is not an object"))?;
-                for (n, v) in patch {
-                    match v {
-                        Value::Null => entries.remove(n).map(|_| ()).ok_or_else(|| format!("`{key}` has no `{n}`"))?,
-                        v => {
-                            entries.insert(n.clone(), v.clone());
-                        }
-                    }
-                }
-                Ok(())
-            };
-            // Names removed, and the projections among them (their points go too).
-            let removed_in = |key: &str| -> Vec<String> {
-                p.get(key)
-                    .and_then(Value::as_object)
-                    .map(|m| m.iter().filter(|(_, v)| v.is_null()).map(|(n, _)| n.clone()).collect())
-                    .unwrap_or_default()
-            };
-            let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures"].iter().flat_map(|k| removed_in(k)).collect();
-            let projections = removed_in("project");
-            gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
-            merge(&mut op, "project", p.get("project"))?;
-            let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
-            for key in ["points", "lines", "arcs", "circles", "measures"] {
-                merge(sketch, key, p.get(key))?;
-            }
-            let mut also = Vec::new();
-            let refers = |v: &Value, gone: &[String]| {
-                let mut v = v.clone();
-                let mut found = false;
-                visit_names(&mut v, &mut |n| found |= gone.contains(n));
-                found
-            };
-            // Curves on removed points, then dimensions on anything removed.
-            for key in ["lines", "arcs", "circles", "measures"] {
-                if let Some(m) = sketch.get_mut(key).and_then(Value::as_object_mut) {
-                    let doomed: Vec<String> = m.iter().filter(|(_, v)| refers(v, &gone)).map(|(n, _)| n.clone()).collect();
-                    for n in doomed {
-                        m.remove(&n);
-                        also.push(format!("{key}: {n}"));
-                        gone.push(n);
-                    }
-                }
-            }
-            if let Some(c) = sketch.get_mut("constraints").and_then(Value::as_array_mut) {
-                let before = c.len();
-                c.retain(|c| !refers(c, &gone));
-                if c.len() < before {
-                    also.push(format!("constraints: {}", before - c.len()));
-                }
-            }
-            let constraints = sketch.entry("constraints").or_insert_with(|| json!([]));
-            let constraints = constraints.as_array_mut().ok_or("`constraints` is not a list")?;
-            // Constraints compare as parsed: field order and number spelling do not matter.
-            let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
-            for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
-                let gone = parse(gone)?;
-                let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
-                constraints.remove(k);
-            }
-            for added in p.get("add_constraints").and_then(Value::as_array).into_iter().flatten() {
-                parse(added)?;
-                constraints.push(added.clone());
-            }
+            let also = patch_sketch(&mut op, p)?;
             let op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
             let mut reply = s.rebuild_recording(ix);
@@ -776,4 +709,77 @@ fn find_again(old: &Body, new: &Body, id: &str, kinds: &[Kind]) -> Option<String
         };
     }
     None
+}
+
+/// Applies an `edit_sketch` patch to a sketch feature's JSON (`op` and its fields): element maps
+/// and `project` merged by name (null removes, and with it whatever refers to it), constraints
+/// added and removed. Returns what went with the removed. One place for the session and the
+/// window, which applies its own edits at once rather than wait for the rebuild.
+pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Result<Vec<String>, String> {
+    let merge = |target: &mut Map<String, Value>, key: &str, patch: Option<&Value>| -> Result<(), String> {
+        let Some(patch) = patch else { return Ok(()) };
+        let patch = patch.as_object().ok_or_else(|| format!("`{key}` must be an object"))?;
+        let entries = target.entry(key).or_insert_with(|| json!({}));
+        let entries = entries.as_object_mut().ok_or_else(|| format!("`{key}` is not an object"))?;
+        for (n, v) in patch {
+            match v {
+                Value::Null => entries.remove(n).map(|_| ()).ok_or_else(|| format!("`{key}` has no `{n}`"))?,
+                v => {
+                    entries.insert(n.clone(), v.clone());
+                }
+            }
+        }
+        Ok(())
+    };
+    // Names removed, and the projections among them (their points go too).
+    let removed_in = |key: &str| -> Vec<String> {
+        p.get(key).and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.is_null()).map(|(n, _)| n.clone()).collect()).unwrap_or_default()
+    };
+    let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures"].iter().flat_map(|k| removed_in(k)).collect();
+    let projections = removed_in("project");
+    gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
+    merge(op, "project", p.get("project"))?;
+    let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
+    for key in ["points", "lines", "arcs", "circles", "measures"] {
+        merge(sketch, key, p.get(key))?;
+    }
+    let mut also = Vec::new();
+    let refers = |v: &Value, gone: &[String]| {
+        let mut v = v.clone();
+        let mut found = false;
+        visit_names(&mut v, &mut |n| found |= gone.contains(n));
+        found
+    };
+    // Curves on removed points, then dimensions on anything removed.
+    for key in ["lines", "arcs", "circles", "measures"] {
+        if let Some(m) = sketch.get_mut(key).and_then(Value::as_object_mut) {
+            let doomed: Vec<String> = m.iter().filter(|(_, v)| refers(v, &gone)).map(|(n, _)| n.clone()).collect();
+            for n in doomed {
+                m.remove(&n);
+                also.push(format!("{key}: {n}"));
+                gone.push(n);
+            }
+        }
+    }
+    if let Some(c) = sketch.get_mut("constraints").and_then(Value::as_array_mut) {
+        let before = c.len();
+        c.retain(|c| !refers(c, &gone));
+        if c.len() < before {
+            also.push(format!("constraints: {}", before - c.len()));
+        }
+    }
+    let constraints = sketch.entry("constraints").or_insert_with(|| json!([]));
+    let constraints = constraints.as_array_mut().ok_or("`constraints` is not a list")?;
+    // Constraints compare as parsed: field order and number spelling do not matter.
+    let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
+    for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
+        let gone = parse(gone)?;
+        let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
+        constraints.remove(k);
+    }
+    for added in p.get("add_constraints").and_then(Value::as_array).into_iter().flatten() {
+        parse(added)?;
+        constraints.push(added.clone());
+    }
+    Ok(also)
 }
