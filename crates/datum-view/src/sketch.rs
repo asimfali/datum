@@ -347,10 +347,27 @@ impl SketchEdit {
             if let Some(v) = Self::curve_points(p, n) {
                 let d = self.json["sketch"]["circles"][n]["diameter"].clone();
                 let text = if d.is_null() { short(c.diameter.value().unwrap_or(0.0)) } else { shown(&d) };
-                out.push(Label { pick: Pick::Curve(n.clone()), at: v[v.len() / 4], text: format!("⌀{text}") });
+                // Ø: the window's font has no ⌀.
+                out.push(Label { pick: Pick::Curve(n.clone()), at: v[v.len() / 4], text: format!("Ø{text}") });
             }
         }
         out
+    }
+
+    /// The labels as shown in a picture `height` tall: each at its pixel offset from the middle,
+    /// with its size (`size` of its text, padded). One that would cover an earlier one moves
+    /// down until it does not: two dimensions between the same points both read.
+    pub fn laid_out(&self, height: f64, size: impl Fn(&str) -> (f64, f64)) -> Vec<(Label, (f64, f64), (f64, f64))> {
+        let mut placed: Vec<(Label, (f64, f64), (f64, f64))> = Vec::new();
+        for l in self.labels() {
+            let (w, h) = size(&l.text);
+            let (x, mut y) = self.camera.offset(l.at, height);
+            while placed.iter().any(|(_, (px, py), (pw, ph))| (x - px).abs() * 2.0 < w + pw && (y - py).abs() * 2.0 < h + ph) {
+                y += h + 1.0;
+            }
+            placed.push((l, (x, y), (w, h)));
+        }
+        placed
     }
 
     /// What is under pixel offset `(dx, dy)` from the middle of a picture `height` tall: a point
@@ -372,10 +389,8 @@ impl SketchEdit {
         if let Some(n) = point {
             return Some(self.projection_of(&n).map_or(Pick::Point(n), Pick::Projection));
         }
-        for l in self.labels() {
-            let (x, y) = self.camera.offset(l.at, height);
-            let (w, h) = label_size(&l.text);
-            if (dx - x).abs() <= w * 0.5 + 2.0 && (dy - y).abs() <= h * 0.5 + 2.0 {
+        for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
+            if (dx - x).abs() <= w * 0.5 && (dy - y).abs() <= h * 0.5 {
                 return Some(l.pick);
             }
         }
@@ -413,6 +428,11 @@ impl SketchEdit {
                 DEFINED
             }
         };
+        let laid = self.laid_out(height, |t| label_size(painter, t));
+        let to_rect = |(x, y): (f64, f64), (w, h): (f64, f64)| {
+            egui::Rect::from_center_size(rect.center() + egui::vec2(x as f32, y as f32), egui::vec2(w as f32, h as f32))
+        };
+        let taken: Vec<egui::Rect> = laid.iter().map(|(_, at, size)| to_rect(*at, *size)).collect();
         let construction = |n: &str| {
             p.lines
                 .get(n)
@@ -436,13 +456,29 @@ impl SketchEdit {
             if self.names
                 && let (Some(m), Some(v)) = (Self::middle(p, n), Self::curve_points(p, n))
             {
-                let (a, b) = (screen(v[0]), screen(v[v.len() - 1]));
-                let d = if v.len() == 2 { b - a } else { screen(v[v.len() / 2 + 1]) - screen(v[v.len() / 2]) };
-                let side = egui::vec2(d.y, -d.x).normalized();
+                // Beside a line; outside an arc's middle, or a circle at the upper right.
+                let centre = p.arcs.get(n).map(|a| &a.center).or_else(|| p.circles.get(n).map(|c| &c.center)).and_then(|c| p.solved.points.get(c));
+                let (m, side) = match centre {
+                    Some(c) => {
+                        let m = if p.circles.contains_key(n) { v[v.len() / 8] } else { m };
+                        (m, (screen(m) - screen([c.x, c.y])).normalized())
+                    }
+                    None => {
+                        let d = screen(v[v.len() - 1]) - screen(v[0]);
+                        (m, egui::vec2(d.y, -d.x).normalized())
+                    }
+                };
                 let galley = painter.layout_no_wrap(n.clone(), egui::FontId::proportional(11.0), NAME);
-                // Clear of the line and of a dimension's label on it: its half size that way, and more.
-                let reach = 14.0 + (side.x.abs() * galley.size().x + side.y.abs() * galley.size().y) * 0.5;
-                painter.galley(screen(m) + side * reach - galley.size() * 0.5, galley, NAME);
+                // Clear of the line by its half size that way, and more; on the other side if a
+                // dimension's label is there, left out if both are taken: the dimension matters more.
+                let reach = 10.0 + (side.x.abs() * galley.size().x + side.y.abs() * galley.size().y) * 0.5;
+                let at = [side, -side]
+                    .into_iter()
+                    .map(|s| egui::Rect::from_center_size(screen(m) + s * reach, galley.size()))
+                    .find(|r| !taken.iter().any(|t| t.intersects(*r)));
+                if let Some(r) = at {
+                    painter.galley(r.min, galley, NAME);
+                }
             }
         }
         for (n, v) in &p.solved.points {
@@ -455,16 +491,25 @@ impl SketchEdit {
                 painter.text(at + egui::vec2(5.0, 5.0), egui::Align2::LEFT_TOP, n, egui::FontId::proportional(11.0), NAME);
             }
         }
-        for l in self.labels() {
+        for (l, at, size) in laid {
             let c = if self.selected.contains(&l.pick) { SELECTED } else { DIMENSION };
-            let font = egui::FontId::proportional(if marked(&l.pick) { 14.0 } else { 13.0 });
-            let at = screen(l.at);
-            let galley = painter.layout_no_wrap(l.text, font, c);
-            let r = egui::Rect::from_center_size(at, galley.size() + egui::vec2(4.0, 2.0));
-            painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 210));
-            painter.galley(r.min + egui::vec2(2.0, 1.0), galley, c);
+            let r = to_rect(at, size);
+            painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
+            if marked(&l.pick) {
+                painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
+            }
+            painter.galley(r.min + egui::vec2(2.0, 1.0), painter.layout_no_wrap(l.text, LABEL, c), c);
         }
     }
+}
+
+/// The font of dimension labels.
+const LABEL: egui::FontId = egui::FontId::proportional(13.0);
+
+/// A label's size in pixels as drawn: its text, padded.
+pub fn label_size(painter: &egui::Painter, text: &str) -> (f64, f64) {
+    let g = painter.layout_no_wrap(text.to_string(), LABEL, egui::Color32::BLACK);
+    (f64::from(g.size().x) + 4.0, f64::from(g.size().y) + 2.0)
 }
 
 /// A number as short as it reads: up to six decimals, no trailing zeros.
@@ -564,6 +609,41 @@ mod tests {
         h.run();
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
+        }
+    }
+
+    /// The plate of `symmetric_plate.json`: no two labels cover each other, even the two between
+    /// the same points. `DATUM_PLATE_SHOT=file.png` saves a picture.
+    #[test]
+    fn labels_do_not_cover_each_other() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        let model: Json = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let params = model["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), v.as_f64().unwrap())).collect();
+        let id = TopoId::derive("feature").tag("outline").finish();
+        let mut e = SketchEdit::new("outline".into(), Context { id, input: None }, model["features"][0].clone(), params, None);
+        e.camera.half_height = 30.0;
+        let shot = std::env::var_os("DATUM_PLATE_SHOT");
+        let builder = egui_kittest::Harness::builder().with_size([1100.0, 630.0]);
+        let builder = if shot.is_some() { builder.wgpu() } else { builder };
+        let mut laid = Vec::new();
+        let mut h = builder.build_ui(|ui| {
+            let (rect, _) = ui.allocate_exact_size(ui.available_size(), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
+            e.paint(&ui.painter().with_clip_rect(rect), rect);
+            laid =
+                e.laid_out(f64::from(rect.height()), |t| label_size(ui.painter(), t)).into_iter().map(|(l, at, size)| (l.text, at, size)).collect();
+        });
+        h.run();
+        if let Some(path) = shot {
+            h.render().unwrap().save(path).unwrap();
+        }
+        drop(h);
+        assert!(laid.iter().any(|(t, ..)| t == "Øhole = 9"), "{:?}", laid.iter().map(|l| &l.0).collect::<Vec<_>>());
+        for (i, (a, pa, sa)) in laid.iter().enumerate() {
+            for (b, pb, sb) in &laid[i + 1..] {
+                let apart = (pa.0 - pb.0).abs() * 2.0 >= sa.0 + sb.0 || (pa.1 - pb.1).abs() * 2.0 >= sa.1 + sb.1;
+                assert!(apart, "`{a}` covers `{b}`");
+            }
         }
     }
 

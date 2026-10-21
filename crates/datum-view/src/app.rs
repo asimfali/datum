@@ -598,11 +598,7 @@ impl Viewer {
         let mut leave = false;
         if sk.drag.is_none() {
             let painter = ui.painter();
-            let size = |t: &str| {
-                let g = painter.layout_no_wrap(t.to_string(), egui::FontId::proportional(13.0), egui::Color32::BLACK);
-                (f64::from(g.size().x) + 4.0, f64::from(g.size().y) + 2.0)
-            };
-            sk.hover = offset.and_then(|(x, y)| sk.hit(x, y, h, size));
+            sk.hover = offset.and_then(|(x, y)| sk.hit(x, y, h, |t| crate::sketch::label_size(painter, t)));
         }
         if r.drag_started_by(egui::PointerButton::Primary) {
             sk.start_drag();
