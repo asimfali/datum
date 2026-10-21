@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use datum_brep::{Body, Ix, Surface};
+use datum_brep::{Body, Curve, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use datum_math::expr::{Num, parameter_values};
@@ -80,8 +80,8 @@ const COMMANDS: &[Command] = &[
                       exactly as a feature in the model file.",
         params: feature_schema,
         run: |s, p| {
-            add_feature(&mut s.graph, p.clone())?;
-            Ok(s.rebuild())
+            let ix = add_feature(&mut s.graph, p.clone())?;
+            Ok(s.rebuild_recording(ix))
         },
     },
     Command {
@@ -124,7 +124,7 @@ const COMMANDS: &[Command] = &[
             fields.extend(p.iter().filter(|(k, _)| *k != "name").map(|(k, v)| (k.clone(), v.clone())));
             let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
-            Ok(s.rebuild())
+            Ok(s.rebuild_recording(ix))
         },
     },
     Command {
@@ -205,6 +205,42 @@ const COMMANDS: &[Command] = &[
             Ok(json!({"count": faces.len(), "faces": faces}))
         },
     },
+    Command {
+        name: "query_edges",
+        description: "Edges of a feature's body with their stable IDs, to project into a sketch: each runs from its lower-ID vertex \
+                      (`from`, a sketch projection's `<name>.start`) to the other (`to`), with the vertices' IDs and points; an arc \
+                      with its centre, axis and radius. With `face` (an ID from query_faces), only that face's edges, loop by loop.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "face": {"type": "string"}}, "required": ["name"]}),
+        run: |s, p| {
+            let b = s.body(text(p, "name")?)?;
+            let edges: Vec<Ix> = match p.get("face").and_then(Value::as_str) {
+                None => (0..b.edges().len() as Ix).collect(),
+                Some(id) => {
+                    let f = u128::from_str_radix(id, 16)
+                        .ok()
+                        .and_then(|id| b.faces().binary_search_by_key(&id, |f| f.id.0).ok())
+                        .ok_or_else(|| format!("no face `{id}` in `{}`", text(p, "name").unwrap_or_default()))?;
+                    b.face_loops(f as Ix).flat_map(|l| b.loop_half_edges(l)).map(|h| b.half_edges()[h as usize].edge).collect()
+                }
+            };
+            let vertex = |v: Ix| json!({"id": format!("{:?}", b.vertices()[v as usize].id), "point": b.point(v)});
+            let list: Vec<Value> = edges
+                .iter()
+                .map(|&e| {
+                    let edge = &b.edges()[e as usize];
+                    let (from, to) = (b.half_edges()[edge.half as usize].origin, b.half_edges()[b.next(edge.half) as usize].origin);
+                    let mut j = json!({"id": format!("{:?}", edge.id), "from": vertex(from), "to": vertex(to)});
+                    match b.edge_curve(edge) {
+                        Some(Curve::Arc(a)) => j["arc"] = json!({"center": a.center, "axis": a.axis, "radius": a.radius}),
+                        Some(Curve::Rolled { .. }) => j["rolled"] = json!(true),
+                        None => {}
+                    }
+                    j
+                })
+                .collect();
+            Ok(json!({"count": list.len(), "edges": list}))
+        },
+    },
 ];
 
 fn no_params() -> Value {
@@ -267,6 +303,32 @@ impl Session {
         self.last = self.evaluator.evaluate(&self.graph);
         let failed: Vec<Value> = self.failures().collect();
         json!({"features": self.graph.nodes().len(), "computed": self.last.computed, "reused": self.last.reused, "failed": failed})
+    }
+
+    /// Rebuilds after feature `ix` was added or edited. A sketch projection given without `at`
+    /// gets where it is now, as drawn (D87): later edits upstream that move the projected edge
+    /// do not flip the sketch.
+    fn rebuild_recording(&mut self, ix: NodeIx) -> Value {
+        let summary = self.rebuild();
+        let node = &self.graph.nodes()[ix as usize];
+        let (Op::Sketch { project, .. }, Some(Ok(Feature::Sketch(placed)))) = (&node.op, self.last.results.get(ix as usize).map(|r| r.as_deref()))
+        else {
+            return summary;
+        };
+        if project.values().all(|p| !p.at.is_empty()) {
+            return summary;
+        }
+        let mut op = node.op.clone();
+        if let Op::Sketch { project, .. } = &mut op {
+            for (name, p) in project.iter_mut().filter(|(_, p)| p.at.is_empty()) {
+                p.at = placed.projected.get(name).cloned().unwrap_or_default();
+            }
+        }
+        // What the edit recomputed: the second rebuild only reads the projections back.
+        if self.graph.set_op(ix, op).is_ok() {
+            self.rebuild();
+        }
+        summary
     }
 
     fn failures(&self) -> impl Iterator<Item = Value> + '_ {

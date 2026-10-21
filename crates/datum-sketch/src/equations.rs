@@ -96,6 +96,8 @@ pub(crate) struct Equations {
     /// How messages name each solved equation: the constraint, or the arc whose ends it ties.
     described: Vec<String>,
     fixed: Vec<bool>,
+    /// Where fixed points stand, if not where they were drawn.
+    pub fixed_at: Vec<Option<Vec2>>,
     /// Points no constraint ties: they keep their coordinates and both degrees of freedom.
     pub unconstrained: Vec<usize>,
     centre: [f64; 2],
@@ -195,6 +197,7 @@ impl Equations {
             }
         };
         let mut fixed = vec![false; names.len()];
+        let mut fixed_at = vec![None; names.len()];
         let mut eqs = Vec::with_capacity(sketch.constraints.len());
         for (k, c) in sketch.constraints.iter().enumerate() {
             let number = |v: &Num| v.value().ok_or_else(|| SketchError::Invalid(format!("{}: the expression is not evaluated", c.describe(k))));
@@ -227,8 +230,13 @@ impl Equations {
                     let (a, b) = two(lines)?;
                     Eq::Equal(a, b)
                 }
-                Constraint::Fix { point: p } => {
-                    fixed[point(p)?] = true;
+                Constraint::Fix { point: p, at } => {
+                    let p = point(p)?;
+                    if at.is_some_and(|a| !(a.x.is_finite() && a.y.is_finite())) {
+                        return invalid(format!("{}: non-finite coordinates", c.describe(k)));
+                    }
+                    fixed[p] = true;
+                    fixed_at[p] = at.filter(|a| *a != start[p]);
                     Eq::Fix
                 }
                 Constraint::Distance { points, value } => Eq::Distance(point(&points[0])?, point(&points[1])?, positive(value)?),
@@ -339,7 +347,7 @@ impl Equations {
             });
             measure_names.push(n.clone());
         }
-        let mut eq = Self { names, start, lines, eqs, active, measure_names, described, fixed, unconstrained: Vec::new(), centre, size };
+        let mut eq = Self { names, start, lines, eqs, active, measure_names, described, fixed, fixed_at, unconstrained: Vec::new(), centre, size };
         let tied = eq.tied_points();
         eq.unconstrained = (0..eq.names.len()).filter(|&p| !tied[p] && !eq.fixed[p]).collect();
         Ok(eq)
@@ -421,8 +429,10 @@ impl Equations {
         groups
     }
 
+    /// Where the solver starts point `p`: where it was drawn, or a fixed point where it stands.
     fn scaled(&self, p: usize) -> [f64; 2] {
-        [(self.start[p].x - self.centre[0]) / self.size, (self.start[p].y - self.centre[1]) / self.size]
+        let q = self.fixed_at[p].unwrap_or(self.start[p]);
+        [(q.x - self.centre[0]) / self.size, (q.y - self.centre[1]) / self.size]
     }
 
     /// Solves group `g` with the constraints `use_`: normalised coordinates of its points, or
@@ -455,6 +465,9 @@ impl Equations {
             .iter()
             .enumerate()
             .map(|(k, &p)| {
+                if let Some(at) = self.fixed_at[p] {
+                    return at;
+                }
                 let s = self.scaled(p);
                 let move_by = |i: usize| if x[2 * k + i] == s[i] { 0.0 } else { (x[2 * k + i] - s[i]) * self.size };
                 Vec2::new(self.start[p].x + move_by(0), self.start[p].y + move_by(1))

@@ -112,9 +112,12 @@ pub enum Constraint {
     Equal {
         lines: [String; 2],
     },
-    /// The point stays where it was drawn.
+    /// The point stays where it was drawn, or, with `at`, stands there. Sides are still decided
+    /// where the point was drawn: a projection drawn before the model changed (D87).
     Fix {
         point: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        at: Option<Vec2>,
     },
     Distance {
         points: [String; 2],
@@ -230,7 +233,7 @@ impl Constraint {
             Self::Perpendicular { lines } => ("perpendicular", lines.join(", ")),
             Self::Collinear { lines } => ("collinear", lines.join(", ")),
             Self::Equal { lines } => ("equal", lines.join(", ")),
-            Self::Fix { point } => ("fix", point.clone()),
+            Self::Fix { point, .. } => ("fix", point.clone()),
             Self::Distance { points, value } => ("distance", format!("{} = {value}", points.join(", "))),
             Self::HorizontalDistance { points, value } => ("horizontal_distance", format!("{} = {value}", points.join(", "))),
             Self::VerticalDistance { points, value } => ("vertical_distance", format!("{} = {value}", points.join(", "))),
@@ -298,6 +301,11 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
         }
         dof += r.dof;
         free.extend(r.free);
+    }
+    for (p, at) in eq.fixed_at.iter().enumerate() {
+        if let Some(at) = at {
+            points[p] = *at;
+        }
     }
     free.sort_unstable();
     let measures = eq.measures(&points);

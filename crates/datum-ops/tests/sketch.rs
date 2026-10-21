@@ -161,3 +161,114 @@ fn islands_and_planes() {
     assert_close(m.max.y, 10.0);
     assert_close(m.max.z, 110.0);
 }
+
+/// The edge of `b` whose ends satisfy `pick`, as an ID string.
+fn edge_id(b: &Body, pick: impl Fn(Vec3, Vec3) -> bool) -> String {
+    let e = b
+        .edges()
+        .iter()
+        .find(|e| {
+            let (p, q) = (b.point(b.half_edges()[e.half as usize].origin), b.point(b.half_edges()[b.next(e.half) as usize].origin));
+            pick(p, q) || pick(q, p)
+        })
+        .unwrap();
+    format!("{:?}", e.id)
+}
+
+fn top_face(b: &Body) -> String {
+    format!("{:?}", b.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id)
+}
+
+/// A pocket dimensioned from two projected edges of the top face (M7b). An edit upstream moves
+/// the edges further than the pocket stands from them: drawn where they were (`at`), the pocket
+/// follows them; drawn nowhere in particular, it would keep its side of the old edges (D87).
+#[test]
+fn dimensions_from_projected_edges() {
+    let pocket = |min: Vec3, at: Option<&datum_ops::Placed>| {
+        let plate = Value::Body(cuboid(id("plate"), min, min + Vec3::new(40.0, 30.0, 8.0)).unwrap());
+        let b = plate.body().unwrap();
+        let top = |p: Vec3, q: Vec3| p.z == min.z + 8.0 && q.z == min.z + 8.0;
+        let (front, left) =
+            (edge_id(b, |p, q| top(p, q) && p.y == min.y && q.y == min.y), edge_id(b, |p, q| top(p, q) && p.x == min.x && q.x == min.x));
+        let square = serde_json::json!({
+            "points": {"p": [3, 3], "q": [13, 3], "r": [13, 9], "s": [3, 9]},
+            "lines": {"l1": {"from": "p", "to": "q"}, "l2": {"from": "q", "to": "r"}, "l3": {"from": "r", "to": "s"}, "l4": {"from": "s", "to": "p"}},
+            "constraints": [
+                {"type": "horizontal", "line": "l1"}, {"type": "vertical", "line": "l2"}, {"type": "horizontal", "line": "l3"}, {"type": "vertical", "line": "l4"},
+                {"type": "length", "line": "l1", "value": 10}, {"type": "length", "line": "l2", "value": 6},
+                {"type": "point_line", "point": "p", "line": "front", "value": 5}, {"type": "point_line", "point": "p", "line": "left", "value": 4}
+            ]
+        });
+        let drawn = |n: &str| at.map(|p| serde_json::json!(p.projected[n].iter().map(|v| [v.x, v.y]).collect::<Vec<_>>()));
+        let projection = |n: &str, id: String| match drawn(n) {
+            Some(at) => serde_json::json!({"id": id, "at": at}),
+            None => serde_json::json!({"id": id}),
+        };
+        let extra = serde_json::json!({"face": top_face(b), "project": {"front": projection("front", front), "left": projection("left", left)}});
+        let s = eval(&sketch_op(square, extra), "s", &[&plate]).unwrap();
+        let placed = s.sketch().unwrap().clone();
+        // Projections are fixed construction geometry: they bound no profile, the sketch is defined.
+        assert!(placed.lines["front"].construction && placed.solved.dof == 0, "{:?}", placed.solved.free_points);
+        let [o, x, y, _] = placed.frame;
+        let p = placed.solved.points["p"];
+        (o + x * p.x + y * p.y, placed)
+    };
+    let near = |a: Vec3, b: Vec3| (a - b).dot(a - b) < 1e-20;
+    let (at, first) = pocket(Vec3::ZERO, None);
+    assert!(near(at, Vec3::new(4.0, 5.0, 8.0)), "{at:?}");
+    let moved = pocket(Vec3::new(10.0, -7.0, 2.0), Some(&first)).0;
+    assert!(near(moved, Vec3::new(14.0, -2.0, 10.0)), "{moved:?}");
+    // Without `at` the left edge jumped over the drawn pocket: it stays left of where it was drawn.
+    let flipped = pocket(Vec3::new(10.0, -7.0, 2.0), None).0;
+    assert!(near(flipped, Vec3::new(6.0, -2.0, 10.0)), "{flipped:?}");
+}
+
+/// A projected arc brings its centre: a hole drawn anywhere lands concentric with the rim.
+#[test]
+fn projected_arc_and_its_centre() {
+    let disk = serde_json::json!({"points": {"c": [7, 3]}, "circles": {"rim": {"center": "c", "diameter": 10}}});
+    let disk = eval(
+        &op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 2})),
+        "disk",
+        &[&eval(&sketch_op(disk, serde_json::json!({})), "d", &[]).unwrap()],
+    )
+    .unwrap();
+    let b = disk.body().unwrap();
+    let rim = format!("{:?}", b.edges().iter().find(|e| b.edge_arc(e).is_some_and(|a| a.center.z == 2.0)).unwrap().id);
+    let hole = serde_json::json!({"points": {"h": [0, 0]}, "circles": {"hole": {"center": "h", "diameter": 4}},
+        "constraints": [{"type": "concentric", "curves": ["hole", "rim"]}]});
+    let s = eval(&sketch_op(hole.clone(), serde_json::json!({"face": top_face(b), "project": {"rim": {"id": rim}}})), "s", &[&disk]).unwrap();
+    let placed = s.sketch().unwrap();
+    let h = placed.solved.points["h"];
+    assert!((h.x - 7.0).abs() < 1e-12 && (h.y - 3.0).abs() < 1e-12 && placed.arcs["rim"].construction, "{h:?}");
+    // Seen from the side the arc would be an ellipse: refused, not approximated.
+    let side = serde_json::json!({"plane": {"origin": [0, 0, 0], "x_axis": [0, 1, 0], "normal": [1, 0, 0]}, "project": {"rim": {"id": rim}}});
+    match eval(&sketch_op(serde_json::json!({"points": {}}), side), "s", &[&disk]) {
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("not parallel"), "{m}"),
+        r => panic!("expected a refusal, got {r:?}"),
+    }
+}
+
+#[test]
+fn projections_are_checked() {
+    let plate = Value::Body(cuboid(id("plate"), Vec3::ZERO, Vec3::new(4.0, 3.0, 2.0)).unwrap());
+    let b = plate.body().unwrap();
+    let up = edge_id(b, |p, q| p.x == 0.0 && q.x == 0.0 && p.y == 0.0 && q.y == 0.0);
+    let corner = format!("{:?}", b.vertices()[0].id);
+    let fails = |sketch: serde_json::Value, extra: serde_json::Value, inputs: &[&Value]| match eval(&sketch_op(sketch, extra), "s", inputs) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("expected an error"),
+    };
+    let empty = serde_json::json!({"points": {}});
+    let on_top = |project: serde_json::Value| serde_json::json!({"face": top_face(b), "project": project});
+    assert!(fails(empty.clone(), on_top(serde_json::json!({"x": {"id": "0123"}})), &[&plate]).contains("no edge or vertex"));
+    assert!(fails(empty.clone(), on_top(serde_json::json!({"x": {"id": up}})), &[&plate]).contains("across the sketch plane"));
+    let taken = serde_json::json!({"points": {"c": [0, 0]}});
+    assert!(fails(taken, on_top(serde_json::json!({"c": {"id": corner}})), &[&plate]).contains("already has a point `c`"));
+    assert!(fails(empty.clone(), serde_json::json!({"project": {"c": {"id": corner}}}), &[]).contains("takes the body"));
+    assert!(fails(empty.clone(), serde_json::json!({"project": {"c": {"id": corner, "at": [[0, 0], [1, 1]]}}}), &[&plate]).contains("2 points"));
+    // A vertex alone is a fixed point; a body without face or projections is a mistake.
+    let s = eval(&sketch_op(empty.clone(), serde_json::json!({"project": {"c": {"id": corner}}})), "s", &[&plate]).unwrap();
+    assert_eq!(s.sketch().unwrap().solved.dof, 0);
+    assert!(fails(empty, serde_json::json!({}), &[&plate]).contains("to project its edges"));
+}

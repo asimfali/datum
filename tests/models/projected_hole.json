@@ -1,0 +1,188 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "w": 40.0
+  },
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "point": "m",
+            "type": "fix"
+          },
+          {
+            "line": "bottom",
+            "point": "m",
+            "type": "midpoint"
+          },
+          {
+            "line": "bottom",
+            "type": "horizontal"
+          },
+          {
+            "line": "top",
+            "type": "horizontal"
+          },
+          {
+            "line": "left",
+            "type": "vertical"
+          },
+          {
+            "line": "right",
+            "type": "vertical"
+          },
+          {
+            "points": [
+              "a",
+              "b"
+            ],
+            "type": "horizontal_distance",
+            "value": "w"
+          },
+          {
+            "points": [
+              "a",
+              "d"
+            ],
+            "type": "vertical_distance",
+            "value": 20.0
+          }
+        ],
+        "lines": {
+          "bottom": {
+            "from": "a",
+            "to": "b"
+          },
+          "left": {
+            "from": "d",
+            "to": "a"
+          },
+          "right": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "c",
+            "to": "d"
+          }
+        },
+        "points": {
+          "a": [
+            -21.0,
+            0.5
+          ],
+          "b": [
+            19.0,
+            -0.3
+          ],
+          "c": [
+            20.0,
+            21.0
+          ],
+          "d": [
+            -20.0,
+            19.0
+          ],
+          "m": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "outline"
+      ],
+      "name": "plate",
+      "op": "extrude",
+      "z0": 0.0,
+      "z1": 3.0
+    },
+    {
+      "face": "df34ab372c2756871d73c688a4eba5ca",
+      "inputs": [
+        "plate"
+      ],
+      "name": "hole_sketch",
+      "op": "sketch",
+      "project": {
+        "front": {
+          "at": [
+            [
+              20.0,
+              1.6653345369377348e-16
+            ],
+            [
+              -20.0,
+              1.1102230246251565e-16
+            ]
+          ],
+          "id": "3489ce77abfd1cc29e371b79f028f68d"
+        },
+        "left": {
+          "at": [
+            [
+              -20.0,
+              20.0
+            ],
+            [
+              -20.0,
+              1.1102230246251565e-16
+            ]
+          ],
+          "id": "3750fee5adb7ef3f95f6027fb4eef149"
+        }
+      },
+      "sketch": {
+        "circles": {
+          "hole": {
+            "center": "h",
+            "diameter": 5.0
+          }
+        },
+        "constraints": [
+          {
+            "line": "left",
+            "point": "h",
+            "type": "point_line",
+            "value": 4.0
+          },
+          {
+            "line": "front",
+            "point": "h",
+            "type": "point_line",
+            "value": 10.0
+          }
+        ],
+        "lines": {},
+        "measures": {
+          "from_centre": {
+            "points": [
+              "h",
+              "front.start"
+            ],
+            "type": "horizontal_distance"
+          }
+        },
+        "points": {
+          "h": [
+            -16.0,
+            10.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "plate",
+        "hole_sketch"
+      ],
+      "name": "drilled",
+      "op": "cut"
+    }
+  ]
+}
