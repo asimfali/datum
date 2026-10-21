@@ -128,6 +128,76 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "edit_sketch",
+        description: "Change part of a sketch feature `name` without rewriting it. `points`, `lines`, `arcs`, `circles`, `measures` \
+                      and `project` are merged by name: an entry replaces the one of that name, null removes it. `add_constraints` \
+                      appends constraints; `remove_constraints` removes those equal to the ones given (as `inspect` lists them).",
+        params: || {
+            let map = json!({"type": "object", "additionalProperties": true});
+            let list = json!({"type": "array", "items": {"type": "object"}});
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "points": map, "lines": map, "arcs": map, "circles": map, "measures": map, "project": map,
+                "add_constraints": list, "remove_constraints": list
+            }, "required": ["name"], "additionalProperties": false})
+        },
+        run: |s, p| {
+            let ix = s.find(text(p, "name")?)?;
+            let Ok(Value::Object(mut op)) = serde_json::to_value(&s.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
+            if op.get("op") != Some(&json!("sketch")) {
+                return Err(format!("`{}` is not a sketch", text(p, "name")?));
+            }
+            let merge = |target: &mut Map<String, Value>, key: &str, patch: Option<&Value>| -> Result<(), String> {
+                let Some(patch) = patch else { return Ok(()) };
+                let patch = patch.as_object().ok_or_else(|| format!("`{key}` must be an object"))?;
+                let entries = target.entry(key).or_insert_with(|| json!({}));
+                let entries = entries.as_object_mut().ok_or_else(|| format!("`{key}` is not an object"))?;
+                for (n, v) in patch {
+                    match v {
+                        Value::Null => entries.remove(n).map(|_| ()).ok_or_else(|| format!("`{key}` has no `{n}`"))?,
+                        v => {
+                            entries.insert(n.clone(), v.clone());
+                        }
+                    }
+                }
+                Ok(())
+            };
+            merge(&mut op, "project", p.get("project"))?;
+            let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
+            for key in ["points", "lines", "arcs", "circles", "measures"] {
+                merge(sketch, key, p.get(key))?;
+            }
+            let constraints = sketch.entry("constraints").or_insert_with(|| json!([]));
+            let constraints = constraints.as_array_mut().ok_or("`constraints` is not a list")?;
+            // Constraints compare as parsed: field order and number spelling do not matter.
+            let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
+            for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
+                let gone = parse(gone)?;
+                let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
+                constraints.remove(k);
+            }
+            for added in p.get("add_constraints").and_then(Value::as_array).into_iter().flatten() {
+                parse(added)?;
+                constraints.push(added.clone());
+            }
+            let op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
+            s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
+            Ok(s.rebuild_recording(ix))
+        },
+    },
+    Command {
+        name: "rename_in_sketch",
+        description: "Rename a point, line, arc, circle, reference dimension or projection of sketch feature `name` from `from` to \
+                      `to`, everywhere it is used: the sketch's constraints, a sheet's `start`. Names of faces made from the sketch \
+                      change with it; faces, edges and vertices referred to downstream by ID are found again by their geometry, \
+                      which a rename leaves as it was. The reply lists references it could not find again.",
+        params: || {
+            json!({"type": "object", "properties": {"name": {"type": "string"}, "from": {"type": "string"}, "to": {"type": "string"}},
+                   "required": ["name", "from", "to"]})
+        },
+        run: |s, p| s.rename_in_sketch(text(p, "name")?, text(p, "from")?, text(p, "to")?),
+    },
+    Command {
         name: "remove",
         description: "Remove a feature that no other feature uses.",
         params: name_param,
@@ -305,6 +375,95 @@ impl Session {
         json!({"features": self.graph.nodes().len(), "computed": self.last.computed, "reused": self.last.reused, "failed": failed})
     }
 
+    fn rename_in_sketch(&mut self, feature: &str, from: &str, to: &str) -> Result<Value, String> {
+        let ix = self.find(feature)?;
+        if to.is_empty() || to.contains('.') || from == to {
+            return Err("the new name must be a different name without `.` (it would read as a projection's point)".into());
+        }
+        let Ok(Value::Object(mut op)) = serde_json::to_value(&self.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
+        let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or_else(|| format!("`{feature}` is not a sketch"))?;
+        // The names a sketch defines: its elements', its projections' and their points'.
+        let mut defined: Vec<String> = ["points", "lines", "arcs", "circles", "measures"]
+            .iter()
+            .filter_map(|k| sketch.get(*k).and_then(Value::as_object))
+            .flat_map(|m| m.keys().cloned())
+            .collect();
+        let projections: Vec<String> = op.get("project").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        defined.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
+        if !defined.iter().any(|n| n == from) {
+            return Err(format!("`{feature}` has no `{from}`"));
+        }
+        if defined.iter().any(|n| n == to) {
+            return Err(format!("`{feature}` already has `{to}`"));
+        }
+        let projection = projections.iter().any(|n| n == from);
+        let renamed = |n: &str| match n.strip_prefix(from) {
+            Some("") => Some(to.to_string()),
+            Some(rest) if projection && rest.starts_with('.') => Some(format!("{to}{rest}")),
+            _ => None,
+        };
+        rename_names(&mut op, &renamed);
+        let mut ops: Vec<(NodeIx, Op)> = vec![(ix, serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?)];
+        for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1) {
+            if let (Op::Sheet { start: Some(st), .. }, true) = (&n.op, n.inputs.contains(&ix))
+                && let Some(new) = renamed(st)
+            {
+                let mut op = n.op.clone();
+                if let Op::Sheet { start, .. } = &mut op {
+                    *start = Some(new);
+                }
+                ops.push((j as NodeIx, op));
+            }
+        }
+        let before = self.last.results.clone();
+        for (j, op) in ops {
+            self.graph.set_op(j, op).map_err(|e| e.to_string())?;
+        }
+        let summary = self.rebuild();
+        // References by ID downstream: the same element, found by its unchanged geometry.
+        let mut lost = Vec::new();
+        let mut remapped = Vec::new();
+        for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1) {
+            let Some(&input) = n.inputs.first() else { continue };
+            let (Some(old), Some(new)) = (body_of(&before, input), body_of(&self.last.results, input)) else { continue };
+            let mut op = n.op.clone();
+            let mut changed = false;
+            let mut again = |id: &mut String, kinds: &[Kind], what: String| match find_again(old, new, id, kinds) {
+                Some(found) if found != *id => {
+                    *id = found;
+                    changed = true;
+                }
+                Some(_) => {}
+                None => lost.push(what),
+            };
+            match &mut op {
+                Op::Sketch { face, project, .. } => {
+                    if let Some(f) = face {
+                        again(f, &[Kind::Face], format!("{}: face", n.name));
+                    }
+                    for (pn, pr) in project.iter_mut() {
+                        again(&mut pr.id, &[Kind::Vertex, Kind::Edge], format!("{}: projection `{pn}`", n.name));
+                    }
+                }
+                Op::Unfold { face, .. } => again(face, &[Kind::Face], format!("{}: face", n.name)),
+                _ => {}
+            }
+            if changed {
+                remapped.push((j as NodeIx, op));
+            }
+        }
+        let found_again = remapped.len();
+        for (j, op) in remapped {
+            self.graph.set_op(j, op).map_err(|e| e.to_string())?;
+        }
+        if found_again > 0 {
+            self.rebuild();
+        }
+        let failed: Vec<Value> = self.failures().collect();
+        Ok(json!({"renamed": {"from": from, "to": to}, "features_with_ids_found_again": found_again, "lost": lost, "failed": failed,
+                  "computed": summary["computed"]}))
+    }
+
     /// Rebuilds after feature `ix` was added or edited. A sketch projection given without `at`
     /// gets where it is now, as drawn (D87): later edits upstream that move the projected edge
     /// do not flip the sketch.
@@ -367,7 +526,10 @@ impl Session {
                             }
                             Feature::Sketch(s) => {
                                 let points: serde_json::Map<String, Value> = s.solved.points.iter().map(|(n, p)| (n.clone(), json!([p.x, p.y]))).collect();
-                                json!({"sketch": {"dof": s.solved.dof, "free_points": s.solved.free_points, "points": points, "measures": s.solved.measures}, "hash": hash})
+                                // A free point: "plane", or the direction it slides along.
+                                let free: Map<String, Value> =
+                                    s.solved.free.iter().map(|(n, d)| (n.clone(), d.map_or(json!("plane"), |d| json!([d.x, d.y])))).collect();
+                                json!({"sketch": {"dof": s.solved.dof, "free": free, "points": points, "measures": s.solved.measures}, "hash": hash})
                             }
                             Feature::Flat(f) => {
                                 let [lines, arcs, circles] = f.counts();
@@ -398,4 +560,103 @@ impl Session {
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "parameters": parameters, "features": features})
     }
+}
+
+/// Renames, in a sketch feature's JSON, every name `renamed` maps: keys of the element maps and
+/// of `project`, and every string naming an element. Expressions (`value`, `degrees`,
+/// `diameter`), constraint kinds and IDs are left alone.
+fn rename_names(op: &mut Map<String, Value>, renamed: &impl Fn(&str) -> Option<String>) {
+    fn walk(v: &mut Value, renamed: &impl Fn(&str) -> Option<String>) {
+        match v {
+            Value::String(s) => {
+                if let Some(n) = renamed(s) {
+                    *s = n;
+                }
+            }
+            Value::Array(a) => a.iter_mut().for_each(|v| walk(v, renamed)),
+            Value::Object(m) => {
+                for (k, v) in m.iter_mut() {
+                    if !["type", "value", "degrees", "diameter", "id"].contains(&k.as_str()) {
+                        walk(v, renamed);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let rekey = |m: &mut Value| {
+        if let Some(m) = m.as_object_mut() {
+            *m = std::mem::take(m).into_iter().map(|(k, v)| (renamed(&k).unwrap_or(k), v)).collect();
+        }
+    };
+    if let Some(p) = op.get_mut("project") {
+        rekey(p);
+    }
+    if let Some(sketch) = op.get_mut("sketch") {
+        if let Some(sk) = sketch.as_object_mut() {
+            for key in ["points", "lines", "arcs", "circles", "measures"] {
+                if let Some(m) = sk.get_mut(key) {
+                    rekey(m);
+                }
+            }
+        }
+        walk(sketch, renamed);
+    }
+}
+
+/// The body feature `ix` evaluated to in `results`, if it did.
+fn body_of(results: &[Result<datum_graph::ValueRef, datum_graph::EvalError>], ix: NodeIx) -> Option<&Body> {
+    results.get(ix as usize)?.as_ref().ok()?.body()
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Vertex,
+    Edge,
+    Face,
+}
+
+/// The ID in `new` of the element with ID `id` (hex) in `old`, found by its geometry: a vertex by
+/// its point, an edge by its ends and curve, a face by its surface and the points of its loops,
+/// all compared exactly. None if `old` has no such element or `new` has not exactly one.
+fn find_again(old: &Body, new: &Body, id: &str, kinds: &[Kind]) -> Option<String> {
+    let id = u128::from_str_radix(id, 16).ok()?;
+    let bits = |p: Vec3| p.to_array().map(f64::to_bits);
+    let vertex = |b: &Body, v: usize| format!("{:?}", bits(b.vertices()[v].point));
+    let edge = |b: &Body, e: usize| {
+        let ed = &b.edges()[e];
+        let mut ends = [b.half_edges()[ed.half as usize].origin, b.half_edges()[b.next(ed.half) as usize].origin].map(|v| bits(b.point(v)));
+        ends.sort_unstable();
+        format!("{ends:?} {:?}", b.edge_curve(ed))
+    };
+    let face = |b: &Body, f: usize| {
+        let mut pts: Vec<[u64; 3]> =
+            b.face_loops(f as Ix).flat_map(|l| b.loop_half_edges(l)).map(|h| bits(b.point(b.half_edges()[h as usize].origin))).collect();
+        pts.sort_unstable();
+        format!("{:?} {pts:?}", b.faces()[f].surface)
+    };
+    for &kind in kinds {
+        let found: Vec<_> = match kind {
+            Kind::Vertex => {
+                let Ok(v) = old.vertices().binary_search_by_key(&id, |v| v.id.0) else { continue };
+                let key = vertex(old, v);
+                (0..new.vertices().len()).filter(|&w| vertex(new, w) == key).map(|w| new.vertices()[w].id).collect()
+            }
+            Kind::Edge => {
+                let Ok(e) = old.edges().binary_search_by_key(&id, |e| e.id.0) else { continue };
+                let key = edge(old, e);
+                (0..new.edges().len()).filter(|&w| edge(new, w) == key).map(|w| new.edges()[w].id).collect()
+            }
+            Kind::Face => {
+                let Ok(f) = old.faces().binary_search_by_key(&id, |f| f.id.0) else { continue };
+                let key = face(old, f);
+                (0..new.faces().len()).filter(|&w| face(new, w) == key).map(|w| new.faces()[w].id).collect()
+            }
+        };
+        return match found[..] {
+            [one] => Some(format!("{one:?}")),
+            _ => None,
+        };
+    }
+    None
 }

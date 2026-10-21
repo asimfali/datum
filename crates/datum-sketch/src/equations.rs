@@ -447,15 +447,51 @@ impl Equations {
         }
     }
 
-    /// Degrees of freedom left in group `g` at `x`, and the points that can still move.
-    pub fn freedom(&self, g: &Group, x: &[f64]) -> (usize, Vec<usize>) {
+    /// Degrees of freedom left in group `g` at `x`, and the points that can still move: each
+    /// free in the plane (`None`) or sliding along a unit direction, the first nonzero coordinate
+    /// positive.
+    pub fn freedom(&self, g: &Group, x: &[f64]) -> (usize, Vec<(usize, Option<Vec2>)>) {
         let free: Vec<usize> = g.points.iter().enumerate().filter(|(_, p)| !self.fixed[**p]).flat_map(|(k, _)| [2 * k, 2 * k + 1]).collect();
         let mut rows = Vec::new();
         let mut r = Vec::new();
         self.residuals(g, &g.constraints, x, &mut r, Some(&mut rows));
         let (rank, null) = solver::null_space(&rows, &free, RANK);
-        let moving = |k: usize| null.iter().any(|v| free.iter().zip(v).any(|(&c, s)| c / 2 == k && s.abs() > MOVES));
-        let points = g.points.iter().enumerate().filter(|(k, _)| moving(*k)).map(|(_, &p)| p).collect();
+        // A point's share of the allowed motions: G = Σ v vᵀ over its two coordinates of each.
+        let motion = |k: usize| {
+            let mut gram = [0.0f64; 3];
+            for v in &null {
+                let mut d = [0.0; 2];
+                for (&c, s) in free.iter().zip(v).filter(|(c, _)| **c / 2 == k) {
+                    d[c % 2] = *s;
+                }
+                gram = [gram[0] + d[0] * d[0], gram[1] + d[0] * d[1], gram[2] + d[1] * d[1]];
+            }
+            gram
+        };
+        let points = g
+            .points
+            .iter()
+            .enumerate()
+            .filter_map(|(k, &p)| {
+                let [a, b, c] = motion(k);
+                // Eigenvalues of [[a, b], [b, c]]: both above the threshold, the point moves in
+                // the plane; one, along its eigenvector.
+                let (mean, half) = (0.5 * (a + c), libm::hypot(0.5 * (a - c), b));
+                if mean + half <= MOVES * MOVES {
+                    return None;
+                }
+                if mean - half > MOVES * MOVES {
+                    return Some((p, None));
+                }
+                // The eigenvector of the larger eigenvalue: the longer of two equivalent forms.
+                let l = mean + half;
+                let (u, v) = ([l - c, b], [b, l - a]);
+                let [dx, dy] = if libm::hypot(u[0], u[1]) >= libm::hypot(v[0], v[1]) { u } else { v };
+                let len = libm::hypot(dx, dy);
+                let s = if dx < 0.0 || (dx == 0.0 && dy < 0.0) { -1.0 } else { 1.0 };
+                Some((p, Some(Vec2::new(s * dx / len, s * dy / len))))
+            })
+            .collect();
         (free.len() - rank, points)
     }
 

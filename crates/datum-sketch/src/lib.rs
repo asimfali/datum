@@ -279,8 +279,9 @@ pub struct Solved {
     pub points: BTreeMap<String, Vec2>,
     /// Degrees of freedom left: independent ways the points can still move.
     pub dof: usize,
-    /// Points that can still move, in name order.
-    pub free_points: Vec<String>,
+    /// Points that can still move, by name: free in the plane (`None`) or sliding along a unit
+    /// direction (the first nonzero coordinate positive) — what a dimension would still fix.
+    pub free: BTreeMap<String, Option<Vec2>>,
     /// The values of the reference dimensions, by name.
     pub measures: BTreeMap<String, f64>,
 }
@@ -293,7 +294,7 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
     let solved = groups.par_iter().map(|g| solve_group(&eq, g)).collect::<Vec<_>>();
     let mut points = eq.start.clone();
     let mut dof = 2 * eq.unconstrained.len();
-    let mut free: Vec<usize> = eq.unconstrained.clone();
+    let mut free: Vec<(usize, Option<Vec2>)> = eq.unconstrained.iter().map(|&p| (p, None)).collect();
     for (g, r) in groups.iter().zip(solved) {
         let r = r?;
         for (k, &p) in g.points.iter().enumerate() {
@@ -307,12 +308,12 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
             points[p] = *at;
         }
     }
-    free.sort_unstable();
+    free.sort_unstable_by_key(|f| f.0);
     let measures = eq.measures(&points);
     Ok(Solved {
         points: eq.names.iter().cloned().zip(points).collect(),
         dof,
-        free_points: free.into_iter().map(|p| eq.names[p].clone()).collect(),
+        free: free.into_iter().map(|(p, d)| (eq.names[p].clone(), d)).collect(),
         measures,
     })
 }
@@ -320,7 +321,7 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
 struct GroupResult {
     points: Vec<Vec2>,
     dof: usize,
-    free: Vec<usize>,
+    free: Vec<(usize, Option<Vec2>)>,
 }
 
 fn solve_group(eq: &Equations, g: &Group) -> Result<GroupResult, SketchError> {

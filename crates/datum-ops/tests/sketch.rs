@@ -208,7 +208,7 @@ fn dimensions_from_projected_edges() {
         let s = eval(&sketch_op(square, extra), "s", &[&plate]).unwrap();
         let placed = s.sketch().unwrap().clone();
         // Projections are fixed construction geometry: they bound no profile, the sketch is defined.
-        assert!(placed.lines["front"].construction && placed.solved.dof == 0, "{:?}", placed.solved.free_points);
+        assert!(placed.lines["front"].construction && placed.solved.dof == 0, "{:?}", placed.solved.free);
         let [o, x, y, _] = placed.frame;
         let p = placed.solved.points["p"];
         (o + x * p.x + y * p.y, placed)
