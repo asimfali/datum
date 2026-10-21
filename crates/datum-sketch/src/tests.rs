@@ -39,7 +39,7 @@ fn rectangle(w: f64, h: f64, scale: f64) -> Sketch {
 #[test]
 fn rectangle_is_fully_defined() {
     let r = solve(&rectangle(12.0, 5.0, 1.0)).unwrap();
-    assert_eq!((r.dof, r.free_points.len()), (0, 0));
+    assert_eq!((r.dof, r.free.len()), (0, 0));
     // The fixed corner keeps its drawn coordinates exactly.
     assert_eq!(r.points["a"], Vec2::new(0.0, 0.0));
     close(r.points["b"], [12.0, 0.0], 1e-12);
@@ -64,7 +64,10 @@ fn missing_constraints_leave_freedom() {
     let r = solve(&s).unwrap();
     // Width and height are free; the fixed corner is not.
     assert_eq!(r.dof, 2);
-    assert_eq!(r.free_points, ["b", "c", "d"]);
+    assert_eq!(r.free.keys().collect::<Vec<_>>(), ["b", "c", "d"]);
+    // The bottom's far end slides along it; the top corners move both ways.
+    assert_eq!((r.free["b"], r.free["c"]), (Some(Vec2::new(1.0, 0.0)), None));
+    assert_eq!(r.free["d"], Some(Vec2::new(0.0, 1.0)));
     // Nothing moves more than the constraints need: the right side straightens halfway between
     // its drawn ends, the bottom levels out.
     close(r.points["b"], [9.65, 0.0], 1e-12);
@@ -223,7 +226,7 @@ fn slot() -> Sketch {
 #[test]
 fn slot_is_fully_defined() {
     let r = solve(&slot()).unwrap();
-    assert_eq!(r.dof, 0, "{:?}", r.free_points);
+    assert_eq!(r.dof, 0, "{:?}", r.free);
     close(r.points["r"], [10.0, 0.0], 1e-12);
     close(r.points["a"], [0.0, -2.5], 1e-12);
     close(r.points["b"], [10.0, -2.5], 1e-12);
@@ -293,7 +296,7 @@ fn drawing_dimensions_and_symmetry() {
     close(r.points["h2"], [32.0, 10.0], 1e-12);
     // The vertical axis through the middle of the bottom meets the top edge at one point.
     close(r.points["t"], [20.0, 20.0], 1e-12);
-    assert_eq!(r.dof, 0, "{:?}", r.free_points);
+    assert_eq!(r.dof, 0, "{:?}", r.free);
     assert!((r.measures["to_edge"] - 8.0).abs() < 1e-12 && (r.measures["width"] - 40.0).abs() < 1e-12, "{:?}", r.measures);
 }
 
@@ -321,7 +324,9 @@ fn points_on_curves() {
     let (x, y, z) = (r.points["x"], r.points["y"], r.points["z"]);
     assert!(((y.x - x.x) * (z.y - x.y) - (y.y - x.y) * (z.x - x.x)).abs() < 1e-12);
     // Each point slides along its curve; the arc's other end stays on the arc too.
-    assert_eq!(r.dof, 4, "{:?}", r.free_points);
+    assert_eq!(r.dof, 4, "{:?}", r.free);
+    let along = r.free["z"].unwrap();
+    assert!((along.x * (y.y - x.y) - along.y * (y.x - x.x)).abs() < 1e-9, "{along:?}");
 }
 
 /// Arcs of one radius around one centre as a circle, and an arc as large as a circle.

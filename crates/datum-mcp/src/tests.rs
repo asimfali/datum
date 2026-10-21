@@ -104,3 +104,116 @@ fn query_edges_and_project_one() {
     let at = &m["features"][1]["project"]["edge"]["at"];
     assert_eq!(at.as_array().map(Vec::len), Some(2), "{}", m["features"][1]);
 }
+
+fn execute(s: &mut Server, command: &str, params: Value) -> Value {
+    let (err, r) = tool(s, "execute", json!({"command": command, "params": params}));
+    assert!(!err, "{command}: {r}");
+    r
+}
+
+fn feature<'a>(m: &'a Value, name: &str) -> &'a Value {
+    m["features"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap()
+}
+
+/// A rectangle, 10 × 4, the lower left corner fixed: the outline of a plate.
+fn rectangle() -> Value {
+    json!({"name": "outline", "op": "sketch", "sketch": {
+        "points": {"a": [0, 0], "b": [10, 0], "c": [10, 4], "d": [0, 4]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+        "constraints": [{"type": "fix", "point": "a"}, {"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"},
+                        {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"}]}})
+}
+
+/// An agent changes a sketch piece by piece, and sees what is still free.
+#[test]
+fn edit_a_sketch_piece_by_piece() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    let sketch = |s: &mut Server| tool(s, "inspect_model", json!({})).1["features"][0].clone();
+    // Width and height are free: the right side slides along X, the top along Y, the far corner both.
+    let free = &sketch(&mut s)["status"]["sketch"]["free"];
+    assert_eq!((free["b"].clone(), free["c"].clone(), free["d"].clone()), (json!([1.0, 0.0]), json!("plane"), json!([0.0, 1.0])), "{free}");
+    execute(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline",
+        "add_constraints": [{"type": "horizontal_distance", "points": ["a", "b"], "value": 12}, {"value": 5, "points": ["a", "d"], "type": "vertical_distance"}],
+        "measures": {"diagonal": {"type": "distance", "points": ["a", "c"]}}}),
+    );
+    let f = sketch(&mut s);
+    assert_eq!(f["status"]["sketch"]["dof"], 0, "{f}");
+    assert_eq!(f["status"]["sketch"]["measures"]["diagonal"], 13.0);
+    // Constraints are removed by what they say, whatever the order of their fields.
+    execute(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline", "remove_constraints": [{"type": "vertical_distance", "points": ["a", "d"], "value": 5.0}],
+        "measures": {"diagonal": null}}),
+    );
+    let f = sketch(&mut s);
+    assert_eq!(f["status"]["sketch"]["dof"], 1, "{f}");
+    assert!(f["sketch"].get("measures").is_none(), "{f}");
+    let (err, r) = tool(&mut s, "execute", json!({"command": "edit_sketch", "params": {"name": "outline", "points": {"z": null}}}));
+    assert!(err && r.as_str().unwrap().contains("no `z`"), "{r}");
+}
+
+/// Renaming the line a side face is named after: the sketch on that face and its projected edge
+/// are found again by their geometry, and nothing downstream breaks.
+#[test]
+fn rename_keeps_downstream_references() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    execute(&mut s, "add", json!({"name": "plate", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": 3}));
+    let (_, q) = tool(&mut s, "query_topology", json!({"name": "plate", "normal": [-1, 0, 0]}));
+    let side = q["faces"][0]["id"].as_str().unwrap().to_string();
+    let edges = execute(&mut s, "query_edges", json!({"name": "plate", "face": side.clone()}));
+    let top_edge =
+        edges["edges"].as_array().unwrap().iter().find(|e| e["from"]["point"][2] == 3.0 && e["to"]["point"][2] == 3.0).unwrap()["id"].clone();
+    execute(
+        &mut s,
+        "add",
+        json!({"name": "slot", "op": "sketch", "inputs": ["plate"], "face": side, "project": {"rim": {"id": top_edge}},
+        "sketch": {"points": {"p": [1, 1]}, "constraints": [{"type": "point_line", "point": "p", "line": "rim", "value": 1}]}}),
+    );
+    let r = execute(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "left", "to": "edge_side"}));
+    assert_eq!((r["lost"].clone(), r["failed"].clone(), r["features_with_ids_found_again"].clone()), (json!([]), json!([]), json!(1)), "{r}");
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    let slot = feature(&m, "slot");
+    assert_ne!(slot["face"], json!(side), "the side face is named after the line: its ID changed");
+    assert!(slot["status"]["sketch"]["points"]["p"].is_array(), "{slot}");
+    assert!(feature(&m, "outline")["sketch"]["lines"].get("edge_side").is_some());
+    // Points too, and a projection with its points.
+    execute(&mut s, "rename_in_sketch", json!({"name": "slot", "from": "rim", "to": "brim"}));
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "slot")["sketch"]["constraints"][0]["line"], "brim");
+    assert!(feature(&m, "slot")["status"]["sketch"]["points"].get("brim.start").is_some());
+    for bad in [
+        json!({"name": "outline", "from": "a", "to": "b"}),
+        json!({"name": "outline", "from": "x", "to": "y"}),
+        json!({"name": "outline", "from": "a", "to": "p.q"}),
+    ] {
+        assert!(tool(&mut s, "execute", json!({"command": "rename_in_sketch", "params": bad})).0);
+    }
+}
+
+/// A sheet starts from a named point of its path: the rename follows it there.
+#[test]
+fn rename_follows_into_a_sheet() {
+    let mut s = Server::default();
+    execute(
+        &mut s,
+        "add",
+        json!({"name": "path", "op": "sketch", "sketch": {
+        "points": {"a": [0, 0], "b": [20, 0], "c": [20, 15]},
+        "lines": {"base": {"from": "a", "to": "b"}, "wall": {"from": "b", "to": "c"}}}}),
+    );
+    execute(
+        &mut s,
+        "add",
+        json!({"name": "bent", "op": "sheet", "inputs": ["path"], "thickness": 1, "radius": 1, "side": "left", "z0": 0, "z1": 10, "start": "a"}),
+    );
+    let r = execute(&mut s, "rename_in_sketch", json!({"name": "path", "from": "a", "to": "origin"}));
+    assert_eq!(r["failed"], json!([]), "{r}");
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "bent")["start"], "origin");
+}

@@ -18,7 +18,8 @@ const INVALID_PARAMS: i64 = -32602;
 const INSTRUCTIONS: &str = "Datum is a parametric solid-modelling kernel. A model is a history of features (JSON objects with \
 `name`, `inputs` and `op` plus parameters); bodies are rebuilt from it deterministically and incrementally. Start with \
 list_commands, build with execute (add, edit, remove, open, save), check with inspect_model, mass_properties and \
-query_topology; edges to project into a sketch come from execute `query_edges`. Look at the result with render. Every edit returns which features were recomputed and which \
+query_topology; edges to project into a sketch come from execute `query_edges`, and a sketch changes piece by piece \
+with `edit_sketch` and `rename_in_sketch`. Look at the result with render. Every edit returns which features were recomputed and which \
 failed, with the cause.";
 
 /// Query tools: (tool name, command it runs, description).
