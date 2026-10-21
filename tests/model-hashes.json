@@ -125,6 +125,10 @@
     "pocket": "c9a6f583fbcb86fa59cc7ff51674a400aaf5f264892d8a1ce15fe9cfb5074d4d",
     "pocket_sketch": "87265aef0895799127c9d65f68a1cb55a85d36a890ee7750224c37d961585995"
   },
+  "symmetric_plate.json": {
+    "outline": "61c05fcb457285a84737013be14f279e66ca6c634411922fc93c7fb889067ae9",
+    "plate": "132515fda73dc78f180b6a4cc4b2ee9a0e0602c3a6b08e7859c1dd4d58196092"
+  },
   "terrain_pit.json": {
     "excavation": "429b66e00ed12044ad317e0244088487860d155aaa2b9bc27e8d642eaeb4c8b0",
     "ground": "c361bf6c28e9ec42e89a0c0aa4a80082384e4ea536069d26818cbc85153e596c",

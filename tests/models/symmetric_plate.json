@@ -1,0 +1,43 @@
+{
+  "format": "datum/1",
+  "parameters": {"w": 80, "h": 40, "t": 4, "pitch": 50, "hole": 9},
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [0, 0], "a": [81, 1], "b": [79, 42], "c": [-1, 39],
+          "m": [41, 0.5], "n": [39, 41],
+          "h1": [14, 19], "h2": [66, 21]
+        },
+        "lines": {
+          "bottom": {"from": "o", "to": "a"}, "right": {"from": "a", "to": "b"},
+          "top": {"from": "b", "to": "c"}, "left": {"from": "c", "to": "o"},
+          "axis": {"from": "m", "to": "n", "construction": true}
+        },
+        "circles": {
+          "left_hole": {"center": "h1", "diameter": "hole"},
+          "right_hole": {"center": "h2", "diameter": "hole"}
+        },
+        "constraints": [
+          {"type": "fix", "point": "o"},
+          {"type": "horizontal", "line": "bottom"}, {"type": "horizontal", "line": "top"},
+          {"type": "vertical", "line": "left"}, {"type": "vertical", "line": "right"},
+          {"type": "horizontal_distance", "points": ["o", "a"], "value": "w"},
+          {"type": "vertical_distance", "points": ["o", "c"], "value": "h"},
+          {"type": "midpoint", "point": "m", "line": "bottom"},
+          {"type": "on", "point": "n", "curve": "top"},
+          {"type": "vertical", "line": "axis"},
+          {"type": "symmetric", "points": ["h1", "h2"], "line": "axis"},
+          {"type": "horizontal_distance", "points": ["h1", "h2"], "value": "pitch"},
+          {"type": "vertical_distance", "points": ["o", "h1"], "value": "h / 2"}
+        ],
+        "measures": {
+          "edge_to_hole": {"type": "horizontal_distance", "points": ["o", "h1"]}
+        }
+      }
+    },
+    {"name": "plate", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": "t"}
+  ]
+}

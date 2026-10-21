@@ -257,3 +257,122 @@ fn arcs_and_circles_are_checked() {
     assert!(bad(r#"{"points": {"a": [0, 0], "b": [1, 0], "c": [0, 1]}, "lines": {"x": {"from": "a", "to": "b"}, "y": {"from": "a", "to": "c"}},
         "constraints": [{"type": "tangent", "curves": ["x", "y"]}]}"#));
 }
+
+/// A symmetric plate as drawings dimension it: horizontal and vertical distances from a base
+/// corner, holes mirrored in the centre line, the centre line through the middle of the bottom.
+#[test]
+fn drawing_dimensions_and_symmetry() {
+    let s = sketch(
+        r#"{
+        "points": {"o": [0, 0], "a": [41, 1], "b": [39, 22], "c": [-1, 19], "m": [21, 0.5], "t": [19, 25],
+                   "h1": [9, 11], "h2": [29, 9]},
+        "lines": {"bottom": {"from": "o", "to": "a"}, "right": {"from": "a", "to": "b"}, "top": {"from": "b", "to": "c"},
+                  "left": {"from": "c", "to": "o"}, "axis": {"from": "m", "to": "t", "construction": true}},
+        "circles": {"left_hole": {"center": "h1", "diameter": 6}, "right_hole": {"center": "h2", "diameter": 6}},
+        "constraints": [
+            {"type": "fix", "point": "o"},
+            {"type": "horizontal", "line": "bottom"}, {"type": "horizontal", "line": "top"},
+            {"type": "vertical", "line": "left"}, {"type": "vertical", "line": "right"},
+            {"type": "horizontal_distance", "points": ["o", "a"], "value": 40},
+            {"type": "vertical_distance", "points": ["o", "c"], "value": 20},
+            {"type": "midpoint", "point": "m", "line": "bottom"},
+            {"type": "on", "point": "t", "curve": "top"},
+            {"type": "vertical", "line": "axis"},
+            {"type": "symmetric", "points": ["h1", "h2"], "line": "axis"},
+            {"type": "horizontal_distance", "points": ["h1", "h2"], "value": 24},
+            {"type": "vertical_distance", "points": ["o", "h1"], "value": 10}
+        ],
+        "measures": {"to_edge": {"type": "horizontal_distance", "points": ["o", "h1"]}, "width": {"type": "length", "line": "top"}}
+        }"#,
+    );
+    let r = solve(&s).unwrap();
+    close(r.points["a"], [40.0, 0.0], 1e-12);
+    close(r.points["b"], [40.0, 20.0], 1e-12);
+    close(r.points["m"], [20.0, 0.0], 1e-12);
+    close(r.points["h1"], [8.0, 10.0], 1e-12);
+    close(r.points["h2"], [32.0, 10.0], 1e-12);
+    // The vertical axis through the middle of the bottom meets the top edge at one point.
+    close(r.points["t"], [20.0, 20.0], 1e-12);
+    assert_eq!(r.dof, 0, "{:?}", r.free_points);
+    assert!((r.measures["to_edge"] - 8.0).abs() < 1e-12 && (r.measures["width"] - 40.0).abs() < 1e-12, "{:?}", r.measures);
+}
+
+/// A point on an arc, on a circle and on the line through a segment beyond its ends.
+#[test]
+fn points_on_curves() {
+    let s = sketch(
+        r#"{
+        "points": {"o": [0, 0], "f": [5, 0], "e": [0, 5], "p": [3.1, 4.4], "c": [20, 0], "q": [23.5, 0.4], "x": [10, 0.2], "y": [12, -0.1], "z": [15, 1]},
+        "lines": {"l": {"from": "x", "to": "y"}},
+        "arcs": {"quarter": {"center": "o", "from": "f", "to": "e"}},
+        "circles": {"ring": {"center": "c", "diameter": 8}},
+        "constraints": [
+            {"type": "fix", "point": "o"}, {"type": "fix", "point": "f"}, {"type": "fix", "point": "c"},
+            {"type": "fix", "point": "x"}, {"type": "fix", "point": "y"},
+            {"type": "on", "point": "p", "curve": "quarter"},
+            {"type": "on", "point": "q", "curve": "ring"},
+            {"type": "on", "point": "z", "curve": "l"}
+        ]}"#,
+    );
+    let r = solve(&s).unwrap();
+    let d = |a: Vec2, b: Vec2| libm::hypot(a.x - b.x, a.y - b.y);
+    assert!((d(r.points["p"], r.points["o"]) - 5.0).abs() < 1e-12);
+    assert!((d(r.points["q"], r.points["c"]) - 4.0).abs() < 1e-12);
+    let (x, y, z) = (r.points["x"], r.points["y"], r.points["z"]);
+    assert!(((y.x - x.x) * (z.y - x.y) - (y.y - x.y) * (z.x - x.x)).abs() < 1e-12);
+    // Each point slides along its curve; the arc's other end stays on the arc too.
+    assert_eq!(r.dof, 4, "{:?}", r.free_points);
+}
+
+/// Arcs of one radius around one centre as a circle, and an arc as large as a circle.
+#[test]
+fn equal_radius_and_concentric() {
+    let s = sketch(
+        r#"{
+        "points": {"o": [0, 0], "a": [4, 0.3], "b": [-0.2, 4.1], "c": [0.4, 0.3], "d": [-5.2, 0], "e": [0.1, -4.8], "k": [10, 0]},
+        "arcs": {"first": {"center": "o", "from": "a", "to": "b"}, "second": {"center": "c", "from": "d", "to": "e"}},
+        "circles": {"hole": {"center": "k", "diameter": 9}},
+        "constraints": [
+            {"type": "fix", "point": "o"}, {"type": "fix", "point": "k"},
+            {"type": "concentric", "curves": ["first", "second"]},
+            {"type": "equal_radius", "curves": ["second", "first"]},
+            {"type": "equal_radius", "curves": ["hole", "first"]}
+        ],
+        "measures": {"r": {"type": "radius", "arc": "second"}}
+        }"#,
+    );
+    let r = solve(&s).unwrap();
+    close(r.points["c"], [0.0, 0.0], 1e-12);
+    assert!((r.measures["r"] - 4.5).abs() < 1e-12, "{:?}", r.measures);
+    let bad = |c: &str, why: &str| {
+        let mut t = s.clone();
+        t.circles.insert("other".into(), Circle { center: "o".into(), diameter: 3.0.into(), construction: false });
+        t.constraints = vec![serde_json::from_str(c).unwrap()];
+        match solve(&t) {
+            Err(SketchError::Invalid(m)) => assert!(m.contains(why), "{m}"),
+            r => panic!("expected `{why}`, got {r:?}"),
+        }
+    };
+    bad(r#"{"type": "equal_radius", "curves": ["hole", "other"]}"#, "both diameters");
+    bad(r#"{"type": "concentric", "curves": ["hole", "nothing"]}"#, "unknown curve `nothing`");
+}
+
+/// A reference dimension measures and constrains nothing: the sketch keeps its freedom.
+#[test]
+fn measures_constrain_nothing() {
+    let mut s = rectangle(12.0, 5.0, 1.0);
+    s.constraints.retain(|c| !matches!(c, Constraint::Length { .. }));
+    let free = solve(&s).unwrap();
+    s.measures = BTreeMap::from([
+        ("diagonal".into(), serde_json::from_str(r#"{"type": "distance", "points": ["a", "c"]}"#).unwrap()),
+        ("corner".into(), serde_json::from_str(r#"{"type": "angle", "lines": ["bottom", "left"]}"#).unwrap()),
+        ("height".into(), serde_json::from_str(r#"{"type": "point_line", "point": "d", "line": "bottom"}"#).unwrap()),
+    ]);
+    let r = solve(&s).unwrap();
+    assert_eq!((r.dof, &r.points), (free.dof, &free.points));
+    let (b, c) = (r.points["b"], r.points["c"]);
+    assert!((r.measures["diagonal"] - libm::hypot(c.x, c.y)).abs() < 1e-12);
+    assert!((r.measures["height"] - (c.y - b.y)).abs() < 1e-12);
+    // From the bottom (→) to the left side (↓), counterclockwise: three quarters of a turn.
+    assert!((r.measures["corner"] - 270.0).abs() < 1e-9, "{:?}", r.measures);
+}
