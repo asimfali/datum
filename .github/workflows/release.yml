@@ -48,6 +48,8 @@ jobs:
             7z a "${{ matrix.archive }}" "$dir" > /dev/null
           else
             cp target/release/datum target/release/datum-view "$dir"/
+            # The release profile keeps debug info for profiling; testers need none of it.
+            strip "$dir"/datum "$dir"/datum-view
             tar czf "${{ matrix.archive }}" "$dir"
           fi
       - uses: actions/upload-artifact@v4
