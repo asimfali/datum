@@ -94,6 +94,10 @@ Design documents are in Russian:
 
 ## Try it
 
+Download a portable build for Windows or Linux from [Releases](https://github.com/asimfali/datum/releases), unpack it anywhere and run `datum-view`. What to try and what is not there yet: [`TESTERS.md`](TESTERS.md) (in Russian).
+
+From source:
+
 ```bash
 cargo run --release -p datum-cli -- examples/rolled_perforation.json   # the viewer on a model
 cargo run --release -p datum-cli -- dxf examples/rolled_perforation.json --out blank.dxf

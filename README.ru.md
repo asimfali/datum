@@ -79,6 +79,10 @@ Datum развивается открыто, и пригодится любая 
 
 ## Попробовать
 
+Скачайте портативную сборку для Windows или Linux со страницы [Releases](https://github.com/asimfali/datum/releases), распакуйте куда угодно и запустите `datum-view`. Что попробовать и чего пока нет — [`TESTERS.md`](TESTERS.md).
+
+Из исходников:
+
 ```bash
 cargo run --release -p datum-cli -- examples/rolled_perforation.json   # вьюер с моделью
 cargo run --release -p datum-cli -- dxf examples/rolled_perforation.json --out blank.dxf
