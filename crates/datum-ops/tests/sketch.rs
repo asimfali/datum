@@ -272,3 +272,35 @@ fn projections_are_checked() {
     assert_eq!(s.sketch().unwrap().solved.dof, 0);
     assert!(fails(empty, serde_json::json!({}), &[&plate]).contains("to project its edges"));
 }
+
+/// Every plane sketch has the model's origin as a fixed point: a rectangle dimensioned from it
+/// is defined without a fixed point of its own (D93).
+#[test]
+fn the_origin_is_there_to_dimension_from() {
+    let rect = serde_json::json!({
+        "points": {"a": [1, 1], "b": [9, 1.2], "c": [9.1, 5], "d": [0.8, 5.2]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+        "constraints": [
+            {"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"}, {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
+            {"type": "horizontal_distance", "points": ["origin", "a"], "value": 2}, {"type": "vertical_distance", "points": ["origin", "a"], "value": 3},
+            {"type": "length", "line": "bottom", "value": 10}, {"type": "length", "line": "left", "value": 4}
+        ]
+    });
+    let s = eval(&sketch_op(rect.clone(), serde_json::json!({})), "s", &[]).unwrap();
+    let p = s.sketch().unwrap();
+    assert_eq!((p.solved.points["origin"].x, p.solved.points["origin"].y), (0.0, 0.0));
+    assert_eq!(p.solved.dof, 0, "{:?}", p.solved.free);
+    assert!((p.solved.points["c"].x - 12.0).abs() < 1e-9 && (p.solved.points["c"].y - 7.0).abs() < 1e-9);
+    // On a plane elsewhere, the origin is the world's, projected onto it.
+    let plane = serde_json::json!({"plane": {"origin": [5, 5, 5], "x_axis": [1, 0, 0], "normal": [0, 0, 1]}});
+    let s = eval(&sketch_op(serde_json::json!({"points": {}}), plane), "s", &[]).unwrap();
+    let o = s.sketch().unwrap().solved.points["origin"];
+    assert_eq!((o.x, o.y), (-5.0, -5.0));
+    // The name is the origin's.
+    let mut taken = rect;
+    taken["points"]["origin"] = serde_json::json!([0, 0]);
+    match eval(&sketch_op(taken, serde_json::json!({})), "s", &[]) {
+        Err(BrepError::Sketch(m)) => assert!(m.contains("origin"), "{m}"),
+        r => panic!("expected a refusal, got {r:?}"),
+    }
+}

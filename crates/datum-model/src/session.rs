@@ -422,8 +422,11 @@ impl Session {
 
     fn rename_in_sketch(&mut self, feature: &str, from: &str, to: &str) -> Result<Value, String> {
         let ix = self.find(feature)?;
-        if to.is_empty() || to.contains('.') || from == to {
-            return Err("the new name must be a different name without `.` (it would read as a projection's point)".into());
+        if to.is_empty() || to.contains('.') || from == to || to == datum_ops::ORIGIN {
+            return Err(format!(
+                "the new name must be a different name, without `.` (it would read as a projection's point), not `{}`",
+                datum_ops::ORIGIN
+            ));
         }
         let Ok(Value::Object(mut op)) = serde_json::to_value(&self.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
         let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or_else(|| format!("`{feature}` is not a sketch"))?;

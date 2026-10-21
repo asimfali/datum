@@ -726,6 +726,7 @@ dependencies = [
  "datum-brep",
  "datum-graph",
  "datum-math",
+ "datum-ops",
  "datum-sketch",
  "schemars",
  "serde",
