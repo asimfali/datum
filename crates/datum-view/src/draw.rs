@@ -49,6 +49,8 @@ pub enum Lean {
     Vertical,
     Parallel(String),
     Perpendicular(String),
+    /// A line leaving the arc that ends the chain along it.
+    Tangent(String),
 }
 
 /// The end of the line chain being drawn: its point, and the curve that ends there with the
@@ -212,9 +214,10 @@ impl Draft {
     }
 
     /// The constraint a line from `from` to the free spot `to` leans to, and where that puts
-    /// its end: horizontal or vertical first, then parallel or perpendicular to the nearest line
-    /// by angle. None beyond a few degrees.
-    pub fn lean(&self, edit: &SketchEdit, from: [f64; 2], to: [f64; 2]) -> Option<(Lean, [f64; 2])> {
+    /// its end: on along the arc the chain ends in (`last`, with the direction it arrived in),
+    /// then horizontal or vertical, then parallel or perpendicular to the nearest line by
+    /// angle. None beyond a few degrees.
+    pub fn lean(&self, edit: &SketchEdit, from: [f64; 2], to: [f64; 2], last: Option<&(String, [f64; 2])>) -> Option<(Lean, [f64; 2])> {
         let d = [to[0] - from[0], to[1] - from[1]];
         let len = libm::hypot(d[0], d[1]);
         if len == 0.0 {
@@ -230,6 +233,12 @@ impl Draft {
             let t = d[0] * u[0] + d[1] * u[1];
             [from[0] + u[0] * t, from[1] + u[1] * t]
         };
+        let arc_end = last.filter(|(c, _)| edit.placed.as_ref().is_ok_and(|p| p.arcs.contains_key(c)));
+        if let Some((arc, dir)) = arc_end
+            && degrees(d, *dir) <= LEAN_DEG
+        {
+            return Some((Lean::Tangent(arc.clone()), along(*dir)));
+        }
         if off(angle, 0.0) <= LEAN_DEG {
             return Some((Lean::Horizontal, [to[0], from[1]]));
         }
@@ -265,7 +274,7 @@ impl Draft {
         let leaning = !free && spot.snap == Snap::Free;
         let found = match (self.tool, &self.chain, &self.clicks[..]) {
             _ if !leaning => None,
-            (Tool::Line, Some(c), _) if !self.tangent => self.lean(edit, c.at, spot.at),
+            (Tool::Line, Some(c), _) if !self.tangent => self.lean(edit, c.at, spot.at, c.last.as_ref()),
             (Tool::Line, Some(Chain { at, last: Some((_, dir)), .. }), _) => tangent_lean(*at, *dir, spot.at),
             (Tool::Arc, _, [c] | [c, _]) => axis_lean(c.at, spot.at),
             _ => None,
@@ -375,6 +384,7 @@ impl Draft {
                         Some(Lean::Vertical) => patch.constrain(json!({"type": "vertical", "line": name})),
                         Some(Lean::Parallel(o)) => patch.constrain(json!({"type": "parallel", "lines": [o, name]})),
                         Some(Lean::Perpendicular(o)) => patch.constrain(json!({"type": "perpendicular", "lines": [o, name]})),
+                        Some(Lean::Tangent(a)) => patch.constrain(json!({"type": "tangent", "curves": [a, name]})),
                         None => {}
                     }
                     let dir = [(spot.at[0] - chain.at[0]) / l, (spot.at[1] - chain.at[1]) / l];
@@ -450,6 +460,7 @@ impl Draft {
             (Snap::Free, Some(Lean::Vertical)) => "V",
             (Snap::Free, Some(Lean::Parallel(_))) => "parallel",
             (Snap::Free, Some(Lean::Perpendicular(_))) => "perpendicular",
+            (Snap::Free, Some(Lean::Tangent(_))) => "tangent",
             (Snap::Free, None) => "",
         };
         if !mark.is_empty() {
@@ -730,6 +741,22 @@ mod tests {
         assert_eq!(p["points"]["p3"], json!([8.0, 10.0]), "{p}");
         assert_eq!(p["points"]["p4"], json!([4.0, 10.0]), "{p}");
         assert_eq!(p["add_constraints"][1], json!({"type": "horizontal", "points": ["p4", "p3"]}), "{p}");
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+    }
+
+    /// After an arc, a line leaving along it is tangent to it, before anything else.
+    #[test]
+    fn a_line_leaves_an_arc_along_it() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        click_at(&mut e, [10.0, 0.0], false);
+        e.draft.tangent = true;
+        // A quarter turn would snap; an eighth goes free: the arc ends heading up and right.
+        click_at(&mut e, [12.93, 0.0 + 7.07], true);
+        let dir = e.draft.chain.as_ref().unwrap().last.as_ref().unwrap().1;
+        let p = click_at(&mut e, [12.93 + dir[0] * 10.0 + 0.2, 7.07 + dir[1] * 10.0], false).unwrap();
+        assert_eq!(p["add_constraints"], json!([{"type": "tangent", "curves": ["a1", "l2"]}]), "{p}");
         assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
     }
 
