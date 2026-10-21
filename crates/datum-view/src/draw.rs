@@ -20,6 +20,8 @@ pub enum Tool {
     /// Pick a line, an arc, a circle, two points, a point and a line or two lines; then click
     /// where the dimension goes.
     Dimension,
+    /// Place a template (`Draft::template`): a click per anchor.
+    Template,
 }
 
 /// What a click lands on.
@@ -92,6 +94,8 @@ pub struct Draft {
     pub typed: Option<(Json, f64)>,
     /// Dimension tool: what is picked so far.
     pub picks: Vec<crate::dims::Pick2>,
+    /// Template tool: the template placed.
+    pub template: Option<Json>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
     /// Where the cursor would click, and the inferred constraint of a line.
@@ -113,6 +117,7 @@ impl Default for Draft {
             start_radius: None,
             typed: None,
             picks: Vec::new(),
+            template: None,
             tangent: false,
             cursor: None,
             lean: None,
@@ -337,6 +342,16 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension => return None,
+            Tool::Template => {
+                let t = self.template.clone()?;
+                if self.clicks.len() + 1 < crate::templates::anchors(&t).len() {
+                    self.clicks.push(spot);
+                    return None;
+                }
+                let mut spots = std::mem::take(&mut self.clicks);
+                spots.push(spot);
+                crate::templates::place(&mut patch, &t, &spots, self.construction)?;
+            }
             Tool::Point => {
                 // A point already there needs no other; a vertex of the face is projected.
                 if matches!(spot.snap, Snap::Point(_)) {
@@ -488,6 +503,14 @@ impl Draft {
                 polyline(arc(c.at, r, 0.0, std::f64::consts::TAU));
             }
             (Tool::Arc, _, [c]) => polyline(vec![c.at, spot.at]),
+            (Tool::Template, _, clicks) => {
+                if let Some(t) = &self.template {
+                    let at: Vec<[f64; 2]> = clicks.iter().map(|c| c.at).chain([spot.at]).collect();
+                    for line in crate::templates::outline(t, &at) {
+                        polyline(line);
+                    }
+                }
+            }
             (Tool::Arc, _, [c, s]) => {
                 let r = libm::hypot(s.at[0] - c.at[0], s.at[1] - c.at[1]);
                 polyline(arc(c.at, r, libm::atan2(s.at[1] - c.at[1], s.at[0] - c.at[0]), self.sweep));
@@ -603,7 +626,7 @@ fn short(x: f64) -> f64 {
 }
 
 /// An `edit_sketch` patch being made: new names stay clear of the sketch's and of each other.
-struct Patch {
+pub(crate) struct Patch {
     taken: Vec<String>,
     params: Map<String, Json>,
 }
@@ -618,16 +641,21 @@ impl Patch {
     }
 
     /// The first `prefix1`, `prefix2`… not taken.
-    fn fresh(&mut self, prefix: &str) -> String {
+    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
         let n = (1..).map(|k| format!("{prefix}{k}")).find(|n| !self.taken.contains(n)).unwrap_or_default();
         self.taken.push(n.clone());
         n
     }
 
-    fn add(&mut self, key: &str, name: &str, mut value: Json, construction: bool) {
+    pub(crate) fn add(&mut self, key: &str, name: &str, mut value: Json, construction: bool) {
         if construction {
             value["construction"] = json!(true);
         }
+        self.set(key, name, value);
+    }
+
+    /// Entry `name` of map `key` of the patch.
+    pub(crate) fn set(&mut self, key: &str, name: &str, value: Json) {
         self.params.entry(key).or_insert_with(|| json!({}))[name] = value;
     }
 
@@ -640,7 +668,7 @@ impl Patch {
         }
     }
 
-    fn constrain(&mut self, c: Json) {
+    pub(crate) fn constrain(&mut self, c: Json) {
         if let Json::Array(a) = self.params.entry("add_constraints").or_insert_with(|| json!([])) {
             a.push(c);
         }
@@ -648,7 +676,7 @@ impl Patch {
 
     /// The point a spot names, made as it needs: an existing point as it is; a vertex of the
     /// face projected; otherwise a new point there, on what it snapped to.
-    fn point(&mut self, spot: &Spot) -> String {
+    pub(crate) fn point(&mut self, spot: &Spot) -> String {
         match &spot.snap {
             Snap::Point(n) => return n.clone(),
             Snap::Vertex(id) => {
