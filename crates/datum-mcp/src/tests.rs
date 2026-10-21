@@ -217,3 +217,56 @@ fn rename_follows_into_a_sheet() {
     let m = tool(&mut s, "inspect_model", json!({})).1;
     assert_eq!(feature(&m, "bent")["start"], "origin");
 }
+
+/// Each change is one step back; a command that fails changes nothing.
+#[test]
+fn undo_redo_and_whole_commands() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    execute(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline", "add_constraints": [{"type": "horizontal_distance", "points": ["a", "b"], "value": 12}]}),
+    );
+    // The solver converges to 1e-12 of the size: compare to the millimetre's millionth.
+    let width = |s: &mut Server| {
+        (tool(s, "inspect_model", json!({})).1["features"][0]["status"]["sketch"]["points"]["b"][0].as_f64().unwrap() * 1e6).round() / 1e6
+    };
+    assert_eq!(width(&mut s), 12.0);
+    execute(&mut s, "undo", json!({}));
+    assert_eq!(width(&mut s), 10.0);
+    execute(&mut s, "redo", json!({}));
+    assert_eq!(width(&mut s), 12.0);
+    // Removing a point takes its lines and their constraints with it, in one step.
+    let r = execute(&mut s, "edit_sketch", json!({"name": "outline", "points": {"b": null}}));
+    assert_eq!(r["also_removed"], json!(["lines: bottom", "lines: right", "constraints: 3"]), "{r}");
+    execute(&mut s, "undo", json!({}));
+    assert_eq!(width(&mut s), 12.0);
+    // A rename refused halfway (the name is taken) leaves the model as it was.
+    assert!(tool(&mut s, "execute", json!({"command": "rename_in_sketch", "params": {"name": "outline", "from": "a", "to": "b"}})).0);
+    execute(&mut s, "undo", json!({}));
+    assert_eq!(width(&mut s), 10.0, "the refused rename was no step");
+    execute(&mut s, "undo", json!({}));
+    assert!(tool(&mut s, "execute", json!({"command": "undo", "params": {}})).0, "nothing left to undo");
+    // The sketch plane is reported: the window looks at it, an agent places things on it.
+    execute(&mut s, "redo", json!({}));
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(m["features"][0]["status"]["sketch"]["frame"]["normal"], json!([0.0, 0.0, 1.0]));
+}
+
+/// An edit that turns holes into discs beside the plate says so: no dimension shows it.
+#[test]
+fn shape_changes_are_reported() {
+    let mut s = Server::default();
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+    execute(&mut s, "open", json!({"path": model.display().to_string()}));
+    // Narrower than the holes are apart: both end up outside the plate.
+    let r = execute(&mut s, "set_parameter", json!({"name": "w", "value": 30}));
+    let change = json!([{"feature": "plate", "before": {"pieces": 1, "through_holes": 2}, "after": {"pieces": 3, "through_holes": 0}}]);
+    assert_eq!(r["shape_changed"], change, "{r}");
+    // A dimension that keeps the shape says nothing more.
+    let r = execute(&mut s, "set_parameter", json!({"name": "h", "value": 45}));
+    assert!(r.get("shape_changed").is_none(), "{r}");
+    let r = execute(&mut s, "undo", json!({}));
+    assert!(r.get("shape_changed").is_none(), "undo is no edit to report: {r}");
+}

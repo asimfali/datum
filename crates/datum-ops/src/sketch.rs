@@ -422,6 +422,14 @@ pub fn extrude_sketch(feature: TopoId, s: &Placed, z0: f64, z1: f64) -> Result<B
     if s.developed.is_some() {
         return Err(BrepError::Unsupported("an extrusion of a sketch on a cylinder face".into()));
     }
+    let regions = profile_regions(feature, s)?;
+    let [o, x, y, z] = s.frame;
+    Ok(extrude(&regions, z0, z1)?.transformed(&Rigid::frame(o, x, y, z)))
+}
+
+/// The regions the closed profiles of `s` bound, in its plane: a loop inside another is a hole,
+/// one inside a hole an island. Each region's caps are named by its lowest point.
+pub fn profile_regions(feature: TopoId, s: &Placed) -> Result<Vec<Region>, BrepError> {
     let mut loops = profile_loops(feature, s)?;
     // Each loop with the name its caps would be named by: its lowest point.
     let inside = |a: &Found, b: &Found| a.ring.winding(b.ring.points[0]) != 0;
@@ -439,8 +447,7 @@ pub fn extrude_sketch(feature: TopoId, s: &Placed, z0: f64, z1: f64) -> Result<B
             caps: ["extrude.cap_start", "extrude.cap_end"].map(|t| TopoId::derive(t).id(feature).tag(&first).finish()),
         });
     }
-    let [o, x, y, z] = s.frame;
-    Ok(extrude(&regions, z0, z1)?.transformed(&Rigid::frame(o, x, y, z)))
+    Ok(regions)
 }
 
 /// A profile loop of a sketch and the name its region's caps take.

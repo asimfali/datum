@@ -162,13 +162,18 @@ impl Evaluation {
     /// An unfold uses nothing up: its blank is made for export, the sheet stays what the model
     /// ends in.
     pub fn final_values(&self, graph: &Graph) -> Vec<&Value> {
+        self.finals(graph).into_iter().map(|i| self.results[i as usize].as_ref().map(|v| v.as_ref())).filter_map(Result::ok).collect()
+    }
+
+    /// The features [`Self::final_values`] are of, failed ones too.
+    pub fn finals(&self, graph: &Graph) -> Vec<NodeIx> {
         let mut used = vec![false; graph.nodes.len()];
         for n in graph.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. })) {
             for &i in &n.inputs {
                 used[i as usize] = true;
             }
         }
-        self.results.iter().zip(used).filter(|(_, u)| !u).filter_map(|(r, _)| r.as_ref().ok().map(|v| v.as_ref())).collect()
+        (0..graph.nodes.len() as NodeIx).filter(|&i| !used[i as usize]).collect()
     }
 }
 

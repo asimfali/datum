@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
-use datum_brep::{Body, Ix, edge_points, face_mesh};
+use datum_brep::{Body, Ix, TopoId, edge_points, face_mesh};
 use datum_graph::Value;
 use datum_math::{Vec2, Vec3};
 use rayon::prelude::*;
@@ -17,11 +17,14 @@ const SHARP: f64 = 0.939_692_620_785_908_4;
 
 /// A body's triangles and edges. Cached by the body's content hash: an unchanged body is never
 /// tessellated again.
+#[derive(Default)]
 pub struct BodyMesh {
     /// Corners of each triangle, counterclockwise seen from outside.
     pub triangles: Vec<[Vec3; 3]>,
     /// The surface normal at each corner, unit length: flat on planes, round on cylinders.
     pub normals: Vec<[[f32; 3]; 3]>,
+    /// The face each triangle is of: what a click on it picks.
+    pub faces: Vec<TopoId>,
     /// B-rep edges (not triangle edges), arcs as chords: what an engineer reads a part by.
     pub edges: Vec<[Vec3; 2]>,
 }
@@ -34,19 +37,21 @@ impl BodyMesh {
             .into_par_iter()
             .map(|f| {
                 // A face that cannot be triangulated is left out of the picture, not the program.
-                let Ok(m) = face_mesh(body, f, true, chord) else { return Self { triangles: Vec::new(), normals: Vec::new(), edges: Vec::new() } };
+                let Ok(m) = face_mesh(body, f, true, chord) else { return Self::default() };
                 let corners = |t: &[u32; 3], v: &[Vec3]| t.map(|k| v[k as usize]);
                 Self {
                     triangles: m.triangles.iter().map(|t| corners(t, &m.points)).collect(),
                     normals: m.triangles.iter().map(|t| corners(t, &m.normals).map(f32s)).collect(),
+                    faces: vec![body.faces()[f as usize].id; m.triangles.len()],
                     edges: Vec::new(),
                 }
             })
             .collect();
-        let mut mesh = Self { triangles: Vec::new(), normals: Vec::new(), edges: Vec::new() };
+        let mut mesh = Self::default();
         for f in faces {
             mesh.triangles.extend(f.triangles);
             mesh.normals.extend(f.normals);
+            mesh.faces.extend(f.faces);
         }
         // Edges where the surface turns: between nearly coplanar faces (a terrain's cells, a
         // split face) or along the seams of a cylinder an edge says nothing on screen. A display
@@ -141,6 +146,30 @@ impl Scene {
             })
         });
         s
+    }
+
+    /// The body and face under a ray from `origin` along `dir`: the nearest triangle it passes
+    /// through, by Möller–Trumbore. A pick on the screen, not a geometric decision.
+    pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<(usize, TopoId)> {
+        let mut best: Option<(f64, usize, TopoId)> = None;
+        for (b, m) in self.bodies.iter().enumerate() {
+            for (t, &face) in m.triangles.iter().zip(&m.faces) {
+                let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
+                let p = dir.cross(e2);
+                let det = e1.dot(p);
+                if det == 0.0 {
+                    continue;
+                }
+                let s = origin - t[0];
+                let (u, q) = (s.dot(p) / det, s.cross(e1));
+                let v = dir.dot(q) / det;
+                let d = e2.dot(q) / det;
+                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && d > 0.0 && best.is_none_or(|b| d < b.0) {
+                    best = Some((d, b, face));
+                }
+            }
+        }
+        best.map(|(_, b, f)| (b, f))
     }
 
     /// The point vertices are made relative to: the middle of the bounds.

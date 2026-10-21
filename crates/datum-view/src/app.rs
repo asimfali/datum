@@ -15,6 +15,7 @@ use serde_json::{Value as Json, json};
 use crate::camera::Camera;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
+use crate::sketch::{Context, SketchEdit};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -43,10 +44,10 @@ fn title(path: Option<&std::path::Path>) -> String {
 enum Request {
     Open(PathBuf),
     SetParameter(String, Json),
-    /// Write the flat blank of an unfold feature as DXF.
-    ExportDxf(String, PathBuf),
-    /// Change fields of a feature (`edit`).
-    Edit(String, Json),
+    /// Any other command of the session, with its parameters.
+    Command(&'static str, Json),
+    /// The sketch feature edited in the window, if any: its context comes with every model.
+    Editing(Option<String>),
 }
 
 /// What the background thread hands the window after each rebuild.
@@ -58,11 +59,17 @@ struct Model {
     geometry: Arc<Geometry>,
     /// The last command's error, if it was refused.
     error: Option<String>,
+    /// What the commands of this rebuild changed beyond what they were asked: a body's shape.
+    notes: Vec<String>,
     /// A model was opened in this rebuild: the view fits it.
     opened: bool,
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
     rebuild_ms: f64,
     scene_ms: f64,
+    /// The feature each body of the scene is of.
+    bodies: Vec<String>,
+    /// The sketch being edited (left out of the scene: the window draws it) and its context.
+    editing: Option<(String, Context)>,
 }
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
@@ -70,12 +77,21 @@ struct Model {
 fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context) {
     let mut session = Session::default();
     let mut meshes = MeshCache::default();
+    let mut editing: Option<String> = None;
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
         pending.extend(requests.try_iter());
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
         let (mut error, mut opened) = (None, false);
+        let mut notes = Vec::new();
+        // A body whose shape an edit changed (pieces, through holes): worth a word.
+        let mut note = |reply: &Json| {
+            for c in reply["shape_changed"].as_array().into_iter().flatten() {
+                let says = |s: &Json| format!("{} piece(s), {} through hole(s)", s["pieces"], s["through_holes"]);
+                notes.push(format!("{} changed shape: {} → {}", c["feature"].as_str().unwrap_or_default(), says(&c["before"]), says(&c["after"])));
+            }
+        };
         for r in pending {
             match r {
                 Request::Open(p) => {
@@ -88,37 +104,56 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
                 }
-                Request::Edit(name, mut fields) => {
-                    fields["name"] = json!(name);
-                    if let Err(e) = session.execute("edit", &fields) {
-                        error = Some(e);
-                    }
-                }
-                Request::ExportDxf(name, path) => {
-                    if let Err(e) = session.execute("export_dxf", &json!({"name": name, "path": path.display().to_string()})) {
-                        error = Some(e);
-                    }
-                }
+                Request::Command(command, params) => match session.execute(command, &params) {
+                    Ok(reply) => note(&reply),
+                    Err(e) => error = Some(e),
+                },
+                Request::Editing(name) => editing = name,
             }
         }
         for (name, value) in latest {
-            if let Err(e) = session.execute("set_parameter", &json!({"name": name, "value": value})) {
-                error = Some(e);
+            match session.execute("set_parameter", &json!({"name": name, "value": value})) {
+                Ok(reply) => note(&reply),
+                Err(e) => error = Some(e),
             }
         }
         let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = std::time::Instant::now();
-        let finals = session.evaluation().final_values(session.graph());
+        let (graph, evaluation) = (session.graph(), session.evaluation());
+        let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing.as_deref())
+            .into_iter()
+            .filter_map(|i| Some((graph.nodes()[i as usize].name.as_str(), evaluation.results[i as usize].as_deref().ok()?)))
+            .collect();
+        let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
+        let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
         let scene = Scene::new(&finals, &mut meshes);
         meshes.retain(&finals.iter().filter_map(|v| v.body()).collect::<Vec<_>>());
+        let context = editing.as_ref().and_then(|name| {
+            let node = graph.nodes().iter().position(|n| &n.name == name)?;
+            let input = graph.nodes()[node].inputs.first().and_then(|&i| evaluation.results[i as usize].as_ref().ok().cloned());
+            Some((name.clone(), Context { id: graph.nodes()[node].id, input }))
+        });
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, opened, rebuild_ms, scene_ms }).is_err() {
+        if models.send(Model { inspect, scene, geometry, error, notes, opened, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
             return;
         }
         ctx.request_repaint();
     }
+}
+
+/// The features the view shows: what the model ends in, but the sketch being edited (the window
+/// draws it) in place of itself shows its input, the body it lies on.
+fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<datum_graph::NodeIx> {
+    let edited = editing.and_then(|n| graph.find(n));
+    let mut v: Vec<datum_graph::NodeIx> = evaluation.finals(graph).into_iter().filter(|i| Some(*i) != edited).collect();
+    if let Some(e) = edited {
+        v.extend(&graph.nodes()[e as usize].inputs);
+        v.sort_unstable();
+        v.dedup();
+    }
+    v
 }
 
 /// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
@@ -150,6 +185,12 @@ struct Viewer {
     adapter: String,
     /// Parameter definitions as typed, by name.
     edits: BTreeMap<String, String>,
+    /// The sketch being edited, and one asked for that the model has not brought yet.
+    sketch: Option<SketchEdit>,
+    entering: Option<String>,
+    /// Picking a face to sketch on, and the body and face under the cursor.
+    picking: bool,
+    face: Option<(usize, datum_brep::TopoId)>,
 }
 
 impl Viewer {
@@ -175,6 +216,10 @@ impl Viewer {
             ui_ms: 0.0,
             adapter,
             edits: BTreeMap::new(),
+            sketch: None,
+            entering: None,
+            picking: false,
+            face: None,
         };
         if let Some(p) = path {
             v.open(p);
@@ -183,8 +228,69 @@ impl Viewer {
     }
 
     fn open(&mut self, path: PathBuf) {
-        let _ = self.requests.send(Request::Open(path));
+        self.leave();
+        self.send(Request::Open(path));
+    }
+
+    fn send(&mut self, r: Request) {
+        let _ = self.requests.send(r);
         self.busy = true;
+    }
+
+    /// Starts editing sketch feature `name`, once the model brings its context.
+    fn enter(&mut self, name: String) {
+        self.picking = false;
+        self.sketch = None;
+        self.send(Request::Editing(Some(name.clone())));
+        self.entering = Some(name);
+    }
+
+    fn leave(&mut self) {
+        if self.sketch.is_some() || self.entering.is_some() {
+            self.sketch = None;
+            self.entering = None;
+            let _ = self.requests.send(Request::Editing(None));
+        }
+    }
+
+    /// A new sketch feature from `fields` (its plane or face), edited at once.
+    fn new_sketch(&mut self, mut fields: Json) {
+        let taken: Vec<&str> = self
+            .model
+            .as_ref()
+            .map(|m| m.inspect["features"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect())
+            .unwrap_or_default();
+        let name = (1..).map(|k| format!("sketch{k}")).find(|n| !taken.contains(&n.as_str())).unwrap_or_default();
+        fields["name"] = json!(name);
+        fields["op"] = json!("sketch");
+        fields["sketch"] = json!({"points": {}});
+        self.send(Request::Command("add", fields));
+        self.enter(name);
+    }
+
+    /// Brings the sketch being edited up to the model just received, or starts one asked for.
+    fn sync_sketch(&mut self) {
+        let Some(m) = &self.model else { return };
+        let params: BTreeMap<String, f64> = m.inspect["parameters"]
+            .as_object()
+            .map(|p| p.iter().filter_map(|(n, v)| Some((n.clone(), v["value"].as_f64()?))).collect())
+            .unwrap_or_default();
+        let feature = |name: &str| m.inspect["features"].as_array().and_then(|f| f.iter().find(|f| f["name"] == name)).cloned();
+        let wanted = self.sketch.as_ref().map(|s| s.feature.clone()).or_else(|| self.entering.clone());
+        let Some(name) = wanted else { return };
+        match (&m.editing, feature(&name)) {
+            (Some((n, context)), Some(json)) if *n == name => match &mut self.sketch {
+                Some(s) => s.refresh(context.clone(), json, params),
+                None => {
+                    let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
+                    self.sketch = Some(SketchEdit::new(name, context.clone(), json, params, scene));
+                    self.entering = None;
+                }
+            },
+            // Still on its way, or gone (undone, or the model replaced).
+            (_, Some(_)) if self.sketch.is_none() => {}
+            _ => self.leave(),
+        }
     }
 
     /// The toolbar: open a model by dialog; a `.json` dropped on the window opens too.
@@ -200,6 +306,21 @@ impl Viewer {
             ui.separator();
             ui.checkbox(&mut self.smooth, "Smooth edges")
                 .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
+            ui.separator();
+            if ui.button("↶").on_hover_text("Undo (Ctrl+Z)").clicked() {
+                self.send(Request::Command("undo", json!({})));
+            }
+            if ui.button("↷").on_hover_text("Redo (Ctrl+Y)").clicked() {
+                self.send(Request::Command("redo", json!({})));
+            }
+            ui.separator();
+            if ui.button("New sketch").on_hover_text("A sketch on the XY plane").clicked() {
+                self.new_sketch(json!({}));
+            }
+            if ui.selectable_label(self.picking, "Sketch on face").on_hover_text("Then click a plane face of the model").clicked() {
+                self.leave();
+                self.picking = !self.picking;
+            }
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
@@ -219,6 +340,7 @@ impl Viewer {
                 self.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
             self.model = Some(m);
+            self.sync_sketch();
         }
     }
 
@@ -229,6 +351,30 @@ impl Viewer {
         };
         if let Some(e) = &m.error {
             ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+        }
+        for n in &m.notes {
+            ui.colored_label(egui::Color32::from_rgb(190, 120, 0), format!("⚠ {n}"));
+        }
+        let mut done = false;
+        if let Some(sk) = &mut self.sketch {
+            ui.heading(format!("Sketch {}", sk.feature));
+            match &sk.placed {
+                Ok(p) if p.solved.dof == 0 => ui.label("Fully defined"),
+                Ok(p) => {
+                    ui.colored_label(egui::Color32::from_rgb(30, 90, 210), format!("{} degrees of freedom: blue points can still move", p.solved.dof))
+                }
+                Err(e) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
+            };
+            // What the sketch breaks downstream: why the model behind did not change.
+            for f in m.inspect["features"].as_array().into_iter().flatten().filter(|f| f["name"] != sk.feature.as_str()) {
+                if let (Some(name), Some(e)) = (f["name"].as_str(), f["error"].as_str()) {
+                    ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}: {e}"));
+                }
+            }
+            ui.checkbox(&mut sk.names, "Names");
+            ui.weak("Drag a blue point · click to select, Shift to add · Del removes · Esc clears, then leaves");
+            done = ui.button("Done").clicked();
+            ui.separator();
         }
         ui.heading("Parameters");
         let params = m.inspect["parameters"].as_object().cloned().unwrap_or_default();
@@ -263,7 +409,7 @@ impl Viewer {
         }
         ui.separator();
         ui.heading("Features");
-        let (mut export, mut edit) = (None, None);
+        let (mut export, mut edit, mut enter) = (None, None, None);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let name = f["name"].as_str().unwrap_or_default();
@@ -293,6 +439,14 @@ impl Viewer {
                             }
                         });
                     }
+                    None if op == "sketch" => {
+                        ui.horizontal(|ui| {
+                            ui.label(format!("✔ {name}  ·  {op}"));
+                            if ui.button("✎").on_hover_text("Edit the sketch").clicked() {
+                                enter = Some(name.to_string());
+                            }
+                        });
+                    }
                     None => {
                         ui.label(format!("✔ {name}  ·  {op}"));
                     }
@@ -303,40 +457,76 @@ impl Viewer {
                 }
             }
         });
-        if let Some((name, fields)) = edit {
-            let _ = self.requests.send(Request::Edit(name, fields));
-            self.busy = true;
+        if let Some((name, mut fields)) = edit {
+            fields["name"] = json!(name);
+            self.send(Request::Command("edit", fields));
         }
         if let Some((name, path)) = export {
-            let _ = self.requests.send(Request::ExportDxf(name, path));
-            self.busy = true;
+            self.send(Request::Command("export_dxf", json!({"name": name, "path": path.display().to_string()})));
+        }
+        if let Some(name) = enter {
+            self.enter(name);
+        }
+        if done {
+            self.leave();
         }
     }
 
     fn viewport(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        let d = r.drag_delta();
-        if r.dragged_by(egui::PointerButton::Primary) {
-            self.camera.orbit(f64::from(d.x), f64::from(d.y));
-        } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
-            self.camera.pan(f64::from(d.x), f64::from(d.y), f64::from(rect.height()));
-        }
-        if r.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom(libm::exp(-f64::from(scroll) * 0.002));
+        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+        if self.sketch.is_some() {
+            self.sketch_input(ui, rect, &r, offset);
+        } else {
+            let d = r.drag_delta();
+            if r.dragged_by(egui::PointerButton::Primary) {
+                self.camera.orbit(f64::from(d.x), f64::from(d.y));
+            } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
+                self.camera.pan(f64::from(d.x), f64::from(d.y), f64::from(rect.height()));
+            }
+            if r.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    self.camera.zoom(libm::exp(-f64::from(scroll) * 0.002));
+                }
             }
         }
+        // Picking a face to sketch on: the one under the cursor, and a click starts the sketch.
+        let mut on_face = None;
+        if self.picking
+            && let Some(m) = &self.model
+        {
+            let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
+            self.face = offset.and_then(|(x, y)| {
+                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
+                m.scene.pick(origin, dir)
+            });
+            if r.clicked()
+                && let Some((b, id)) = self.face
+            {
+                on_face = Some(json!({"inputs": [m.bodies[b]], "face": format!("{id:?}")}));
+            }
+        }
+        if let Some(fields) = on_face {
+            self.new_sketch(fields);
+        }
         let Some(m) = &self.model else { return };
-        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
         // A model just opened is fitted once, where the view's shape is known.
         if r.double_clicked() || (!self.fitted && m.scene.bounds.is_some()) {
-            self.camera.fit(m.scene.bounds, aspect);
+            match &mut self.sketch {
+                Some(sk) if r.double_clicked() => sk.fit(scene),
+                _ => self.camera.fit(m.scene.bounds, aspect),
+            }
             self.fitted = true;
         }
         let anchor = m.scene.anchor();
-        let radius = m.scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
-        let (view_projection, eye) = self.camera.matrices(anchor, aspect, radius);
+        let radius = scene.map_or(1.0, |s| s.1);
+        let (view_projection, eye) = match &self.sketch {
+            Some(sk) => sk.camera.matrices(anchor, aspect, radius),
+            None => self.camera.matrices(anchor, aspect, radius),
+        };
         let ppp = ui.ctx().pixels_per_point();
         let [w, h] = [rect.width(), rect.height()].map(|x| (x * ppp).round() as u32);
         if w == 0 || h == 0 {
@@ -375,6 +565,26 @@ impl Viewer {
         if let Some((id, _)) = self.texture {
             ui.painter().image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
         }
+        let painter = ui.painter().with_clip_rect(rect);
+        if let Some(sk) = &self.sketch {
+            sk.paint(&painter, rect);
+        }
+        // The face a click would sketch on, tinted.
+        if let (true, Some((b, id))) = (self.picking, self.face) {
+            let mesh = &m.scene.bodies[b];
+            let mut tint = egui::Mesh::default();
+            for t in mesh.triangles.iter().zip(&mesh.faces).filter(|(_, f)| **f == id).map(|(t, _)| t) {
+                let corners: Option<Vec<egui::Pos2>> = t.iter().map(|&q| on_screen(&view_projection, q - anchor, rect)).collect();
+                if let Some(c) = corners {
+                    let base = tint.vertices.len() as u32;
+                    for p in c {
+                        tint.colored_vertex(p, egui::Color32::from_rgba_unmultiplied(235, 110, 20, 90));
+                    }
+                    tint.add_triangle(base, base + 1, base + 2);
+                }
+            }
+            painter.add(egui::Shape::mesh(tint));
+        }
         // What the view costs, to tell a slow frame from a slow rebuild.
         let dt = f64::from(ui.input(|i| i.unstable_dt)) * 1e3;
         self.frame_ms = smooth(self.frame_ms, dt);
@@ -398,6 +608,92 @@ impl Viewer {
     }
 }
 
+/// Where point `q` (relative to the anchor) shows in `rect` through view-projection `m`, if in
+/// front of the eye.
+fn on_screen(m: &[f32; 16], q: datum_math::Vec3, rect: egui::Rect) -> Option<egui::Pos2> {
+    let v = [q.x as f32, q.y as f32, q.z as f32, 1.0];
+    let row = |r: usize| (0..4).map(|c| m[c * 4 + r] * v[c]).sum::<f32>();
+    let w = row(3);
+    (w > 0.0).then(|| rect.center() + egui::vec2(row(0) / w * rect.width() * 0.5, -row(1) / w * rect.height() * 0.5))
+}
+
+impl Viewer {
+    /// The mouse and keys while a sketch is edited: hover, select, drag points, pan, zoom,
+    /// delete, Esc.
+    fn sketch_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
+        let Some(sk) = &mut self.sketch else { return };
+        let h = f64::from(rect.height());
+        let mut sent = Vec::new();
+        let mut leave = false;
+        if sk.drag.is_none() {
+            let painter = ui.painter();
+            sk.hover = offset.and_then(|(x, y)| sk.hit(x, y, h, |t| crate::sketch::label_size(painter, t)));
+        }
+        // A drag starts a few pixels from where the button went down: what is there is dragged.
+        if r.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+                let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
+                sk.hover = sk.hit(x, y, h, |t| crate::sketch::label_size(ui.painter(), t));
+            }
+            sk.start_drag();
+        }
+        if sk.drag.is_some() {
+            if let Some((x, y)) = offset {
+                sk.drag_to(sk.camera.at(x, y, h));
+            }
+            if r.drag_stopped()
+                && let Some(p) = sk.end_drag()
+            {
+                sent.push(Request::Command("edit_sketch", p));
+            }
+        } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
+            let d = r.drag_delta();
+            sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
+        }
+        if r.clicked() {
+            let shift = ui.input(|i| i.modifiers.shift);
+            match sk.hover.clone() {
+                Some(p) if shift => {
+                    if let Some(k) = sk.selected.iter().position(|q| *q == p) {
+                        sk.selected.remove(k);
+                    } else {
+                        sk.selected.push(p);
+                    }
+                }
+                Some(p) => sk.selected = vec![p],
+                None if !shift => sk.selected.clear(),
+                None => {}
+            }
+        }
+        let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
+        if scroll != 0.0 {
+            let (x, y) = offset.unwrap_or((0.0, 0.0));
+            sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
+        }
+        if !ui.ctx().egui_wants_keyboard_input() {
+            if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
+                && let Some(p) = sk.delete()
+            {
+                sent.push(Request::Command("edit_sketch", p));
+                sk.selected.clear();
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if sk.selected.is_empty() {
+                    leave = true;
+                } else {
+                    sk.selected.clear();
+                }
+            }
+        }
+        for r in sent {
+            self.send(r);
+        }
+        if leave {
+            self.leave();
+        }
+    }
+}
+
 /// A running average of frame times, steady enough to read.
 fn smooth(average: f64, sample: f64) -> f64 {
     if average == 0.0 { sample } else { average * 0.9 + sample * 0.1 }
@@ -417,6 +713,17 @@ impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
         self.receive();
+        // Undo and redo, unless a text field takes the keys.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            let shortcut = |k| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k);
+            let (undo, redo) = ui.input_mut(|i| (i.consume_shortcut(&shortcut(egui::Key::Z)), i.consume_shortcut(&shortcut(egui::Key::Y))));
+            if undo {
+                self.send(Request::Command("undo", json!({})));
+            }
+            if redo {
+                self.send(Request::Command("redo", json!({})));
+            }
+        }
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
@@ -453,9 +760,12 @@ mod tests {
                 scene: Scene::default(),
                 geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
                 error: None,
+                notes: Vec::new(),
                 opened: false,
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
+                bodies: Vec::new(),
+                editing: None,
             }),
             busy: false,
             camera: Camera::default(),
@@ -470,6 +780,10 @@ mod tests {
             ui_ms: 0.0,
             adapter: String::new(),
             edits,
+            sketch: None,
+            entering: None,
+            picking: false,
+            face: None,
         };
         (v, inbox)
     }
@@ -497,6 +811,60 @@ mod tests {
         }
     }
 
+    /// ✎ on a sketch asks to edit it; the model that comes back opens it in the view.
+    #[test]
+    fn a_sketch_opens_for_editing() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        {
+            let mut h = egui_kittest::Harness::builder().with_size([360.0, 600.0]).build_ui(|ui| {
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+            });
+            h.run();
+            h.get_by_label("✎").click();
+            h.run();
+        }
+        assert!(matches!(inbox.try_recv(), Ok(Request::Editing(Some(n))) if n == "outline"));
+        // The worker's answer: the sketch's context with the model.
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let id = session.graph().nodes()[0].id;
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id, input: None }));
+        }
+        v.sync_sketch();
+        let sk = v.sketch.as_ref().expect("editing");
+        assert_eq!(sk.placed.as_ref().map(|p| p.solved.dof), Ok(0));
+        // The view looks at the whole sketch, 80 × 40.
+        assert!(sk.camera.half_height > 20.0 && (sk.camera.center[0] - 40.0).abs() < 1e-9, "{:?}", sk.camera);
+        // When the model no longer has it (undone), the window stops editing it.
+        if let Some(m) = &mut v.model {
+            m.inspect["features"] = json!([]);
+        }
+        v.sync_sketch();
+        assert!(v.sketch.is_none());
+        assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
+    }
+
+    /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.
+    #[test]
+    fn the_face_a_sketch_is_on_stays_in_view() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let faces = session.execute("query_faces", &json!({"name": "plate", "normal": [0, 0, 1]})).unwrap();
+        let top = faces["faces"][0]["id"].clone();
+        session.execute("add", &json!({"name": "sketch1", "op": "sketch", "inputs": ["plate"], "face": top, "sketch": {"points": {}}})).unwrap();
+        let names = |editing: Option<&str>| {
+            shown(session.graph(), session.evaluation(), editing)
+                .into_iter()
+                .map(|i| session.graph().nodes()[i as usize].name.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names(None), ["sketch1"]);
+        assert_eq!(names(Some("sketch1")), ["plate"]);
+    }
+
     /// A sheet's thickness side flips with one click: left, right, middle.
     #[test]
     fn the_side_of_a_sheet_flips() {
@@ -508,6 +876,6 @@ mod tests {
         h.get_by_label("⇄ left").click();
         h.run();
         let sent = inbox.try_recv();
-        assert!(matches!(&sent, Ok(Request::Edit(name, fields)) if name == "panel" && *fields == json!({"side": "right"})), "an edit of the side");
+        assert!(matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "panel", "side": "right"})), "an edit of the side");
     }
 }
