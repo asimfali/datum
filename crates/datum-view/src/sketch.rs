@@ -186,14 +186,17 @@ impl SketchEdit {
     /// (D89); failing that, the solver places it as drawn there. The others follow.
     pub fn drag_to(&mut self, p: [f64; 2]) {
         let Some(n) = self.drag.clone() else { return };
-        let along = self.placed.as_ref().ok().and_then(|pl| Some((pl.solved.points.get(&n).copied()?, pl.solved.free.get(&n).copied()?)));
         self.json["sketch"]["points"][&n] = json!(p);
+        // The direction it is free in, from the sketch solved without a pin: with one, the
+        // point would have none, and frames would alternate between two placements.
+        let plain = self.placed_with(None);
+        let along = plain.as_ref().ok().and_then(|pl| Some((pl.solved.points.get(&n).copied()?, pl.solved.free.get(&n).copied()?)));
         let mut tries = vec![p];
         if let Some((at, Some(d))) = along {
             let t = (p[0] - at.x) * d.x + (p[1] - at.y) * d.y;
             tries.push([at.x + d.x * t, at.y + d.y * t]);
         }
-        self.placed = tries.into_iter().map(|q| self.placed_with(Some((&n, q)))).find(Result::is_ok).unwrap_or_else(|| self.placed_with(None));
+        self.placed = tries.into_iter().map(|q| self.placed_with(Some((&n, q)))).find(Result::is_ok).unwrap_or(plain);
     }
 
     /// Ends the drag: `edit_sketch` parameters writing every own point where it now stands, or
@@ -585,6 +588,24 @@ mod tests {
         // A defined point does not drag.
         e.hover = Some(Pick::Point("b".into()));
         assert!(!e.start_drag());
+    }
+
+    /// Dragged where it cannot go, frame after frame, a point stays put: no flicker between the
+    /// pinned and the projected placement.
+    #[test]
+    fn a_drag_is_steady() {
+        let mut e = edit();
+        e.hover = Some(Pick::Point("c".into()));
+        assert!(e.start_drag());
+        let at = |e: &SketchEdit| e.placed.as_ref().map(|p| p.solved.points["c"]).unwrap();
+        e.drag_to([15.0, 7.0]);
+        let first = at(&e);
+        for _ in 0..4 {
+            e.drag_to([15.0, 7.0]);
+            assert_eq!(at(&e), first);
+        }
+        // The width is given: the corner slides up its side to the cursor's height.
+        assert!((first.x - 12.0).abs() < 1e-9 && (first.y - 7.0).abs() < 1e-9, "{first:?}");
     }
 
     #[test]
