@@ -22,6 +22,7 @@ use crate::sketch::{Context, SketchEdit};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
+    crate::log::install();
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
@@ -109,7 +110,10 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 }
                 Request::Command(command, params) => match session.execute(command, &params) {
                     Ok(reply) => note(&reply),
-                    Err(e) => error = Some(e),
+                    Err(e) => {
+                        crate::log::write(&format!("{command} refused: {e}"));
+                        error = Some(e);
+                    }
                 },
                 Request::Editing(name) => editing = name,
             }
@@ -188,6 +192,8 @@ struct Viewer {
     adapter: String,
     /// Parameter definitions as typed, by name.
     edits: BTreeMap<String, String>,
+    /// The file the model was opened from or saved to.
+    path: Option<PathBuf>,
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
@@ -221,6 +227,7 @@ impl Viewer {
             ui_ms: 0.0,
             adapter,
             edits: BTreeMap::new(),
+            path: None,
             sketch: None,
             entering: None,
             library: crate::templates::library(),
@@ -235,7 +242,21 @@ impl Viewer {
 
     fn open(&mut self, path: PathBuf) {
         self.leave();
+        self.path = Some(path.clone());
         self.send(Request::Open(path));
+    }
+
+    /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
+    fn save(&mut self, ui: &egui::Ui, ask: bool) {
+        let path = match (&self.path, ask) {
+            (Some(p), false) => Some(p.clone()),
+            _ => rfd::FileDialog::new().add_filter("Datum model", &["json"]).set_file_name("model.json").save_file(),
+        };
+        if let Some(p) = path {
+            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+            self.send(Request::Command("save", json!({"path": p.display().to_string()})));
+            self.path = Some(p);
+        }
     }
 
     fn send(&mut self, r: Request) {
@@ -308,7 +329,18 @@ impl Viewer {
                 ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
                 self.open(p);
             }
-            ui.weak("or drop a model (.json) on the window");
+            if ui.button("New").on_hover_text("An empty model").clicked() {
+                self.leave();
+                self.path = None;
+                ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
+                self.send(Request::Command("new", json!({})));
+            }
+            if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
+                self.save(ui, false);
+            }
+            if ui.button("Save as…").clicked() {
+                self.save(ui, true);
+            }
             ui.separator();
             ui.checkbox(&mut self.smooth, "Smooth edges")
                 .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
@@ -355,6 +387,7 @@ impl Viewer {
             ui.label(if self.busy { "Opening…" } else { "No model open." });
             return;
         };
+        ui.weak(format!("Datum {} · problems are logged to {}", env!("CARGO_PKG_VERSION"), crate::log::path().display()));
         if let Some(e) = &m.error {
             ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
         }
@@ -955,6 +988,9 @@ impl eframe::App for Viewer {
             if undo {
                 self.send(Request::Command("undo", json!({})));
             }
+            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::S))) {
+                self.save(ui, false);
+            }
             if redo {
                 self.send(Request::Command("redo", json!({})));
             }
@@ -1015,6 +1051,7 @@ mod tests {
             ui_ms: 0.0,
             adapter: String::new(),
             edits,
+            path: None,
             sketch: None,
             entering: None,
             library: crate::templates::library(),

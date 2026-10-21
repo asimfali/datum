@@ -6,6 +6,7 @@ pub mod camera;
 pub mod capture;
 mod dims;
 mod draw;
+pub mod log;
 pub mod render;
 pub mod scene;
 mod sketch;

@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+default-run = "datum"
 
 [[bin]]
 name = "datum"
@@ -21,3 +22,7 @@ datum-model = { workspace = true }
 datum-mcp = { workspace = true }
 rayon = { workspace = true }
 datum-view = { workspace = true }
+
+[[bin]]
+name = "datum-view"
+path = "src/bin/datum-view.rs"

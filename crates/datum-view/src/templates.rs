@@ -13,12 +13,32 @@ use serde_json::{Map, Value as Json, json};
 use crate::draw::{Patch, Spot};
 use crate::sketch::{Pick, SketchEdit};
 
-/// The built-in templates.
+/// The templates: the built-in ones, then those in `library/sketches` beside the program, by
+/// file name (a file that is no template is left out, and logged).
 pub fn library() -> Vec<Json> {
-    [include_str!("../../../library/sketches/rectangle.json"), include_str!("../../../library/sketches/center_rectangle.json")]
-        .iter()
-        .filter_map(|t| serde_json::from_str(t).ok())
-        .collect()
+    let mut out: Vec<Json> =
+        [include_str!("../../../library/sketches/rectangle.json"), include_str!("../../../library/sketches/center_rectangle.json")]
+            .iter()
+            .filter_map(|t| serde_json::from_str(t).ok())
+            .collect();
+    let folder = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("library").join("sketches")));
+    let mut files: Vec<std::path::PathBuf> = folder
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    files.sort();
+    for f in files {
+        match std::fs::read_to_string(&f).ok().and_then(|t| serde_json::from_str::<Json>(&t).ok()).filter(|t| !anchors(t).is_empty()) {
+            // A built-in one shipped beside the program too is not listed twice.
+            Some(t) if !out.iter().any(|o| o["name"] == t["name"]) => out.push(t),
+            Some(_) => {}
+            None => crate::log::write(&format!("{}: not a sketch template (JSON with `anchors` and `points`)", f.display())),
+        }
+    }
+    out
 }
 
 /// The anchors of a template: one or two of its points, in order.
