@@ -24,11 +24,26 @@ pub fn write(message: &str) {
     }
 }
 
+/// Logs a failure and says so on the screen: a program without a console has no other way
+/// (D97).
+pub fn fail(message: &str) {
+    write(message);
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Datum")
+        .set_description(format!("{message}\n\nThis is written to {} too: please send that file.", path().display()))
+        .show();
+}
+
 /// Logs every panic, with where it happened, before the usual report.
 pub fn install() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         write(&format!("panic: {info}\n{}", std::backtrace::Backtrace::force_capture()));
+        // The main thread's panic ends the program: said on the screen too.
+        if std::thread::current().name() == Some("main") {
+            fail(&format!("Datum stopped: {info}"));
+        }
         previous(info);
     }));
 }
