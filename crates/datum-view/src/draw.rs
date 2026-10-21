@@ -17,6 +17,9 @@ pub enum Tool {
     Arc,
     Circle,
     Point,
+    /// Pick a line, an arc, a circle, two points, a point and a line or two lines; then click
+    /// where the dimension goes.
+    Dimension,
 }
 
 /// What a click lands on.
@@ -81,8 +84,14 @@ pub struct Draft {
     pub clicks: Vec<Spot>,
     /// Arc tool: the angle swept from the start, following the mouse (counterclockwise > 0).
     pub sweep: f64,
-    /// Arc tool: the start's lean to the centre.
+    /// Arc tool: the start's lean to the centre, and its radius as typed.
     pub start_lean: Option<Lean>,
+    pub start_radius: Option<Json>,
+    /// A value typed while drawing (the field by the cursor), and what it comes to: the length
+    /// of the line, the circle's diameter, the arc's radius.
+    pub typed: Option<(Json, f64)>,
+    /// Dimension tool: what is picked so far.
+    pub picks: Vec<crate::dims::Pick2>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
     /// Where the cursor would click, and the inferred constraint of a line.
@@ -101,6 +110,9 @@ impl Default for Draft {
             clicks: Vec::new(),
             sweep: 0.0,
             start_lean: None,
+            start_radius: None,
+            typed: None,
+            picks: Vec::new(),
             tangent: false,
             cursor: None,
             lean: None,
@@ -142,11 +154,24 @@ pub fn face_edges(body: &Body, placed: &Placed) -> Vec<FaceEdge> {
 impl Draft {
     /// Cancels what is half drawn; true if there was something.
     pub fn cancel(&mut self) -> bool {
-        let busy = self.chain.is_some() || !self.clicks.is_empty();
+        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty();
         self.chain = None;
         self.clicks.clear();
+        self.picks.clear();
         self.tangent = false;
+        self.typed = None;
         busy
+    }
+
+    /// Whether a value typed now would size what is being drawn: a line from the chain's end,
+    /// a circle from its centre, an arc's radius from its centre.
+    pub fn takes_value(&self) -> bool {
+        match self.tool {
+            Tool::Line => self.chain.is_some() && !self.tangent,
+            Tool::Circle => self.clicks.len() == 1,
+            Tool::Arc => self.clicks.len() == 1,
+            _ => false,
+        }
     }
 
     /// Esc: ends the command, as in Inventor: what is half drawn goes, the tool is Select.
@@ -283,6 +308,20 @@ impl Draft {
             spot.at = at;
             self.lean = Some(lean);
         }
+        // A typed size: as far from where the line, circle or arc starts, toward the cursor.
+        let from = match (self.tool, &self.chain, &self.clicks[..]) {
+            (Tool::Line, Some(c), _) if !self.tangent => Some((c.at, 1.0)),
+            (Tool::Circle, _, [c]) => Some((c.at, 0.5)),
+            (Tool::Arc, _, [c]) => Some((c.at, 1.0)),
+            _ => None,
+        };
+        if let (Some((_, size)), Some((o, k))) = (&self.typed, from) {
+            let d = [spot.at[0] - o[0], spot.at[1] - o[1]];
+            let len = libm::hypot(d[0], d[1]);
+            if len > 0.0 && *size > 0.0 {
+                spot = Spot { at: [o[0] + d[0] / len * size * k, o[1] + d[1] / len * size * k], snap: Snap::Free };
+            }
+        }
         if let (Tool::Arc, [c, s]) = (self.tool, &self.clicks[..]) {
             let angle = |q: [f64; 2]| libm::atan2(q[1] - c.at[1], q[0] - c.at[0]);
             let before = self.cursor.as_ref().map_or(angle(s.at), |k| angle(k.at));
@@ -297,7 +336,7 @@ impl Draft {
         let spot = self.cursor.clone()?;
         let mut patch = Patch::new(edit);
         match self.tool {
-            Tool::Select => return None,
+            Tool::Select | Tool::Dimension => return None,
             Tool::Point => {
                 // A point already there needs no other; a vertex of the face is projected.
                 if matches!(spot.snap, Snap::Point(_)) {
@@ -316,7 +355,8 @@ impl Draft {
                 }
                 let c = patch.point(&centre);
                 let name = patch.fresh("c");
-                patch.add("circles", &name, json!({"center": c, "diameter": short(2.0 * r)}), self.construction);
+                let diameter = self.typed.take().map_or(json!(short(2.0 * r)), |t| t.0);
+                patch.add("circles", &name, json!({"center": c, "diameter": diameter}), self.construction);
                 self.clicks.clear();
             }
             Tool::Arc => {
@@ -324,6 +364,7 @@ impl Draft {
                     if self.clicks.len() == 1 {
                         self.sweep = 0.0;
                         self.start_lean = self.lean.clone();
+                        self.start_radius = self.typed.take().map(|t| t.0);
                     }
                     self.clicks.push(spot);
                     return None;
@@ -345,6 +386,9 @@ impl Draft {
                 patch.add("arcs", &name, json!({"center": cn, "from": from, "to": to}), self.construction);
                 for (lean, p) in [(self.start_lean.take(), sn), (self.lean.clone(), en)] {
                     patch.level(lean.as_ref(), &cn, &p);
+                }
+                if let Some(r) = self.start_radius.take() {
+                    patch.constrain(json!({"type": "radius", "arc": name, "value": r}));
                 }
                 self.clicks.clear();
             }
@@ -379,6 +423,9 @@ impl Draft {
                     }
                     let name = patch.fresh("l");
                     patch.add("lines", &name, json!({"from": from, "to": end}), self.construction);
+                    if let Some((v, _)) = self.typed.take() {
+                        patch.constrain(json!({"type": "length", "line": name, "value": v}));
+                    }
                     match &self.lean {
                         Some(Lean::Horizontal) => patch.constrain(json!({"type": "horizontal", "line": name})),
                         Some(Lean::Vertical) => patch.constrain(json!({"type": "vertical", "line": name})),
@@ -446,6 +493,22 @@ impl Draft {
                 polyline(arc(c.at, r, libm::atan2(s.at[1] - c.at[1], s.at[0] - c.at[0]), self.sweep));
             }
             _ => {}
+        }
+        // The dimension the picks would make, by the cursor.
+        if self.tool == Tool::Dimension && !self.picks.is_empty() {
+            let text = match edit.dimension(&self.picks, spot.at) {
+                Some((c, _, now)) => {
+                    let kind = match c["type"].as_str() {
+                        Some("horizontal_distance") => "↔ ",
+                        Some("vertical_distance") => "↕ ",
+                        Some("radius") => "R",
+                        _ => "",
+                    };
+                    format!("{kind}{}{}", short(now), if c["type"] == "angle" { "°" } else { "" })
+                }
+                None => format!("{} picked: a second, or click where the dimension goes", self.picks.len()),
+            };
+            painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }
         // Where the click lands, and what it ties to.
         let at = screen(spot.at);
@@ -742,6 +805,27 @@ mod tests {
         assert_eq!(p["points"]["p4"], json!([4.0, 10.0]), "{p}");
         assert_eq!(p["add_constraints"][1], json!({"type": "horizontal", "points": ["p4", "p3"]}), "{p}");
         assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+    }
+
+    /// A length typed while drawing: the line ends that far toward the cursor, with that
+    /// dimension; a diameter typed goes into the circle as typed, an expression too.
+    #[test]
+    fn typed_sizes() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], true);
+        assert!(e.draft.takes_value());
+        e.draft.typed = Some((json!(25.0), 25.0));
+        let p = click_at(&mut e, [3.0, 4.0], true).unwrap();
+        assert_eq!(p["points"]["p2"], json!([15.0, 20.0]), "{p}");
+        assert_eq!(p["add_constraints"], json!([{"type": "length", "line": "l1", "value": 25.0}]));
+        assert!(e.draft.typed.is_none());
+        e.draft.escape();
+        e.draft.tool = Tool::Circle;
+        click_at(&mut e, [30.0, 0.0], true);
+        e.draft.typed = Some((json!("w / 2"), 12.5));
+        let p = click_at(&mut e, [31.0, 0.0], true).unwrap();
+        assert_eq!(p["circles"]["c1"]["diameter"], json!("w / 2"), "{p}");
     }
 
     /// After an arc, a line leaving along it is tangent to it, before anything else.
