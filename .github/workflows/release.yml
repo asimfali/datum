@@ -1,0 +1,74 @@
+name: Release
+
+# A tag `v0.1.0` (and so on) builds Datum for Windows and Linux, checks it as CI does, and
+# publishes a GitHub release with a portable archive for each and their SHA-256 sums. Run by
+# hand, it builds the archives as artifacts and publishes nothing: a dry run.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            archive: datum-${{ github.ref_name }}-windows-x64.zip
+          - os: ubuntu-latest
+            archive: datum-${{ github.ref_name }}-linux-x64.tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+      - run: scripts/check.sh
+        shell: bash
+      - run: cargo build --release -p datum-cli
+      - name: Package
+        shell: bash
+        run: |
+          dir=datum-${{ github.ref_name }}
+          mkdir -p "$dir"
+          cp -r library examples "$dir"/
+          cp -r tests/models "$dir"/models
+          cp README.md README.ru.md TESTERS.md LICENSE-MIT LICENSE-APACHE "$dir"/
+          if [ "${{ runner.os }}" = Windows ]; then
+            cp target/release/datum.exe target/release/datum-view.exe "$dir"/
+            7z a "${{ matrix.archive }}" "$dir" > /dev/null
+          else
+            cp target/release/datum target/release/datum-view "$dir"/
+            tar czf "${{ matrix.archive }}" "$dir"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          gh release create "${{ github.ref_name }}" * --title "Datum ${{ github.ref_name }}" --notes-file ../TESTERS.md

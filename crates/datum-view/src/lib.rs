@@ -11,5 +11,6 @@ pub mod render;
 pub mod scene;
 mod sketch;
 mod templates;
+mod update;
 
 pub use app::run;
