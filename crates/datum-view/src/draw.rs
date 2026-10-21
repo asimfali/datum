@@ -41,7 +41,8 @@ pub struct Spot {
     pub snap: Snap,
 }
 
-/// A constraint inferred for a line from where it starts to the cursor.
+/// A constraint inferred while drawing: a line horizontal, vertical, parallel or perpendicular
+/// to another; an arc's end level with its centre (horizontal) or plumb above it (vertical).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lean {
     Horizontal,
@@ -78,6 +79,8 @@ pub struct Draft {
     pub clicks: Vec<Spot>,
     /// Arc tool: the angle swept from the start, following the mouse (counterclockwise > 0).
     pub sweep: f64,
+    /// Arc tool: the start's lean to the centre.
+    pub start_lean: Option<Lean>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
     /// Where the cursor would click, and the inferred constraint of a line.
@@ -95,6 +98,7 @@ impl Default for Draft {
             chain: None,
             clicks: Vec::new(),
             sweep: 0.0,
+            start_lean: None,
             tangent: false,
             cursor: None,
             lean: None,
@@ -147,6 +151,8 @@ impl Draft {
     pub fn escape(&mut self) {
         self.cancel();
         self.tool = Tool::Select;
+        self.cursor = None;
+        self.lean = None;
     }
 
     /// Where a click at pixel offset `(dx, dy)` would land, `free` (Shift) without snaps.
@@ -252,13 +258,19 @@ impl Draft {
         best.map(|(_, lean, at)| (lean, at))
     }
 
-    /// Follows the cursor: where it would click, the line's lean, and the arc's sweep.
+    /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
         let mut spot = self.spot(edit, dx, dy, height, free);
         self.lean = None;
-        if let (Tool::Line, Some(c), false, Snap::Free, false) = (self.tool, &self.chain, self.tangent, &spot.snap, free)
-            && let Some((lean, at)) = self.lean(edit, c.at, spot.at)
-        {
+        let leaning = !free && spot.snap == Snap::Free;
+        let found = match (self.tool, &self.chain, &self.clicks[..]) {
+            _ if !leaning => None,
+            (Tool::Line, Some(c), _) if !self.tangent => self.lean(edit, c.at, spot.at),
+            (Tool::Line, Some(Chain { at, last: Some((_, dir)), .. }), _) => tangent_lean(*at, *dir, spot.at),
+            (Tool::Arc, _, [c] | [c, _]) => axis_lean(c.at, spot.at),
+            _ => None,
+        };
+        if let Some((lean, at)) = found {
             spot.at = at;
             self.lean = Some(lean);
         }
@@ -302,6 +314,7 @@ impl Draft {
                 if self.clicks.len() < 2 {
                     if self.clicks.len() == 1 {
                         self.sweep = 0.0;
+                        self.start_lean = self.lean.clone();
                     }
                     self.clicks.push(spot);
                     return None;
@@ -319,8 +332,11 @@ impl Draft {
                 };
                 let (cn, sn, en) = (patch.point(&c), patch.point(&s), patch.point(&end));
                 let name = patch.fresh("a");
-                let (from, to) = if self.sweep > 0.0 { (sn, en) } else { (en, sn) };
+                let (from, to) = if self.sweep > 0.0 { (sn.clone(), en.clone()) } else { (en.clone(), sn.clone()) };
                 patch.add("arcs", &name, json!({"center": cn, "from": from, "to": to}), self.construction);
+                for (lean, p) in [(self.start_lean.take(), sn), (self.lean.clone(), en)] {
+                    patch.level(lean.as_ref(), &cn, &p);
+                }
                 self.clicks.clear();
             }
             Tool::Line => {
@@ -339,8 +355,9 @@ impl Draft {
                     let centre = patch.point(&Spot { at: c, snap: Snap::Free });
                     let name = patch.fresh("a");
                     let (f, t) = if ccw { (from, end.clone()) } else { (end.clone(), from) };
-                    patch.add("arcs", &name, json!({"center": centre, "from": f, "to": t}), self.construction);
+                    patch.add("arcs", &name, json!({"center": centre.clone(), "from": f, "to": t}), self.construction);
                     patch.constrain(json!({"type": "tangent", "curves": [curve, name.clone()]}));
+                    patch.level(self.lean.as_ref(), &centre, &end);
                     // Travelling on: along the circle at the end, the way the arc turned.
                     let w = [spot.at[0] - c[0], spot.at[1] - c[1]];
                     let l = libm::hypot(w[0], w[1]);
@@ -376,7 +393,7 @@ impl Draft {
 
     /// Draws what is half drawn and where the cursor would click.
     pub fn paint(&self, edit: &SketchEdit, painter: &egui::Painter, rect: egui::Rect) {
-        let Some(spot) = &self.cursor else { return };
+        let Some(spot) = self.cursor.as_ref().filter(|_| self.tool != Tool::Select) else { return };
         let height = f64::from(rect.height());
         let screen = |q: [f64; 2]| {
             let (x, y) = edit.camera.offset(q, height);
@@ -455,6 +472,44 @@ pub fn tangent_arc(from: [f64; 2], dir: [f64; 2], to: [f64; 2]) -> Option<([f64;
     Some(([from[0] + n[0] * r, from[1] + n[1] * r], r > 0.0))
 }
 
+/// The four directions along the sketch's axes, each with its lean: from a centre, a point
+/// along X is level with it (horizontal), along Y plumb above or below (vertical).
+const AXES: [([f64; 2], Lean); 4] =
+    [([1.0, 0.0], Lean::Horizontal), ([-1.0, 0.0], Lean::Horizontal), ([0.0, 1.0], Lean::Vertical), ([0.0, -1.0], Lean::Vertical)];
+
+/// Degrees between two directions.
+fn degrees(a: [f64; 2], b: [f64; 2]) -> f64 {
+    libm::atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]).abs().to_degrees()
+}
+
+/// A point `q` near the horizontal or vertical through centre `c`: projected onto it, as a
+/// line's end is.
+fn axis_lean(c: [f64; 2], q: [f64; 2]) -> Option<(Lean, [f64; 2])> {
+    let w = [q[0] - c[0], q[1] - c[1]];
+    let (u, lean) = AXES.into_iter().find(|(u, _)| w != [0.0, 0.0] && degrees(w, *u) <= LEAN_DEG)?;
+    let t = w[0] * u[0] + w[1] * u[1];
+    Some((lean, [c[0] + u[0] * t, c[1] + u[1] * t]))
+}
+
+/// The end of a tangent arc from `from` along `dir` near level with or plumb above its centre:
+/// moved to where it is exactly, so the arc turns a quarter, a half or three quarters. The centre
+/// is `from + n·r`; an end along axis `u` from it is `from + r·(n + u)` for `r > 0`, `from +
+/// r·(n − u)` for `r < 0`: the cursor is projected onto that line.
+fn tangent_lean(from: [f64; 2], dir: [f64; 2], to: [f64; 2]) -> Option<(Lean, [f64; 2])> {
+    let (c, ccw) = tangent_arc(from, dir, to)?;
+    let n = [-dir[1], dir[0]];
+    let w = [to[0] - c[0], to[1] - c[1]];
+    let (u, lean) = AXES.into_iter().find(|(u, _)| degrees(w, *u) <= LEAN_DEG)?;
+    let s = if ccw { 1.0 } else { -1.0 };
+    let line = [n[0] + s * u[0], n[1] + s * u[1]];
+    let l2 = line[0] * line[0] + line[1] * line[1];
+    if l2 == 0.0 {
+        return None;
+    }
+    let r = ((to[0] - from[0]) * line[0] + (to[1] - from[1]) * line[1]) / l2;
+    (r * s > 0.0).then(|| (lean, [from[0] + line[0] * r, from[1] + line[1] * r]))
+}
+
 /// The point of polyline `pts` nearest `q`.
 fn foot(pts: &[[f64; 2]], q: [f64; 2]) -> Option<[f64; 2]> {
     pts.windows(2)
@@ -500,6 +555,15 @@ impl Patch {
             value["construction"] = json!(true);
         }
         self.params.entry(key).or_insert_with(|| json!({}))[name] = value;
+    }
+
+    /// An arc's point `p` level with (horizontal) or plumb above (vertical) its centre `c`.
+    fn level(&mut self, lean: Option<&Lean>, c: &str, p: &str) {
+        match lean {
+            Some(Lean::Horizontal) => self.constrain(json!({"type": "horizontal", "points": [c, p]})),
+            Some(Lean::Vertical) => self.constrain(json!({"type": "vertical", "points": [c, p]})),
+            _ => {}
+        }
     }
 
     fn constrain(&mut self, c: Json) {
@@ -603,7 +667,8 @@ mod tests {
         let p = click_at(&mut e, [5.0, 13.0], false).unwrap();
         assert_eq!(p["arcs"]["a1"], json!({"center": "p5", "from": "p3", "to": "p4"}), "{p}");
         assert_eq!(p["points"]["p5"], json!([5.0, 8.0]), "the centre across the line's end: {p}");
-        assert_eq!(p["add_constraints"], json!([{"type": "tangent", "curves": ["l2", "a1"]}]));
+        // Its end straight above the centre: a quarter turn, held so.
+        assert_eq!(p["add_constraints"], json!([{"type": "tangent", "curves": ["l2", "a1"]}, {"type": "vertical", "points": ["p5", "p4"]}]));
         assert!(!e.draft.tangent, "the next segment is a line again");
         assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
         // Closing on the first point ends the chain.
@@ -640,7 +705,7 @@ mod tests {
         }
     }
 
-    /// Esc ends the command at once: the chain half drawn goes, and so does the tool.
+    /// Esc ends the command at once: the chain half drawn goes, the tool, and its cursor.
     #[test]
     fn escape_ends_the_command() {
         let mut e = editor(json!({"points": {}}), false);
@@ -648,7 +713,47 @@ mod tests {
         click_at(&mut e, [0.0, 0.0], false);
         assert!(e.draft.chain.is_some());
         e.draft.escape();
-        assert!(e.draft.chain.is_none() && e.draft.tool == Tool::Select);
+        assert!(e.draft.chain.is_none() && e.draft.tool == Tool::Select && e.draft.cursor.is_none());
+    }
+
+    /// A tangent arc ending level with its centre turns a half: the end is put there exactly and
+    /// held there.
+    #[test]
+    fn a_tangent_arc_snaps_to_a_half_turn() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        click_at(&mut e, [0.0, 10.0], false);
+        e.draft.tangent = true;
+        // Up the line, then a half turn right: the end near (8, 10.15), level with the centre (4, 10).
+        let p = click_at(&mut e, [8.0, 10.15], false).unwrap();
+        assert_eq!(p["points"]["p3"], json!([8.0, 10.0]), "{p}");
+        assert_eq!(p["points"]["p4"], json!([4.0, 10.0]), "{p}");
+        assert_eq!(p["add_constraints"][1], json!({"type": "horizontal", "points": ["p4", "p3"]}), "{p}");
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+    }
+
+    /// The arc tool's start and end level with or plumb above the centre take that constraint.
+    #[test]
+    fn arc_ends_snap_to_the_axes() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Arc;
+        click_at(&mut e, [0.0, 0.0], false);
+        click_at(&mut e, [5.0, 0.2], false);
+        for q in [[4.0, 3.0], [0.2, 5.0]] {
+            let (x, y) = e.camera.offset(q, H);
+            let mut d = std::mem::take(&mut e.draft);
+            d.track(&e, x, y, H, false);
+            e.draft = d;
+        }
+        let p = click_at(&mut e, [-0.2, 5.0], false).unwrap();
+        assert_eq!(p["points"]["p2"], json!([5.0, 0.0]), "{p}");
+        assert_eq!(p["points"]["p3"], json!([0.0, 5.0]), "{p}");
+        assert_eq!(
+            p["add_constraints"],
+            json!([{"type": "horizontal", "points": ["p1", "p2"]}, {"type": "vertical", "points": ["p1", "p3"]}]),
+            "{p}"
+        );
     }
 
     #[test]

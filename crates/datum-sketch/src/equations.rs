@@ -17,8 +17,8 @@ use crate::{Constraint, Measure, Sketch, SketchError};
 #[derive(Clone, Copy)]
 enum Eq {
     Coincident(usize, usize),
-    Horizontal(usize),
-    Vertical(usize),
+    /// Two points on one horizontal (axis 1: equal Y) or vertical (axis 0); a line is its ends.
+    Level(usize, usize, usize),
     Parallel(usize, usize),
     Perpendicular(usize, usize),
     Collinear(usize, usize),
@@ -212,8 +212,17 @@ impl Equations {
             let two = |l: &[String; 2]| -> Result<(usize, usize), SketchError> { Ok((line(&l[0])?, line(&l[1])?)) };
             eqs.push(match c {
                 Constraint::Coincident { points } => Eq::Coincident(point(&points[0])?, point(&points[1])?),
-                Constraint::Horizontal { line: l } => Eq::Horizontal(line(l)?),
-                Constraint::Vertical { line: l } => Eq::Vertical(line(l)?),
+                Constraint::Horizontal { line: l, points: p } | Constraint::Vertical { line: l, points: p } => {
+                    let axis = usize::from(matches!(c, Constraint::Horizontal { .. }));
+                    match (l, p) {
+                        (Some(l), None) => {
+                            let (a, b) = lines[line(l)?];
+                            Eq::Level(a, b, axis)
+                        }
+                        (None, Some([a, b])) => Eq::Level(point(a)?, point(b)?, axis),
+                        _ => return invalid(format!("{}: give a line or two points", c.describe(k))),
+                    }
+                }
                 Constraint::Parallel { lines } => {
                     let (a, b) = two(lines)?;
                     Eq::Parallel(a, b)
@@ -361,8 +370,8 @@ impl Equations {
             Rad::Value(_) => vec![c],
         };
         match self.eqs[k] {
-            Eq::Coincident(a, b) | Eq::Distance(a, b, _) | Eq::AxisDistance(a, b, ..) | Eq::Radius(a, b, _) => vec![a, b],
-            Eq::Horizontal(i) | Eq::Vertical(i) | Eq::Length(i, _) => l(i).to_vec(),
+            Eq::Coincident(a, b) | Eq::Distance(a, b, _) | Eq::AxisDistance(a, b, ..) | Eq::Radius(a, b, _) | Eq::Level(a, b, _) => vec![a, b],
+            Eq::Length(i, _) => l(i).to_vec(),
             Eq::Parallel(i, j) | Eq::Perpendicular(i, j) | Eq::Collinear(i, j) | Eq::Equal(i, j) | Eq::Angle(i, j, _) => {
                 l(i).into_iter().chain(l(j)).collect()
             }
@@ -574,13 +583,10 @@ impl Equations {
                     emit(pa[0] - pb[0], &[(a, [1.0, 0.0]), (b, [-1.0, 0.0])]);
                     emit(pa[1] - pb[1], &[(a, [0.0, 1.0]), (b, [0.0, -1.0])]);
                 }
-                Eq::Horizontal(l) => {
-                    let (a, b) = self.lines[l];
-                    emit(at(b)[1] - at(a)[1], &[(a, [0.0, -1.0]), (b, [0.0, 1.0])]);
-                }
-                Eq::Vertical(l) => {
-                    let (a, b) = self.lines[l];
-                    emit(at(b)[0] - at(a)[0], &[(a, [-1.0, 0.0]), (b, [1.0, 0.0])]);
+                Eq::Level(a, b, axis) => {
+                    let mut d = [0.0; 2];
+                    d[axis] = 1.0;
+                    emit(at(b)[axis] - at(a)[axis], &[(a, neg(d)), (b, d)]);
                 }
                 Eq::Parallel(i, j) => {
                     let (di, dj) = (self.dir(i, &at), self.dir(j, &at));

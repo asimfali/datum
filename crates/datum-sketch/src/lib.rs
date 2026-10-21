@@ -92,11 +92,20 @@ pub enum Constraint {
     Coincident {
         points: [String; 2],
     },
+    /// A line along the sketch's X axis, or two points on one horizontal: give `line` or
+    /// `points`.
     Horizontal {
-        line: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        points: Option<[String; 2]>,
     },
+    /// A line along the sketch's Y axis, or two points on one vertical.
     Vertical {
-        line: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        line: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        points: Option<[String; 2]>,
     },
     Parallel {
         lines: [String; 2],
@@ -227,8 +236,8 @@ impl Constraint {
     pub(crate) fn describe(&self, k: usize) -> String {
         let (kind, what) = match self {
             Self::Coincident { points } => ("coincident", points.join(", ")),
-            Self::Horizontal { line } => ("horizontal", line.clone()),
-            Self::Vertical { line } => ("vertical", line.clone()),
+            Self::Horizontal { line, points } => ("horizontal", line.clone().or_else(|| points.as_ref().map(|p| p.join(", "))).unwrap_or_default()),
+            Self::Vertical { line, points } => ("vertical", line.clone().or_else(|| points.as_ref().map(|p| p.join(", "))).unwrap_or_default()),
             Self::Parallel { lines } => ("parallel", lines.join(", ")),
             Self::Perpendicular { lines } => ("perpendicular", lines.join(", ")),
             Self::Collinear { lines } => ("collinear", lines.join(", ")),
