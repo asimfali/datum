@@ -642,7 +642,7 @@ fn rename_names(op: &mut Map<String, Value>, renamed: &impl Fn(&str) -> Option<S
 
 /// Calls `f` on every string in a part of a sketch's JSON that names an element: all of them but
 /// expressions (`value`, `degrees`, `diameter`), constraint kinds and IDs.
-fn visit_names(v: &mut Value, f: &mut impl FnMut(&mut String)) {
+pub fn visit_names(v: &mut Value, f: &mut impl FnMut(&mut String)) {
     match v {
         Value::String(s) => f(s),
         Value::Array(a) => a.iter_mut().for_each(|v| visit_names(v, f)),

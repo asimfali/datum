@@ -1,0 +1,18 @@
+{
+  "name": "Rectangle",
+  "description": "A rectangle by two opposite corners",
+  "anchors": ["a", "c"],
+  "points": {"a": [0, 0], "b": [1, 0], "c": [1, 1], "d": [0, 1]},
+  "lines": {
+    "bottom": {"from": "a", "to": "b"},
+    "right": {"from": "b", "to": "c"},
+    "top": {"from": "c", "to": "d"},
+    "left": {"from": "d", "to": "a"}
+  },
+  "constraints": [
+    {"type": "horizontal", "line": "bottom"},
+    {"type": "vertical", "line": "right"},
+    {"type": "horizontal", "line": "top"},
+    {"type": "vertical", "line": "left"}
+  ]
+}

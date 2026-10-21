@@ -191,6 +191,8 @@ struct Viewer {
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
+    /// The built-in sketch templates.
+    library: Vec<Json>,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -221,6 +223,7 @@ impl Viewer {
             edits: BTreeMap::new(),
             sketch: None,
             entering: None,
+            library: crate::templates::library(),
             picking: false,
             face: None,
         };
@@ -394,6 +397,19 @@ impl Viewer {
                     }
                 }
             });
+            // Templates: pieces of sketch from the library, placed by a click per anchor.
+            ui.horizontal_wrapped(|ui| {
+                for t in &self.library {
+                    let name = t["name"].as_str().unwrap_or("template");
+                    let on = sk.draft.tool == Tool::Template && sk.draft.template.as_ref().is_some_and(|c| c["name"] == t["name"]);
+                    let hint = format!("{} (R: the first)", t["description"].as_str().unwrap_or(""));
+                    if ui.selectable_label(on, name).on_hover_text(hint).clicked() {
+                        sk.draft.cancel();
+                        sk.draft.tool = Tool::Template;
+                        sk.draft.template = Some(t.clone());
+                    }
+                }
+            });
             ui.horizontal(|ui| {
                 ui.checkbox(&mut sk.draft.construction, "Construction");
                 ui.checkbox(&mut sk.names, "Names");
@@ -417,8 +433,9 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · Del removes · Esc clears, then leaves",
+                Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
                 Tool::Dimension => "Pick what to dimension, then click where the dimension goes; type the value, Enter",
+                Tool::Template => "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · Esc ends",
                 _ => "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc ends the command",
             });
             done = ui.button("Done").clicked();
@@ -700,6 +717,28 @@ impl Viewer {
                 sk.draft.cancel();
                 sk.draft.tool = t;
             }
+            if ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none())
+                && let Some(t) = self.library.first()
+            {
+                sk.draft.cancel();
+                sk.draft.tool = Tool::Template;
+                sk.draft.template = Some(t.clone());
+            }
+            // Copy: the selection as a template, on the clipboard as JSON. Paste: a template
+            // from the clipboard (a copy, or one written by hand or by an agent), placed by clicks.
+            let (copy, paste) = ui.input(|i| {
+                let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
+                let paste = i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None });
+                (copy, paste)
+            });
+            if copy && let Some(t) = sk.copy() {
+                ui.ctx().copy_text(serde_json::to_string_pretty(&t).unwrap_or_default());
+            }
+            if let Some(t) = paste.and_then(|p| serde_json::from_str::<Json>(&p).ok()).filter(|t| !crate::templates::anchors(t).is_empty()) {
+                sk.draft.cancel();
+                sk.draft.tool = Tool::Template;
+                sk.draft.template = Some(t);
+            }
             if ui.input(|i| i.key_pressed(egui::Key::T)) && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                 sk.draft.tangent = !sk.draft.tangent;
             }
@@ -978,6 +1017,7 @@ mod tests {
             edits,
             sketch: None,
             entering: None,
+            library: crate::templates::library(),
             picking: false,
             face: None,
         };

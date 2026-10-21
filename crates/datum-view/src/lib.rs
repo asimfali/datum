@@ -9,5 +9,6 @@ mod draw;
 pub mod render;
 pub mod scene;
 mod sketch;
+mod templates;
 
 pub use app::run;
