@@ -90,6 +90,12 @@
     "pins": "d9cdb53129b97334522846d183551ae2dfefb1a2eab11a86d95a8f986c377ad5",
     "plate": "39072f351ebabf2590a8622e909a436ef31a2ff434450244e43a6f5c805421d9"
   },
+  "projected_hole.json": {
+    "drilled": "3f184e30166c21a1a013a6ccccbebc65a9ea16a17f2a88c27d211f82099d01ac",
+    "hole_sketch": "95c6a784005dd3e0cfa9100d2b79f8ed30181f6b627e100ae5e7e8f926f86813",
+    "outline": "06cd082b95f669ee1552a7d89237fed1ac4d26f596b0e6373547895787f8ba6a",
+    "plate": "5238b0f1a829e3322fb4581a991f584721d22c8a0080dd871a61bfec26f5df81"
+  },
   "rolled_perforation.json": {
     "blank": "03f80cdcc5065a1828dce851ff104facd72bacd5089e8a88b760f8886c8d6afc",
     "holes": "f1e475f06656acee1786841b9f2c847ab938730f025347bd11a5cf11d4148877",

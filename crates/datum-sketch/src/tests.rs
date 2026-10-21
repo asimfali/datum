@@ -25,7 +25,7 @@ fn rectangle(w: f64, h: f64, scale: f64) -> Sketch {
         s.lines.insert(n.into(), Line { from: f.into(), to: t.into(), construction: false });
     }
     s.constraints = vec![
-        Constraint::Fix { point: "a".into() },
+        Constraint::Fix { point: "a".into(), at: None },
         Constraint::Horizontal { line: "bottom".into() },
         Constraint::Horizontal { line: "top".into() },
         Constraint::Vertical { line: "left".into() },
@@ -138,7 +138,7 @@ fn same_result_on_any_thread_count() {
         s.points.extend(r.points);
         s.lines.extend(r.lines);
         s.constraints.extend(r.constraints.into_iter().map(|c| match c {
-            Constraint::Fix { point } => Constraint::Fix { point: format!("{point}{k}") },
+            Constraint::Fix { point, at } => Constraint::Fix { point: format!("{point}{k}"), at },
             Constraint::Horizontal { line } => Constraint::Horizontal { line: format!("{line}{k}") },
             Constraint::Vertical { line } => Constraint::Vertical { line: format!("{line}{k}") },
             Constraint::Length { line, value } => Constraint::Length { line: format!("{line}{k}"), value },

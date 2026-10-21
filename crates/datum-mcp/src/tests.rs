@@ -79,3 +79,28 @@ fn render_returns_a_png() {
         assert!(err, "{text}");
     }
 }
+
+/// What an agent does to dimension from a model edge: find the face, list its edges, project one.
+#[test]
+fn query_edges_and_project_one() {
+    let mut s = Server::default();
+    let add = json!({"name": "plate", "op": "prism", "polygon": [[0, 0], [10, 0], [10, 5], [0, 5]], "z0": 0, "z1": 2});
+    tool(&mut s, "execute", json!({"command": "add", "params": add}));
+    let (_, q) = tool(&mut s, "query_topology", json!({"name": "plate", "normal": [0, 0, 1]}));
+    let top = q["faces"][0]["id"].as_str().unwrap().to_string();
+    let (err, e) = tool(&mut s, "execute", json!({"command": "query_edges", "params": {"name": "plate", "face": top}}));
+    assert!(!err && e["count"] == 4, "{e}");
+    let bottom = e["edges"].as_array().unwrap().iter().find(|e| e["from"]["point"][1] == 0.0 && e["to"]["point"][1] == 0.0).unwrap();
+    let sketch = json!({"name": "mark", "op": "sketch", "inputs": ["plate"], "face": top, "project": {"edge": {"id": bottom["id"]}},
+        "sketch": {"points": {"m": [4, 1]}, "constraints": [{"type": "point_line", "point": "m", "line": "edge", "value": 2}],
+                   "measures": {"along": {"type": "distance", "points": ["edge.start", "m"]}}}});
+    let (err, r) = tool(&mut s, "execute", json!({"command": "add", "params": sketch}));
+    assert!(!err && r["failed"] == json!([]), "{r}");
+    let (_, m) = tool(&mut s, "inspect_model", json!({}));
+    let mark = &m["features"][1]["status"]["sketch"];
+    assert_eq!(mark["points"]["m"][1], 2.0, "{mark}");
+    assert!(mark["measures"]["along"].as_f64().unwrap() > 0.0, "{mark}");
+    // The session wrote down where the edge was when the sketch was added.
+    let at = &m["features"][1]["project"]["edge"]["at"];
+    assert_eq!(at.as_array().map(Vec::len), Some(2), "{}", m["features"][1]);
+}

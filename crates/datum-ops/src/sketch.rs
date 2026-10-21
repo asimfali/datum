@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 
 use datum_brep::{Body, BrepError, Curve, Cylinder, Development, Ix, ProfileArc, ProfileLoop, Region, Surface, TopoId, extrude};
-use datum_math::{Rigid, Vec2, Vec3};
-use datum_sketch::{Arc, Circle, Line, Sketch, Solved, solve};
+use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
+use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, solve};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -16,6 +16,19 @@ pub struct SketchPlane {
     pub origin: Vec3,
     pub x_axis: Vec3,
     pub normal: Vec3,
+}
+
+/// An edge or vertex of the input body projected into a sketch (D87), by ID. `at` keeps where
+/// its points were when the sketch was drawn, in sketch coordinates: a vertex's point; a line's
+/// start and end; an arc's centre, start and end. Sides (a point above a line, a circle inside or
+/// outside another) are decided there, so a projection moved by an edit upstream does not flip the
+/// sketch. Empty: drawn where the projection is now.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Projection {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub at: Vec<Vec2>,
 }
 
 /// A solved sketch in its place: the value of a sketch feature.
@@ -33,6 +46,8 @@ pub struct Placed {
     pub circles: BTreeMap<String, Circle>,
     /// The face the sketch lies on, if it was placed on one.
     pub face: Option<TopoId>,
+    /// Where each projection's points stand now, in the order of [`Projection::at`].
+    pub projected: BTreeMap<String, Vec<Vec2>>,
     pub hash: [u8; 32],
 }
 
@@ -170,6 +185,105 @@ pub(crate) fn find_face(body: &Body, id: &str) -> Result<(usize, TopoId), BrepEr
     Ok((f, id))
 }
 
+/// Whether `a` and `b` lie along one line, exactly: every 2 × 2 minor of the pair is zero.
+fn parallel(a: Vec3, b: Vec3) -> bool {
+    let minor = |i: usize, j: usize| {
+        let (a, b) = (a.to_array(), b.to_array());
+        orient2d(Vec2::new(0.0, 0.0), Vec2::new(a[i], a[j]), Vec2::new(b[i], b[j]))
+    };
+    [minor(0, 1), minor(1, 2), minor(0, 2)] == [Sign::Zero; 3]
+}
+
+/// `sketch` with edges and vertices of `body` projected onto its plane (D87): each entry of
+/// `project` names an edge or vertex by ID. A vertex becomes a fixed point of that name. An edge
+/// becomes a construction line or arc of that name between fixed points `<name>.start` (its
+/// lower-ID vertex) and `<name>.end`, an arc around a fixed `<name>.center`. The sketch's own
+/// constraints tie to them like to any point or line. `normal` is the sketch plane's normal as
+/// given (not made unit), so an arc's axis is tested along it exactly: an arc seen at a slant
+/// would be an ellipse, which a sketch does not have.
+/// Also returns where each projection's points stand.
+fn projected(
+    sketch: &Sketch,
+    body: &Body,
+    frame: &[Vec3; 4],
+    normal: Vec3,
+    project: &BTreeMap<String, Projection>,
+) -> Result<(Sketch, BTreeMap<String, Vec<Vec2>>), BrepError> {
+    let mut s = sketch.clone();
+    let mut now = BTreeMap::new();
+    let [o, x, y, _] = *frame;
+    let flat = |p: Vec3| Vec2::new((p - o).dot(x), (p - o).dot(y));
+    for (name, proj) in project {
+        let mut points: Vec<(String, Vec2)> = Vec::with_capacity(3);
+        // The point drawn at its `at`, or where it is; fixed where it is.
+        let mut add = |s: &mut Sketch, n: String, p: Vec3| -> Result<String, BrepError> {
+            let p = flat(p);
+            let drawn = match proj.at.len() {
+                0 => p,
+                _ => *proj.at.get(points.len()).ok_or_else(|| BrepError::Sketch(format!("projection `{name}`: `at` has too few points")))?,
+            };
+            if s.points.insert(n.clone(), drawn).is_some() {
+                return Err(BrepError::Sketch(format!("the sketch already has a point `{n}`")));
+            }
+            s.constraints.push(Constraint::Fix { point: n.clone(), at: Some(p) });
+            points.push((n.clone(), p));
+            Ok(n)
+        };
+        let id = u128::from_str_radix(&proj.id, 16)
+            .map(TopoId)
+            .map_err(|_| BrepError::Sketch(format!("projection `{name}`: `{}` is not an ID", proj.id)))?;
+        if let Ok(v) = body.vertices().binary_search_by_key(&id, |v| v.id) {
+            add(&mut s, name.clone(), body.vertices()[v].point)?;
+            check_at(name, proj, &points)?;
+            now.insert(name.clone(), points.into_iter().map(|(_, p)| p).collect());
+            continue;
+        }
+        let e = body
+            .edges()
+            .binary_search_by_key(&id, |e| e.id)
+            .map_err(|_| BrepError::LostReference(format!("projection `{name}`: no edge or vertex {id:?} in the input body")))?;
+        let edge = &body.edges()[e];
+        let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
+        let (pa, pb) = (body.point(a), body.point(b));
+        if s.lines.contains_key(name) || s.arcs.contains_key(name) || s.circles.contains_key(name) {
+            return Err(BrepError::Sketch(format!("the sketch already has a curve `{name}`")));
+        }
+        match body.edge_curve(edge) {
+            None => {
+                if flat(pa) == flat(pb) {
+                    return Err(BrepError::Degenerate(format!("projection `{name}`: the edge is across the sketch plane; project a vertex")));
+                }
+                let (from, to) = (add(&mut s, format!("{name}.start"), pa)?, add(&mut s, format!("{name}.end"), pb)?);
+                s.lines.insert(name.clone(), Line { from, to, construction: true });
+            }
+            Some(Curve::Arc(arc)) if parallel(arc.axis, normal) => {
+                let center = add(&mut s, format!("{name}.center"), arc.center)?;
+                let (start, end) = (add(&mut s, format!("{name}.start"), pa)?, add(&mut s, format!("{name}.end"), pb)?);
+                // The edge turns counterclockwise about its axis from its lower-ID vertex.
+                let (from, to) = if arc.axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
+                s.arcs.insert(name.clone(), Arc { center, from, to, construction: true });
+            }
+            Some(Curve::Arc(_)) => {
+                return Err(BrepError::Unsupported(format!("projection `{name}`: the arc is not parallel to the sketch plane")));
+            }
+            Some(Curve::Rolled { .. }) => {
+                return Err(BrepError::Unsupported(format!("projection `{name}`: an edge of a cut in a rolled sheet")));
+            }
+        }
+        check_at(name, proj, &points)?;
+        now.insert(name.clone(), points.into_iter().map(|(_, p)| p).collect());
+    }
+    Ok((s, now))
+}
+
+fn check_at(name: &str, proj: &Projection, points: &[(String, Vec2)]) -> Result<(), BrepError> {
+    if proj.at.is_empty() || proj.at.len() == points.len() {
+        Ok(())
+    } else {
+        Err(BrepError::Sketch(format!("projection `{name}`: `at` has {} points, the projection {}", proj.at.len(), points.len())))
+    }
+}
+
 /// The frame with normal `z` and X axis along `x` projected into the plane.
 fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
     let bad = || BrepError::Degenerate("the sketch plane needs a normal and an X axis not along it".into());
@@ -183,17 +297,37 @@ fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
 /// the world axis least along the normal, projected: on a top face sketch coordinates are world X
 /// and Y. The frame follows the face's plane only. On a cylinder face of a rolled sheet the
 /// sketch lies in the sheet's development (see [`Developed`]) with its neutral layer at
-/// `k_factor` of the thickness. A face gone after a rebuild is a lost reference.
-pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, &str)>, k_factor: Option<f64>) -> Result<Placed, BrepError> {
+/// `k_factor` of the thickness. With `project`, edges and vertices of `body` are projected into
+/// the sketch (see [`projected`]). A face, edge or vertex gone after a rebuild is a lost
+/// reference.
+pub fn place(
+    sketch: &Sketch,
+    plane: Option<&SketchPlane>,
+    body: Option<&Body>,
+    face: Option<&str>,
+    k_factor: Option<f64>,
+    project: &BTreeMap<String, Projection>,
+) -> Result<Placed, BrepError> {
     let mut developed = None;
+    // The plane's normal as given, for projections.
+    let mut normal = Vec3::new(0.0, 0.0, 1.0);
+    let face = match (body, face) {
+        (Some(b), Some(f)) => Some((b, f)),
+        (None, Some(_)) => return Err(BrepError::Sketch("a sketch on a face takes the body as its input and the face ID as `face`".into())),
+        _ => None,
+    };
     let (frame, on) = match (plane, face) {
         (Some(_), Some(_)) => return Err(BrepError::Sketch("give a plane or a face, not both".into())),
-        (Some(p), None) => (frame(p.origin, p.x_axis, p.normal)?, None),
+        (Some(p), None) => {
+            normal = p.normal;
+            (frame(p.origin, p.x_axis, p.normal)?, None)
+        }
         (None, Some((body, id))) => {
             let (f, id) = find_face(body, id)?;
             match body.faces()[f].surface {
                 Surface::Plane(_) if k_factor.is_some() => return Err(BrepError::Sketch("`k_factor` is for a sketch on a cylinder face".into())),
                 Surface::Plane(plane) => {
+                    normal = plane.normal;
                     let n = unit(plane.normal).ok_or_else(|| BrepError::Degenerate("the face has no normal".into()))?;
                     let axes = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)];
                     let x = axes.into_iter().min_by(|a, b| a.dot(n).abs().total_cmp(&b.dot(n).abs())).unwrap_or(axes[0]);
@@ -210,6 +344,17 @@ pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, 
             }
         }
         (None, None) => ([Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)], None),
+    };
+    let with_projections;
+    let mut now = BTreeMap::new();
+    let sketch = match body {
+        _ if project.is_empty() => sketch,
+        None => return Err(BrepError::Sketch("a projection takes the body as the sketch's input".into())),
+        Some(_) if developed.is_some() => return Err(BrepError::Unsupported("projections into a sketch on a cylinder face".into())),
+        Some(b) => {
+            (with_projections, now) = projected(sketch, b, &frame, normal, project)?;
+            &with_projections
+        }
     };
     let solved = solve(sketch).map_err(|e| BrepError::Sketch(e.to_string()))?;
     let mut h = blake3::Hasher::new();
@@ -257,6 +402,7 @@ pub fn place(sketch: &Sketch, plane: Option<&SketchPlane>, face: Option<(&Body, 
     }
     Ok(Placed {
         face: on,
+        projected: now,
         developed: developed.map(Box::new),
         frame,
         solved,
