@@ -70,7 +70,7 @@ Priorities come from real engineering pain points ([`PAINS.md`](PAINS.md)), not 
 | M9 | Stamping: nonlinear sheet deformation as a graph node (FEM), flat pattern with thinning and springback |
 | M10 | Robust editing: reference recovery on real scenarios; Booleans with curved faces; coplanar cases |
 
-Later: drawings through CADCraft (a 2D CAD on the same stack), assemblies, wiring and piping with bills of materials, lightweight models for the shop floor, fillets, data exchange.
+Later: the agent as a co-engineer in the window (named faces, two-way highlighting, reviewable proposals); associative drawings and parts lists driven by JSON standards; assemblies and variants; a project-wide PDF book; wiring and piping; GLB for the shop floor; fillets. How Datum works with engineers, agents and documentation is described in [`VISION.md`](VISION.md) (in Russian).
 
 ## Contributing
 
@@ -86,6 +86,7 @@ Datum is built in the open, and every kind of help counts:
 
 Design documents are in Russian:
 
+- [`VISION.md`](VISION.md): how Datum works with engineers, agents and documentation
 - [`ROADMAP.md`](ROADMAP.md): the development plan
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): goals, data structures, algorithms, decision log
 - [`CLAUDE.md`](CLAUDE.md): project rules (determinism, geometry, code style)
