@@ -13,6 +13,7 @@ use egui_wgpu::wgpu;
 use serde_json::{Value as Json, json};
 
 use crate::camera::Camera;
+use crate::draw::Tool;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
@@ -371,8 +372,31 @@ impl Viewer {
                     ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}: {e}"));
                 }
             }
-            ui.checkbox(&mut sk.names, "Names");
-            ui.weak("Drag a blue point · click to select, Shift to add · Del removes · Esc clears, then leaves");
+            ui.horizontal_wrapped(|ui| {
+                for (tool, label, hint) in [
+                    (Tool::Select, "Select", "Select and drag (Esc)"),
+                    (Tool::Line, "Line", "Lines in a chain; T or a drag from its end: a tangent arc (L)"),
+                    (Tool::Arc, "Arc", "Centre, start, end (A)"),
+                    (Tool::Circle, "Circle", "Centre, then a point on it (C)"),
+                    (Tool::Point, "Point", "A point (P)"),
+                ] {
+                    if ui.selectable_label(sk.draft.tool == tool, label).on_hover_text(hint).clicked() {
+                        sk.draft.cancel();
+                        sk.draft.tool = tool;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut sk.draft.construction, "Construction");
+                ui.checkbox(&mut sk.names, "Names");
+                if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
+                    ui.checkbox(&mut sk.draft.tangent, "Tangent arc (T)");
+                }
+            });
+            ui.weak(match sk.draft.tool {
+                Tool::Select => "Drag a blue point · click to select, Shift to add · Del removes · Esc clears, then leaves",
+                _ => "Click to place · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc cancels, then back to Select",
+            });
             done = ui.button("Done").clicked();
             ui.separator();
         }
@@ -568,6 +592,7 @@ impl Viewer {
         let painter = ui.painter().with_clip_rect(rect);
         if let Some(sk) = &self.sketch {
             sk.paint(&painter, rect);
+            sk.draft.paint(sk, &painter, rect);
         }
         // The face a click would sketch on, tinted.
         if let (true, Some((b, id))) = (self.picking, self.face) {
@@ -625,6 +650,60 @@ impl Viewer {
         let h = f64::from(rect.height());
         let mut sent = Vec::new();
         let mut leave = false;
+        let typing = ui.ctx().egui_wants_keyboard_input();
+        if !typing {
+            let tool = ui.input(|i| {
+                [(egui::Key::L, Tool::Line), (egui::Key::A, Tool::Arc), (egui::Key::C, Tool::Circle), (egui::Key::P, Tool::Point)]
+                    .into_iter()
+                    .find(|(k, _)| i.key_pressed(*k) && i.modifiers.is_none())
+                    .map(|(_, t)| t)
+            });
+            if let Some(t) = tool {
+                sk.draft.cancel();
+                sk.draft.tool = t;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::T)) && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
+                sk.draft.tangent = !sk.draft.tangent;
+            }
+        }
+        if sk.draft.tool != Tool::Select {
+            let free = ui.input(|i| i.modifiers.shift);
+            let mut draft = std::mem::take(&mut sk.draft);
+            // As in Inventor: a drag from the chain's end draws a tangent arc.
+            if r.drag_started_by(egui::PointerButton::Primary)
+                && let (Some(c), Some(o)) = (&draft.chain, ui.input(|i| i.pointer.press_origin()))
+                && c.last.is_some()
+            {
+                let (x, y) = sk.camera.offset(c.at, h);
+                let at = rect.center() + egui::vec2(x as f32, y as f32);
+                draft.tangent |= o.distance(at) <= 10.0;
+            }
+            if let Some((x, y)) = offset {
+                draft.track(sk, x, y, h, free);
+            }
+            if (r.clicked() || (draft.tangent && r.drag_stopped_by(egui::PointerButton::Primary)))
+                && let Some(patch) = draft.click(sk)
+            {
+                sent.push(Request::Command("edit_sketch", sk.apply(patch)));
+            }
+            if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
+                let d = r.drag_delta();
+                sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
+            }
+            if !typing && ui.input(|i| i.key_pressed(egui::Key::Escape)) && !draft.cancel() {
+                draft.tool = Tool::Select;
+            }
+            sk.draft = draft;
+            let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
+            if scroll != 0.0 {
+                let (x, y) = offset.unwrap_or((0.0, 0.0));
+                sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
+            }
+            for r in sent {
+                self.send(r);
+            }
+            return;
+        }
         if sk.drag.is_none() {
             let painter = ui.painter();
             sk.hover = offset.and_then(|(x, y)| sk.hit(x, y, h, |t| crate::sketch::label_size(painter, t)));

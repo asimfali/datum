@@ -12,6 +12,7 @@ use datum_ops::Placed;
 use serde_json::{Value as Json, json};
 
 use crate::camera::SketchCamera;
+use crate::draw::{Draft, face_edges};
 
 /// What the background thread knows of the sketch being edited: its feature's ID (for
 /// `Op::eval`) and its input body (a face it lies on, edges it projects).
@@ -52,6 +53,8 @@ pub struct SketchEdit {
     pub drag: Option<String>,
     /// Show element names.
     pub names: bool,
+    /// The drawing tool and what it has drawn so far.
+    pub draft: Draft,
 }
 
 /// Pixels within which the cursor is on a point, and on a curve or a label.
@@ -102,6 +105,7 @@ impl SketchEdit {
             selected: Vec::new(),
             drag: None,
             names: true,
+            draft: Draft::default(),
         };
         s.solve();
         s.fit(scene);
@@ -156,7 +160,23 @@ impl SketchEdit {
     /// extrusion would sweep), triangulated as a face of a body one unit thick.
     fn set(&mut self, placed: Result<Placed, String>) {
         self.fill = placed.as_ref().ok().and_then(|p| fill(self.context.id, p)).unwrap_or_default();
+        // The face the sketch lies on, to snap to and project from.
+        self.draft.face = match (&self.context.input, &placed) {
+            (Some(v), Ok(p)) => v.body().map(|b| face_edges(b, p)).unwrap_or_default(),
+            _ => Vec::new(),
+        };
         self.placed = placed;
+    }
+
+    /// Applies an `edit_sketch` patch drawn in the window at once, without waiting for the
+    /// model, and returns it as the command's parameters.
+    pub fn apply(&mut self, mut patch: serde_json::Map<String, Json>) -> Json {
+        if let Some(fields) = self.json.as_object_mut() {
+            let _ = datum_model::patch_sketch(fields, &patch);
+        }
+        self.solve();
+        patch.insert("name".into(), json!(self.feature));
+        Json::Object(patch)
     }
 
     /// The sketch solved and placed, with point `pin.0` held at `pin.1` if given (a drag).
@@ -278,7 +298,7 @@ impl SketchEdit {
 
     /// The points of a curve of the placed sketch, in order, as polyline points: a line its two
     /// ends, an arc or circle chords (64 a turn).
-    fn curve_points(p: &Placed, name: &str) -> Option<Vec<[f64; 2]>> {
+    pub(crate) fn curve_points(p: &Placed, name: &str) -> Option<Vec<[f64; 2]>> {
         let at = |n: &str| p.solved.points.get(n).map(|v| [v.x, v.y]);
         if let Some(l) = p.lines.get(name) {
             return Some(vec![at(&l.from)?, at(&l.to)?]);
@@ -304,7 +324,7 @@ impl SketchEdit {
     }
 
     /// The middle of a curve: of a line between its ends, of an arc or circle on it.
-    fn middle(p: &Placed, name: &str) -> Option<[f64; 2]> {
+    pub(crate) fn middle(p: &Placed, name: &str) -> Option<[f64; 2]> {
         let v = Self::curve_points(p, name)?;
         Some(match v[..] {
             [a, b] => [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5],
