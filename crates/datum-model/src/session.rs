@@ -18,13 +18,19 @@ pub struct Session {
     evaluator: Evaluator,
     last: Evaluation,
     path: Option<PathBuf>,
+    /// Models before each change, the latest last; and those undone, for `redo`.
+    undo: Vec<Graph>,
+    redo: Vec<Graph>,
 }
+
+/// Changes `undo` goes back through.
+const UNDO_DEPTH: usize = 100;
 
 impl Default for Session {
     fn default() -> Self {
         let evaluator = Evaluator::default();
         let last = evaluator.evaluate(&Graph::default());
-        Self { graph: Graph::default(), evaluator, last, path: None }
+        Self { graph: Graph::default(), evaluator, last, path: None, undo: Vec::new(), redo: Vec::new() }
     }
 }
 
@@ -130,8 +136,10 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "edit_sketch",
         description: "Change part of a sketch feature `name` without rewriting it. `points`, `lines`, `arcs`, `circles`, `measures` \
-                      and `project` are merged by name: an entry replaces the one of that name, null removes it. `add_constraints` \
-                      appends constraints; `remove_constraints` removes those equal to the ones given (as `inspect` lists them).",
+                      and `project` are merged by name: an entry replaces the one of that name, null removes it, and with it \
+                      whatever refers to it (the lines through a removed point, the constraints and dimensions naming either: \
+                      listed in `also_removed`). `add_constraints` appends constraints; `remove_constraints` removes those equal \
+                      to the ones given (as `inspect` lists them).",
         params: || {
             let map = json!({"type": "object", "additionalProperties": true});
             let list = json!({"type": "array", "items": {"type": "object"}});
@@ -162,10 +170,45 @@ const COMMANDS: &[Command] = &[
                 }
                 Ok(())
             };
+            // Names removed, and the projections among them (their points go too).
+            let removed_in = |key: &str| -> Vec<String> {
+                p.get(key)
+                    .and_then(Value::as_object)
+                    .map(|m| m.iter().filter(|(_, v)| v.is_null()).map(|(n, _)| n.clone()).collect())
+                    .unwrap_or_default()
+            };
+            let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures"].iter().flat_map(|k| removed_in(k)).collect();
+            let projections = removed_in("project");
+            gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
             merge(&mut op, "project", p.get("project"))?;
             let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
             for key in ["points", "lines", "arcs", "circles", "measures"] {
                 merge(sketch, key, p.get(key))?;
+            }
+            let mut also = Vec::new();
+            let refers = |v: &Value, gone: &[String]| {
+                let mut v = v.clone();
+                let mut found = false;
+                visit_names(&mut v, &mut |n| found |= gone.contains(n));
+                found
+            };
+            // Curves on removed points, then dimensions on anything removed.
+            for key in ["lines", "arcs", "circles", "measures"] {
+                if let Some(m) = sketch.get_mut(key).and_then(Value::as_object_mut) {
+                    let doomed: Vec<String> = m.iter().filter(|(_, v)| refers(v, &gone)).map(|(n, _)| n.clone()).collect();
+                    for n in doomed {
+                        m.remove(&n);
+                        also.push(format!("{key}: {n}"));
+                        gone.push(n);
+                    }
+                }
+            }
+            if let Some(c) = sketch.get_mut("constraints").and_then(Value::as_array_mut) {
+                let before = c.len();
+                c.retain(|c| !refers(c, &gone));
+                if c.len() < before {
+                    also.push(format!("constraints: {}", before - c.len()));
+                }
             }
             let constraints = sketch.entry("constraints").or_insert_with(|| json!([]));
             let constraints = constraints.as_array_mut().ok_or("`constraints` is not a list")?;
@@ -182,7 +225,9 @@ const COMMANDS: &[Command] = &[
             }
             let op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
-            Ok(s.rebuild_recording(ix))
+            let mut reply = s.rebuild_recording(ix);
+            reply["also_removed"] = json!(also);
+            Ok(reply)
         },
     },
     Command {
@@ -214,6 +259,13 @@ const COMMANDS: &[Command] = &[
             Ok(s.rebuild())
         },
     },
+    Command {
+        name: "undo",
+        description: "Go back one change of the model: one command, whatever it changed.",
+        params: no_params,
+        run: |s, _| s.step(true),
+    },
+    Command { name: "redo", description: "Make a change undone again.", params: no_params, run: |s, _| s.step(false) },
     Command {
         name: "inspect",
         description: "The feature history with each feature's status: volume, element counts and hash, or why it failed.",
@@ -360,7 +412,40 @@ impl Session {
             Value::Null => &empty,
             _ => return Err("params must be an object".into()),
         };
-        (c.run)(self, p)
+        if matches!(c.name, "undo" | "redo") {
+            return (c.run)(self, p);
+        }
+        // A command changes the model whole or not at all: one that fails halfway leaves it as
+        // it was, and each change is one step of `undo`.
+        let before = self.graph.clone();
+        let result = (c.run)(self, p);
+        match (&result, self.graph == before) {
+            (_, true) => {}
+            (Err(_), false) => {
+                self.graph = before;
+                self.rebuild();
+            }
+            (Ok(_), false) if matches!(c.name, "new" | "open") => {
+                self.undo.clear();
+                self.redo.clear();
+            }
+            (Ok(_), false) => {
+                self.undo.push(before);
+                if self.undo.len() > UNDO_DEPTH {
+                    self.undo.remove(0);
+                }
+                self.redo.clear();
+            }
+        }
+        result
+    }
+
+    /// One step back (`undo`) or forward.
+    fn step(&mut self, back: bool) -> Result<Value, String> {
+        let (from, to) = if back { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+        let g = from.pop().ok_or(if back { "nothing to undo" } else { "nothing to redo" })?;
+        to.push(std::mem::replace(&mut self.graph, g));
+        Ok(self.rebuild())
     }
 
     fn replace(&mut self, g: Graph, path: Option<PathBuf>) -> Value {
@@ -529,7 +614,9 @@ impl Session {
                                 // A free point: "plane", or the direction it slides along.
                                 let free: Map<String, Value> =
                                     s.solved.free.iter().map(|(n, d)| (n.clone(), d.map_or(json!("plane"), |d| json!([d.x, d.y])))).collect();
-                                json!({"sketch": {"dof": s.solved.dof, "free": free, "points": points, "measures": s.solved.measures}, "hash": hash})
+                                let [o, x, y, z] = s.frame;
+                                let frame = json!({"origin": o, "x": x, "y": y, "normal": z});
+                                json!({"sketch": {"dof": s.solved.dof, "free": free, "points": points, "measures": s.solved.measures, "frame": frame}, "hash": hash})
                             }
                             Feature::Flat(f) => {
                                 let [lines, arcs, circles] = f.counts();
@@ -566,24 +653,6 @@ impl Session {
 /// of `project`, and every string naming an element. Expressions (`value`, `degrees`,
 /// `diameter`), constraint kinds and IDs are left alone.
 fn rename_names(op: &mut Map<String, Value>, renamed: &impl Fn(&str) -> Option<String>) {
-    fn walk(v: &mut Value, renamed: &impl Fn(&str) -> Option<String>) {
-        match v {
-            Value::String(s) => {
-                if let Some(n) = renamed(s) {
-                    *s = n;
-                }
-            }
-            Value::Array(a) => a.iter_mut().for_each(|v| walk(v, renamed)),
-            Value::Object(m) => {
-                for (k, v) in m.iter_mut() {
-                    if !["type", "value", "degrees", "diameter", "id"].contains(&k.as_str()) {
-                        walk(v, renamed);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
     let rekey = |m: &mut Value| {
         if let Some(m) = m.as_object_mut() {
             *m = std::mem::take(m).into_iter().map(|(k, v)| (renamed(&k).unwrap_or(k), v)).collect();
@@ -600,7 +669,28 @@ fn rename_names(op: &mut Map<String, Value>, renamed: &impl Fn(&str) -> Option<S
                 }
             }
         }
-        walk(sketch, renamed);
+        visit_names(sketch, &mut |s| {
+            if let Some(n) = renamed(s) {
+                *s = n;
+            }
+        });
+    }
+}
+
+/// Calls `f` on every string in a part of a sketch's JSON that names an element: all of them but
+/// expressions (`value`, `degrees`, `diameter`), constraint kinds and IDs.
+fn visit_names(v: &mut Value, f: &mut impl FnMut(&mut String)) {
+    match v {
+        Value::String(s) => f(s),
+        Value::Array(a) => a.iter_mut().for_each(|v| visit_names(v, f)),
+        Value::Object(m) => {
+            for (k, v) in m.iter_mut() {
+                if !["type", "value", "degrees", "diameter", "id"].contains(&k.as_str()) {
+                    visit_names(v, f);
+                }
+            }
+        }
+        _ => {}
     }
 }
 

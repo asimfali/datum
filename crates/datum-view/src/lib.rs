@@ -6,5 +6,6 @@ pub mod camera;
 pub mod capture;
 pub mod render;
 pub mod scene;
+mod sketch;
 
 pub use app::run;

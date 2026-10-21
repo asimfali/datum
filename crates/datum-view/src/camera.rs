@@ -97,6 +97,15 @@ impl Camera {
         (r, r.cross(f), f)
     }
 
+    /// The ray through a point of the picture, `x` and `y` from −1 to 1 (right, up), of width /
+    /// height `aspect`: from the eye, a unit direction.
+    pub fn ray(&self, x: f64, y: f64, aspect: f64) -> (Vec3, Vec3) {
+        let (r, u, f) = self.axes();
+        let t = libm::tan(self.fov * 0.5);
+        let d = f + r * (x * t * aspect) + u * (y * t);
+        (self.eye(), d * (1.0 / d.dot(d).sqrt()))
+    }
+
     /// View-projection matrix (column-major, wgpu clip space with depth 0..1) for points given
     /// relative to `anchor`, and the eye relative to it. The near and far planes enclose a
     /// sphere of `radius` around the target.
@@ -122,6 +131,76 @@ impl Camera {
                 m[col * 4 + row] = *v as f32;
             }
         }
+        (m, [eye.x as f32, eye.y as f32, eye.z as f32])
+    }
+}
+
+/// The view of a sketch being edited: straight at its plane, orthographic, so that lengths on
+/// the screen are true. Everything in sketch coordinates; `frame` is the sketch's origin and X,
+/// Y, Z axes.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SketchCamera {
+    pub frame: [Vec3; 4],
+    /// The sketch point at the middle of the picture.
+    pub center: [f64; 2],
+    /// Sketch units from the middle of the picture to its top.
+    pub half_height: f64,
+}
+
+impl SketchCamera {
+    /// Sketch units per pixel in a picture `height` pixels tall.
+    pub fn per_pixel(&self, height: f64) -> f64 {
+        2.0 * self.half_height / height.max(1.0)
+    }
+
+    /// The sketch point at pixel offset `(dx, dy)` from the middle of a picture `height` tall
+    /// (y down, as on the screen), and back.
+    pub fn at(&self, dx: f64, dy: f64, height: f64) -> [f64; 2] {
+        let k = self.per_pixel(height);
+        [self.center[0] + dx * k, self.center[1] - dy * k]
+    }
+
+    pub fn offset(&self, p: [f64; 2], height: f64) -> (f64, f64) {
+        let k = self.per_pixel(height);
+        ((p[0] - self.center[0]) / k, (self.center[1] - p[1]) / k)
+    }
+
+    /// Moves the picture with a drag of `dx, dy` pixels.
+    pub fn pan(&mut self, dx: f64, dy: f64, height: f64) {
+        let k = self.per_pixel(height);
+        self.center = [self.center[0] - dx * k, self.center[1] + dy * k];
+    }
+
+    /// Zooms by `factor` (< 1: closer), keeping the sketch point under pixel offset `(dx, dy)`
+    /// where it is.
+    pub fn zoom_at(&mut self, factor: f64, dx: f64, dy: f64, height: f64) {
+        let before = self.at(dx, dy, height);
+        self.half_height = (self.half_height * factor).max(f64::MIN_POSITIVE);
+        let after = self.at(dx, dy, height);
+        self.center = [self.center[0] + before[0] - after[0], self.center[1] + before[1] - after[1]];
+    }
+
+    /// Orthographic view-projection matrix (as [`Camera::matrices`]) for points relative to
+    /// `anchor`, the scene within `radius` of it, and an eye far along the plane's normal.
+    pub fn matrices(&self, anchor: Vec3, aspect: f64, radius: f64) -> ([f32; 16], [f32; 3]) {
+        let [o, x, y, z] = self.frame;
+        let c = o + x * self.center[0] + y * self.center[1] - anchor;
+        // Depth: the camera looks down −Z; the whole scene lies within `reach` of the plane.
+        let reach = (z.dot(c).abs() + radius) * 1.01 + f64::MIN_POSITIVE;
+        let (sx, sy) = (1.0 / (self.half_height * aspect.max(1e-6)), 1.0 / self.half_height);
+        let rows = [
+            [x.x * sx, x.y * sx, x.z * sx, -x.dot(c) * sx],
+            [y.x * sy, y.y * sy, y.z * sy, -y.dot(c) * sy],
+            [-z.x * 0.5 / reach, -z.y * 0.5 / reach, -z.z * 0.5 / reach, z.dot(c) * 0.5 / reach + 0.5],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        let mut m = [0f32; 16];
+        for (row, values) in rows.iter().enumerate() {
+            for (col, v) in values.iter().enumerate() {
+                m[col * 4 + row] = *v as f32;
+            }
+        }
+        let eye = c + z * (reach * 100.0);
         (m, [eye.x as f32, eye.y as f32, eye.z as f32])
     }
 }
