@@ -55,6 +55,10 @@ pub struct SketchEdit {
     pub names: bool,
     /// The drawing tool and what it has drawn so far.
     pub draft: Draft,
+    /// The field by the cursor (a value typed while drawing, a dimension's value), and a new
+    /// dimension that would over-constrain the sketch.
+    pub field: Option<crate::dims::Field>,
+    pub conflict: Option<crate::dims::Conflict>,
 }
 
 /// Pixels within which the cursor is on a point, and on a curve or a label.
@@ -106,6 +110,8 @@ impl SketchEdit {
             drag: None,
             names: true,
             draft: Draft::default(),
+            field: None,
+            conflict: None,
         };
         s.solve();
         s.fit(scene);
@@ -424,20 +430,7 @@ impl SketchEdit {
     /// What is under pixel offset `(dx, dy)` from the middle of a picture `height` tall: a point
     /// first, then a label, then a curve.
     pub fn hit(&self, dx: f64, dy: f64, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Pick> {
-        let Ok(p) = &self.placed else { return None };
-        let near = |q: [f64; 2]| {
-            let (x, y) = self.camera.offset(q, height);
-            libm::hypot(x - dx, y - dy)
-        };
-        let point = p
-            .solved
-            .points
-            .iter()
-            .map(|(n, v)| (near([v.x, v.y]), n))
-            .filter(|(d, _)| *d <= NEAR_POINT)
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, n)| n.clone());
-        if let Some(n) = point {
+        if let Some(n) = self.point_at(dx, dy, height) {
             return Some(self.projection_of(&n).map_or(Pick::Point(n), Pick::Projection));
         }
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
@@ -445,18 +438,40 @@ impl SketchEdit {
                 return Some(l.pick);
             }
         }
-        let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys());
+        self.curve_at(dx, dy, height).map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
+    }
+
+    /// The point under pixel offset `(dx, dy)`, by its own name (a projection's too).
+    pub fn point_at(&self, dx: f64, dy: f64, height: f64) -> Option<String> {
+        let p = self.placed.as_ref().ok()?;
+        p.solved
+            .points
+            .iter()
+            .map(|(n, v)| {
+                let (x, y) = self.camera.offset([v.x, v.y], height);
+                (libm::hypot(x - dx, y - dy), n)
+            })
+            .filter(|(d, _)| *d <= NEAR_POINT)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, n)| n.clone())
+    }
+
+    /// The line, arc or circle under pixel offset `(dx, dy)`, by its own name.
+    pub fn curve_at(&self, dx: f64, dy: f64, height: f64) -> Option<String> {
+        let p = self.placed.as_ref().ok()?;
         let distance = |n: &String| {
             let pts = Self::curve_points(p, n)?;
             let screen: Vec<(f64, f64)> = pts.iter().map(|q| self.camera.offset(*q, height)).collect();
             screen.windows(2).map(|w| segment_distance((dx, dy), w[0], w[1])).min_by(f64::total_cmp)
         };
-        let curve = curves
+        p.lines
+            .keys()
+            .chain(p.arcs.keys())
+            .chain(p.circles.keys())
             .filter_map(|n| Some((distance(n)?, n)))
             .filter(|(d, _)| *d <= NEAR_CURVE)
             .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, n)| n.clone());
-        curve.map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
+            .map(|(_, n)| n.clone())
     }
 
     /// Draws the sketch over the view in `rect`.
