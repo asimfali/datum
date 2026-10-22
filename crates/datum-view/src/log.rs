@@ -1,6 +1,7 @@
 //! The log of what went wrong, for testers to send: panics with their backtrace and refused
 //! commands, appended to `datum.log` beside the program, or in the temporary folder where the
-//! program's own is not writable.
+//! program's own is not writable. The window's start and its GPU are logged too: a log that
+//! stops at "opening the window" means the process died in the GPU driver.
 
 use std::io::Write;
 use std::path::PathBuf;

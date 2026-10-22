@@ -23,11 +23,21 @@ use crate::sketch::{Context, SketchEdit};
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     crate::log::install();
-    let options = eframe::NativeOptions {
+    crate::log::write("opening the window");
+    let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
         viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
+    // On Windows, DirectX 12 with OpenGL for GPUs without it, not Vulkan: a laptop's Vulkan
+    // driver killed the process with an access violation that no log can catch (D103).
+    // `WGPU_BACKEND` still chooses.
+    if cfg!(windows)
+        && wgpu::Backends::from_env().is_none()
+        && let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
+    {
+        setup.instance_descriptor.backends = wgpu::Backends::DX12 | wgpu::Backends::GL;
+    }
     eframe::run_native(
         "Datum",
         options,
@@ -35,6 +45,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let rs = cc.wgpu_render_state.as_ref().ok_or("the window has no wgpu renderer")?;
             let info = rs.adapter.get_info();
             let adapter = format!("{} ({:?})", info.name, info.backend);
+            crate::log::write(&format!("window on {adapter}"));
             Ok(Box::new(Viewer::new(path, cc.egui_ctx.clone(), adapter)))
         }),
     )
