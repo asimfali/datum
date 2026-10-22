@@ -380,16 +380,13 @@ impl SketchEdit {
                     let t = (d[0] * w[0] + d[1] * w[1]) / (d[0] * d[0] + d[1] * d[1]);
                     Some(mid(q, [a[0] + d[0] * t, a[1] + d[1] * t]))
                 }
-                "angle" => line(&c["lines"][0]).map(|(a, _)| a),
+                "angle" => Some(angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?)),
                 "radius" => c["arc"].as_str().and_then(|n| Self::middle(p, n)),
                 _ => None,
             }
         };
-        let prefix = |c: &Json| match c["type"].as_str() {
-            Some("radius") => "R",
-            Some("angle") => "∠",
-            _ => "",
-        };
+        // An angle reads by its °: the window's font has no ∠.
+        let prefix = |c: &Json| if c["type"] == "radius" { "R" } else { "" };
         let mut out = Vec::new();
         for (k, c) in self.json["sketch"]["constraints"].as_array().into_iter().flatten().enumerate() {
             let value = c.get("value").or_else(|| c.get("degrees"));
@@ -697,6 +694,35 @@ fn short(x: f64) -> String {
     if s == "-0" { "0".into() } else { s.into() }
 }
 
+/// Where an angle's label stands: inside the angle, off the point where the two lines meet,
+/// along the bisector toward their middles; between their middles if they are parallel.
+fn angle_spot(l: ([f64; 2], [f64; 2]), m: ([f64; 2], [f64; 2])) -> [f64; 2] {
+    let mid = |(a, b): ([f64; 2], [f64; 2])| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    let (ml, mm) = (mid(l), mid(m));
+    let (d, e) = ([l.1[0] - l.0[0], l.1[1] - l.0[1]], [m.1[0] - m.0[0], m.1[1] - m.0[1]]);
+    let det = d[0] * e[1] - d[1] * e[0];
+    if det == 0.0 {
+        return mid((ml, mm));
+    }
+    let t = ((m.0[0] - l.0[0]) * e[1] - (m.0[1] - l.0[1]) * e[0]) / det;
+    let x = [l.0[0] + d[0] * t, l.0[1] + d[1] * t];
+    // Unit rays from the vertex toward each line's middle; their sum is the bisector.
+    let ray = |q: [f64; 2]| {
+        let v = [q[0] - x[0], q[1] - x[1]];
+        let n = libm::hypot(v[0], v[1]);
+        if n > 0.0 { [v[0] / n, v[1] / n] } else { [0.0, 0.0] }
+    };
+    let (u, w) = (ray(ml), ray(mm));
+    let b = [u[0] + w[0], u[1] + w[1]];
+    let n = libm::hypot(b[0], b[1]);
+    if n == 0.0 {
+        return x;
+    }
+    // A quarter of the shorter line off the vertex.
+    let r = 0.25 * libm::hypot(d[0], d[1]).min(libm::hypot(e[0], e[1]));
+    [x[0] + b[0] / n * r, x[1] + b[1] / n * r]
+}
+
 /// Whether segment `a`–`b` meets the box `lo`–`hi` (Liang–Barsky clipping): what a frame
 /// dragged to the left touches.
 fn segment_meets_box(a: (f64, f64), b: (f64, f64), lo: (f64, f64), hi: (f64, f64)) -> bool {
@@ -914,5 +940,14 @@ mod tests {
         assert_eq!(got, [Pick::Curve("left".into()), Pick::Curve("right".into()), Pick::Measure("height".into())]);
         // The same frame to the right: nothing lies wholly inside it.
         assert!(e.framed([b, a], 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
+    }
+
+    /// An angle's label stands inside the angle, by the point where its lines meet.
+    #[test]
+    fn angle_labels_stand_by_the_vertex() {
+        // Lines meeting at (10, 0): one toward (0, 0), one toward (10, 8).
+        let at = angle_spot(([0.0, 0.0], [10.0, 0.0]), ([10.0, 0.0], [10.0, 8.0]));
+        assert!((at[0] - (10.0 - 2.0 * libm::sqrt(0.5))).abs() < 1e-9 && (at[1] - 2.0 * libm::sqrt(0.5)).abs() < 1e-9, "{at:?}");
+        assert_eq!(angle_spot(([0.0, 0.0], [4.0, 0.0]), ([0.0, 2.0], [4.0, 2.0])), [2.0, 1.0]);
     }
 }
