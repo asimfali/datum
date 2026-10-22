@@ -523,6 +523,20 @@ impl SketchEdit {
         out
     }
 
+    /// Follows the frame being dragged to `offset`; when the drag has `stopped`, ends it and
+    /// gives what it selects.
+    pub fn frame_to(&mut self, offset: Option<(f64, f64)>, stopped: bool, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Vec<Pick>> {
+        let f = self.frame.as_mut()?;
+        if let Some(o) = offset {
+            f[1] = o;
+        }
+        if !stopped {
+            return None;
+        }
+        let f = self.frame.take()?;
+        Some(self.framed(f, height, label_size))
+    }
+
     /// Draws the selection frame being dragged: solid to the right, dashed to the left.
     pub fn paint_frame(&self, painter: &egui::Painter, rect: egui::Rect) {
         let Some(f) = self.frame else { return };

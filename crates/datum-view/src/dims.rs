@@ -131,25 +131,22 @@ impl SketchEdit {
         true
     }
 
-    /// The dimension tool taken up with a selection: the selection is what it dimensions, at
-    /// once (two lines: their angle), or two points wait for the click where it goes.
-    pub fn dimension_selected(&mut self) {
-        let picks: Option<Vec<Pick2>> = self
-            .selected
-            .iter()
-            .map(|s| match s {
-                Pick::Point(n) => Some(Pick2::Point(n.clone())),
-                Pick::Curve(n) => Some(Pick2::Curve(n.clone())),
-                _ => None,
-            })
-            .collect();
-        let Some(picks) = picks.filter(|p| matches!(p.len(), 1 | 2)) else { return };
-        let Some(at) = self.spot(&picks) else { return };
-        if self.dimension_now(&picks, at) {
-            self.selected.clear();
-        } else if matches!(picks[..], [Pick2::Point(_), Pick2::Point(_)]) {
-            self.draft.picks = picks;
-            self.selected.clear();
+    /// What a frame dragged in the dimension tool dimensions: its curves, or its points if it
+    /// has no curve. One or two curves, or a point and a line, open the field at once (two
+    /// lines: their angle); two points are returned, to wait for the click where it goes.
+    pub fn dimension_framed(&mut self, framed: &[Pick]) -> Vec<Pick2> {
+        let curves: Vec<Pick2> = framed.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(Pick2::Curve(n.clone())) } else { None }).collect();
+        let picks = if curves.is_empty() {
+            framed.iter().filter_map(|p| if let Pick::Point(n) = p { Some(Pick2::Point(n.clone())) } else { None }).collect()
+        } else {
+            curves
+        };
+        if !matches!(picks.len(), 1 | 2) {
+            return Vec::new();
+        }
+        match self.spot(&picks) {
+            Some(at) if !self.dimension_now(&picks, at) && matches!(picks[..], [Pick2::Point(_), Pick2::Point(_)]) => picks,
+            _ => Vec::new(),
         }
     }
 
@@ -344,7 +341,7 @@ mod tests {
     }
 
     /// A click on a line dimensions it at once; two points wait for where the dimension goes.
-    /// Two lines selected before the tool is taken up: their angle.
+    /// Two lines framed: their angle.
     #[test]
     fn curves_and_selections_dimension_at_once() {
         let mut e = editor();
@@ -353,16 +350,15 @@ mod tests {
         e.field = None;
         assert!(!e.dimension_now(&[Pick2::Point("a".into()), Pick2::Point("c".into())], [10.0, 0.0]));
         assert!(e.field.is_none());
-        e.selected = vec![Pick::Curve("bottom".into()), Pick::Curve("left".into())];
-        e.dimension_selected();
+        // A frame around two sides, their corners in it too: the angle of the sides.
+        let framed = [Pick::Point("a".into()), Pick::Curve("bottom".into()), Pick::Curve("left".into()), Pick::Point("b".into())];
+        assert!(e.dimension_framed(&framed).is_empty());
         let f = e.field.as_ref().unwrap();
         assert_eq!(f.entry, Entry::New { constraint: json!({"type": "angle", "lines": ["bottom", "left"]}), key: "degrees" });
-        assert!(e.selected.is_empty());
         e.field = None;
-        e.selected = vec![Pick::Point("a".into()), Pick::Point("c".into())];
-        e.dimension_selected();
+        // Two points framed wait for where the dimension goes.
+        assert_eq!(e.dimension_framed(&[Pick::Point("a".into()), Pick::Point("c".into())]).len(), 2);
         assert!(e.field.is_none());
-        assert_eq!(e.draft.picks.len(), 2);
     }
 
     /// A double click on a dimension changes its value in place; on a circle, its diameter.
