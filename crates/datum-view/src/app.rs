@@ -452,12 +452,15 @@ impl Viewer {
                     (
                         Tool::Dimension,
                         "Dimension",
-                        "Pick a line, an arc, a circle, two points, a point and a line or two lines; then click where it goes (D)",
+                        "Click a line, an arc or a circle; a point, then a line; two points, then where it goes. Two lines selected first: their angle (D)",
                     ),
                 ] {
                     if ui.selectable_label(sk.draft.tool == tool, label).on_hover_text(hint).clicked() {
                         sk.draft.cancel();
                         sk.draft.tool = tool;
+                        if tool == Tool::Dimension {
+                            sk.dimension_selected();
+                        }
                     }
                 }
             });
@@ -498,7 +501,7 @@ impl Viewer {
             }
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
-                Tool::Dimension => "Pick what to dimension, then click where the dimension goes; type the value, Enter",
+                Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: select two lines, then D",
                 Tool::Template => "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · Esc ends",
                 _ => "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc ends the command",
             });
@@ -780,6 +783,9 @@ impl Viewer {
             if let Some(t) = tool {
                 sk.draft.cancel();
                 sk.draft.tool = t;
+                if t == Tool::Dimension {
+                    sk.dimension_selected();
+                }
             }
             if ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none())
                 && let Some(t) = self.library.first()
@@ -861,22 +867,20 @@ impl Viewer {
                 {
                     // An element picked, or the place where the dimension goes.
                     let pick = sk.point_at(x, y, h).map(Pick2::Point).or_else(|| sk.curve_at(x, y, h).map(Pick2::Curve));
+                    let at = sk.camera.at(x, y, h);
                     match pick {
-                        Some(p) if draft.picks.len() < 2 && !draft.picks.contains(&p) => draft.picks.push(p),
+                        Some(p) if draft.picks.len() < 2 && !draft.picks.contains(&p) => {
+                            draft.picks.push(p);
+                            // A curve, or a point and a line: dimensioned at once.
+                            if sk.dimension_now(&draft.picks, at) {
+                                draft.picks.clear();
+                            }
+                        }
                         Some(_) => {}
+                        // Where the dimension between two points goes.
                         None => {
-                            let at = sk.camera.at(x, y, h);
-                            let circle = match &draft.picks[..] {
-                                [Pick2::Curve(c)] if sk.placed.as_ref().is_ok_and(|p| p.circles.contains_key(c)) => Some(c.clone()),
-                                _ => None,
-                            };
-                            match circle {
-                                Some(c) => sk.edit_label(&Pick::Curve(c), at),
-                                None => {
-                                    if let Some((c, key, now)) = sk.dimension(&draft.picks, at) {
-                                        sk.ask(c, key, now, at);
-                                    }
-                                }
+                            if let Some((c, key, now)) = sk.dimension(&draft.picks, at) {
+                                sk.ask(c, key, now, at);
                             }
                             draft.picks.clear();
                         }
