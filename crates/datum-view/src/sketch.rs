@@ -51,6 +51,9 @@ pub struct SketchEdit {
     pub selected: Vec<Pick>,
     /// The point being dragged.
     pub drag: Option<String>,
+    /// The selection frame being dragged: where it began and where the cursor is, pixels from
+    /// the middle of the view.
+    pub frame: Option<[(f64, f64); 2]>,
     /// Show element names.
     pub names: bool,
     /// The drawing tool and what it has drawn so far.
@@ -108,6 +111,7 @@ impl SketchEdit {
             hover: None,
             selected: Vec::new(),
             drag: None,
+            frame: None,
             names: true,
             draft: Draft::default(),
             field: None,
@@ -476,6 +480,68 @@ impl SketchEdit {
             .map(|(_, n)| n.clone())
     }
 
+    /// What frame `f` selects in a picture `height` tall, as in Inventor: dragged to the right,
+    /// what lies wholly inside it; to the left, whatever it touches. Points, curves and
+    /// dimensions of this sketch; projections stay out.
+    pub fn framed(&self, f: [(f64, f64); 2], height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Vec<Pick> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        let crossing = f[1].0 < f[0].0;
+        let (lo, hi) = ((f[0].0.min(f[1].0), f[0].1.min(f[1].1)), (f[0].0.max(f[1].0), f[0].1.max(f[1].1)));
+        let inside = |q: (f64, f64)| (lo.0..=hi.0).contains(&q.0) && (lo.1..=hi.1).contains(&q.1);
+        let mut out = Vec::new();
+        let drawn = self.drawn();
+        for (n, v) in &p.solved.points {
+            if drawn.contains_key(n) && inside(self.camera.offset([v.x, v.y], height)) {
+                out.push(Pick::Point(n.clone()));
+            }
+        }
+        for n in p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()) {
+            if self.projection_of(n).is_some() {
+                continue;
+            }
+            let Some(pts) = Self::curve_points(p, n) else { continue };
+            let screen: Vec<(f64, f64)> = pts.iter().map(|q| self.camera.offset(*q, height)).collect();
+            let taken = if crossing {
+                screen.iter().any(|q| inside(*q)) || screen.windows(2).any(|w| segment_meets_box(w[0], w[1], lo, hi))
+            } else {
+                screen.iter().all(|q| inside(*q))
+            };
+            if taken {
+                out.push(Pick::Curve(n.clone()));
+            }
+        }
+        for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
+            if !matches!(l.pick, Pick::Constraint(_) | Pick::Measure(_)) {
+                continue;
+            }
+            let (a, b) = ((x - w * 0.5, y - h * 0.5), (x + w * 0.5, y + h * 0.5));
+            let taken = if crossing { a.0 <= hi.0 && b.0 >= lo.0 && a.1 <= hi.1 && b.1 >= lo.1 } else { inside(a) && inside(b) };
+            if taken {
+                out.push(l.pick);
+            }
+        }
+        out
+    }
+
+    /// Draws the selection frame being dragged: solid to the right, dashed to the left.
+    pub fn paint_frame(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let Some(f) = self.frame else { return };
+        let at = |q: (f64, f64)| rect.center() + egui::vec2(q.0 as f32, q.1 as f32);
+        let r = egui::Rect::from_two_pos(at(f[0]), at(f[1]));
+        let (fill, stroke) = if f[1].0 < f[0].0 {
+            (egui::Color32::from_rgba_unmultiplied(40, 160, 60, 30), egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 140, 60)))
+        } else {
+            (egui::Color32::from_rgba_unmultiplied(40, 100, 220, 30), egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 100, 220)))
+        };
+        painter.rect_filled(r, 0.0, fill);
+        if f[1].0 < f[0].0 {
+            let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            painter.extend(egui::Shape::dashed_line(&c, stroke, 6.0, 4.0));
+        } else {
+            painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+    }
+
     /// Draws the sketch over the view in `rect`.
     pub fn paint(&self, painter: &egui::Painter, rect: egui::Rect) {
         let Ok(p) = &self.placed else { return };
@@ -615,6 +681,28 @@ fn short(x: f64) -> String {
     let s = format!("{:.6}", x);
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.into() }
+}
+
+/// Whether segment `a`–`b` meets the box `lo`–`hi` (Liang–Barsky clipping): what a frame
+/// dragged to the left touches.
+fn segment_meets_box(a: (f64, f64), b: (f64, f64), lo: (f64, f64), hi: (f64, f64)) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (q, r) in [(-dx, a.0 - lo.0), (dx, hi.0 - a.0), (-dy, a.1 - lo.1), (dy, hi.1 - a.1)] {
+        if q == 0.0 {
+            if r < 0.0 {
+                return false;
+            }
+        } else {
+            let t = r / q;
+            if q < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    t0 <= t1
 }
 
 /// Distance from `p` to the segment `a`–`b`.
@@ -792,5 +880,25 @@ mod tests {
         let (x, y) = e.camera.offset([12.0, 2.0], 600.0);
         assert_eq!(e.hit(x + 2.0, y, 600.0, |_| (0.0, 0.0)), Some(Pick::Curve("right".into())));
         assert_eq!(e.hit(x + 40.0, y, 600.0, |_| (0.0, 0.0)), None);
+    }
+
+    /// A frame dragged to the right takes what is wholly inside; to the left, what it touches.
+    #[test]
+    fn frames_select_inside_or_touched() {
+        let e = edit();
+        let at = |q: [f64; 2]| e.camera.offset(q, 600.0);
+        let size = |_: &str| (0.0, 0.0);
+        // Around the bottom edge only, to the right: the bottom and its corners.
+        let (a, b) = (at([-1.0, -1.0]), at([13.0, 1.0]));
+        let mut got = e.framed([a, b], 600.0, size);
+        got.retain(|p| !matches!(p, Pick::Constraint(_) | Pick::Measure(_)));
+        assert_eq!(got, [Pick::Point("a".into()), Pick::Point("b".into()), Pick::Curve("bottom".into())]);
+        // A thin frame across the middle, to the left: the two sides it cuts, no corner, and
+        // the height's label on the left side.
+        let (a, b) = (at([13.0, 1.5]), at([-1.0, 2.5]));
+        let got = e.framed([a, b], 600.0, size);
+        assert_eq!(got, [Pick::Curve("left".into()), Pick::Curve("right".into()), Pick::Measure("height".into())]);
+        // The same frame to the right: nothing lies wholly inside it.
+        assert!(e.framed([b, a], 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
     }
 }
