@@ -486,6 +486,8 @@ impl Viewer {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut sk.draft.construction, "Construction");
                 ui.checkbox(&mut sk.names, "Names");
+                ui.checkbox(&mut sk.constraints, "Constraints")
+                    .on_hover_text("Badges of the geometric constraints: click one to select it, Del removes it");
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                     ui.checkbox(&mut sk.draft.tangent, "Tangent arc (T)");
                 }

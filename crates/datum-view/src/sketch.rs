@@ -55,6 +55,8 @@ pub struct SketchEdit {
     pub frame: Option<SelectFrame>,
     /// Show element names.
     pub names: bool,
+    /// Show the badges of geometric constraints.
+    pub constraints: bool,
     /// The drawing tool and what it has drawn so far.
     pub draft: Draft,
     /// The field by the cursor (a value typed while drawing, a dimension's value), and a new
@@ -76,6 +78,132 @@ impl SelectFrame {
     /// Whether it takes whatever it touches, rather than only what lies wholly inside.
     fn crossing(&self) -> bool {
         self.touching || self.ends[1].0 < self.ends[0].0
+    }
+}
+
+/// What a geometric constraint's badge shows: drawn in lines, as the window's font has few of
+/// the symbols (∥, ⊥).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Glyph {
+    Horizontal,
+    Vertical,
+    Parallel,
+    Perpendicular,
+    Collinear,
+    Equal,
+    Fix,
+    Coincident,
+    Tangent,
+    On,
+    Midpoint,
+    Symmetric,
+    Concentric,
+}
+
+/// A geometric constraint's badge by one of the elements it ties: the constraint, its glyph,
+/// and where it stands, pixels from the middle of the view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Badge {
+    pub pick: Pick,
+    pub glyph: Glyph,
+    pub at: (f64, f64),
+}
+
+/// A badge's side, pixels.
+const BADGE: f64 = 14.0;
+
+/// The glyph of a geometric constraint and the elements its badges stand by; None for a
+/// dimension, which has its label.
+fn glyph_of(c: &Json) -> Option<(Glyph, Vec<String>)> {
+    let names = |key: &str| -> Vec<String> {
+        match &c[key] {
+            Json::String(n) => vec![n.clone()],
+            Json::Array(a) => a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let line_or_points = || if c["line"].is_string() { names("line") } else { names("points") };
+    let (g, on) = match c["type"].as_str()? {
+        "horizontal" => (Glyph::Horizontal, line_or_points()),
+        "vertical" => (Glyph::Vertical, line_or_points()),
+        "parallel" => (Glyph::Parallel, names("lines")),
+        "perpendicular" => (Glyph::Perpendicular, names("lines")),
+        "collinear" => (Glyph::Collinear, names("lines")),
+        "equal" => (Glyph::Equal, names("lines")),
+        "equal_radius" => (Glyph::Equal, names("curves")),
+        "fix" => (Glyph::Fix, names("point")),
+        "coincident" => (Glyph::Coincident, names("points").into_iter().take(1).collect()),
+        "tangent" => (Glyph::Tangent, names("curves")),
+        "on" => (Glyph::On, names("point")),
+        "midpoint" => (Glyph::Midpoint, names("point")),
+        "symmetric" => (Glyph::Symmetric, names("points")),
+        "concentric" => (Glyph::Concentric, names("curves")),
+        _ => return None,
+    };
+    Some((g, on))
+}
+
+/// Draws glyph `g` in a badge centred at `c`.
+fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colour: egui::Color32) {
+    let s = 4.5;
+    let p = |x: f32, y: f32| c + egui::vec2(x * s, y * s);
+    let stroke = egui::Stroke::new(1.3, colour);
+    let line = |a: (f32, f32), b: (f32, f32)| {
+        painter.line_segment([p(a.0, a.1), p(b.0, b.1)], stroke);
+    };
+    match g {
+        Glyph::Horizontal => line((-1.0, 0.0), (1.0, 0.0)),
+        Glyph::Vertical => line((0.0, -1.0), (0.0, 1.0)),
+        Glyph::Parallel => {
+            line((-0.8, 1.0), (-0.1, -1.0));
+            line((0.1, 1.0), (0.8, -1.0));
+        }
+        Glyph::Perpendicular => {
+            line((-1.0, 1.0), (1.0, 1.0));
+            line((0.0, 1.0), (0.0, -1.0));
+        }
+        Glyph::Collinear => {
+            for x in [-1.0, -0.2, 0.6] {
+                line((x, 0.0), (x + 0.4, 0.0));
+            }
+        }
+        Glyph::Equal => {
+            line((-1.0, -0.4), (1.0, -0.4));
+            line((-1.0, 0.4), (1.0, 0.4));
+        }
+        Glyph::Fix => {
+            painter.rect_stroke(egui::Rect::from_two_pos(p(-0.8, -0.1), p(0.8, 1.0)), 0.0, stroke, egui::StrokeKind::Middle);
+            line((-0.5, -0.1), (-0.5, -0.8));
+            line((-0.5, -0.8), (0.5, -0.8));
+            line((0.5, -0.8), (0.5, -0.1));
+        }
+        Glyph::Coincident => {
+            painter.rect_filled(egui::Rect::from_center_size(c, egui::vec2(s, s)), 0.0, colour);
+        }
+        Glyph::Tangent => {
+            painter.circle_stroke(p(0.0, 0.35), 0.65 * s, stroke);
+            line((-1.0, -0.3), (1.0, -0.3));
+        }
+        Glyph::On => {
+            painter.circle_stroke(c, 0.8 * s, stroke);
+            painter.circle_filled(p(0.0, -0.8), 0.35 * s, colour);
+        }
+        Glyph::Midpoint => {
+            line((-0.9, 0.7), (0.9, 0.7));
+            line((0.9, 0.7), (0.0, -0.8));
+            line((0.0, -0.8), (-0.9, 0.7));
+        }
+        Glyph::Symmetric => {
+            for x in [-1.0, 1.0] {
+                line((x, -1.0), (x, 1.0));
+                line((x, -1.0), (x * 0.5, -1.0));
+                line((x, 1.0), (x * 0.5, 1.0));
+            }
+        }
+        Glyph::Concentric => {
+            painter.circle_stroke(c, 0.95 * s, stroke);
+            painter.circle_stroke(c, 0.4 * s, stroke);
+        }
     }
 }
 
@@ -128,6 +256,7 @@ impl SketchEdit {
             drag: None,
             frame: None,
             names: true,
+            constraints: true,
             draft: Draft::default(),
             field: None,
             conflict: None,
@@ -446,10 +575,13 @@ impl SketchEdit {
     }
 
     /// What is under pixel offset `(dx, dy)` from the middle of a picture `height` tall: a point
-    /// first, then a label, then a curve.
+    /// first, then a constraint's badge, then a label, then a curve.
     pub fn hit(&self, dx: f64, dy: f64, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Pick> {
         if let Some(n) = self.point_at(dx, dy, height) {
             return Some(self.projection_of(&n).map_or(Pick::Point(n), Pick::Projection));
+        }
+        if let Some(b) = self.badges(height).into_iter().find(|b| (dx - b.at.0).abs() <= BADGE * 0.5 && (dy - b.at.1).abs() <= BADGE * 0.5) {
+            return Some(b.pick);
         }
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
             if (dx - x).abs() <= w * 0.5 && (dy - y).abs() <= h * 0.5 {
@@ -530,6 +662,45 @@ impl SketchEdit {
             let taken = if crossing { a.0 <= hi.0 && b.0 >= lo.0 && a.1 <= hi.1 && b.1 >= lo.1 } else { inside(a) && inside(b) };
             if taken {
                 out.push(l.pick);
+            }
+        }
+        out
+    }
+
+    /// The badges of the geometric constraints in a picture `height` tall: by a line, off it a
+    /// third of the way along, on its left; by a point, above and to its left (its name is
+    /// below and to the right); by an arc or circle, off its middle. More on one element line
+    /// up beside the first.
+    pub fn badges(&self, height: f64) -> Vec<Badge> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        if !self.constraints {
+            return Vec::new();
+        }
+        let px = |n: &str| p.solved.points.get(n).map(|v| self.camera.offset([v.x, v.y], height));
+        let step = BADGE + 2.0;
+        let mut taken: BTreeMap<String, f64> = BTreeMap::new();
+        let mut out = Vec::new();
+        for (k, c) in self.json["sketch"]["constraints"].as_array().into_iter().flatten().enumerate() {
+            let Some((glyph, on)) = glyph_of(c) else { continue };
+            for n in on {
+                let i = taken.entry(n.clone()).or_default();
+                let shift = *i * step;
+                *i += 1.0;
+                let at = if let Some(l) = p.lines.get(&n) {
+                    let (Some(a), Some(b)) = (px(&l.from), px(&l.to)) else { continue };
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let len = libm::hypot(dx, dy);
+                    let (ux, uy) = if len > 0.0 { (dx / len, dy / len) } else { (1.0, 0.0) };
+                    (a.0 + dx / 3.0 + uy * 12.0 + ux * shift, a.1 + dy / 3.0 - ux * 12.0 + uy * shift)
+                } else if let Some(q) = px(&n) {
+                    (q.0 - 14.0 - shift, q.1 - 14.0)
+                } else if let Some(m) = Self::middle(p, &n) {
+                    let q = self.camera.offset(m, height);
+                    (q.0 + 14.0 + shift, q.1 - 14.0)
+                } else {
+                    continue;
+                };
+                out.push(Badge { pick: Pick::Constraint(k), glyph, at });
             }
         }
         out
@@ -667,6 +838,13 @@ impl SketchEdit {
             if self.names && self.drawn().contains_key(n) {
                 painter.text(at + egui::vec2(5.0, 5.0), egui::Align2::LEFT_TOP, n, egui::FontId::proportional(11.0), NAME);
             }
+        }
+        for b in self.badges(height) {
+            let c = if marked(&b.pick) { SELECTED } else { NAME };
+            let r = egui::Rect::from_center_size(rect.center() + egui::vec2(b.at.0 as f32, b.at.1 as f32), egui::vec2(BADGE as f32, BADGE as f32));
+            painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
+            painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
+            paint_glyph(painter, r.center(), b.glyph, c);
         }
         for (l, at, size) in laid {
             let c = if self.selected.contains(&l.pick) { SELECTED } else { DIMENSION };
@@ -968,5 +1146,24 @@ mod tests {
         let at = angle_spot(([0.0, 0.0], [10.0, 0.0]), ([10.0, 0.0], [10.0, 8.0]));
         assert!((at[0] - (10.0 - 2.0 * libm::sqrt(0.5))).abs() < 1e-9 && (at[1] - 2.0 * libm::sqrt(0.5)).abs() < 1e-9, "{at:?}");
         assert_eq!(angle_spot(([0.0, 0.0], [4.0, 0.0]), ([0.0, 2.0], [4.0, 2.0])), [2.0, 1.0]);
+    }
+
+    /// Geometric constraints have badges by what they tie; a click on one picks the constraint.
+    #[test]
+    fn constraints_have_badges() {
+        let e = edit();
+        let glyphs: Vec<(Pick, Glyph)> = e.badges(600.0).into_iter().map(|b| (b.pick, b.glyph)).collect();
+        assert_eq!(
+            glyphs,
+            [
+                (Pick::Constraint(0), Glyph::Fix),
+                (Pick::Constraint(1), Glyph::Horizontal),
+                (Pick::Constraint(2), Glyph::Vertical),
+                (Pick::Constraint(3), Glyph::Horizontal),
+                (Pick::Constraint(4), Glyph::Vertical),
+            ]
+        );
+        let b = &e.badges(600.0)[2];
+        assert_eq!(e.hit(b.at.0 + 3.0, b.at.1, 600.0, |_| (0.0, 0.0)), Some(Pick::Constraint(2)));
     }
 }
