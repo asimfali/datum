@@ -820,8 +820,19 @@ impl Viewer {
             let (x, y) = sk.camera.offset(f.at, h);
             let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
             egui::Area::new(egui::Id::new("datum_sketch_field")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(110.0));
-                r.request_focus();
+                let id = egui::Id::new("datum_sketch_field_text");
+                let fresh = !ui.memory(|m| m.has_focus(id));
+                let mut out = egui::TextEdit::singleline(&mut f.text).id(id).desired_width(110.0).show(ui);
+                // A dimension's value comes selected, to be typed over; a value typed while
+                // drawing goes on from its first digit.
+                if fresh && f.entry != Entry::Draw {
+                    out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(f.text.chars().count()),
+                    )));
+                    out.state.store(ui.ctx(), id);
+                }
+                out.response.request_focus();
                 field_done = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
             });
             // While drawing, the value sizes what is drawn as it is typed.
