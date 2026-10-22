@@ -17,8 +17,8 @@ use crate::dims::{Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
-use crate::sketch::Pick;
 use crate::sketch::{Context, SketchEdit};
+use crate::sketch::{Pick, SelectFrame};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -877,13 +877,14 @@ impl Viewer {
             let placing =
                 r.clicked() || (draft.tangent && r.drag_stopped_by(egui::PointerButton::Primary)) || (field_done.0 && draft.typed.is_some());
             if draft.tool == Tool::Dimension {
-                // A frame from an empty place picks what to dimension: two lines, their angle.
+                // A frame from an empty place, either way, picks what it touches to dimension: two
+                // lines, their angle.
                 if r.drag_started_by(egui::PointerButton::Primary)
                     && let Some(o) = ui.input(|i| i.pointer.press_origin())
                 {
                     let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
                     if sk.point_at(x, y, h).is_none() && sk.curve_at(x, y, h).is_none() {
-                        sk.frame = Some([(x, y); 2]);
+                        sk.frame = Some(SelectFrame { ends: [(x, y); 2], touching: true });
                     }
                 }
                 if let Some(framed) = sk.frame_to(offset, r.drag_stopped(), h, |t| crate::sketch::label_size(ui.painter(), t)) {
@@ -956,7 +957,7 @@ impl Viewer {
             let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
             sk.hover = sk.hit(x, y, h, |t| crate::sketch::label_size(ui.painter(), t));
             if !sk.start_drag() && sk.hover.is_none() {
-                sk.frame = Some([(x, y); 2]);
+                sk.frame = Some(SelectFrame { ends: [(x, y); 2], touching: false });
             }
         }
         if let Some(framed) = sk.frame_to(offset, r.drag_stopped(), h, |t| crate::sketch::label_size(ui.painter(), t)) {

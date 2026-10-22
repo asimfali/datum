@@ -51,9 +51,8 @@ pub struct SketchEdit {
     pub selected: Vec<Pick>,
     /// The point being dragged.
     pub drag: Option<String>,
-    /// The selection frame being dragged: where it began and where the cursor is, pixels from
-    /// the middle of the view.
-    pub frame: Option<[(f64, f64); 2]>,
+    /// The selection frame being dragged.
+    pub frame: Option<SelectFrame>,
     /// Show element names.
     pub names: bool,
     /// The drawing tool and what it has drawn so far.
@@ -62,6 +61,22 @@ pub struct SketchEdit {
     /// dimension that would over-constrain the sketch.
     pub field: Option<crate::dims::Field>,
     pub conflict: Option<crate::dims::Conflict>,
+}
+
+/// A selection frame: where it began and where the cursor is, pixels from the middle of the
+/// view; `touching` when it takes what it touches whichever way it is dragged (the dimension
+/// tool), not only to the left.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectFrame {
+    pub ends: [(f64, f64); 2],
+    pub touching: bool,
+}
+
+impl SelectFrame {
+    /// Whether it takes whatever it touches, rather than only what lies wholly inside.
+    fn crossing(&self) -> bool {
+        self.touching || self.ends[1].0 < self.ends[0].0
+    }
 }
 
 /// Pixels within which the cursor is on a point, and on a curve or a label.
@@ -477,12 +492,12 @@ impl SketchEdit {
             .map(|(_, n)| n.clone())
     }
 
-    /// What frame `f` selects in a picture `height` tall, as in Inventor: dragged to the right,
-    /// what lies wholly inside it; to the left, whatever it touches. Points, curves and
+    /// What frame `fr` selects in a picture `height` tall, as in Inventor: dragged to the
+    /// right, what lies wholly inside it; to the left, whatever it touches. Points, curves and
     /// dimensions of this sketch; projections stay out.
-    pub fn framed(&self, f: [(f64, f64); 2], height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Vec<Pick> {
+    pub fn framed(&self, fr: SelectFrame, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Vec<Pick> {
         let Ok(p) = &self.placed else { return Vec::new() };
-        let crossing = f[1].0 < f[0].0;
+        let (f, crossing) = (fr.ends, fr.crossing());
         let (lo, hi) = ((f[0].0.min(f[1].0), f[0].1.min(f[1].1)), (f[0].0.max(f[1].0), f[0].1.max(f[1].1)));
         let inside = |q: (f64, f64)| (lo.0..=hi.0).contains(&q.0) && (lo.1..=hi.1).contains(&q.1);
         let mut out = Vec::new();
@@ -525,7 +540,7 @@ impl SketchEdit {
     pub fn frame_to(&mut self, offset: Option<(f64, f64)>, stopped: bool, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Vec<Pick>> {
         let f = self.frame.as_mut()?;
         if let Some(o) = offset {
-            f[1] = o;
+            f.ends[1] = o;
         }
         if !stopped {
             return None;
@@ -534,18 +549,19 @@ impl SketchEdit {
         Some(self.framed(f, height, label_size))
     }
 
-    /// Draws the selection frame being dragged: solid to the right, dashed to the left.
+    /// Draws the selection frame being dragged: solid when it takes what is inside, dashed when
+    /// what it touches.
     pub fn paint_frame(&self, painter: &egui::Painter, rect: egui::Rect) {
         let Some(f) = self.frame else { return };
         let at = |q: (f64, f64)| rect.center() + egui::vec2(q.0 as f32, q.1 as f32);
-        let r = egui::Rect::from_two_pos(at(f[0]), at(f[1]));
-        let (fill, stroke) = if f[1].0 < f[0].0 {
+        let r = egui::Rect::from_two_pos(at(f.ends[0]), at(f.ends[1]));
+        let (fill, stroke) = if f.crossing() {
             (egui::Color32::from_rgba_unmultiplied(40, 160, 60, 30), egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 140, 60)))
         } else {
             (egui::Color32::from_rgba_unmultiplied(40, 100, 220, 30), egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 100, 220)))
         };
         painter.rect_filled(r, 0.0, fill);
-        if f[1].0 < f[0].0 {
+        if f.crossing() {
             let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
             painter.extend(egui::Shape::dashed_line(&c, stroke, 6.0, 4.0));
         } else {
@@ -930,16 +946,19 @@ mod tests {
         let size = |_: &str| (0.0, 0.0);
         // Around the bottom edge only, to the right: the bottom and its corners.
         let (a, b) = (at([-1.0, -1.0]), at([13.0, 1.0]));
-        let mut got = e.framed([a, b], 600.0, size);
+        let frame = |a, b| SelectFrame { ends: [a, b], touching: false };
+        let mut got = e.framed(frame(a, b), 600.0, size);
         got.retain(|p| !matches!(p, Pick::Constraint(_) | Pick::Measure(_)));
         assert_eq!(got, [Pick::Point("a".into()), Pick::Point("b".into()), Pick::Curve("bottom".into())]);
         // A thin frame across the middle, to the left: the two sides it cuts, no corner, and
         // the height's label on the left side.
         let (a, b) = (at([13.0, 1.5]), at([-1.0, 2.5]));
-        let got = e.framed([a, b], 600.0, size);
+        let got = e.framed(frame(a, b), 600.0, size);
         assert_eq!(got, [Pick::Curve("left".into()), Pick::Curve("right".into()), Pick::Measure("height".into())]);
         // The same frame to the right: nothing lies wholly inside it.
-        assert!(e.framed([b, a], 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
+        assert!(e.framed(frame(b, a), 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
+        // The dimension tool's frame takes what it touches either way.
+        assert_eq!(e.framed(SelectFrame { ends: [b, a], touching: true }, 600.0, size), e.framed(frame(a, b), 600.0, size));
     }
 
     /// An angle's label stands inside the angle, by the point where its lines meet.
