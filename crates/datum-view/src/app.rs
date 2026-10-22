@@ -17,8 +17,8 @@ use crate::dims::{Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
-use crate::sketch::Pick;
 use crate::sketch::{Context, SketchEdit};
+use crate::sketch::{Pick, SelectFrame};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -305,6 +305,15 @@ impl Viewer {
     }
 
     /// A new sketch feature from `fields` (its plane or face), edited at once.
+    /// S, as in Inventor: a sketch on a face to be clicked; with no model to click, on XY.
+    fn start_sketch(&mut self) {
+        if self.model.as_ref().is_some_and(|m| !m.bodies.is_empty()) {
+            self.picking = !self.picking;
+        } else {
+            self.new_sketch(json!({}));
+        }
+    }
+
     fn new_sketch(&mut self, mut fields: Json) {
         let taken: Vec<&str> = self
             .model
@@ -386,7 +395,7 @@ impl Viewer {
             if ui.button("New sketch").on_hover_text("A sketch on the XY plane").clicked() {
                 self.new_sketch(json!({}));
             }
-            if ui.selectable_label(self.picking, "Sketch on face").on_hover_text("Then click a plane face of the model").clicked() {
+            if ui.selectable_label(self.picking, "Sketch on face").on_hover_text("Then click a plane face of the model (S)").clicked() {
                 self.leave();
                 self.picking = !self.picking;
             }
@@ -452,7 +461,7 @@ impl Viewer {
                     (
                         Tool::Dimension,
                         "Dimension",
-                        "Pick a line, an arc, a circle, two points, a point and a line or two lines; then click where it goes (D)",
+                        "Click a line, an arc or a circle; a point, then a line; two points, then where it goes. Frame two lines: their angle (D)",
                     ),
                 ] {
                     if ui.selectable_label(sk.draft.tool == tool, label).on_hover_text(hint).clicked() {
@@ -477,6 +486,8 @@ impl Viewer {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut sk.draft.construction, "Construction");
                 ui.checkbox(&mut sk.names, "Names");
+                ui.checkbox(&mut sk.constraints, "Constraints")
+                    .on_hover_text("Badges of the geometric constraints: click one to select it, Del removes it");
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                     ui.checkbox(&mut sk.draft.tangent, "Tangent arc (T)");
                 }
@@ -497,8 +508,8 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
-                Tool::Dimension => "Pick what to dimension, then click where the dimension goes; type the value, Enter",
+                Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
+                Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
                 Tool::Template => "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · Esc ends",
                 _ => "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc ends the command",
             });
@@ -706,6 +717,7 @@ impl Viewer {
         if let Some(sk) = &self.sketch {
             sk.paint(&painter, rect);
             sk.draft.paint(sk, &painter, rect);
+            sk.paint_frame(&painter, rect);
         }
         // The face a click would sketch on, tinted.
         if let (true, Some((b, id))) = (self.picking, self.face) {
@@ -814,8 +826,19 @@ impl Viewer {
             let (x, y) = sk.camera.offset(f.at, h);
             let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
             egui::Area::new(egui::Id::new("datum_sketch_field")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut f.text).desired_width(110.0));
-                r.request_focus();
+                let id = egui::Id::new("datum_sketch_field_text");
+                let fresh = !ui.memory(|m| m.has_focus(id));
+                let mut out = egui::TextEdit::singleline(&mut f.text).id(id).desired_width(110.0).show(ui);
+                // A dimension's value comes selected, to be typed over; a value typed while
+                // drawing goes on from its first digit.
+                if fresh && f.entry != Entry::Draw {
+                    out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(f.text.chars().count()),
+                    )));
+                    out.state.store(ui.ctx(), id);
+                }
+                out.response.request_focus();
                 field_done = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
             });
             // While drawing, the value sizes what is drawn as it is typed.
@@ -856,27 +879,38 @@ impl Viewer {
             let placing =
                 r.clicked() || (draft.tangent && r.drag_stopped_by(egui::PointerButton::Primary)) || (field_done.0 && draft.typed.is_some());
             if draft.tool == Tool::Dimension {
+                // A frame from an empty place, either way, picks what it touches to dimension: two
+                // lines, their angle.
+                if r.drag_started_by(egui::PointerButton::Primary)
+                    && let Some(o) = ui.input(|i| i.pointer.press_origin())
+                {
+                    let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
+                    if sk.point_at(x, y, h).is_none() && sk.curve_at(x, y, h).is_none() {
+                        sk.frame = Some(SelectFrame { ends: [(x, y); 2], touching: true });
+                    }
+                }
+                if let Some(framed) = sk.frame_to(offset, r.drag_stopped(), h, |t| crate::sketch::label_size(ui.painter(), t)) {
+                    draft.picks = sk.dimension_framed(&framed);
+                }
                 if r.clicked()
                     && let Some((x, y)) = offset
                 {
                     // An element picked, or the place where the dimension goes.
                     let pick = sk.point_at(x, y, h).map(Pick2::Point).or_else(|| sk.curve_at(x, y, h).map(Pick2::Curve));
+                    let at = sk.camera.at(x, y, h);
                     match pick {
-                        Some(p) if draft.picks.len() < 2 && !draft.picks.contains(&p) => draft.picks.push(p),
+                        Some(p) if draft.picks.len() < 2 && !draft.picks.contains(&p) => {
+                            draft.picks.push(p);
+                            // A curve, or a point and a line: dimensioned at once.
+                            if sk.dimension_now(&draft.picks, at) {
+                                draft.picks.clear();
+                            }
+                        }
                         Some(_) => {}
+                        // Where the dimension between two points goes.
                         None => {
-                            let at = sk.camera.at(x, y, h);
-                            let circle = match &draft.picks[..] {
-                                [Pick2::Curve(c)] if sk.placed.as_ref().is_ok_and(|p| p.circles.contains_key(c)) => Some(c.clone()),
-                                _ => None,
-                            };
-                            match circle {
-                                Some(c) => sk.edit_label(&Pick::Curve(c), at),
-                                None => {
-                                    if let Some((c, key, now)) = sk.dimension(&draft.picks, at) {
-                                        sk.ask(c, key, now, at);
-                                    }
-                                }
+                            if let Some((c, key, now)) = sk.dimension(&draft.picks, at) {
+                                sk.ask(c, key, now, at);
                             }
                             draft.picks.clear();
                         }
@@ -917,13 +951,26 @@ impl Viewer {
             let painter = ui.painter();
             sk.hover = offset.and_then(|(x, y)| sk.hit(x, y, h, |t| crate::sketch::label_size(painter, t)));
         }
-        // A drag starts a few pixels from where the button went down: what is there is dragged.
-        if r.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
-                let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
-                sk.hover = sk.hit(x, y, h, |t| crate::sketch::label_size(ui.painter(), t));
+        // A drag starts a few pixels from where the button went down: what is there is dragged;
+        // from an empty place, a selection frame.
+        if r.drag_started_by(egui::PointerButton::Primary)
+            && let Some(o) = ui.input(|i| i.pointer.press_origin())
+        {
+            let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
+            sk.hover = sk.hit(x, y, h, |t| crate::sketch::label_size(ui.painter(), t));
+            if !sk.start_drag() && sk.hover.is_none() {
+                sk.frame = Some(SelectFrame { ends: [(x, y); 2], touching: false });
             }
-            sk.start_drag();
+        }
+        if let Some(framed) = sk.frame_to(offset, r.drag_stopped(), h, |t| crate::sketch::label_size(ui.painter(), t)) {
+            if !ui.input(|i| i.modifiers.shift) {
+                sk.selected.clear();
+            }
+            for p in framed {
+                if !sk.selected.contains(&p) {
+                    sk.selected.push(p);
+                }
+            }
         }
         if sk.drag.is_some() {
             if let Some((x, y)) = offset {
@@ -1021,6 +1068,8 @@ impl eframe::App for Viewer {
             }
             if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::S))) {
                 self.save(ui, false);
+            } else if self.sketch.is_none() && ui.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.is_none()) {
+                self.start_sketch();
             }
             if redo {
                 self.send(Request::Command("redo", json!({})));

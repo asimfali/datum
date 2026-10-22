@@ -51,14 +51,160 @@ pub struct SketchEdit {
     pub selected: Vec<Pick>,
     /// The point being dragged.
     pub drag: Option<String>,
+    /// The selection frame being dragged.
+    pub frame: Option<SelectFrame>,
     /// Show element names.
     pub names: bool,
+    /// Show the badges of geometric constraints.
+    pub constraints: bool,
     /// The drawing tool and what it has drawn so far.
     pub draft: Draft,
     /// The field by the cursor (a value typed while drawing, a dimension's value), and a new
     /// dimension that would over-constrain the sketch.
     pub field: Option<crate::dims::Field>,
     pub conflict: Option<crate::dims::Conflict>,
+}
+
+/// A selection frame: where it began and where the cursor is, pixels from the middle of the
+/// view; `touching` when it takes what it touches whichever way it is dragged (the dimension
+/// tool), not only to the left.
+#[derive(Clone, Copy, Debug)]
+pub struct SelectFrame {
+    pub ends: [(f64, f64); 2],
+    pub touching: bool,
+}
+
+impl SelectFrame {
+    /// Whether it takes whatever it touches, rather than only what lies wholly inside.
+    fn crossing(&self) -> bool {
+        self.touching || self.ends[1].0 < self.ends[0].0
+    }
+}
+
+/// What a geometric constraint's badge shows: drawn in lines, as the window's font has few of
+/// the symbols (∥, ⊥).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Glyph {
+    Horizontal,
+    Vertical,
+    Parallel,
+    Perpendicular,
+    Collinear,
+    Equal,
+    Fix,
+    Coincident,
+    Tangent,
+    On,
+    Midpoint,
+    Symmetric,
+    Concentric,
+}
+
+/// A geometric constraint's badge by one of the elements it ties: the constraint, its glyph,
+/// and where it stands, pixels from the middle of the view.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Badge {
+    pub pick: Pick,
+    pub glyph: Glyph,
+    pub at: (f64, f64),
+}
+
+/// A badge's side, pixels.
+const BADGE: f64 = 14.0;
+
+/// The glyph of a geometric constraint and the elements its badges stand by; None for a
+/// dimension, which has its label.
+fn glyph_of(c: &Json) -> Option<(Glyph, Vec<String>)> {
+    let names = |key: &str| -> Vec<String> {
+        match &c[key] {
+            Json::String(n) => vec![n.clone()],
+            Json::Array(a) => a.iter().filter_map(|n| n.as_str().map(str::to_string)).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let line_or_points = || if c["line"].is_string() { names("line") } else { names("points") };
+    let (g, on) = match c["type"].as_str()? {
+        "horizontal" => (Glyph::Horizontal, line_or_points()),
+        "vertical" => (Glyph::Vertical, line_or_points()),
+        "parallel" => (Glyph::Parallel, names("lines")),
+        "perpendicular" => (Glyph::Perpendicular, names("lines")),
+        "collinear" => (Glyph::Collinear, names("lines")),
+        "equal" => (Glyph::Equal, names("lines")),
+        "equal_radius" => (Glyph::Equal, names("curves")),
+        "fix" => (Glyph::Fix, names("point")),
+        "coincident" => (Glyph::Coincident, names("points").into_iter().take(1).collect()),
+        "tangent" => (Glyph::Tangent, names("curves")),
+        "on" => (Glyph::On, names("point")),
+        "midpoint" => (Glyph::Midpoint, names("point")),
+        "symmetric" => (Glyph::Symmetric, names("points")),
+        "concentric" => (Glyph::Concentric, names("curves")),
+        _ => return None,
+    };
+    Some((g, on))
+}
+
+/// Draws glyph `g` in a badge centred at `c`.
+fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colour: egui::Color32) {
+    let s = 4.5;
+    let p = |x: f32, y: f32| c + egui::vec2(x * s, y * s);
+    let stroke = egui::Stroke::new(1.3, colour);
+    let line = |a: (f32, f32), b: (f32, f32)| {
+        painter.line_segment([p(a.0, a.1), p(b.0, b.1)], stroke);
+    };
+    match g {
+        Glyph::Horizontal => line((-1.0, 0.0), (1.0, 0.0)),
+        Glyph::Vertical => line((0.0, -1.0), (0.0, 1.0)),
+        Glyph::Parallel => {
+            line((-0.8, 1.0), (-0.1, -1.0));
+            line((0.1, 1.0), (0.8, -1.0));
+        }
+        Glyph::Perpendicular => {
+            line((-1.0, 1.0), (1.0, 1.0));
+            line((0.0, 1.0), (0.0, -1.0));
+        }
+        Glyph::Collinear => {
+            for x in [-1.0, -0.2, 0.6] {
+                line((x, 0.0), (x + 0.4, 0.0));
+            }
+        }
+        Glyph::Equal => {
+            line((-1.0, -0.4), (1.0, -0.4));
+            line((-1.0, 0.4), (1.0, 0.4));
+        }
+        Glyph::Fix => {
+            painter.rect_stroke(egui::Rect::from_two_pos(p(-0.8, -0.1), p(0.8, 1.0)), 0.0, stroke, egui::StrokeKind::Middle);
+            line((-0.5, -0.1), (-0.5, -0.8));
+            line((-0.5, -0.8), (0.5, -0.8));
+            line((0.5, -0.8), (0.5, -0.1));
+        }
+        Glyph::Coincident => {
+            painter.rect_filled(egui::Rect::from_center_size(c, egui::vec2(s, s)), 0.0, colour);
+        }
+        Glyph::Tangent => {
+            painter.circle_stroke(p(0.0, 0.35), 0.65 * s, stroke);
+            line((-1.0, -0.3), (1.0, -0.3));
+        }
+        Glyph::On => {
+            painter.circle_stroke(c, 0.8 * s, stroke);
+            painter.circle_filled(p(0.0, -0.8), 0.35 * s, colour);
+        }
+        Glyph::Midpoint => {
+            line((-0.9, 0.7), (0.9, 0.7));
+            line((0.9, 0.7), (0.0, -0.8));
+            line((0.0, -0.8), (-0.9, 0.7));
+        }
+        Glyph::Symmetric => {
+            for x in [-1.0, 1.0] {
+                line((x, -1.0), (x, 1.0));
+                line((x, -1.0), (x * 0.5, -1.0));
+                line((x, 1.0), (x * 0.5, 1.0));
+            }
+        }
+        Glyph::Concentric => {
+            painter.circle_stroke(c, 0.95 * s, stroke);
+            painter.circle_stroke(c, 0.4 * s, stroke);
+        }
+    }
 }
 
 /// Pixels within which the cursor is on a point, and on a curve or a label.
@@ -108,7 +254,9 @@ impl SketchEdit {
             hover: None,
             selected: Vec::new(),
             drag: None,
+            frame: None,
             names: true,
+            constraints: true,
             draft: Draft::default(),
             field: None,
             conflict: None,
@@ -376,16 +524,13 @@ impl SketchEdit {
                     let t = (d[0] * w[0] + d[1] * w[1]) / (d[0] * d[0] + d[1] * d[1]);
                     Some(mid(q, [a[0] + d[0] * t, a[1] + d[1] * t]))
                 }
-                "angle" => line(&c["lines"][0]).map(|(a, _)| a),
+                "angle" => Some(angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?)),
                 "radius" => c["arc"].as_str().and_then(|n| Self::middle(p, n)),
                 _ => None,
             }
         };
-        let prefix = |c: &Json| match c["type"].as_str() {
-            Some("radius") => "R",
-            Some("angle") => "∠",
-            _ => "",
-        };
+        // An angle reads by its °: the window's font has no ∠.
+        let prefix = |c: &Json| if c["type"] == "radius" { "R" } else { "" };
         let mut out = Vec::new();
         for (k, c) in self.json["sketch"]["constraints"].as_array().into_iter().flatten().enumerate() {
             let value = c.get("value").or_else(|| c.get("degrees"));
@@ -430,10 +575,13 @@ impl SketchEdit {
     }
 
     /// What is under pixel offset `(dx, dy)` from the middle of a picture `height` tall: a point
-    /// first, then a label, then a curve.
+    /// first, then a constraint's badge, then a label, then a curve.
     pub fn hit(&self, dx: f64, dy: f64, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Pick> {
         if let Some(n) = self.point_at(dx, dy, height) {
             return Some(self.projection_of(&n).map_or(Pick::Point(n), Pick::Projection));
+        }
+        if let Some(b) = self.badges(height).into_iter().find(|b| (dx - b.at.0).abs() <= BADGE * 0.5 && (dy - b.at.1).abs() <= BADGE * 0.5) {
+            return Some(b.pick);
         }
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
             if (dx - x).abs() <= w * 0.5 && (dy - y).abs() <= h * 0.5 {
@@ -474,6 +622,122 @@ impl SketchEdit {
             .filter(|(d, _)| *d <= NEAR_CURVE)
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, n)| n.clone())
+    }
+
+    /// What frame `fr` selects in a picture `height` tall, as in Inventor: dragged to the
+    /// right, what lies wholly inside it; to the left, whatever it touches. Points, curves and
+    /// dimensions of this sketch; projections stay out.
+    pub fn framed(&self, fr: SelectFrame, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Vec<Pick> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        let (f, crossing) = (fr.ends, fr.crossing());
+        let (lo, hi) = ((f[0].0.min(f[1].0), f[0].1.min(f[1].1)), (f[0].0.max(f[1].0), f[0].1.max(f[1].1)));
+        let inside = |q: (f64, f64)| (lo.0..=hi.0).contains(&q.0) && (lo.1..=hi.1).contains(&q.1);
+        let mut out = Vec::new();
+        let drawn = self.drawn();
+        for (n, v) in &p.solved.points {
+            if drawn.contains_key(n) && inside(self.camera.offset([v.x, v.y], height)) {
+                out.push(Pick::Point(n.clone()));
+            }
+        }
+        for n in p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()) {
+            if self.projection_of(n).is_some() {
+                continue;
+            }
+            let Some(pts) = Self::curve_points(p, n) else { continue };
+            let screen: Vec<(f64, f64)> = pts.iter().map(|q| self.camera.offset(*q, height)).collect();
+            let taken = if crossing {
+                screen.iter().any(|q| inside(*q)) || screen.windows(2).any(|w| segment_meets_box(w[0], w[1], lo, hi))
+            } else {
+                screen.iter().all(|q| inside(*q))
+            };
+            if taken {
+                out.push(Pick::Curve(n.clone()));
+            }
+        }
+        for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
+            if !matches!(l.pick, Pick::Constraint(_) | Pick::Measure(_)) {
+                continue;
+            }
+            let (a, b) = ((x - w * 0.5, y - h * 0.5), (x + w * 0.5, y + h * 0.5));
+            let taken = if crossing { a.0 <= hi.0 && b.0 >= lo.0 && a.1 <= hi.1 && b.1 >= lo.1 } else { inside(a) && inside(b) };
+            if taken {
+                out.push(l.pick);
+            }
+        }
+        out
+    }
+
+    /// The badges of the geometric constraints in a picture `height` tall: by a line, off it a
+    /// third of the way along, on its left; by a point, above and to its left (its name is
+    /// below and to the right); by an arc or circle, off its middle. More on one element line
+    /// up beside the first.
+    pub fn badges(&self, height: f64) -> Vec<Badge> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        if !self.constraints {
+            return Vec::new();
+        }
+        let px = |n: &str| p.solved.points.get(n).map(|v| self.camera.offset([v.x, v.y], height));
+        let step = BADGE + 2.0;
+        let mut taken: BTreeMap<String, f64> = BTreeMap::new();
+        let mut out = Vec::new();
+        for (k, c) in self.json["sketch"]["constraints"].as_array().into_iter().flatten().enumerate() {
+            let Some((glyph, on)) = glyph_of(c) else { continue };
+            for n in on {
+                let i = taken.entry(n.clone()).or_default();
+                let shift = *i * step;
+                *i += 1.0;
+                let at = if let Some(l) = p.lines.get(&n) {
+                    let (Some(a), Some(b)) = (px(&l.from), px(&l.to)) else { continue };
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let len = libm::hypot(dx, dy);
+                    let (ux, uy) = if len > 0.0 { (dx / len, dy / len) } else { (1.0, 0.0) };
+                    (a.0 + dx / 3.0 + uy * 12.0 + ux * shift, a.1 + dy / 3.0 - ux * 12.0 + uy * shift)
+                } else if let Some(q) = px(&n) {
+                    (q.0 - 14.0 - shift, q.1 - 14.0)
+                } else if let Some(m) = Self::middle(p, &n) {
+                    let q = self.camera.offset(m, height);
+                    (q.0 + 14.0 + shift, q.1 - 14.0)
+                } else {
+                    continue;
+                };
+                out.push(Badge { pick: Pick::Constraint(k), glyph, at });
+            }
+        }
+        out
+    }
+
+    /// Follows the frame being dragged to `offset`; when the drag has `stopped`, ends it and
+    /// gives what it selects.
+    pub fn frame_to(&mut self, offset: Option<(f64, f64)>, stopped: bool, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Vec<Pick>> {
+        let f = self.frame.as_mut()?;
+        if let Some(o) = offset {
+            f.ends[1] = o;
+        }
+        if !stopped {
+            return None;
+        }
+        let f = self.frame.take()?;
+        Some(self.framed(f, height, label_size))
+    }
+
+    /// Draws the selection frame being dragged: solid when it takes what is inside, dashed when
+    /// what it touches.
+    pub fn paint_frame(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let Some(f) = self.frame else { return };
+        let at = |q: (f64, f64)| rect.center() + egui::vec2(q.0 as f32, q.1 as f32);
+        let r = egui::Rect::from_two_pos(at(f.ends[0]), at(f.ends[1]));
+        let (fill, stroke) = if f.crossing() {
+            (egui::Color32::from_rgba_unmultiplied(40, 160, 60, 30), egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 140, 60)))
+        } else {
+            (egui::Color32::from_rgba_unmultiplied(40, 100, 220, 30), egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 100, 220)))
+        };
+        painter.rect_filled(r, 0.0, fill);
+        if f.crossing() {
+            let c = [r.left_top(), r.right_top(), r.right_bottom(), r.left_bottom(), r.left_top()];
+            painter.extend(egui::Shape::dashed_line(&c, stroke, 6.0, 4.0));
+        } else {
+            painter.rect_stroke(r, 0.0, stroke, egui::StrokeKind::Inside);
+        }
     }
 
     /// Draws the sketch over the view in `rect`.
@@ -575,6 +839,13 @@ impl SketchEdit {
                 painter.text(at + egui::vec2(5.0, 5.0), egui::Align2::LEFT_TOP, n, egui::FontId::proportional(11.0), NAME);
             }
         }
+        for b in self.badges(height) {
+            let c = if marked(&b.pick) { SELECTED } else { NAME };
+            let r = egui::Rect::from_center_size(rect.center() + egui::vec2(b.at.0 as f32, b.at.1 as f32), egui::vec2(BADGE as f32, BADGE as f32));
+            painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
+            painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
+            paint_glyph(painter, r.center(), b.glyph, c);
+        }
         for (l, at, size) in laid {
             let c = if self.selected.contains(&l.pick) { SELECTED } else { DIMENSION };
             let r = to_rect(at, size);
@@ -615,6 +886,57 @@ fn short(x: f64) -> String {
     let s = format!("{:.6}", x);
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s == "-0" { "0".into() } else { s.into() }
+}
+
+/// Where an angle's label stands: inside the angle, off the point where the two lines meet,
+/// along the bisector toward their middles; between their middles if they are parallel.
+fn angle_spot(l: ([f64; 2], [f64; 2]), m: ([f64; 2], [f64; 2])) -> [f64; 2] {
+    let mid = |(a, b): ([f64; 2], [f64; 2])| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+    let (ml, mm) = (mid(l), mid(m));
+    let (d, e) = ([l.1[0] - l.0[0], l.1[1] - l.0[1]], [m.1[0] - m.0[0], m.1[1] - m.0[1]]);
+    let det = d[0] * e[1] - d[1] * e[0];
+    if det == 0.0 {
+        return mid((ml, mm));
+    }
+    let t = ((m.0[0] - l.0[0]) * e[1] - (m.0[1] - l.0[1]) * e[0]) / det;
+    let x = [l.0[0] + d[0] * t, l.0[1] + d[1] * t];
+    // Unit rays from the vertex toward each line's middle; their sum is the bisector.
+    let ray = |q: [f64; 2]| {
+        let v = [q[0] - x[0], q[1] - x[1]];
+        let n = libm::hypot(v[0], v[1]);
+        if n > 0.0 { [v[0] / n, v[1] / n] } else { [0.0, 0.0] }
+    };
+    let (u, w) = (ray(ml), ray(mm));
+    let b = [u[0] + w[0], u[1] + w[1]];
+    let n = libm::hypot(b[0], b[1]);
+    if n == 0.0 {
+        return x;
+    }
+    // A quarter of the shorter line off the vertex.
+    let r = 0.25 * libm::hypot(d[0], d[1]).min(libm::hypot(e[0], e[1]));
+    [x[0] + b[0] / n * r, x[1] + b[1] / n * r]
+}
+
+/// Whether segment `a`–`b` meets the box `lo`–`hi` (Liang–Barsky clipping): what a frame
+/// dragged to the left touches.
+fn segment_meets_box(a: (f64, f64), b: (f64, f64), lo: (f64, f64), hi: (f64, f64)) -> bool {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (mut t0, mut t1) = (0.0_f64, 1.0_f64);
+    for (q, r) in [(-dx, a.0 - lo.0), (dx, hi.0 - a.0), (-dy, a.1 - lo.1), (dy, hi.1 - a.1)] {
+        if q == 0.0 {
+            if r < 0.0 {
+                return false;
+            }
+        } else {
+            let t = r / q;
+            if q < 0.0 {
+                t0 = t0.max(t);
+            } else {
+                t1 = t1.min(t);
+            }
+        }
+    }
+    t0 <= t1
 }
 
 /// Distance from `p` to the segment `a`–`b`.
@@ -792,5 +1114,56 @@ mod tests {
         let (x, y) = e.camera.offset([12.0, 2.0], 600.0);
         assert_eq!(e.hit(x + 2.0, y, 600.0, |_| (0.0, 0.0)), Some(Pick::Curve("right".into())));
         assert_eq!(e.hit(x + 40.0, y, 600.0, |_| (0.0, 0.0)), None);
+    }
+
+    /// A frame dragged to the right takes what is wholly inside; to the left, what it touches.
+    #[test]
+    fn frames_select_inside_or_touched() {
+        let e = edit();
+        let at = |q: [f64; 2]| e.camera.offset(q, 600.0);
+        let size = |_: &str| (0.0, 0.0);
+        // Around the bottom edge only, to the right: the bottom and its corners.
+        let (a, b) = (at([-1.0, -1.0]), at([13.0, 1.0]));
+        let frame = |a, b| SelectFrame { ends: [a, b], touching: false };
+        let mut got = e.framed(frame(a, b), 600.0, size);
+        got.retain(|p| !matches!(p, Pick::Constraint(_) | Pick::Measure(_)));
+        assert_eq!(got, [Pick::Point("a".into()), Pick::Point("b".into()), Pick::Curve("bottom".into())]);
+        // A thin frame across the middle, to the left: the two sides it cuts, no corner, and
+        // the height's label on the left side.
+        let (a, b) = (at([13.0, 1.5]), at([-1.0, 2.5]));
+        let got = e.framed(frame(a, b), 600.0, size);
+        assert_eq!(got, [Pick::Curve("left".into()), Pick::Curve("right".into()), Pick::Measure("height".into())]);
+        // The same frame to the right: nothing lies wholly inside it.
+        assert!(e.framed(frame(b, a), 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
+        // The dimension tool's frame takes what it touches either way.
+        assert_eq!(e.framed(SelectFrame { ends: [b, a], touching: true }, 600.0, size), e.framed(frame(a, b), 600.0, size));
+    }
+
+    /// An angle's label stands inside the angle, by the point where its lines meet.
+    #[test]
+    fn angle_labels_stand_by_the_vertex() {
+        // Lines meeting at (10, 0): one toward (0, 0), one toward (10, 8).
+        let at = angle_spot(([0.0, 0.0], [10.0, 0.0]), ([10.0, 0.0], [10.0, 8.0]));
+        assert!((at[0] - (10.0 - 2.0 * libm::sqrt(0.5))).abs() < 1e-9 && (at[1] - 2.0 * libm::sqrt(0.5)).abs() < 1e-9, "{at:?}");
+        assert_eq!(angle_spot(([0.0, 0.0], [4.0, 0.0]), ([0.0, 2.0], [4.0, 2.0])), [2.0, 1.0]);
+    }
+
+    /// Geometric constraints have badges by what they tie; a click on one picks the constraint.
+    #[test]
+    fn constraints_have_badges() {
+        let e = edit();
+        let glyphs: Vec<(Pick, Glyph)> = e.badges(600.0).into_iter().map(|b| (b.pick, b.glyph)).collect();
+        assert_eq!(
+            glyphs,
+            [
+                (Pick::Constraint(0), Glyph::Fix),
+                (Pick::Constraint(1), Glyph::Horizontal),
+                (Pick::Constraint(2), Glyph::Vertical),
+                (Pick::Constraint(3), Glyph::Horizontal),
+                (Pick::Constraint(4), Glyph::Vertical),
+            ]
+        );
+        let b = &e.badges(600.0)[2];
+        assert_eq!(e.hit(b.at.0 + 3.0, b.at.1, 600.0, |_| (0.0, 0.0)), Some(Pick::Constraint(2)));
     }
 }

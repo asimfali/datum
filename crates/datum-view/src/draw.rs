@@ -522,8 +522,8 @@ impl Draft {
             let text = match edit.dimension(&self.picks, spot.at) {
                 Some((c, _, now)) => {
                     let kind = match c["type"].as_str() {
-                        Some("horizontal_distance") => "↔ ",
-                        Some("vertical_distance") => "↕ ",
+                        Some("horizontal_distance") => "H ",
+                        Some("vertical_distance") => "V ",
                         Some("radius") => "R",
                         _ => "",
                     };

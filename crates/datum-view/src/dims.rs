@@ -7,7 +7,7 @@
 
 use serde_json::{Map, Value as Json, json};
 
-use crate::sketch::SketchEdit;
+use crate::sketch::{Pick, SketchEdit};
 
 /// What the field by the cursor is for.
 #[derive(Clone, Debug, PartialEq)]
@@ -113,6 +113,58 @@ impl SketchEdit {
         (now > 0.0).then_some((c, key, now))
     }
 
+    /// Opens the field, at `at`, for the dimension `picks` make without a click where it goes:
+    /// a line's length, an arc's radius, a circle's diameter, a point and a line's distance,
+    /// two lines' angle. False when they make none so: two points wait for that click.
+    pub fn dimension_now(&mut self, picks: &[Pick2], at: [f64; 2]) -> bool {
+        if let [Pick2::Curve(c)] = picks
+            && self.placed.as_ref().is_ok_and(|p| p.circles.contains_key(c))
+        {
+            self.edit_label(&Pick::Curve(c.clone()), at);
+            return self.field.is_some();
+        }
+        if matches!(picks, [Pick2::Point(_), Pick2::Point(_)]) {
+            return false;
+        }
+        let Some((c, key, now)) = self.dimension(picks, at) else { return false };
+        self.ask(c, key, now, at);
+        true
+    }
+
+    /// What a frame dragged in the dimension tool dimensions: its curves, or its points if it
+    /// has no curve. One or two curves, or a point and a line, open the field at once (two
+    /// lines: their angle); two points are returned, to wait for the click where it goes.
+    pub fn dimension_framed(&mut self, framed: &[Pick]) -> Vec<Pick2> {
+        let curves: Vec<Pick2> = framed.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(Pick2::Curve(n.clone())) } else { None }).collect();
+        let picks = if curves.is_empty() {
+            framed.iter().filter_map(|p| if let Pick::Point(n) = p { Some(Pick2::Point(n.clone())) } else { None }).collect()
+        } else {
+            curves
+        };
+        if !matches!(picks.len(), 1 | 2) {
+            return Vec::new();
+        }
+        match self.spot(&picks) {
+            Some(at) if !self.dimension_now(&picks, at) && matches!(picks[..], [Pick2::Point(_), Pick2::Point(_)]) => picks,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Where the field for `picks` stands: amid their middles.
+    fn spot(&self, picks: &[Pick2]) -> Option<[f64; 2]> {
+        let p = self.placed.as_ref().ok()?;
+        let mut sum = [0.0, 0.0];
+        for k in picks {
+            let q = match k {
+                Pick2::Point(n) => p.solved.points.get(n).map(|v| [v.x, v.y])?,
+                Pick2::Curve(n) => SketchEdit::middle(p, n)?,
+            };
+            sum = [sum[0] + q[0], sum[1] + q[1]];
+        }
+        let n = picks.len() as f64;
+        Some([sum[0] / n, sum[1] / n])
+    }
+
     /// Opens the field for a new dimension `c` measuring `now`, by sketch point `at`.
     pub fn ask(&mut self, c: Json, key: &'static str, now: f64, at: [f64; 2]) {
         self.field = Some(Field { entry: Entry::New { constraint: c, key }, text: text_of(&json!(now)), at });
@@ -123,11 +175,11 @@ impl SketchEdit {
     pub fn edit_label(&mut self, pick: &crate::sketch::Pick, at: [f64; 2]) {
         let sketch = &self.json["sketch"];
         let field = match pick {
-            crate::sketch::Pick::Constraint(k) => {
+            Pick::Constraint(k) => {
                 let c = &sketch["constraints"][*k];
                 c.get("value").or_else(|| c.get("degrees")).map(|v| Field { entry: Entry::Edit(*k), text: text_of(v), at })
             }
-            crate::sketch::Pick::Curve(n) if sketch["circles"].get(n).is_some() => {
+            Pick::Curve(n) if sketch["circles"].get(n).is_some() => {
                 Some(Field { entry: Entry::Diameter(n.clone()), text: text_of(&sketch["circles"][n]["diameter"]), at })
             }
             _ => None,
@@ -288,6 +340,27 @@ mod tests {
         assert_eq!(sent["measures"], json!({"d1": {"type": "length", "line": "top"}}));
     }
 
+    /// A click on a line dimensions it at once; two points wait for where the dimension goes.
+    /// Two lines framed: their angle.
+    #[test]
+    fn curves_and_selections_dimension_at_once() {
+        let mut e = editor();
+        assert!(e.dimension_now(&[Pick2::Curve("bottom".into())], [10.0, 0.0]));
+        assert_eq!(e.field.as_ref().unwrap().entry, Entry::New { constraint: json!({"type": "length", "line": "bottom"}), key: "value" });
+        e.field = None;
+        assert!(!e.dimension_now(&[Pick2::Point("a".into()), Pick2::Point("c".into())], [10.0, 0.0]));
+        assert!(e.field.is_none());
+        // A frame around two sides, their corners in it too: the angle of the sides.
+        let framed = [Pick::Point("a".into()), Pick::Curve("bottom".into()), Pick::Curve("left".into()), Pick::Point("b".into())];
+        assert!(e.dimension_framed(&framed).is_empty());
+        let f = e.field.as_ref().unwrap();
+        assert_eq!(f.entry, Entry::New { constraint: json!({"type": "angle", "lines": ["bottom", "left"]}), key: "degrees" });
+        e.field = None;
+        // Two points framed wait for where the dimension goes.
+        assert_eq!(e.dimension_framed(&[Pick::Point("a".into()), Pick::Point("c".into())]).len(), 2);
+        assert!(e.field.is_none());
+    }
+
     /// A double click on a dimension changes its value in place; on a circle, its diameter.
     #[test]
     fn values_change_in_place() {
@@ -296,7 +369,7 @@ mod tests {
         e.ask(c, key, now, [-5.0, 5.0]);
         e.commit_field().unwrap();
         let k = e.json["sketch"]["constraints"].as_array().unwrap().len() - 1;
-        e.edit_label(&crate::sketch::Pick::Constraint(k), [0.0, 0.0]);
+        e.edit_label(&Pick::Constraint(k), [0.0, 0.0]);
         assert_eq!(e.field.as_ref().unwrap().text, "10");
         e.field.as_mut().unwrap().text = "14".into();
         let sent = e.commit_field().unwrap();
