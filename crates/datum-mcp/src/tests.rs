@@ -157,6 +157,34 @@ fn edit_a_sketch_piece_by_piece() {
     assert!(err && r.as_str().unwrap().contains("no `z`"), "{r}");
 }
 
+/// Groups: a union of elements, named; a removed element leaves its group, a group left empty
+/// goes, a rename follows into it, and removing a group removes no element.
+#[test]
+fn groups_name_elements_together() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    execute(&mut s, "edit_sketch", json!({"name": "outline", "groups": {"sides": ["left", "right"], "base": ["bottom"], "corner": ["a", "left"]}}));
+    let r = execute(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": null}}));
+    assert!(r["also_removed"].as_array().unwrap().contains(&json!("groups: base")), "{r}");
+    execute(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "left", "to": "west"}));
+    execute(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "sides", "to": "walls"}));
+    let groups = |s: &mut Server| tool(s, "inspect_model", json!({})).1["features"][0]["sketch"]["groups"].clone();
+    assert_eq!(groups(&mut s), json!({"walls": ["west", "right"], "corner": ["a", "west"]}));
+    execute(&mut s, "edit_sketch", json!({"name": "outline", "groups": {"walls": null}}));
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert!(feature(&m, "outline")["sketch"]["lines"].get("west").is_some(), "the elements stay");
+    for bad in [json!({"top": ["top"]}), json!({"g": ["nothing"]})] {
+        let (err, r) = tool(&mut s, "execute", json!({"command": "edit_sketch", "params": {"name": "outline", "groups": bad}}));
+        let failed = !feature(&tool(&mut s, "inspect_model", json!({})).1, "outline")["error"].is_null();
+        assert!(err || failed, "{bad}: {r}");
+        if !err {
+            execute(&mut s, "undo", json!({}));
+        }
+    }
+    let r = execute(&mut s, "edit_sketch", json!({"name": "outline", "groups": {"g": []}}));
+    assert!(r["also_removed"].as_array().unwrap().contains(&json!("groups: g")), "an empty group goes at once: {r}");
+}
+
 /// Renaming the line a side face is named after: the sketch on that face and its projected edge
 /// are found again by their geometry, and nothing downstream breaks.
 #[test]

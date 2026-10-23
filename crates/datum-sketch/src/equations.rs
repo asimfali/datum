@@ -120,6 +120,20 @@ impl Equations {
             return invalid(format!("point `{n}` has non-finite coordinates"));
         }
         let point = |n: &str| names.binary_search_by(|x| x.as_str().cmp(n)).map_err(|_| SketchError::Invalid(format!("unknown point `{n}`")));
+        for (g, members) in &sketch.groups {
+            let element = |n: &str| {
+                sketch.points.contains_key(n) || sketch.lines.contains_key(n) || sketch.arcs.contains_key(n) || sketch.circles.contains_key(n)
+            };
+            if element(g) || sketch.measures.contains_key(g) {
+                return invalid(format!("group `{g}`: an element is named so too"));
+            }
+            if members.is_empty() {
+                return invalid(format!("group `{g}` is empty"));
+            }
+            if let Some(n) = members.iter().find(|n| !element(n)) {
+                return invalid(format!("group `{g}`: unknown element `{n}`"));
+            }
+        }
         let line_names: Vec<&String> = sketch.lines.keys().collect();
         let mut lines = Vec::with_capacity(sketch.lines.len());
         for (n, l) in &sketch.lines {

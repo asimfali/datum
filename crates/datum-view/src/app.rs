@@ -966,6 +966,21 @@ impl Viewer {
                 if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
                     self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
                 }
+                // Groups: a name for elements together (a pattern's cell, a path); its badge
+                // marks them, a click on it selects them.
+                match sk.selected_group() {
+                    Some(g) => {
+                        if ui.button("Ungroup").on_hover_text(format!("Take group `{g}` apart: its elements stay")).clicked() {
+                            sent.push(Request::Command("edit_sketch", sk.ungroup(&g)));
+                        }
+                    }
+                    None => {
+                        let hint = "The selected points and curves as a group: its badge marks them, a click on it selects them";
+                        if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("Group")).on_hover_text(hint).clicked() {
+                            sent.extend(sk.group_selection().map(|p| Request::Command("edit_sketch", p)));
+                        }
+                    }
+                }
             });
             ui.horizontal(|ui| {
                 ui.checkbox(&mut sk.draft.construction, "Construction");
@@ -1694,17 +1709,21 @@ impl Viewer {
             }
         } else if r.clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
-            match sk.hover.clone() {
-                Some(p) if shift => {
-                    if let Some(k) = sk.selected.iter().position(|q| *q == p) {
-                        sk.selected.remove(k);
-                    } else {
+            // A group's badge stands for what the group holds.
+            let picks = match sk.hover.clone() {
+                Some(Pick::Group(g)) => sk.group_picks(&g),
+                p => p.into_iter().collect(),
+            };
+            if !shift {
+                sk.selected = picks;
+            } else if picks.iter().all(|p| sk.selected.contains(p)) {
+                sk.selected.retain(|q| !picks.contains(q));
+            } else {
+                for p in picks {
+                    if !sk.selected.contains(&p) {
                         sk.selected.push(p);
                     }
                 }
-                Some(p) => sk.selected = vec![p],
-                None if !shift => sk.selected.clear(),
-                None => {}
             }
         }
         let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };

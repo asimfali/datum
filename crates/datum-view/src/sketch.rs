@@ -33,6 +33,9 @@ pub enum Pick {
     Measure(String),
     /// A projected edge or vertex, or one of its points.
     Projection(String),
+    /// A group, by its badge: under the cursor, it marks what the group holds; a click selects
+    /// that (a selection holds elements, not groups).
+    Group(String),
 }
 
 pub struct SketchEdit {
@@ -107,6 +110,8 @@ pub enum Glyph {
     Midpoint,
     Symmetric,
     Concentric,
+    /// A group's badge: the corners of a frame.
+    Group,
 }
 
 /// A geometric constraint's badge by one of the elements it ties: the constraint, its glyph,
@@ -212,6 +217,12 @@ pub(crate) fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colo
         Glyph::Concentric => {
             painter.circle_stroke(c, 0.95 * s, stroke);
             painter.circle_stroke(c, 0.4 * s, stroke);
+        }
+        Glyph::Group => {
+            for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                line((x, y), (x * 0.3, y));
+                line((x, y), (x, y * 0.3));
+            }
         }
     }
 }
@@ -376,12 +387,63 @@ impl SketchEdit {
         self.projections().into_iter().find(|p| name == p || name.strip_prefix(p.as_str()).is_some_and(|r| r.starts_with('.')))
     }
 
+    /// The groups, by name: the elements each holds.
+    pub fn groups(&self) -> BTreeMap<String, Vec<String>> {
+        serde_json::from_value(self.json["sketch"]["groups"].clone()).unwrap_or_default()
+    }
+
+    /// What group `g` holds, as picks: its points and curves.
+    pub fn group_picks(&self, g: &str) -> Vec<Pick> {
+        let points = &self.json["sketch"]["points"];
+        let members = self.groups().remove(g).unwrap_or_default();
+        members.into_iter().map(|n| if points.get(&n).is_some() { Pick::Point(n) } else { Pick::Curve(n) }).collect()
+    }
+
+    /// The group whose elements are exactly those selected, if one is.
+    pub fn selected_group(&self) -> Option<String> {
+        self.groups().into_keys().find(|g| {
+            let held = self.group_picks(g);
+            held.len() == self.selected.len() && held.iter().all(|p| self.selected.contains(p))
+        })
+    }
+
+    /// `edit_sketch` parameters grouping the selected points and curves under a new name.
+    pub fn group_selection(&mut self) -> Option<Json> {
+        let members: Vec<&String> = self
+            .selected
+            .iter()
+            .filter_map(|p| match p {
+                Pick::Point(n) if n != datum_ops::ORIGIN => Some(n),
+                Pick::Curve(n) => Some(n),
+                _ => None,
+            })
+            .collect();
+        if members.is_empty() {
+            return None;
+        }
+        let mut patch = datum_model::SketchPatch::new(&self.json);
+        let name = patch.fresh("g");
+        patch.set("groups", &name, json!(members));
+        Some(self.apply(patch.done()?))
+    }
+
+    /// `edit_sketch` parameters taking group `g` apart: its elements stay.
+    pub fn ungroup(&mut self, g: &str) -> Json {
+        let mut patch = serde_json::Map::new();
+        patch.insert("groups".into(), json!({ g: null }));
+        self.apply(patch)
+    }
+
     /// The sketch's own points of `picks`: the points, and the ends and centres of curves.
     fn points_of(&self, picks: &[Pick]) -> BTreeSet<String> {
         let sketch = &self.json["sketch"];
         let drawn = self.drawn();
         let mut out = BTreeSet::new();
         for p in picks {
+            if let Pick::Group(g) = p {
+                out.extend(self.points_of(&self.group_picks(g)));
+                continue;
+            }
             let names: Vec<&Json> = match p {
                 Pick::Point(n) => {
                     out.insert(n.clone());
@@ -493,6 +555,7 @@ impl SketchEdit {
                 Pick::Measure(n) => remove("measures", n),
                 Pick::Projection(n) => remove("project", n),
                 Pick::Constraint(k) => constraints.extend(sketch["constraints"].get(*k).cloned()),
+                Pick::Group(_) => {}
             }
         }
         if !constraints.is_empty() {
@@ -731,15 +794,31 @@ impl SketchEdit {
     /// third of the way along, on its left; by a point, above and to its left (its name is
     /// below and to the right); by an arc or circle, off its middle. More on one element line
     /// up beside the first.
+    ///
+    /// A group's badge stands off the upper left corner of what it holds, shown with the
+    /// constraints or without; one that would cover another moves right.
     pub fn badges(&self, height: f64) -> Vec<Badge> {
         let Ok(p) = &self.placed else { return Vec::new() };
-        if !self.constraints {
-            return Vec::new();
-        }
         let px = |n: &str| p.solved.points.get(n).map(|v| self.camera.offset([v.x, v.y], height));
         let step = BADGE + 2.0;
+        let mut out: Vec<Badge> = Vec::new();
+        for g in self.groups().into_keys() {
+            let corner = self
+                .points_of(&[Pick::Group(g.clone())])
+                .iter()
+                .filter_map(|n| px(n))
+                .fold(None, |c: Option<(f64, f64)>, q| Some(c.map_or(q, |c| (c.0.min(q.0), c.1.min(q.1)))));
+            let Some((x, y)) = corner else { continue };
+            let mut at = (x - 14.0, y - 14.0);
+            while out.iter().any(|b| (b.at.0 - at.0).abs() < step && (b.at.1 - at.1).abs() < step) {
+                at.0 += step;
+            }
+            out.push(Badge { pick: Pick::Group(g), glyph: Glyph::Group, at });
+        }
+        if !self.constraints {
+            return out;
+        }
         let mut taken: BTreeMap<String, f64> = BTreeMap::new();
-        let mut out = Vec::new();
         for (k, c) in self.json["sketch"]["constraints"].as_array().into_iter().flatten().enumerate() {
             let Some((glyph, on)) = glyph_of(c) else { continue };
             for n in on {
@@ -821,7 +900,11 @@ impl SketchEdit {
             let (x, y) = self.camera.offset(q, height);
             rect.center() + egui::vec2(x as f32, y as f32)
         };
-        let marked = |pick: &Pick| self.selected.contains(pick) || self.hover.as_ref() == Some(pick);
+        let held = match &self.hover {
+            Some(Pick::Group(g)) => self.group_picks(g),
+            _ => Vec::new(),
+        };
+        let marked = |pick: &Pick| self.selected.contains(pick) || self.hover.as_ref() == Some(pick) || held.contains(pick);
         let colour = |pick: &Pick, ends: &[String]| {
             if self.selected.contains(pick) {
                 SELECTED
@@ -918,6 +1001,9 @@ impl SketchEdit {
             painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
             painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
             paint_glyph(painter, r.center(), b.glyph, c);
+            if let (Pick::Group(g), true) = (&b.pick, self.names) {
+                painter.text(r.right_center() + egui::vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, g, egui::FontId::proportional(11.0), c);
+            }
         }
         for (l, at, size) in laid {
             let c = if self.selected.contains(&l.pick) { SELECTED } else { DIMENSION };
@@ -1107,6 +1193,46 @@ mod tests {
         e.drag_to([5.5, 2.0]);
         let patch = e.end_drag().unwrap();
         assert_eq!(patch["points"], json!({"p1": [2.0, -3.0], "p2": [3.0, 1.0], "p3": [8.0, 3.0]}));
+    }
+
+    /// The selection as a group: named past `g<k>`, with a badge; selected again, it is that
+    /// group (Ungroup); dragged by the badge, all of it moves; taken apart, its elements stay.
+    #[test]
+    fn groups_from_the_selection() {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
+            "points": {"p1": [0, 0], "p2": [1, 4], "p3": [6, 6], "q": [20, 0]},
+            "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}},
+            "circles": {"c": {"center": "q", "diameter": 3}}}});
+        let id = TopoId::derive("feature").tag("s").finish();
+        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into()), Pick::Constraint(0)];
+        let sent = e.group_selection().unwrap();
+        assert_eq!(sent["groups"], json!({"g1": ["l1", "l2"]}), "elements only");
+        assert_eq!(e.selected_group(), None, "a dimension is selected too");
+        e.selected = e.group_picks("g1");
+        assert_eq!(e.selected_group().as_deref(), Some("g1"));
+        let badge = e.badges(600.0).into_iter().find(|b| b.pick == Pick::Group("g1".into())).expect("a badge");
+        assert_eq!(e.hit(badge.at.0, badge.at.1, 600.0, |_| (0.0, 0.0)), Some(Pick::Group("g1".into())));
+        e.selected.clear();
+        // `DATUM_GROUP_SHOT=file.png` saves a picture with the cursor on the badge.
+        if let Some(path) = std::env::var_os("DATUM_GROUP_SHOT") {
+            e.hover = Some(Pick::Group("g1".into()));
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 600.0]).wgpu().build_ui(|ui| {
+                let rect = ui.max_rect();
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
+                e.paint(ui.painter(), rect);
+            });
+            h.run();
+            h.render().unwrap().save(path).unwrap();
+        }
+        e.hover = Some(Pick::Group("g1".into()));
+        assert!(e.start_drag([0.0, 0.0]));
+        e.drag_to([1.0, 1.0]);
+        let moved = e.end_drag().unwrap();
+        assert_eq!(moved["points"], json!({"p1": [1.0, 1.0], "p2": [2.0, 5.0], "p3": [7.0, 7.0]}), "the circle stays");
+        let sent = e.ungroup("g1");
+        assert_eq!(sent["groups"], json!({"g1": null}));
+        assert!(e.groups().is_empty() && e.json["sketch"]["lines"].get("l1").is_some());
     }
 
     /// Dragged where it cannot go, frame after frame, a point stays put: no flicker between the
