@@ -26,7 +26,12 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     crate::log::write("opening the window");
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
+        // Maximized, as a CAD window opens; restored, it is 1280 × 800.
+        viewport: egui::ViewportBuilder::default()
+            .with_title(title(path.as_deref()))
+            .with_inner_size([1280.0, 800.0])
+            .with_maximized(true)
+            .with_drag_and_drop(true),
         ..Default::default()
     };
     // On Windows, DirectX 12 with OpenGL for GPUs without it, not Vulkan: a laptop's Vulkan
