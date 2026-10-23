@@ -2,19 +2,66 @@
 //! commands, appended to `datum.log` beside the program, or in the temporary folder where the
 //! program's own is not writable. The window's start and its GPU are logged too: a log that
 //! stops at "opening the window" means the process died in the GPU driver.
+//!
+//! Beside it, the journal of actions (D110), while the engineer records: every command the
+//! window runs, a JSON line as the agent's `execute` takes it (`{"command": …, "params": …}`,
+//! and `error` if refused), to the console and to `datum-actions.jsonl`, begun anew each time
+//! recording starts. Off by default: models may be confidential. The engineer shows a sequence
+//! of operations; the agent reads it, talks it over, repeats it.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// File `name` beside the program, or in the temporary folder if that is not writable.
+fn beside(name: &str) -> PathBuf {
+    let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(name)));
+    let writable = |p: &PathBuf| std::fs::OpenOptions::new().create(true).append(true).open(p).is_ok();
+    beside.filter(writable).unwrap_or_else(|| std::env::temp_dir().join(name))
+}
 
 /// The log file.
 pub fn path() -> &'static PathBuf {
     static PATH: OnceLock<PathBuf> = OnceLock::new();
-    PATH.get_or_init(|| {
-        let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("datum.log")));
-        let writable = |p: &PathBuf| std::fs::OpenOptions::new().create(true).append(true).open(p).is_ok();
-        beside.filter(writable).unwrap_or_else(|| std::env::temp_dir().join("datum.log"))
-    })
+    PATH.get_or_init(|| beside("datum.log"))
+}
+
+/// The journal of actions.
+pub fn actions_path() -> &'static PathBuf {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| beside("datum-actions.jsonl"))
+}
+
+static RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// Whether actions are journaled.
+pub fn recording() -> bool {
+    RECORDING.load(Ordering::Relaxed)
+}
+
+/// Starts recording, with the journal emptied, or stops it.
+pub fn record(on: bool) {
+    if on {
+        let _ = std::fs::File::create(actions_path());
+    }
+    RECORDING.store(on, Ordering::Relaxed);
+}
+
+/// Journals command `command` run with `params`, while recording: refused, with `error`.
+pub fn action(command: &str, params: &serde_json::Value, error: Option<&str>) {
+    if !recording() {
+        return;
+    }
+    let mut line = serde_json::json!({"command": command, "params": params});
+    if let Some(e) = error {
+        line["error"] = e.into();
+    }
+    // A window without a console has no stdout: nothing to say there, and no harm.
+    let _ = writeln!(std::io::stdout().lock(), "{line}");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(actions_path()) {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// Appends a line, with the time (seconds since 1970) and the version.
@@ -47,4 +94,28 @@ pub fn install() {
         }
         previous(info);
     }));
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use serde_json::{Value, json};
+
+    /// A journaled action reads back as the agent's `execute` arguments; nothing is journaled
+    /// unless recording.
+    #[test]
+    fn actions_are_execute_calls() {
+        let params = json!({"name": "s", "lines": {"l1": {"from": "p1", "to": "p2"}}});
+        super::action("add", &json!({"name": "secret"}), None);
+        super::record(true);
+        super::action("edit_sketch", &params, None);
+        super::action("remove", &json!({"name": "x"}), Some("no feature `x`"));
+        super::record(false);
+        super::action("add", &json!({"name": "secret"}), None);
+        let text = std::fs::read_to_string(super::actions_path()).unwrap();
+        assert!(!text.contains("secret"), "{text}");
+        let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert!(lines.contains(&json!({"command": "edit_sketch", "params": params})), "{text}");
+        assert!(lines.contains(&json!({"command": "remove", "params": {"name": "x"}, "error": "no feature `x`"})), "{text}");
+    }
 }
