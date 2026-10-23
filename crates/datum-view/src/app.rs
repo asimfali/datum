@@ -58,6 +58,8 @@ fn title(path: Option<&std::path::Path>) -> String {
 
 enum Request {
     Open(PathBuf),
+    /// No model any more: the session starts empty, the window shows none.
+    Close,
     SetParameter(String, Json),
     /// Any other command of the session, with its parameters.
     Command(&'static str, Json),
@@ -116,6 +118,8 @@ struct Model {
     notes: Vec<String>,
     /// A model was opened in this rebuild: the view fits it.
     opened: bool,
+    /// Closed: the window shows no model.
+    closed: bool,
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
     rebuild_ms: f64,
     scene_ms: f64,
@@ -143,7 +147,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         pending.extend(requests.try_iter());
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
-        let (mut error, mut opened) = (None, false);
+        let (mut error, mut opened, mut closed) = (None, false, false);
         let mut notes = Vec::new();
         // A body whose shape an edit changed (pieces, through holes): worth a word.
         let mut note = |reply: &Json| {
@@ -156,13 +160,18 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             match r {
                 Request::Open(p) => {
                     latest.clear();
-                    opened = true;
+                    (opened, closed) = (true, false);
                     if let Err(e) = journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
                         error = Some(e);
                     }
                 }
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
+                }
+                Request::Close => {
+                    latest.clear();
+                    session = Session::default();
+                    (opened, closed) = (false, true);
                 }
                 Request::Command(command, params) => match journaled(&mut session, command, &params) {
                     Ok(reply) => note(&reply),
@@ -199,7 +208,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, notes, opened, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
+        if models.send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
             return;
         }
         ctx.request_repaint();
@@ -262,6 +271,8 @@ struct Viewer {
     library_filter: String,
     /// The selection being kept in the library.
     keeping: Option<Keep>,
+    /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
+    quitting: Option<bool>,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -306,6 +317,7 @@ impl Viewer {
             library: crate::templates::library(None),
             library_filter: String::new(),
             keeping: None,
+            quitting: None,
             picking: false,
             face: None,
         };
@@ -339,6 +351,9 @@ impl Viewer {
 
     /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
     fn open_by_dialog(&mut self, ui: &egui::Ui) {
+        if !self.may_leave(ui) {
+            return;
+        }
         if let Some(p) = self.parts().pick_file() {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
             self.open(p);
@@ -346,16 +361,54 @@ impl Viewer {
     }
 
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
-    fn save(&mut self, ui: &egui::Ui, ask: bool) {
+    fn save(&mut self, ui: &egui::Ui, ask: bool) -> bool {
         let path = match (&self.path, ask) {
             (Some(p), false) => Some(p.clone()),
             _ => self.parts().set_file_name("model.json").save_file(),
         };
-        if let Some(p) = path {
-            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-            self.send(Request::Command("save", json!({"path": p.display().to_string()})));
-            self.set_path(Some(p));
+        let Some(p) = path else { return false };
+        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+        self.send(Request::Command("save", json!({"path": p.display().to_string()})));
+        self.set_path(Some(p));
+        true
+    }
+
+    /// Whether the model is changed since it was opened or saved.
+    fn modified(&self) -> bool {
+        self.model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
+    }
+
+    /// Whether the model may be left (closed, replaced): asked first if it has changes not saved
+    /// — saved, dropped, or kept open.
+    fn may_leave(&mut self, ui: &egui::Ui) -> bool {
+        !self.modified() || self.ask_to_save(ui).is_some()
+    }
+
+    /// Asks whether to save the changes: `Some(true)` saved (sent to be written), `Some(false)`
+    /// dropped, `None` kept open.
+    fn ask_to_save(&mut self, ui: &egui::Ui) -> Option<bool> {
+        let file = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new model".to_string(), |f| f.to_string_lossy().to_string());
+        let answer = rfd::MessageDialog::new()
+            .set_title("Datum")
+            .set_description(format!("Save the changes to {file}?"))
+            .set_buttons(rfd::MessageButtons::YesNoCancel)
+            .show();
+        match answer {
+            rfd::MessageDialogResult::Yes => self.save(ui, false).then_some(true),
+            rfd::MessageDialogResult::No => Some(false),
+            _ => None,
         }
+    }
+
+    /// Closes the model (Close, Ctrl+W): the window shows none.
+    fn close(&mut self, ui: &egui::Ui) {
+        if self.model.is_none() || !self.may_leave(ui) {
+            return;
+        }
+        self.leave();
+        self.set_path(None);
+        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
+        self.send(Request::Close);
     }
 
     /// The library palette (D117): every sketch element with its outline, name and where it comes
@@ -710,11 +763,14 @@ impl Viewer {
             if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                 self.open_by_dialog(ui);
             }
-            if ui.button("New").on_hover_text("An empty model").clicked() {
+            if ui.button("New").on_hover_text("An empty model").clicked() && self.may_leave(ui) {
                 self.leave();
                 self.set_path(None);
                 ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
                 self.send(Request::Command("new", json!({})));
+            }
+            if ui.add_enabled(self.model.is_some(), egui::Button::new("Close")).on_hover_text("Close the model (Ctrl+W)").clicked() {
+                self.close(ui);
             }
             if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
                 self.save(ui, false);
@@ -766,7 +822,11 @@ impl Viewer {
             if let Some(p) = m.inspect["parameters"].as_object() {
                 self.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
-            self.model = Some(m);
+            // A save that failed while closing the window: it stays open, the error shown.
+            if self.quitting == Some(true) && m.error.is_some() {
+                self.quitting = None;
+            }
+            self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
         }
     }
@@ -1620,6 +1680,17 @@ impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
         self.receive();
+        // The window closed with changes not saved: asked first; saved, it closes once the
+        // background thread has written the file.
+        if ui.input(|i| i.viewport().close_requested()) && self.quitting.is_none() && self.modified() {
+            ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quitting = self.ask_to_save(ui);
+        }
+        if let Some(saving) = self.quitting
+            && (!saving || (!self.busy && !self.modified()))
+        {
+            ui.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         // Undo and redo, unless a text field takes the keys.
         if !ui.ctx().egui_wants_keyboard_input() {
             let shortcut = |k| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k);
@@ -1629,6 +1700,9 @@ impl eframe::App for Viewer {
             }
             if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::O))) {
                 self.open_by_dialog(ui);
+            }
+            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::W))) {
+                self.close(ui);
             }
             if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::S))) {
                 self.save(ui, false);
@@ -1681,6 +1755,7 @@ mod tests {
                 error: None,
                 notes: Vec::new(),
                 opened: false,
+                closed: false,
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
                 bodies: Vec::new(),
@@ -1707,6 +1782,7 @@ mod tests {
             library: crate::templates::library(None),
             library_filter: String::new(),
             keeping: None,
+            quitting: None,
             picking: false,
             face: None,
         };
@@ -2033,6 +2109,23 @@ mod tests {
         let why = &sk.conflict.as_ref().expect("refused").why;
         assert!(!why.is_empty(), "with why");
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "nothing sent");
+    }
+
+    /// Close: a model with nothing unsaved closes without asking; the background thread is told,
+    /// the file and title go.
+    #[test]
+    fn close_a_saved_model() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.path = Some("plate.json".into());
+        assert!(!v.modified());
+        {
+            let mut h = egui_kittest::Harness::builder().with_size([800.0, 40.0]).build_ui(|ui| v.toolbar(ui));
+            h.run();
+            h.get_by_label("Close").click();
+            h.run();
+        }
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));
+        assert!(v.path.is_none() && v.sketch.is_none());
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

@@ -19,6 +19,8 @@ pub struct Session {
     evaluator: Evaluator,
     last: Evaluation,
     path: Option<PathBuf>,
+    /// The model as last opened or saved: what differs from it is not saved yet.
+    saved: Graph,
     /// Models before each change, the latest last; and those undone, for `redo`.
     undo: Vec<Graph>,
     redo: Vec<Graph>,
@@ -31,7 +33,7 @@ impl Default for Session {
     fn default() -> Self {
         let evaluator = Evaluator::default();
         let last = evaluator.evaluate(&Graph::default());
-        Self { graph: Graph::default(), evaluator, last, path: None, undo: Vec::new(), redo: Vec::new() }
+        Self { graph: Graph::default(), evaluator, last, path: None, saved: Graph::default(), undo: Vec::new(), redo: Vec::new() }
     }
 }
 
@@ -78,6 +80,7 @@ const COMMANDS: &[Command] = &[
             };
             std::fs::write(&path, to_json(&s.graph)).map_err(|e| format!("{}: {e}", path.display()))?;
             s.path = Some(path.clone());
+            s.saved = s.graph.clone();
             Ok(json!({"saved": path.display().to_string()}))
         },
     },
@@ -377,7 +380,8 @@ const COMMANDS: &[Command] = &[
     Command { name: "redo", description: "Make a change undone again.", params: no_params, run: |s, _| s.step(false) },
     Command {
         name: "inspect",
-        description: "The feature history with each feature's status: volume, element counts and hash, or why it failed.",
+        description: "The feature history with each feature's status: volume, element counts and hash, or why it failed; \
+                      `modified`: whether the model differs from its file as last opened or saved.",
         params: no_params,
         run: |s, _| Ok(s.inspect()),
     },
@@ -600,6 +604,7 @@ impl Session {
     }
 
     fn replace(&mut self, g: Graph, path: Option<PathBuf>) -> Value {
+        self.saved = g.clone();
         self.graph = g;
         self.path = path;
         self.rebuild()
@@ -799,7 +804,8 @@ impl Session {
                 (n.clone(), v)
             })
             .collect();
-        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "parameters": parameters, "features": features})
+        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.graph != self.saved, "parameters": parameters,
+               "features": features})
     }
 }
 

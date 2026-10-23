@@ -372,3 +372,23 @@ fn a_line_deleted_with_its_dimension() {
             .contains("no constraint")
     );
 }
+
+/// `inspect` says whether the model differs from its file: after an edit it does, after a save
+/// or an undo back to what was saved it does not.
+#[test]
+fn modified_since_saved() {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("modified.json");
+    let mut s = Session::default();
+    let modified = |s: &mut Session| run(s, "inspect", json!({}))["modified"].as_bool().unwrap();
+    assert!(!modified(&mut s), "an empty new model");
+    plate(&mut s);
+    assert!(modified(&mut s));
+    run(&mut s, "save", json!({"path": path}));
+    assert!(!modified(&mut s));
+    run(&mut s, "edit", json!({"name": "moved", "angle_deg": 30}));
+    assert!(modified(&mut s));
+    run(&mut s, "undo", json!({}));
+    assert!(!modified(&mut s), "back to what was saved");
+    run(&mut s, "open", json!({"path": path}));
+    assert!(!modified(&mut s));
+}
