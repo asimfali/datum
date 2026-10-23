@@ -124,6 +124,8 @@ struct Parser<'a> {
     s: &'a [u8],
     i: usize,
     depth: usize,
+    /// Where each parameter name stands in the text: byte ranges.
+    vars: Vec<std::ops::Range<usize>>,
 }
 
 impl Parser<'_> {
@@ -212,11 +214,14 @@ impl Parser<'_> {
                 t.parse().map(Expr::Num).map_err(|_| ExprError::Syntax(format!("bad number `{t}`")))
             }
             Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
+                let start = self.i;
                 let name = self.word(|c| c.is_ascii_alphanumeric() || c == b'_').to_string();
+                let end = self.i;
                 if name.eq_ignore_ascii_case("pi") {
                     return Ok(Expr::Num(std::f64::consts::PI));
                 }
                 if self.peek() != Some(b'(') {
+                    self.vars.push(start..end);
                     return Ok(Expr::Var(name));
                 }
                 let f = FUNCS
@@ -261,18 +266,42 @@ impl Parser<'_> {
 }
 
 fn parse(text: &str) -> Result<Expr, ExprError> {
+    parse_noting(text).map(|(e, _)| e)
+}
+
+/// The expression and where its parameter names stand in `text`.
+fn parse_noting(text: &str) -> Result<(Expr, Vec<std::ops::Range<usize>>), ExprError> {
     if text.len() > MAX_LEN {
         return Err(ExprError::TooDeep);
     }
     if text.trim().is_empty() {
         return Err(ExprError::Syntax("empty expression".into()));
     }
-    let mut p = Parser { s: text.as_bytes(), i: 0, depth: 0 };
+    let mut p = Parser { s: text.as_bytes(), i: 0, depth: 0, vars: Vec::new() };
     let e = p.sum()?;
     if p.peek().is_some() {
         return Err(ExprError::Syntax(format!("unexpected `{}`", text[p.i..].trim())));
     }
-    Ok(e)
+    Ok((e, p.vars))
+}
+
+/// `text` with each parameter name `with` gives a replacement for replaced by it, in
+/// parentheses: `2 * w` with `w` → `a + 1` is `2 * (a + 1)`. Names it leaves are kept.
+pub fn substitute(text: &str, with: &impl Fn(&str) -> Option<String>) -> Result<String, ExprError> {
+    let (_, vars) = parse_noting(text)?;
+    let mut out = String::with_capacity(text.len());
+    let mut done = 0;
+    for r in vars {
+        if let Some(new) = with(&text[r.clone()]) {
+            out.push_str(&text[done..r.start]);
+            out.push('(');
+            out.push_str(&new);
+            out.push(')');
+            done = r.end;
+        }
+    }
+    out.push_str(&text[done..]);
+    Ok(out)
 }
 
 fn value(e: &Expr, lookup: &dyn Fn(&str) -> Result<f64, ExprError>) -> Result<f64, ExprError> {
@@ -352,6 +381,19 @@ mod tests {
 
     fn constant(t: &str) -> Result<f64, ExprError> {
         eval(t, &|n| Err(ExprError::Unknown(n.to_string())))
+    }
+
+    #[test]
+    fn substitution_keeps_precedence() {
+        let with = |n: &str| match n {
+            "w" => Some("a + 1".to_string()),
+            "h" => Some("40".to_string()),
+            _ => None,
+        };
+        assert_eq!(substitute("2*w - h/2 + gap", &with).unwrap(), "2*(a + 1) - (40)/2 + gap");
+        assert_eq!(substitute("max(w, 1e3) + pi", &with).unwrap(), "max((a + 1), 1e3) + pi");
+        assert_eq!(constant(&substitute("2*w", &|_| Some("3+1".into())).unwrap()), Ok(8.0));
+        assert!(substitute("2*", &with).is_err());
     }
 
     #[test]

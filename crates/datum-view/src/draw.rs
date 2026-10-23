@@ -5,6 +5,7 @@
 //! choose which constraints to add, and the solver then holds those exactly.
 
 use datum_brep::{Body, Curve, Ix};
+use datum_model::SketchPatch;
 use datum_ops::Placed;
 use serde_json::{Map, Value as Json, json};
 
@@ -94,7 +95,7 @@ pub struct Draft {
     pub typed: Option<(Json, f64)>,
     /// Dimension tool: what is picked so far.
     pub picks: Vec<crate::dims::Pick2>,
-    /// Template tool: the template placed.
+    /// Template tool: the library element placed.
     pub template: Option<Json>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
@@ -348,7 +349,7 @@ impl Draft {
             Tool::Select | Tool::Dimension => return None,
             Tool::Template => {
                 let t = self.template.clone()?;
-                if self.clicks.len() + 1 < crate::templates::anchors(&t).len() {
+                if self.clicks.len() + 1 < datum_model::library::anchors(&t).len() {
                     self.clicks.push(spot);
                     return None;
                 }
@@ -629,41 +630,25 @@ fn short(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
 }
 
-/// An `edit_sketch` patch being made: new names stay clear of the sketch's and of each other.
-pub(crate) struct Patch {
-    taken: Vec<String>,
-    params: Map<String, Json>,
+/// An `edit_sketch` patch being made ([`SketchPatch`]), with the window's snaps.
+pub(crate) struct Patch(SketchPatch);
+
+impl std::ops::Deref for Patch {
+    type Target = SketchPatch;
+    fn deref(&self) -> &SketchPatch {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for Patch {
+    fn deref_mut(&mut self) -> &mut SketchPatch {
+        &mut self.0
+    }
 }
 
 impl Patch {
     fn new(edit: &SketchEdit) -> Self {
-        let sketch = &edit.json["sketch"];
-        let mut taken: Vec<String> =
-            ["points", "lines", "arcs", "circles", "measures"].iter().filter_map(|k| sketch[k].as_object()).flat_map(|m| m.keys().cloned()).collect();
-        taken.extend(edit.json["project"].as_object().into_iter().flat_map(|m| m.keys().cloned()));
-        Self { taken, params: Map::new() }
-    }
-
-    /// `prefix` numbered past every `prefix<k>` taken. A name freed by a removal is not given
-    /// again: what referred to the removed element downstream reports it lost rather than
-    /// latching onto the new one.
-    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
-        let last = self.taken.iter().filter_map(|n| n.strip_prefix(prefix)?.parse::<u64>().ok()).max().unwrap_or(0);
-        let n = format!("{prefix}{}", last + 1);
-        self.taken.push(n.clone());
-        n
-    }
-
-    pub(crate) fn add(&mut self, key: &str, name: &str, mut value: Json, construction: bool) {
-        if construction {
-            value["construction"] = json!(true);
-        }
-        self.set(key, name, value);
-    }
-
-    /// Entry `name` of map `key` of the patch.
-    pub(crate) fn set(&mut self, key: &str, name: &str, value: Json) {
-        self.params.entry(key).or_insert_with(|| json!({}))[name] = value;
+        Self(SketchPatch::new(&edit.json))
     }
 
     /// An arc's point `p` level with (horizontal) or plumb above (vertical) its centre `c`.
@@ -675,12 +660,6 @@ impl Patch {
         }
     }
 
-    pub(crate) fn constrain(&mut self, c: Json) {
-        if let Json::Array(a) = self.params.entry("add_constraints").or_insert_with(|| json!([])) {
-            a.push(c);
-        }
-    }
-
     /// The point a spot names, made as it needs: an existing point as it is; a vertex of the
     /// face projected; otherwise a new point there, on what it snapped to.
     pub(crate) fn point(&mut self, spot: &Spot) -> String {
@@ -688,28 +667,33 @@ impl Patch {
             Snap::Point(n) => return n.clone(),
             Snap::Vertex(id) => {
                 let v = self.fresh("v");
-                self.params.entry("project").or_insert_with(|| json!({}))[&v] = json!({"id": id});
+                self.set("project", &v, json!({"id": id}));
                 return v;
             }
             _ => {}
         }
         let p = self.fresh("p");
-        self.params.entry("points").or_insert_with(|| json!({}))[&p] = json!(spot.at);
+        self.set("points", &p, json!(spot.at));
+        self.tie(&p, spot);
+        p
+    }
+
+    /// New point `p` held on what `spot` snapped to: a middle, a curve, an edge of the face.
+    pub(crate) fn tie(&mut self, p: &str, spot: &Spot) {
         match &spot.snap {
             Snap::Middle(l) => self.constrain(json!({"type": "midpoint", "point": p, "line": l})),
             Snap::On(c) => self.constrain(json!({"type": "on", "point": p, "curve": c})),
             Snap::Edge(id) => {
                 let e = self.fresh("e");
-                self.params.entry("project").or_insert_with(|| json!({}))[&e] = json!({"id": id});
+                self.set("project", &e, json!({"id": id}));
                 self.constrain(json!({"type": "on", "point": p, "curve": e}));
             }
             _ => {}
         }
-        p
     }
 
     fn done(self) -> Option<Map<String, Json>> {
-        (!self.params.is_empty()).then_some(self.params)
+        self.0.done()
     }
 }
 

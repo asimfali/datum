@@ -18,8 +18,11 @@ use std::fmt;
 
 use datum_math::expr::Num;
 
+pub mod library;
+mod patch;
 mod session;
 
+pub use patch::SketchPatch;
 pub use session::{Session, patch_sketch, visit_names};
 
 use datum_graph::{Graph, GraphError, NodeIx, Op};
