@@ -660,11 +660,17 @@ pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Where new elements of `level` are saved unless put elsewhere: the library of the model's
-/// project, or else the one beside the program.
+/// The folder work is kept in: the project of the model at `model`, or else the folder beside
+/// the program. Its subfolders: `part`, `assembly`, `drawing` for documents, `library` for
+/// elements (D115).
+pub fn workspace(model: Option<&Path>) -> Option<PathBuf> {
+    model.and_then(project_root).or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))
+}
+
+/// Where new elements of `level` are saved unless put elsewhere: `library/<level>` of the
+/// [`workspace`].
 pub fn folder(level: &str, model: Option<&Path>) -> Option<PathBuf> {
-    let root = model.and_then(project_root).or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))?;
-    Some(root.join("library").join(level))
+    Some(workspace(model)?.join("library").join(level))
 }
 
 /// A file name for element `name`: what a file system would refuse, replaced.

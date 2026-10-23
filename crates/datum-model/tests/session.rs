@@ -250,6 +250,9 @@ fn the_project_library_comes_first() {
     let lib = run(&mut s, "library", json!({}));
     assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["description"]), (&json!("project"), &json!("ours")), "{lib}");
     assert!(lib["skipped"][0].as_str().unwrap().contains("broken.json"), "{lib}");
+    let model = root.join("part/plate.json");
+    assert_eq!(datum_model::library::workspace(Some(&model)), Some(root.clone()), "the project holds part, assembly, drawing, library");
+    assert_eq!(datum_model::library::folder("sketch", Some(&model)), Some(root.join("library/sketch")));
 }
 
 /// A piece of sketch kept in the project's library and placed again: the model's parameters its

@@ -322,11 +322,21 @@ impl Viewer {
         self.path = path;
     }
 
+    /// Where models are opened and saved by dialog: `part` of the workspace (the project, or
+    /// the folder beside the program), made if it is not there yet (D115).
+    fn parts(&self) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new().add_filter("Datum model", &["json"]);
+        match datum_model::library::workspace(self.path.as_deref()).map(|w| w.join("part")).filter(|d| std::fs::create_dir_all(d).is_ok()) {
+            Some(d) => dialog.set_directory(d),
+            None => dialog,
+        }
+    }
+
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
     fn save(&mut self, ui: &egui::Ui, ask: bool) {
         let path = match (&self.path, ask) {
             (Some(p), false) => Some(p.clone()),
-            _ => rfd::FileDialog::new().add_filter("Datum model", &["json"]).set_file_name("model.json").save_file(),
+            _ => self.parts().set_file_name("model.json").save_file(),
         };
         if let Some(p) = path {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
@@ -564,7 +574,7 @@ impl Viewer {
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if ui.button("Open…").clicked()
-                && let Some(p) = rfd::FileDialog::new().add_filter("Datum model", &["json"]).pick_file()
+                && let Some(p) = self.parts().pick_file()
             {
                 ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
                 self.open(p);
@@ -782,7 +792,11 @@ impl Viewer {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
                             if ui.button("DXF…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name(format!("{name}.dxf")).save_file()
+                                && let Some(p) = beside(
+                                    self.path.as_deref(),
+                                    rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name(format!("{name}.dxf")),
+                                )
+                                .save_file()
                             {
                                 export = Some((name.to_string(), p));
                             }
@@ -1366,6 +1380,15 @@ impl Viewer {
 /// A running average of frame times, steady enough to read.
 fn smooth(average: f64, sample: f64) -> f64 {
     if average == 0.0 { sample } else { average * 0.9 + sample * 0.1 }
+}
+
+/// `dialog` opened in the folder of the model's file, if it has one: what is made from a part
+/// goes beside it.
+fn beside(model: Option<&std::path::Path>, dialog: rfd::FileDialog) -> rfd::FileDialog {
+    match model.and_then(std::path::Path::parent) {
+        Some(d) => dialog.set_directory(d),
+        None => dialog,
+    }
 }
 
 /// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
