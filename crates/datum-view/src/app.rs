@@ -26,12 +26,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     crate::log::write("opening the window");
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        // Maximized, as a CAD window opens; restored, it is 1280 × 800.
-        viewport: egui::ViewportBuilder::default()
-            .with_title(title(path.as_deref()))
-            .with_inner_size([1280.0, 800.0])
-            .with_maximized(true)
-            .with_drag_and_drop(true),
+        // Restored, it is 1280 × 800; it opens maximized (see `Viewer::shown`).
+        viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
     // On Windows, DirectX 12 with OpenGL for GPUs without it, not Vulkan: a laptop's Vulkan
@@ -278,6 +274,9 @@ struct Viewer {
     keeping: Option<Keep>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
+    /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
+    /// first). Asked of the window as it is made, Windows drops it when eframe shows the window.
+    shown: u8,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -323,6 +322,7 @@ impl Viewer {
             library_filter: String::new(),
             keeping: None,
             quitting: None,
+            shown: 0,
             picking: false,
             face: None,
         };
@@ -1684,6 +1684,13 @@ fn definition(v: &Json) -> String {
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
+        if self.shown < 2 {
+            self.shown += 1;
+            if self.shown == 2 {
+                ui.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+            ui.ctx().request_repaint();
+        }
         self.receive();
         // The window closed with changes not saved: asked first; saved, it closes once the
         // background thread has written the file.
@@ -1788,6 +1795,7 @@ mod tests {
             library_filter: String::new(),
             keeping: None,
             quitting: None,
+            shown: 0,
             picking: false,
             face: None,
         };
