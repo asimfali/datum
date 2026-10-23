@@ -94,7 +94,7 @@ Design documents are in Russian:
 
 ## Try it
 
-Download a portable build for Windows or Linux from [Releases](https://github.com/asimfali/datum/releases), unpack it anywhere and run `datum-view`. What to try and what is not there yet: [`TESTERS.md`](TESTERS.md) (in Russian).
+Download a portable build for Windows or Linux from [Releases](https://github.com/asimfali/datum/releases), unpack it anywhere and run `datum`. What to try and what is not there yet: [`TESTERS.md`](TESTERS.md) (in Russian).
 
 From source:
 

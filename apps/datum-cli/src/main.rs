@@ -1,4 +1,5 @@
-//! `datum`: command-line front end of the Datum kernel.
+//! `datum`: the Datum program — its window (a double click), the command line and the MCP
+//! server, in one file (D127).
 
 use std::{
     fs::File,
@@ -40,6 +41,35 @@ fn main() -> ExitCode {
     }
 }
 
+/// The window, on the model at `path` if given. Started by a double click, the console Windows
+/// made for it goes; why the window could not open is then said in a message box too.
+fn window(path: Option<PathBuf>) -> Result<(), String> {
+    #[cfg(windows)]
+    let_go_of_own_console();
+    datum_view::run(path).inspect_err(|e| datum_view::log::fail(&format!("Datum could not open its window: {e}")))
+}
+
+/// Lets go of the console if this program is alone in it: the one Windows made for a double
+/// click, which then closes (after a flash). A console shared with a shell (`cmd`) stays, and
+/// what is printed goes there (D127).
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn let_go_of_own_console() {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetConsoleProcessList(list: *mut u32, count: u32) -> u32;
+        fn FreeConsole() -> i32;
+    }
+    let mut list = [0u32; 2];
+    // SAFETY: `list` holds the two IDs it is said to; `FreeConsole` takes nothing. Both only ask
+    // the system, and a failure leaves the console as it was.
+    unsafe {
+        if GetConsoleProcessList(list.as_mut_ptr(), 2) == 1 {
+            FreeConsole();
+        }
+    }
+}
+
 fn run(args: &[String]) -> Result<(), String> {
     match args.split_first() {
         Some((cmd, rest)) if cmd == "build" => cmd_build(rest),
@@ -47,11 +77,11 @@ fn run(args: &[String]) -> Result<(), String> {
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
         Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest),
         Some((cmd, rest)) if cmd == "bench-view" => cmd_bench_view(rest),
-        Some((cmd, [model])) if cmd == "view" => datum_view::run(Some(PathBuf::from(model))),
+        Some((cmd, [model])) if cmd == "view" => window(Some(PathBuf::from(model))),
         // A model dropped on the program, or opened with it: show it.
-        Some((model, [])) if model.ends_with(".json") && Path::new(model).is_file() => datum_view::run(Some(PathBuf::from(model))),
+        Some((model, [])) if model.ends_with(".json") && Path::new(model).is_file() => window(Some(PathBuf::from(model))),
         // Started without arguments (a double click): the viewer, with models to open from it.
-        None => datum_view::run(None),
+        None => window(None),
         Some((cmd, [])) if cmd == "mcp" => {
             datum_mcp::Server::default().serve(std::io::stdin().lock(), std::io::stdout().lock()).map_err(|e| e.to_string())
         }
