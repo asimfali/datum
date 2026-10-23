@@ -274,6 +274,8 @@ struct Viewer {
     keeping: Option<Keep>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
+    /// The folder of the model last opened or saved: where the next one is opened from.
+    worked_in: Option<PathBuf>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first). Asked of the window as it is made, Windows drops it when eframe shows the window.
     shown: u8,
@@ -322,6 +324,7 @@ impl Viewer {
             library_filter: String::new(),
             keeping: None,
             quitting: None,
+            worked_in: None,
             shown: 0,
             picking: false,
             face: None,
@@ -341,17 +344,40 @@ impl Viewer {
     /// The model's file, and with it the project whose library elements are listed.
     fn set_path(&mut self, path: Option<PathBuf>) {
         self.library = crate::templates::library(path.as_deref());
+        if let Some(d) = path.as_deref().and_then(std::path::Path::parent) {
+            self.worked_in = Some(d.to_path_buf());
+        }
         self.path = path;
     }
 
-    /// Where models are opened and saved by dialog: `part` of the workspace (the project, or
-    /// the folder beside the program), made if it is not there yet (D115).
-    fn parts(&self) -> rfd::FileDialog {
+    /// A dialog for models opened in `folder`.
+    fn models_in(folder: Option<PathBuf>) -> rfd::FileDialog {
         let dialog = rfd::FileDialog::new().add_filter("Datum model", &["json"]);
-        match datum_model::library::workspace(self.path.as_deref()).map(|w| w.join("part")).filter(|d| std::fs::create_dir_all(d).is_ok()) {
+        match folder {
             Some(d) => dialog.set_directory(d),
             None => dialog,
         }
+    }
+
+    /// Where a new model is saved by dialog: `part` of the workspace (the project, or the folder
+    /// beside the program), made if it is not there yet (D115).
+    fn parts(&self) -> rfd::FileDialog {
+        let part = datum_model::library::workspace(self.path.as_deref()).map(|w| w.join("part")).filter(|d| std::fs::create_dir_all(d).is_ok());
+        Self::models_in(part)
+    }
+
+    /// Where a model is opened, or saved again elsewhere, by dialog: where the engineer works —
+    /// the folder of the model open, or of the last one opened or saved; else `part` (D121).
+    fn where_working(&self) -> rfd::FileDialog {
+        match self.working_folder() {
+            Some(d) => Self::models_in(Some(d)),
+            None => self.parts(),
+        }
+    }
+
+    /// The folder of the model open, or of the last one opened or saved.
+    fn working_folder(&self) -> Option<PathBuf> {
+        self.path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf).or_else(|| self.worked_in.clone())
     }
 
     /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
@@ -359,7 +385,7 @@ impl Viewer {
         if !self.may_leave(ui) {
             return;
         }
-        if let Some(p) = self.parts().pick_file() {
+        if let Some(p) = self.where_working().pick_file() {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
             self.open(p);
         }
@@ -369,7 +395,11 @@ impl Viewer {
     fn save(&mut self, ui: &egui::Ui, ask: bool) -> bool {
         let path = match (&self.path, ask) {
             (Some(p), false) => Some(p.clone()),
-            _ => self.parts().set_file_name("model.json").save_file(),
+            (Some(p), true) => {
+                let name = p.file_name().map_or_else(|| "model.json".to_string(), |n| n.to_string_lossy().to_string());
+                self.where_working().set_file_name(name).save_file()
+            }
+            (None, _) => self.parts().set_file_name("model.json").save_file(),
         };
         let Some(p) = path else { return false };
         ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
@@ -1795,6 +1825,7 @@ mod tests {
             library_filter: String::new(),
             keeping: None,
             quitting: None,
+            worked_in: None,
             shown: 0,
             picking: false,
             face: None,
@@ -2139,6 +2170,18 @@ mod tests {
         }
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));
         assert!(v.path.is_none() && v.sketch.is_none());
+    }
+
+    /// Open looks where the engineer works: the open model's folder, after Close the last one's;
+    /// only with neither does it fall back to `part` (D121).
+    #[test]
+    fn open_looks_where_working() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        assert_eq!(v.working_folder(), None, "nothing opened yet: the part folder");
+        v.set_path(Some("/work/examples/bracket.json".into()));
+        assert_eq!(v.working_folder(), Some("/work/examples".into()));
+        v.set_path(None);
+        assert_eq!(v.working_folder(), Some("/work/examples".into()), "closed: where it was");
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.
