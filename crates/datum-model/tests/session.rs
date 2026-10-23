@@ -251,3 +251,49 @@ fn the_project_library_comes_first() {
     assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["description"]), (&json!("project"), &json!("ours")), "{lib}");
     assert!(lib["skipped"][0].as_str().unwrap().contains("broken.json"), "{lib}");
 }
+
+/// A piece of sketch kept in the project's library and placed again: the model's parameters its
+/// dimensions name become the element's, in the order asked; placed, it is sized by the answers.
+#[test]
+fn a_selection_kept_in_the_library_and_placed_again() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_keep");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let mut s = Session::default();
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 80}));
+    run(&mut s, "set_parameter", json!({"name": "h", "value": 30}));
+    run(
+        &mut s,
+        "add",
+        json!({"name": "outline", "op": "sketch", "sketch": {
+            "points": {"a": [0, 0], "b": [80, 0], "c": [80, 30], "d": [0, 30]},
+            "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+            "constraints": [{"type": "fix", "point": "origin"}, {"type": "coincident", "points": ["a", "origin"]},
+                            {"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"}, {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
+                            {"type": "length", "line": "bottom", "value": "w"}, {"type": "length", "line": "left", "value": "h / 2 + 15"}]
+        }}),
+    );
+    run(&mut s, "save", json!({"path": root.join("part/plate.json")}));
+    let r = run(
+        &mut s,
+        "to_library",
+        json!({"name": "outline", "select": ["bottom", "right", "top", "left"], "element": "Plate: w × h",
+        "description": "a plate", "order": ["h"]}),
+    );
+    let saved = std::path::PathBuf::from(r["saved"].as_str().unwrap());
+    assert_eq!(saved, root.join("library/sketch/Plate_ w × h.json"), "in the project's library, a name a file system takes");
+    let e = &r["element"];
+    assert_eq!(e["parameters"], json!([{"name": "h", "value": 30.0}, {"name": "w", "value": 80.0}]), "asked in the order given: {e}");
+    let c = e["sketch"]["constraints"].as_array().unwrap();
+    assert!(!c.iter().any(|c| c.to_string().contains("origin")), "what ties to the origin stays behind: {e}");
+    assert!(s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "Plate: w × h"})).unwrap_err().contains("exists"));
+    let lib = run(&mut s, "library", json!({}));
+    assert!(lib["elements"].as_array().unwrap().iter().any(|e| e["name"] == "Plate: w × h" && e["source"] == "project"), "{lib}");
+    run(&mut s, "add", json!({"name": "other", "op": "sketch", "sketch": {"points": {}}}));
+    let r = run(&mut s, "insert_element", json!({"name": "other", "element": "Plate: w × h", "at": [[100, 0]], "values": {"h": 10}}));
+    assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
+    let other = &run(&mut s, "inspect", json!({}))["features"][1]["sketch"];
+    let lengths: Vec<&Value> = other["constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| &c["value"]).collect();
+    assert_eq!(lengths, [&json!(80.0), &json!(20.0)], "w as kept, h answered 10: {other}");
+}

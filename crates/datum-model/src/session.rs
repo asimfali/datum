@@ -180,6 +180,66 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "to_library",
+        description: "Keep a piece of sketch feature `name` as a library element (D98): `select` names its curves (taken with \
+                      their points) and points; the constraints and reference dimensions among them come along, the lowest, \
+                      leftmost point is the anchor. The model's parameters its dimensions name become the element's, with their \
+                      values now; `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
+                      with `description` to `path`, or else to `library/sketch` of the model's project (beside the program \
+                      without one); an existing file is kept unless `replace`. The reply has the element and where it went.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "select": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "element": {"type": "string"},
+                "description": {"type": "string"},
+                "order": {"type": "array", "items": {"type": "string"}},
+                "path": {"type": "string"},
+                "replace": {"type": "boolean"}
+            }, "required": ["name", "select", "element"], "additionalProperties": false})
+        },
+        run: |s, p| {
+            let name = text(p, "name")?;
+            let element_name = text(p, "element")?;
+            let Ok(Feature::Sketch(placed)) = s.value(name) else { return Err(format!("`{name}` is not a sketch that solves")) };
+            let feature = serde_json::to_value(&s.graph.nodes()[s.find(name)? as usize].op).map_err(|e| e.to_string())?;
+            let select: Vec<String> =
+                p.get("select").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
+            let sketch = &feature["sketch"];
+            let curve = |n: &String| ["lines", "arcs", "circles"].iter().any(|k| sketch[*k].get(n.as_str()).is_some());
+            if let Some(n) = select.iter().find(|n| !curve(n) && sketch["points"].get(n.as_str()).is_none()) {
+                return Err(format!("`select`: `{name}` has no point or curve `{n}` of its own"));
+            }
+            let (curves, points): (Vec<String>, Vec<String>) = select.into_iter().partition(curve);
+            let params: BTreeMap<String, f64> =
+                parameter_values(s.graph.parameters()).into_iter().filter_map(|(n, v)| v.ok().map(|v| (n, v))).collect();
+            let mut element =
+                library::extract(&feature, &placed.solved.points, &curves, &points, element_name, Some(&params)).ok_or("nothing to keep")?;
+            if let Some(d) = p.get("description").and_then(Value::as_str) {
+                element["description"] = json!(d);
+            }
+            if let (Some(order), Some(list)) = (p.get("order").and_then(Value::as_array), element.get_mut("parameters").and_then(Value::as_array_mut))
+            {
+                let rank = |v: &Value| order.iter().position(|o| *o == v["name"]).unwrap_or(order.len());
+                list.sort_by_key(rank);
+            }
+            library::check("sketch", &element)?;
+            let path = match p.get("path").and_then(Value::as_str) {
+                Some(x) => PathBuf::from(x),
+                None => library::folder("sketch", s.path.as_deref()).ok_or("no library folder")?.join(library::file_name(element_name)),
+            };
+            if path.exists() && !p.get("replace").and_then(Value::as_bool).unwrap_or(false) {
+                return Err(format!("{} exists: give `replace` to write over it", path.display()));
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            let text = serde_json::to_string_pretty(&element).map_err(|e| e.to_string())?;
+            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(json!({"element": element, "saved": path.display().to_string()}))
+        },
+    },
+    Command {
         name: "insert_element",
         description: "Insert a library element into sketch feature `name` as a copy (D98): its geometry, constraints and \
                       dimensions under new names, nothing tied to the library. `element`: a name from `library`, or an element \

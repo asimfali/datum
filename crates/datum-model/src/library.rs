@@ -472,6 +472,98 @@ pub fn place(
     Ok(renamed)
 }
 
+/// The piece of sketch feature `feature` (its JSON) picked: curves `curves` with their points,
+/// points `picked`, and the constraints and reference dimensions among them, as element `name`
+/// with its point lowest and leftmost (by `points`, the solved ones) as anchor. Projections and
+/// the origin stay behind, and so does what ties to them. With `params` (the model's parameter
+/// values), the model's parameters its dimensions name become the element's (D98: named
+/// dimensions become parameters), with their values now, asked in the order the dimensions name
+/// them; without, the dimensions stay as they are (a copy to paste in the same model).
+pub fn extract(
+    feature: &Value,
+    points: &BTreeMap<String, Vec2>,
+    curves: &[String],
+    picked: &[String],
+    name: &str,
+    params: Option<&BTreeMap<String, f64>>,
+) -> Option<Value> {
+    let sketch = &feature["sketch"];
+    let own = |n: &str| sketch["points"].get(n).is_some();
+    let mut names: Vec<String> = picked.iter().filter(|n| own(n)).cloned().collect();
+    let mut out = Map::new();
+    for n in curves {
+        for key in ["lines", "arcs", "circles"] {
+            if let Some(v) = sketch[key].get(n) {
+                let mut v = v.clone();
+                let mut ends = Vec::new();
+                crate::visit_names(&mut v, &mut |s| ends.push(s.clone()));
+                if ends.iter().all(|e| own(e)) {
+                    out.entry(key).or_insert_with(|| json!({}))[n.as_str()] = v;
+                    names.push(n.clone());
+                    names.extend(ends);
+                }
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    let at: Map<String, Value> = names.iter().filter(|n| own(n)).filter_map(|n| points.get(n).map(|q| (n.clone(), json!([q.x, q.y])))).collect();
+    let anchor = at
+        .iter()
+        .filter_map(|(n, q)| Some((n, q[0].as_f64()?, q[1].as_f64()?)))
+        .min_by(|a, b| (a.2, a.1).partial_cmp(&(b.2, b.1)).unwrap_or(std::cmp::Ordering::Equal))?
+        .0
+        .clone();
+    // Constraints and measures whose names are all taken come along.
+    let within = |v: &Value| {
+        let mut v = v.clone();
+        let mut all = true;
+        crate::visit_names(&mut v, &mut |s| all &= names.contains(s));
+        all
+    };
+    let constraints: Vec<Value> = sketch["constraints"].as_array().into_iter().flatten().filter(|c| within(c)).cloned().collect();
+    let measures: Map<String, Value> =
+        sketch["measures"].as_object().into_iter().flatten().filter(|(_, v)| within(v)).map(|(n, v)| (n.clone(), v.clone())).collect();
+    let mut element = json!({"name": name, "anchors": [anchor]});
+    if let Some(params) = params {
+        let named = std::cell::RefCell::new(Vec::<String>::new());
+        let values = constraints.iter().filter_map(|c| c.get("value").or_else(|| c.get("degrees")));
+        let diameters = out.get("circles").and_then(Value::as_object).into_iter().flat_map(|m| m.values()).map(|c| &c["diameter"]);
+        for text in values.chain(diameters).filter_map(Value::as_str) {
+            let _ = substitute(text, &|n: &str| {
+                if params.contains_key(n) && !named.borrow().iter().any(|m| m == n) {
+                    named.borrow_mut().push(n.to_string());
+                }
+                None
+            });
+        }
+        let parameters: Vec<Value> = named.into_inner().into_iter().map(|n| json!({"name": n, "value": params[&n]})).collect();
+        if !parameters.is_empty() {
+            element["parameters"] = json!(parameters);
+        }
+    }
+    out.insert("points".into(), Value::Object(at));
+    out.insert("constraints".into(), json!(constraints));
+    if !measures.is_empty() {
+        out.insert("measures".into(), Value::Object(measures));
+    }
+    element["sketch"] = Value::Object(out);
+    Some(element)
+}
+
+/// Where new elements of `level` are saved unless put elsewhere: the library of the model's
+/// project, or else the one beside the program.
+pub fn folder(level: &str, model: Option<&Path>) -> Option<PathBuf> {
+    let root = model.and_then(project_root).or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))?;
+    Some(root.join("library").join(level))
+}
+
+/// A file name for element `name`: what a file system would refuse, replaced.
+pub fn file_name(name: &str) -> String {
+    let stem: String = name.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+    format!("{}.json", stem.trim())
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
