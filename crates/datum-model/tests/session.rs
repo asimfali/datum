@@ -306,3 +306,41 @@ fn a_selection_kept_in_the_library_and_placed_again() {
     let lengths: Vec<&Value> = other["constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| &c["value"]).collect();
     assert_eq!(lengths, [&json!(80.0), &json!(20.0)], "w as kept, h answered 10: {other}");
 }
+
+/// A constraint reaching out of the piece kept (l5 ⊥ l4, l4 left behind) becomes a socket: put
+/// again, it is completed by a line of the sketch, or left open and said so.
+#[test]
+fn a_constraint_reaching_out_is_a_socket() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_links");
+    let _ = std::fs::remove_dir_all(&root);
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "add",
+        json!({"name": "path", "op": "sketch", "sketch": {
+            "points": {"p4": [0, 0], "p5": [10, 2], "p6": [11, -3], "p7": [16, -2]},
+            "lines": {"l4": {"from": "p4", "to": "p5"}, "l5": {"from": "p5", "to": "p6"}, "l6": {"from": "p6", "to": "p7"}},
+            "constraints": [{"type": "perpendicular", "lines": ["l4", "l5"]}, {"type": "perpendicular", "lines": ["l5", "l6"]},
+                            {"type": "length", "line": "l5", "value": 5}]
+        }}),
+    );
+    let r = run(
+        &mut s,
+        "to_library",
+        json!({"name": "path", "select": ["l5", "l6"], "element": "Step", "anchors": ["p5"], "path": root.join("step.json")}),
+    );
+    assert_eq!(r["element"]["links"], json!([{"constraint": {"type": "perpendicular", "lines": ["?", "l5"]}, "kind": "line"}]), "{r}");
+    let step = r["element"].clone();
+    // Put at the end of l6, its socket given l6: the new l5 is perpendicular to it.
+    let r = run(&mut s, "insert_element", json!({"name": "path", "element": step, "at": ["p7"], "links": {"perpendicular ? l5": "l6"}}));
+    assert!(r["failed"].as_array().unwrap().is_empty() && r["open_links"] == json!([]), "{r}");
+    let new_l5 = r["names"]["l5"].as_str().unwrap();
+    let c = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"]["constraints"];
+    assert!(c.as_array().unwrap().contains(&json!({"type": "perpendicular", "lines": ["l6", new_l5]})), "{c}");
+    // Not given: open, and said so; given a point: refused.
+    let r = run(&mut s, "insert_element", json!({"name": "path", "element": step, "at": [[40, 0]]}));
+    assert_eq!(r["open_links"].as_array().unwrap().len(), 1, "{r}");
+    let refused =
+        s.execute("insert_element", &json!({"name": "path", "element": step, "at": [[60, 0]], "links": {"perpendicular ? l5": "p4"}})).unwrap_err();
+    assert!(refused.contains("takes a line"), "{refused}");
+}

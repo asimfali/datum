@@ -73,11 +73,13 @@ struct Keep {
     picking: Option<usize>,
     /// The parameter names as typed, by dimension: one not taken yet is kept here meanwhile.
     naming: BTreeMap<String, String>,
+    /// The sockets (by place in `links`) left out: not asked when placing.
+    unlinked: std::collections::BTreeSet<usize>,
 }
 
 impl Keep {
     fn new(element: Json) -> Self {
-        Self { element, error: None, picking: None, naming: BTreeMap::new() }
+        Self { element, error: None, picking: None, naming: BTreeMap::new(), unlinked: std::collections::BTreeSet::new() }
     }
 
     /// Insertion point `k` (0: the first, 1: the second, if any) is point `p` of the piece, or
@@ -448,6 +450,29 @@ impl Viewer {
                 Some(Err(e)) => k.error = Some(e),
                 None => {}
             }
+            // Constraints reaching out of the selection: asked to be completed when placing (D116).
+            let links = k.element["links"].as_array().cloned().unwrap_or_default();
+            if !links.is_empty() {
+                ui.label("Constraints to what is outside — ticked ones are completed by a click when placing:");
+                for (i, l) in links.iter().enumerate() {
+                    let mut names = Vec::new();
+                    datum_model::visit_names(&mut l["constraint"].clone(), &mut |n| names.push(n.clone()));
+                    let label = format!(
+                        "{} {} (? a {})",
+                        l["constraint"]["type"].as_str().unwrap_or_default(),
+                        names.join(" "),
+                        l["kind"].as_str().unwrap_or_default()
+                    );
+                    let mut on = !k.unlinked.contains(&i);
+                    if ui.checkbox(&mut on, label).changed() {
+                        if on {
+                            k.unlinked.remove(&i);
+                        } else {
+                            k.unlinked.insert(i);
+                        }
+                    }
+                }
+            }
             if let Some(list) = k.element.get_mut("parameters").and_then(Json::as_array_mut) {
                 ui.label("Asked in this order:");
                 let mut up = None;
@@ -472,7 +497,19 @@ impl Viewer {
             });
         });
         if save {
-            let element = k.element.clone();
+            let mut element = k.element.clone();
+            if let Some(links) = element.get_mut("links").and_then(Json::as_array_mut) {
+                let mut i = 0;
+                links.retain(|_| {
+                    i += 1;
+                    !k.unlinked.contains(&(i - 1))
+                });
+                if links.is_empty()
+                    && let Some(o) = element.as_object_mut()
+                {
+                    o.remove("links");
+                }
+            }
             let name = element["name"].as_str().unwrap_or_default().to_string();
             let folder = datum_model::library::folder("sketch", self.path.as_deref());
             let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(datum_model::library::file_name(&name));
@@ -1060,9 +1097,18 @@ impl Viewer {
             .draft
             .template
             .as_ref()
-            .filter(|_| sk.draft.tool == Tool::Template)
+            .filter(|_| sk.draft.tool == Tool::Template && sk.draft.linking.is_empty())
             .and_then(|t| datum_model::library::parameter_names(t).ok())
             .unwrap_or_default();
+        // Its sockets next, one by one: what the one asked takes, by the cursor (D116).
+        if let (Some(link), Some(spot)) = (sk.draft.linking.first(), &sk.draft.cursor) {
+            let (x, y) = sk.camera.offset(spot.at, h);
+            let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
+            let text = format!("{} — click a {} · Enter skips ({} left)", link.shown, link.kind, sk.draft.linking.len());
+            egui::Area::new(egui::Id::new("datum_sketch_link")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text));
+            });
+        }
         if names.is_empty() {
             if sk.field.as_ref().is_some_and(|f| matches!(f.entry, Entry::Parameter(_))) {
                 sk.field = None;
@@ -1236,8 +1282,9 @@ impl Viewer {
                     sk.field = None;
                 }
             }
-            // Enter while placing an element: it goes where the cursor is.
-            if field_done.0
+            // Enter while placing an element: it goes where the cursor is; on a socket, skips it.
+            let skip = !draft.linking.is_empty() && !typing && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (field_done.0 || skip)
                 && draft.tool == Tool::Template
                 && let Some(patch) = draft.enter(sk)
             {
@@ -1663,6 +1710,7 @@ mod tests {
     fn a_dimension_ticked_is_asked() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
         v.keeping = Some(Keep::new(json!({"name": "test", "anchors": ["p5"],
+            "links": [{"constraint": {"type": "perpendicular", "lines": ["?", "l5"]}, "kind": "line"}],
             "sketch": {"points": {"p5": [0, 0], "p6": [-4, -8], "p7": [5, -11]},
                        "lines": {"l5": {"from": "p5", "to": "p6"}, "l6": {"from": "p6", "to": "p7"}},
                        "constraints": [{"type": "perpendicular", "lines": ["l5", "l6"]},
@@ -1674,6 +1722,7 @@ mod tests {
         h.run();
         h.get_by_label("length l5").click();
         h.run();
+        h.get_by_label("perpendicular ? l5 (? a line)");
         h.get_all_by_value("d1").next().unwrap().click();
         h.run();
         h.get_all_by_value("d1").next().unwrap().type_text("x");

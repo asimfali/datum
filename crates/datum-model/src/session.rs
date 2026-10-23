@@ -168,7 +168,7 @@ const COMMANDS: &[Command] = &[
                 .iter()
                 .map(|e| {
                     let mut v = json!({"source": e.source});
-                    for k in ["name", "description", "parameters", "presets", "anchors", "fit"] {
+                    for k in ["name", "description", "parameters", "presets", "anchors", "fit", "links"] {
                         if let Some(x) = e.element.get(k) {
                             v[k] = x.clone();
                         }
@@ -264,7 +264,9 @@ const COMMANDS: &[Command] = &[
                       by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
                       sketch's axes, or with `fit: align` turn it toward the second. `names`: element names that take the given \
                       free names (a section put in place of one removed keeps its name, and so what referred to it downstream). \
-                      The reply has the edit's result and `names`: each element name with the name it got.",
+                      `links`: the element's sockets (constraints reaching out of it, `perpendicular l5 ?`, as `library` lists \
+                      them) completed by a point, line or curve of the sketch. The reply has the edit's result, `names`: each \
+                      element name with the name it got, and `open_links`: the sockets left open.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -274,6 +276,7 @@ const COMMANDS: &[Command] = &[
                 "at": {"type": "array", "minItems": 1, "maxItems": 2,
                        "items": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}]}},
                 "names": {"type": "object", "additionalProperties": {"type": "string"}},
+                "links": {"type": "object", "additionalProperties": {"type": "string"}},
                 "construction": {"type": "boolean"}
             }, "required": ["name", "element", "at"], "additionalProperties": false})
         },
@@ -314,10 +317,25 @@ const COMMANDS: &[Command] = &[
             let mut patch = SketchPatch::new(&feature);
             let construction = p.get("construction").and_then(Value::as_bool).unwrap_or(false);
             let renamed = library::place(&mut patch, &element, &values, &at, &names, construction, &lookup)?;
+            // Sockets completed now, by the names given; the rest stay open, listed in the reply.
+            let mut open = Vec::new();
+            let given = p.get("links").and_then(Value::as_object);
+            let sockets = library::links(&element, &values, &renamed)?;
+            if let Some(l) = given.into_iter().flat_map(|g| g.keys()).find(|l| !sockets.iter().any(|k| k.label == **l)) {
+                return Err(format!("`links`: the element has no socket `{l}`"));
+            }
+            for link in sockets {
+                match given.and_then(|g| g.get(&link.label)).and_then(Value::as_str) {
+                    Some(target) if library::fits(placed, &link.kind, target) => patch.constrain(link.to(target)),
+                    Some(target) => return Err(format!("`links`: `{}` takes a {}, `{target}` is not one in `{name}`", link.label, link.kind)),
+                    None => open.push(link.shown),
+                }
+            }
             let mut params = patch.done().unwrap_or_default();
             params.insert("name".into(), json!(name));
             let mut reply = s.edit_sketch(name, &params)?;
             reply["names"] = json!(renamed);
+            reply["open_links"] = json!(open);
             Ok(reply)
         },
     },

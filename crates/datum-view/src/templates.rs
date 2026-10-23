@@ -85,7 +85,8 @@ pub fn asked(draft: &Draft, name: &str, params: &BTreeMap<String, f64>) -> Strin
 /// Places element `t` by `spots` (a spot for its first anchor or for each) into `patch`, with
 /// the parameter values of `preset` and `given`, the clicks answering the rest. An anchor
 /// clicked on a point of the sketch is made coincident with it; on a vertex of the face, with
-/// its projection; on a middle, a curve or an edge, held there as any click is.
+/// its projection; on a middle, a curve or an edge, held there as any click is. Returns its
+/// sockets, to be completed next (D116).
 pub fn place(
     patch: &mut Patch,
     t: &Json,
@@ -94,7 +95,7 @@ pub fn place(
     spots: &[Spot],
     construction: bool,
     params: &BTreeMap<String, f64>,
-) -> Option<()> {
+) -> Option<Vec<library::Link>> {
     let lookup = lookup(params);
     let at: Vec<[f64; 2]> = spots.iter().map(|s| s.at).collect();
     let values = library::answers(t, preset, given, &at, &lookup).ok()?;
@@ -112,7 +113,7 @@ pub fn place(
     for (a, s) in library::anchors(t).iter().zip(spots) {
         patch.tie(&renamed[a], s);
     }
-    Some(())
+    library::links(t, &values, &renamed).ok()
 }
 
 impl SketchEdit {
@@ -304,5 +305,33 @@ mod tests {
         let p = place_by(&mut e, t, &[free([0.0, 0.0]), free([30.0, 20.0])]);
         let l = lengths(&p);
         assert!((l[0].as_f64().unwrap() - 30.0).abs() < 1e-9 && l[1] == json!(5.0), "{p}");
+    }
+
+    /// A socket asked after the element is placed: a click on a line completes it, a click on a
+    /// point does not (it takes a line), Enter skips it.
+    #[test]
+    fn sockets_after_placing() {
+        let mut e = editor(json!({"points": {"p1": [0, 0], "p2": [20, 0]}, "lines": {"l1": {"from": "p1", "to": "p2"}}}));
+        let step = json!({"name": "Step", "anchors": ["a"],
+            "links": [{"constraint": {"type": "perpendicular", "lines": ["?", "up"]}, "kind": "line"}],
+            "sketch": {"points": {"a": [0, 0], "b": [0, 5]}, "lines": {"up": {"from": "a", "to": "b"}}}});
+        place_by(&mut e, step.clone(), &[free([5.0, 3.0])]);
+        assert_eq!(e.draft.linking.len(), 1);
+        assert_eq!(e.draft.linking[0].shown, "perpendicular ? l2");
+        let click = |e: &mut SketchEdit, snap: Snap| {
+            e.draft.cursor = Some(Spot { at: [10.0, 0.0], snap });
+            let mut d = std::mem::take(&mut e.draft);
+            let patch = d.click(e);
+            e.draft = d;
+            patch.map(|p| e.apply(p))
+        };
+        assert!(click(&mut e, Snap::Point("p1".into())).is_none(), "a point is not a line");
+        let p = click(&mut e, Snap::On("l1".into())).unwrap();
+        assert_eq!(p["add_constraints"], json!([{"type": "perpendicular", "lines": ["l1", "l2"]}]), "{p}");
+        assert!(e.draft.linking.is_empty());
+        // The next one: Enter skips its socket.
+        place_by(&mut e, step, &[free([8.0, 3.0])]);
+        let mut d = std::mem::take(&mut e.draft);
+        assert!(d.enter(&e).is_none() && d.linking.is_empty());
     }
 }

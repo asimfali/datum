@@ -138,6 +138,20 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
         Some(Some("align")) if anchors.len() == 2 => {}
         _ => return Err("`fit`: `stretch`, or `align` with two anchors".into()),
     }
+    let own: Vec<&String> = sketch.points.keys().chain(sketch.lines.keys()).chain(sketch.arcs.keys()).chain(sketch.circles.keys()).collect();
+    for l in e.get("links").and_then(Value::as_array).into_iter().flatten() {
+        let c = &l["constraint"];
+        let label = label_of(c);
+        serde_json::from_value::<Constraint>(c.clone()).map_err(|err| format!("link `{label}`: {err}"))?;
+        let mut names = Vec::new();
+        crate::visit_names(&mut c.clone(), &mut |n| names.push(n.clone()));
+        if names.iter().filter(|n| *n == SOCKET).count() != 1 || names.iter().any(|n| n != SOCKET && !own.contains(&n)) {
+            return Err(format!("link `{label}`: one `{SOCKET}` for the side outside, the rest the element's own"));
+        }
+        if !l["kind"].as_str().is_some_and(|k| KINDS.contains(&k)) {
+            return Err(format!("link `{label}`: `kind` is one of {KINDS:?}"));
+        }
+    }
     let names = parameter_names(e)?;
     for (preset, values) in e.get("presets").and_then(Value::as_object).into_iter().flatten() {
         let values = values.as_object().ok_or_else(|| format!("preset `{preset}`: parameter values by name"))?;
@@ -468,6 +482,97 @@ pub fn place(
     Ok(renamed)
 }
 
+/// What stands for the outside side of a socket's constraint (see [`Link`]).
+pub const SOCKET: &str = "?";
+
+/// What a socket takes: a point, a line, an arc or circle, or any curve (a projected edge).
+pub const KINDS: [&str; 4] = ["point", "line", "circle", "curve"];
+
+/// What name `n` of sketch feature `feature` is, as a socket would take it.
+fn kind_of(feature: &Value, n: &str) -> Option<&'static str> {
+    let sketch = &feature["sketch"];
+    let has = |key: &str| sketch[key].get(n).is_some();
+    if has("points") || n == datum_ops::ORIGIN || n.contains('.') {
+        Some("point")
+    } else if has("lines") {
+        Some("line")
+    } else if has("arcs") || has("circles") {
+        Some("circle")
+    } else {
+        feature["project"].get(n).map(|_| "curve")
+    }
+}
+
+/// A socket of a placed element: a constraint between it and something outside it, completed
+/// by naming that (D116). Kept when the piece was taken from a sketch with the constraint
+/// reaching out of it: parallel to a line outside, concentric with a circle outside, a distance
+/// to a point outside.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    /// How it reads, by the element's names (`perpendicular l5 ?`): how the agent names it.
+    pub label: String,
+    /// How it reads once placed, by the sketch's names.
+    pub shown: String,
+    /// What it takes: one of [`KINDS`].
+    pub kind: String,
+    /// The constraint, by the sketch's names, [`SOCKET`] for the side outside.
+    pub constraint: Value,
+}
+
+impl Link {
+    /// The constraint with `target` (a name in the sketch) for the side outside.
+    pub fn to(&self, target: &str) -> Value {
+        let mut c = self.constraint.clone();
+        crate::visit_names(&mut c, &mut |s| {
+            if s == SOCKET {
+                *s = target.to_string();
+            }
+        });
+        c
+    }
+}
+
+/// Whether `target` is something of sketch `placed` a socket of `kind` takes.
+pub fn fits(placed: &datum_ops::Placed, kind: &str, target: &str) -> bool {
+    let line = placed.lines.contains_key(target);
+    let circle = placed.arcs.contains_key(target) || placed.circles.contains_key(target);
+    match kind {
+        "point" => placed.solved.points.contains_key(target),
+        "line" => line,
+        "circle" => circle,
+        _ => line || circle,
+    }
+}
+
+/// How a constraint reads: its type and the names it ties, `perpendicular l5 ?`.
+fn label_of(c: &Value) -> String {
+    let mut names = Vec::new();
+    crate::visit_names(&mut c.clone(), &mut |n| names.push(n.clone()));
+    format!("{} {}", c["type"].as_str().unwrap_or_default(), names.join(" "))
+}
+
+/// The sockets of element `e` placed with parameter values `values` and its names `renamed`
+/// (as [`place`] gave them), in order.
+pub fn links(e: &Value, values: &BTreeMap<String, Value>, renamed: &BTreeMap<String, String>) -> Result<Vec<Link>, String> {
+    let mut out = Vec::new();
+    for l in e["links"].as_array().into_iter().flatten() {
+        let mut c = l["constraint"].clone();
+        let label = label_of(&c);
+        crate::visit_names(&mut c, &mut |s| {
+            if let Some(n) = renamed.get(s.as_str()) {
+                *s = n.clone();
+            }
+        });
+        for k in ["value", "degrees"] {
+            if c.get(k).is_some() {
+                c[k] = resolve(&c[k], values)?;
+            }
+        }
+        out.push(Link { label, shown: label_of(&c), kind: l["kind"].as_str().unwrap_or("curve").to_string(), constraint: c });
+    }
+    Ok(out)
+}
+
 /// The piece of sketch feature `feature` (its JSON) picked: curves `curves` with their points,
 /// points `picked`, and the constraints and reference dimensions among them, as element `name`
 /// with its point lowest and leftmost (by `points`, the solved ones) as anchor. Projections and
@@ -520,10 +625,35 @@ pub fn extract(
     let constraints: Vec<Value> = sketch["constraints"].as_array().into_iter().flatten().filter(|c| within(c)).cloned().collect();
     let measures: Map<String, Value> =
         sketch["measures"].as_object().into_iter().flatten().filter(|(_, v)| within(v)).map(|(n, v)| (n.clone(), v.clone())).collect();
+    // Constraints with one side outside: kept as sockets, completed when the element is placed.
+    let mut links = Vec::new();
+    for c in sketch["constraints"].as_array().into_iter().flatten().filter(|c| c["type"] != "fix") {
+        let mut v = c.clone();
+        let mut outside: Vec<String> = Vec::new();
+        let mut inside = false;
+        crate::visit_names(&mut v, &mut |n| match names.contains(n) {
+            true => inside = true,
+            false if !outside.contains(n) => outside.push(n.clone()),
+            false => {}
+        });
+        let ([n], true) = (&outside[..], inside) else { continue };
+        let Some(kind) = kind_of(feature, n) else { continue };
+        let n = n.clone();
+        crate::visit_names(&mut v, &mut |s| {
+            if *s == n {
+                *s = SOCKET.to_string();
+            }
+        });
+        links.push(json!({"constraint": v, "kind": kind}));
+    }
     let mut element = json!({"name": name, "anchors": [anchor]});
+    if !links.is_empty() {
+        element["links"] = json!(links);
+    }
     if let Some(params) = params {
         let named = std::cell::RefCell::new(Vec::<String>::new());
-        let values = constraints.iter().filter_map(|c| c.get("value").or_else(|| c.get("degrees")));
+        let linked = links.iter().map(|l| &l["constraint"]);
+        let values = constraints.iter().chain(linked).filter_map(|c| c.get("value").or_else(|| c.get("degrees")));
         let diameters = out.get("circles").and_then(Value::as_object).into_iter().flat_map(|m| m.values()).map(|c| &c["diameter"]);
         for text in values.chain(diameters).filter_map(Value::as_str) {
             let _ = substitute(text, &|n: &str| {
