@@ -185,6 +185,32 @@ fn groups_name_elements_together() {
     assert!(r["also_removed"].as_array().unwrap().contains(&json!("groups: g")), "an empty group goes at once: {r}");
 }
 
+/// A pattern for an agent: a plate's outline filled with holes, the totals in `inspect`; a
+/// rename of the group follows into the pattern, and the pattern goes with its region.
+#[test]
+fn a_pattern_fills_a_plate() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    execute(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline", "points": {"h": [30, 0]}, "circles": {"hole": {"center": "h", "diameter": 0.5}},
+            "add_constraints": [{"type": "horizontal_distance", "points": ["a", "b"], "value": 10}, {"type": "vertical_distance", "points": ["a", "d"], "value": 4}],
+            "groups": {"panel": ["bottom", "right", "top", "left"], "cell": ["hole"]},
+            "patterns": {"perf": {"of": "cell", "step": [[1, 0], [0, 1]], "fill": "panel", "clearance": 0.25}}}),
+    );
+    let totals = |s: &mut Server| tool(s, "inspect_model", json!({})).1["features"][0]["status"]["sketch"]["patterns"].clone();
+    // Across 10: centres within 4.5 of the middle, 9 on the whole step; across 4: 3.
+    let t = totals(&mut s);
+    assert_eq!((t["perf"]["copies"].clone(), t["perf"]["profiles"].clone()), (json!(27), json!(27)), "{t}");
+    assert!((t["perf"]["open_share"].as_f64().unwrap() - 27.0 * 0.0625 * std::f64::consts::PI / 40.0).abs() < 1e-12, "{t}");
+    execute(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "cell", "to": "punch"}));
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "outline")["sketch"]["patterns"]["perf"]["of"], "punch");
+    let r = execute(&mut s, "edit_sketch", json!({"name": "outline", "groups": {"panel": null}}));
+    assert!(r["also_removed"].as_array().unwrap().contains(&json!("patterns: perf")), "{r}");
+}
+
 /// Renaming the line a side face is named after: the sketch on that face and its projected edge
 /// are found again by their geometry, and nothing downstream breaks.
 #[test]

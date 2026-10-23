@@ -68,7 +68,15 @@ impl ProfileLoop {
             let i = (0..n).min_by(|&a, &b| p[a].y.total_cmp(&p[b].y).then(p[a].x.total_cmp(&p[b].x))).unwrap_or(0);
             return orient2d(p[(i + n - 1) % n], p[i], p[(i + 1) % n]) == Sign::Positive;
         }
-        let area: f64 = (0..n)
+        self.area() > 0.0
+    }
+
+    /// The area the loop bounds, positive counterclockwise: chords and circular segments, in
+    /// `f64` and in a fixed order.
+    pub fn area(&self) -> f64 {
+        let p = &self.points;
+        let n = p.len();
+        (0..n)
             .map(|k| {
                 let (a, b) = (p[k], p[(k + 1) % n]);
                 let chord = 0.5 * (a.x * b.y - a.y * b.x);
@@ -80,8 +88,7 @@ impl ProfileLoop {
                         0.5 * r2 * (phi - libm::sin(phi)) * if arc.ccw { 1.0 } else { -1.0 }
                     })
             })
-            .sum();
-        area > 0.0
+            .sum()
     }
 
     /// Edge `k` for the touch checks.
@@ -128,21 +135,59 @@ impl ProfileLoop {
         winding
     }
 
-    /// A box around the loop: its points, and the full circle of every arc.
+    /// A box around the loop: its points, and the full circle of every arc, rounded outwards (a
+    /// box is a filter before the exact checks: it may hold more, never less).
     pub fn bounds(&self) -> (Vec2, Vec2) {
         let mut lo = Vec2::new(f64::INFINITY, f64::INFINITY);
         let mut hi = Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY);
-        let mut add = |p: Vec2, r: f64| {
-            lo = Vec2::new(lo.x.min(p.x - r), lo.y.min(p.y - r));
-            hi = Vec2::new(hi.x.max(p.x + r), hi.y.max(p.y + r));
+        let mut add = |a: Vec2, b: Vec2| {
+            lo = Vec2::new(lo.x.min(a.x), lo.y.min(a.y));
+            hi = Vec2::new(hi.x.max(b.x), hi.y.max(b.y));
         };
         for (k, &p) in self.points.iter().enumerate() {
-            add(p, 0.0);
+            add(p, p);
             if let Some(arc) = self.arc(k) {
-                add(arc.center, libm::hypot(p.x - arc.center.x, p.y - arc.center.y));
+                let (c, r) = (arc.center, libm::hypot(p.x - arc.center.x, p.y - arc.center.y).next_up());
+                add(Vec2::new((c.x - r).next_down(), (c.y - r).next_down()), Vec2::new((c.x + r).next_up(), (c.y + r).next_up()));
             }
         }
         (lo, hi)
+    }
+}
+
+/// A 2D box `(min, max)`.
+pub type Box2 = (Vec2, Vec2);
+
+/// The pairs `(a, b)`, `a < b`, of `boxes` that overlap (closed: boxes that touch do), sorted: a
+/// sweep along X. The filter before exact checks of what may touch.
+pub fn overlapping(boxes: &[Box2]) -> Vec<(usize, usize)> {
+    let mut order: Vec<usize> = (0..boxes.len()).collect();
+    order.sort_unstable_by(|&a, &b| boxes[a].0.x.total_cmp(&boxes[b].0.x).then(a.cmp(&b)));
+    let mut active: Vec<usize> = Vec::new();
+    let mut pairs = Vec::new();
+    for &i in &order {
+        active.retain(|&a| boxes[a].1.x >= boxes[i].0.x);
+        pairs.extend(active.iter().filter(|&&a| overlap(boxes[a], boxes[i])).map(|&a| (a.min(i), a.max(i))));
+        active.push(i);
+    }
+    pairs.sort_unstable();
+    pairs
+}
+
+/// Whether two closed boxes share a point.
+pub fn overlap(a: Box2, b: Box2) -> bool {
+    a.0.x <= b.1.x && b.0.x <= a.1.x && a.0.y <= b.1.y && b.0.y <= a.1.y
+}
+
+impl ProfileLoop {
+    /// Edges `i` and `k` of this loop and of `other` share a point, past the point two neighbours
+    /// of one loop share. Of the same loop when `other` is `None`.
+    pub(crate) fn edges_touch(&self, other: Option<&ProfileLoop>) -> bool {
+        let n = self.points.len();
+        match other {
+            None => (0..n).any(|i| (i + 1..n).any(|k| (i + 1) % n != k && (k + 1) % n != i && touch(&self.piece(i), &self.piece(k)))),
+            Some(o) => self.touches(o),
+        }
     }
 }
 

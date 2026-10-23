@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used)] // helpers outside #[test] functions
+#![allow(clippy::unwrap_used, clippy::panic)] // helpers outside #[test] functions
 
 use datum_graph::{Graph, Op};
 use datum_math::{Vec2, Vec3};
@@ -49,4 +49,19 @@ fn mistakes_are_reported_with_the_feature() {
     assert!(case(r#"{"name": "a", "op": "prism", "polygon": [], "z0": 0, "z1": 1, "z2": 5}"#).contains("z2"));
     assert!(case(r#"{"name": "a", "op": "cylinder"}"#).contains("cylinder"));
     assert!(matches!(parse(r#"{"format": "datum/2", "features": []}"#), Err(ModelError::Format(_))));
+}
+
+/// A file from before patterns in sketches (D128): a cut's `pattern` becomes a pattern of its
+/// sketch, named after the cut, copying a group of all the sketch's profile curves.
+#[test]
+fn a_cut_pattern_moves_into_its_sketch() {
+    let old = r#"{"format": "datum/1", "features": [
+        {"name": "s", "op": "sketch", "sketch": {"points": {"h": [5, 5]}, "circles": {"hole": {"center": "h", "diameter": 2}}}},
+        {"name": "perf", "op": "cut", "inputs": ["s", "s"], "pattern": {"count": [3, 2], "step": [[4, 0], [0, 4]]}}]}"#;
+    let g = parse(old).unwrap();
+    let Op::Sketch { sketch, .. } = &g.nodes()[0].op else { panic!("a sketch") };
+    assert_eq!(sketch.groups["perf_cell"], ["hole"]);
+    let p = &sketch.patterns["perf"];
+    assert_eq!((p.of.as_str(), p.count.clone()), ("perf_cell", Some([3.0.into(), 2.0.into()])));
+    assert_eq!(g.nodes()[1].op, Op::Cut {});
 }

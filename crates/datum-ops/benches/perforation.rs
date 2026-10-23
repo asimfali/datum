@@ -2,7 +2,8 @@
 //! tessellation of the drilled plate. Then the way a sheet is usually punched: square punches on
 //! the axes, a plain difference, the punch as thick as the sheet (every face meets a face of the
 //! sheet) or longer; and round holes of the same pitch cut by a sketch profile (M5b), in a flat
-//! sheet and in a rolled one, in its development (M5c). Each on one thread and on all threads.
+//! sheet and in a rolled one, in its development (M5c); a plate 1500 × 1000 filled with a cluster
+//! of four Ø7.5 holes (D128), placed and extruded. Each on one thread and on all threads.
 #![allow(clippy::expect_used)]
 
 use criterion::{Criterion, criterion_group, criterion_main};
@@ -78,10 +79,11 @@ fn round_holes(c: &mut Criterion) {
     let top = sheet.body().and_then(|b| b.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0))).expect("top").id;
     let json = |v: serde_json::Value| serde_json::from_value::<Op>(v).expect("op");
     let sketch = json(
-        serde_json::json!({"op": "sketch", "face": format!("{top:?}"), "sketch": {"points": {"c": [15, 15]}, "circles": {"hole": {"center": "c", "diameter": 5}}}}),
+        serde_json::json!({"op": "sketch", "face": format!("{top:?}"), "sketch": {"points": {"c": [15, 15]}, "circles": {"hole": {"center": "c", "diameter": 5}},
+            "patterns": {"grid": {"of": "hole", "count": [n, n], "step": [[10, 0], [0, 10]]}}}}),
     );
     let sketch = sketch.eval(TopoId::derive("holes").finish(), &[&sheet]).expect("sketch");
-    let cut = json(serde_json::json!({"op": "cut", "pattern": {"count": [n, n], "step": [[10, 0], [0, 10]]}}));
+    let cut = json(serde_json::json!({"op": "cut"}));
     let mut group = c.benchmark_group("cut_round_10000");
     group.sample_size(10);
     for (name, pool) in pools() {
@@ -106,10 +108,11 @@ fn rolled_holes(c: &mut Criterion) {
     let outer =
         sheet.body().and_then(|b| b.faces().iter().find(|f| matches!(f.surface, datum_brep::Surface::Cylinder(c) if c.convex))).expect("outer").id;
     let sketch = json(serde_json::json!({"op": "sketch", "face": format!("{outer:?}"), "k_factor": 0.44,
-        "sketch": {"points": {"c": [15, 15]}, "circles": {"hole": {"center": "c", "diameter": 5}}}}))
+        "sketch": {"points": {"c": [15, 15]}, "circles": {"hole": {"center": "c", "diameter": 5}},
+            "patterns": {"grid": {"of": "hole", "count": [100, 100], "step": [[10, 0], [0, 10]]}}}}))
     .eval(TopoId::derive("holes").finish(), &[&sheet])
     .expect("sketch");
-    let cut = json(serde_json::json!({"op": "cut", "pattern": {"count": [100, 100], "step": [[10, 0], [0, 10]]}}));
+    let cut = json(serde_json::json!({"op": "cut"}));
     let mut group = c.benchmark_group("cut_rolled_10000");
     group.sample_size(10);
     for (name, pool) in pools() {
@@ -129,5 +132,32 @@ fn tessellate_drilled(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, perforation, tessellate_drilled, punched, round_holes, rolled_holes);
+criterion_group!(benches, perforation, tessellate_drilled, punched, round_holes, rolled_holes, fill_cluster);
 criterion_main!(benches);
+
+/// A plate 1500 × 1000 filled by a cluster of four Ø7.5 holes at 19 × 17, 10 clear of its edge
+/// (about 4500 punches, 18 000 holes): the sketch placed, then extruded.
+fn fill_cluster(c: &mut Criterion) {
+    let json = |v: serde_json::Value| serde_json::from_value::<Op>(v).expect("op");
+    let sketch = json(serde_json::json!({"op": "sketch", "sketch": {
+        "points": {"a": [0, 0], "b": [1500, 0], "c": [1500, 1000], "d": [0, 1000], "c1": [1600, 0], "c2": [1609.5, 0], "c3": [1604.75, 8.5], "c4": [1614.25, 8.5]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+        "circles": {"f1": {"center": "c1", "diameter": 7.5}, "f2": {"center": "c2", "diameter": 7.5}, "f3": {"center": "c3", "diameter": 7.5}, "f4": {"center": "c4", "diameter": 7.5}},
+        "groups": {"outline": ["bottom", "right", "top", "left"], "cluster": ["f1", "f2", "f3", "f4"]},
+        "patterns": {"perforation": {"of": "cluster", "step": [[19, 0], [0, 17]], "fill": "outline", "clearance": 10}}
+    }}));
+    let extrude = json(serde_json::json!({"op": "extrude", "z0": 0, "z1": 1}));
+    let mut group = c.benchmark_group("fill_cluster_plate");
+    group.sample_size(10);
+    for (name, pool) in pools() {
+        group.bench_function(&name, |b| {
+            b.iter(|| {
+                pool.install(|| {
+                    let s = sketch.eval(TopoId::derive("panel").finish(), &[]).expect("sketch");
+                    extrude.eval(TopoId::derive("plate").finish(), &[&s]).expect("plate")
+                })
+            })
+        });
+    }
+    group.finish();
+}

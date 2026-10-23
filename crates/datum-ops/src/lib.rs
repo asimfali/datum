@@ -3,6 +3,7 @@
 
 mod boolean;
 mod bounds;
+mod copies;
 mod cut;
 mod pattern;
 mod sheet;
@@ -14,7 +15,8 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
-pub use cut::{ProfileGrid, cut};
+pub use copies::Copies;
+pub use cut::cut;
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
@@ -79,13 +81,9 @@ pub enum Op {
     Extrude { z0: Num, z1: Num },
     /// The closed profiles of a sketch on a plane face of the body cut through the body,
     /// perpendicular to the face, to the opposite face: holes, slots, any outline of lines and
-    /// arcs. With `pattern`, every profile is repeated, copy `(i, j)` moved by
-    /// `i·step[0] + j·step[1]` in the sketch's coordinates, as punches on a turret press. Two
-    /// inputs: the body, then the sketch.
-    Cut {
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        pattern: Option<CutPattern>,
-    },
+    /// arcs; the copies of the sketch's patterns too, as punches on a turret press. Two inputs:
+    /// the body, then the sketch.
+    Cut {},
     /// Sheet metal from the input sketch's path: its lines (an open chain, from point `start` or
     /// else from its end named first) given `thickness` on `side` of the path (looking along it),
     /// bent at every corner with inner `radius`, and extruded from `z0` to `z1` along the sketch's
@@ -104,14 +102,6 @@ pub enum Op {
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
     /// from that face's side, its corner at the origin. Exported as DXF. One input: the body.
     Unfold { face: String, k_factor: Num },
-}
-
-/// Copies of a cut's profiles in the sketch's coordinates.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct CutPattern {
-    pub count: [Num; 2],
-    pub step: [[Num; 2]; 2],
 }
 
 fn zero() -> Num {
@@ -233,15 +223,7 @@ impl Op {
                 project: project.clone(),
             },
             Self::Extrude { z0, z1 } => Self::Extrude { z0: r(z0, "z0")?, z1: r(z1, "z1")? },
-            Self::Cut { pattern } => Self::Cut {
-                pattern: match pattern {
-                    None => None,
-                    Some(p) => {
-                        let r2 = |v: &[Num; 2], field: &str| -> Result<[Num; 2], String> { Ok([r(&v[0], field)?, r(&v[1], field)?]) };
-                        Some(CutPattern { count: r2(&p.count, "count")?, step: [r2(&p.step[0], "step")?, r2(&p.step[1], "step")?] })
-                    }
-                },
-            },
+            Self::Cut {} => Self::Cut {},
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Sheet { thickness, radius, side, z0, z1, start } => Self::Sheet {
                 thickness: r(thickness, "thickness")?,
@@ -290,7 +272,7 @@ impl Op {
                 h.update(format!("{self:?}").as_bytes());
             }
             Self::Extrude { z0, z1 } => [value(z0), value(z1)].into_iter().for_each(num),
-            Self::Cut { pattern } => pattern.iter().flat_map(|p| p.count.iter().chain(p.step.iter().flatten())).map(value).for_each(num),
+            Self::Cut {} => {}
             Self::Unfold { face, k_factor } => {
                 num(value(k_factor));
                 h.update(face.as_bytes());
@@ -357,16 +339,7 @@ impl Op {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
-            Self::Cut { pattern } => {
-                let grid = match pattern {
-                    None => ProfileGrid::ONE,
-                    Some(p) => {
-                        let v2 = |v: &[Num; 2]| -> Result<Vec2, BrepError> { Ok(Vec2::new(num(&v[0])?, num(&v[1])?)) };
-                        ProfileGrid { count: [count(&p.count[0])?, count(&p.count[1])?], step: [v2(&p.step[0])?, v2(&p.step[1])?] }
-                    }
-                };
-                cut(feature, inputs[0], sketch(1)?, grid)?
-            }
+            Self::Cut {} => cut(feature, inputs[0], sketch(1)?)?,
         };
         if cfg!(debug_assertions) {
             body.validate()?;

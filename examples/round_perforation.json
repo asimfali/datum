@@ -158,7 +158,31 @@
             "line": "up",
             "value": "margin"
           }
-        ]
+        ],
+        "groups": {
+          "perforated_cell": [
+            "hole"
+          ]
+        },
+        "patterns": {
+          "perforated": {
+            "of": "perforated_cell",
+            "count": [
+              "nx",
+              "ny"
+            ],
+            "step": [
+              [
+                "pitch_x",
+                0
+              ],
+              [
+                0,
+                "pitch_y"
+              ]
+            ]
+          }
+        }
       }
     },
     {
@@ -167,23 +191,7 @@
       "inputs": [
         "panel",
         "holes"
-      ],
-      "pattern": {
-        "count": [
-          "nx",
-          "ny"
-        ],
-        "step": [
-          [
-            "pitch_x",
-            0
-          ],
-          [
-            0,
-            "pitch_y"
-          ]
-        ]
-      }
+      ]
     }
   ]
 }

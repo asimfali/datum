@@ -30,11 +30,9 @@ fn face(b: &Body, n: Vec3) -> String {
 /// named `name`.
 fn cut_by(name: &str, plate: &Body, on: &str, sketch: serde_json::Value, pattern: serde_json::Value) -> Result<Body, BrepError> {
     let target = Value::Body(plate.clone());
-    let placed = op(serde_json::json!({"op": "sketch", "face": on, "sketch": sketch})).eval(id(&format!("{name}.sketch")), &[&target])?;
-    let mut c = serde_json::json!({"op": "cut"});
-    if !pattern.is_null() {
-        c["pattern"] = pattern;
-    }
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": on, "sketch": patterned(sketch, pattern)})).eval(id(&format!("{name}.sketch")), &[&target])?;
+    let c = serde_json::json!({"op": "cut"});
     let v = op(c).eval(id(name), &[&target, &placed])?;
     let b = v.body().unwrap().clone();
     b.validate().unwrap();
@@ -119,4 +117,16 @@ fn far_away_and_turned() {
     let r = cut(&plate, &top, holes, pattern).unwrap();
     assert_eq!(r.faces().len(), 6 + 12 * 3);
     assert!((r.volume() - (200.0 * 120.0 - 12.0 * 25.0 * PI) * 3.0).abs() < 1e-6 * r.volume(), "{}", r.volume());
+}
+
+/// `sketch` with `pattern` (JSON or null): `count` and `step` of the copies of all its curves.
+fn patterned(mut sketch: serde_json::Value, pattern: serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::Object(mut p) = pattern {
+        let curves: Vec<String> =
+            ["lines", "arcs", "circles"].iter().filter_map(|k| sketch[*k].as_object()).flat_map(|m| m.keys().cloned()).collect();
+        p.insert("of".into(), serde_json::json!("cell"));
+        sketch["groups"] = serde_json::json!({"cell": curves});
+        sketch["patterns"] = serde_json::json!({"copies": p});
+    }
+    sketch
 }

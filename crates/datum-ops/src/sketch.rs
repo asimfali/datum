@@ -5,6 +5,9 @@ use std::collections::BTreeMap;
 use datum_brep::{Body, BrepError, Curve, Cylinder, Development, Ix, ProfileArc, ProfileLoop, Region, Surface, TopoId, extrude};
 use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
 use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, solve};
+use rayon::prelude::*;
+
+use crate::copies::{Copies, moved, place_patterns};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -53,6 +56,8 @@ pub struct Placed {
     pub face: Option<TopoId>,
     /// Where each projection's points stand now, in the order of [`Projection::at`].
     pub projected: BTreeMap<String, Vec<Vec2>>,
+    /// The patterns, by name: their profiles are made with the sketch's own.
+    pub patterns: Vec<Copies>,
     pub hash: [u8; 32],
 }
 
@@ -379,6 +384,20 @@ pub fn place(
         }
     };
     let solved = solve(sketch).map_err(|e| BrepError::Sketch(e.to_string()))?;
+    let mut placed = Placed {
+        face: on,
+        projected: now,
+        developed: developed.map(Box::new),
+        frame,
+        solved,
+        lines: sketch.lines.clone(),
+        arcs: sketch.arcs.clone(),
+        circles: sketch.circles.clone(),
+        patterns: Vec::new(),
+        hash: [0; 32],
+    };
+    placed.patterns = place_patterns(sketch, &placed)?;
+    let (solved, developed) = (&placed.solved, &placed.developed);
     let mut h = blake3::Hasher::new();
     let mut bytes = |b: &[u8]| {
         h.update(&(b.len() as u64).to_le_bytes());
@@ -414,7 +433,18 @@ pub fn place(
     if let Some(id) = on {
         bytes(&id.0.to_le_bytes());
     }
-    if let Some(d) = &developed {
+    for p in &placed.patterns {
+        bytes(b"pattern");
+        bytes(p.name.as_bytes());
+        for c in &p.cell {
+            bytes(c.as_bytes());
+        }
+        bytes(&[u8::from(p.source)]);
+        for (k, d) in &p.at {
+            bytes(&[k[0].to_le_bytes(), k[1].to_le_bytes(), d.x.to_bits().to_le_bytes(), d.y.to_bits().to_le_bytes()].concat());
+        }
+    }
+    if let Some(d) = developed {
         bytes(b"developed");
         let [o, a, s] = [d.dev.origin, d.dev.axis, d.dev.start].map(Vec3::to_array);
         for c in o.into_iter().chain(a).chain(s).chain([d.dev.neutral, d.radius, d.span]) {
@@ -422,17 +452,8 @@ pub fn place(
         }
         bytes(&[u8::from(d.mirrored)]);
     }
-    Ok(Placed {
-        face: on,
-        projected: now,
-        developed: developed.map(Box::new),
-        frame,
-        solved,
-        lines: sketch.lines.clone(),
-        arcs: sketch.arcs.clone(),
-        circles: sketch.circles.clone(),
-        hash: *h.finalize().as_bytes(),
-    })
+    placed.hash = *h.finalize().as_bytes();
+    Ok(placed)
 }
 
 /// The closed profiles of `s` swept from `z0` to `z1` along its normal. Profile lines and arcs
@@ -454,20 +475,53 @@ pub fn extrude_sketch(feature: TopoId, s: &Placed, z0: f64, z1: f64) -> Result<B
 /// by the point its outer loop starts at.
 pub fn profile_regions(feature: TopoId, s: &Placed) -> Result<Vec<Region>, BrepError> {
     let mut loops = profile_loops(feature, s)?;
-    // Each loop with the name its caps would be named by: the point it starts at.
-    let inside = |a: &Found, b: &Found| a.ring.winding(b.ring.points[0]) != 0;
     let n = loops.len();
-    let depth: Vec<usize> = (0..n).map(|b| (0..n).filter(|&a| a != b && inside(&loops[a], &loops[b])).count()).collect();
-    let parent = |b: usize| (0..n).find(|&a| a != b && inside(&loops[a], &loops[b]) && depth[a] + 1 == depth[b]);
-    let parents: Vec<Option<usize>> = (0..n).map(parent).collect();
+    // Who holds whom: of loops whose boxes overlap, the sketch's own against each other and
+    // against copies, and the loops of one copy among themselves (as its cell's lie in one
+    // another); copies hold nothing else (`place_patterns`).
+    let start = |k: usize| loops[k].copy.map(|c| k - c.base);
+    let boxes: Vec<datum_brep::Box2> = loops.par_iter().map(|l| l.ring.bounds()).collect();
+    let holds: Vec<(usize, usize)> = datum_brep::overlapping(&boxes)
+        .into_par_iter()
+        .filter(|&(a, b)| loops[a].copy.is_none() || loops[b].copy.is_none() || start(a) == start(b))
+        .flat_map_iter(|(a, b)| {
+            let inside = |a: usize, b: usize| loops[a].ring.winding(loops[b].ring.points[0]) != 0;
+            [(a, b), (b, a)].into_iter().filter(move |&(h, l)| inside(h, l))
+        })
+        .collect();
+    let mut holders: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for (h, l) in holds {
+        holders[l].push(h);
+    }
+    let depth: Vec<usize> = holders.iter().map(Vec::len).collect();
+    let parent: Vec<Option<usize>> = (0..n).map(|b| holders[b].iter().copied().find(|&a| depth[a] + 1 == depth[b])).collect();
+    let mut holes: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for j in (0..n).filter(|&j| !depth[j].is_multiple_of(2)) {
+        if let Some(i) = parent[j] {
+            holes[i].push(j);
+        }
+    }
     let outer: Vec<usize> = (0..n).filter(|&i| depth[i].is_multiple_of(2)).collect();
     // The caps of a single region are the feature's own: a section of its outline replaced,
     // the first point among those removed, keeps them.
     let single = outer.len() == 1;
-    let mut regions = Vec::new();
+    let mut regions = Vec::with_capacity(outer.len());
+    // The names of the loops of each pattern's cell, once a copy's caps need one.
+    let mut cells: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for i in outer {
-        let holes = (0..n).filter(|&j| !depth[j].is_multiple_of(2) && parents[j] == Some(i)).map(|j| loops[j].ring.clone()).collect();
-        let first = std::mem::take(&mut loops[i].name);
+        let holes = holes[i].iter().map(|&j| loops[j].ring.clone()).collect();
+        let first = match loops[i].copy {
+            None => std::mem::take(&mut loops[i].name),
+            Some(c) => {
+                let names = match cells.entry(c.pattern) {
+                    std::collections::btree_map::Entry::Occupied(e) => e.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(e) => {
+                        e.insert(self::loops(feature, s, &|n| s.patterns[c.pattern].cell.contains(n), false)?.into_iter().map(|l| l.name).collect())
+                    }
+                };
+                format!("{}[{},{}].{}", s.patterns[c.pattern].name, c.k[0], c.k[1], names[c.base])
+            }
+        };
         let cap = |t: &str| {
             let h = TopoId::derive(t).id(feature);
             if single { h.finish() } else { h.tag(&first).finish() }
@@ -477,31 +531,62 @@ pub fn profile_regions(feature: TopoId, s: &Placed) -> Result<Vec<Region>, BrepE
     Ok(regions)
 }
 
-/// A profile loop of a sketch and the name its region's caps take.
+/// A profile loop of a sketch and the name its region's caps take (a copy's is made only if its
+/// caps need it: see [`Found::name`]); of a copy, its pattern, its place on the grid, and its place
+/// among its cell's loops (they lie together among the loops, in the cell's order).
 pub(crate) struct Found {
     pub ring: ProfileLoop,
     pub name: String,
+    pub copy: Option<Copy>,
 }
 
-/// Profile loops: lines and arcs joined at their points, each loop starting at its lowest point;
-/// then circles, each a loop of three arcs from its own points at 0°, 120° and 240°.
+#[derive(Clone, Copy)]
+pub(crate) struct Copy {
+    pub pattern: usize,
+    pub k: [i64; 2],
+    pub base: usize,
+}
+
+/// Profile loops: the sketch's own (see [`loops`]), then each copy of each pattern, its cell's
+/// loops moved.
 pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, BrepError> {
+    let copied: std::collections::BTreeSet<&String> = s.patterns.iter().flat_map(|p| &p.cell).collect();
+    let mut out = loops(feature, s, &|n| !copied.contains(&n.to_string()), false)?;
+    for (pattern, p) in s.patterns.iter().enumerate() {
+        let base = loops(feature, s, &|n| p.cell.contains(n), false)?;
+        out.par_extend(p.at.par_iter().flat_map_iter(|&(k, d)| {
+            let own = p.source && k == [0, 0];
+            base.iter().enumerate().map(move |(b, l)| Found {
+                ring: moved(&l.ring, d, feature, &p.name, k, own),
+                name: String::new(),
+                copy: Some(Copy { pattern, k, base: b }),
+            })
+        }));
+    }
+    if out.is_empty() {
+        return Err(BrepError::Sketch("the sketch has no profile lines, arcs or circles".into()));
+    }
+    Ok(out)
+}
+
+/// The closed loops of the curves `keep` keeps (construction ones too if `construction`): lines
+/// and arcs joined at their points, each loop starting at its lowest point; then circles, each a
+/// loop of three arcs from its own points at 0°, 120° and 240°.
+pub(crate) fn loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool, construction: bool) -> Result<Vec<Found>, BrepError> {
     // Curves at each point: (curve, the other end, the arc's centre if an arc and whether it runs
     // counterclockwise from this end).
     type Via<'a> = (&'a str, &'a str, Option<(&'a str, bool)>);
     let mut at: BTreeMap<&str, Vec<Via>> = BTreeMap::new();
-    for (name, l) in s.lines.iter().filter(|(_, l)| !l.construction) {
+    let keep = |name: &str, c: bool| keep(name) && (construction || !c);
+    for (name, l) in s.lines.iter().filter(|(n, l)| keep(n, l.construction)) {
         at.entry(&l.from).or_default().push((name, &l.to, None));
         at.entry(&l.to).or_default().push((name, &l.from, None));
     }
-    for (name, a) in s.arcs.iter().filter(|(_, a)| !a.construction) {
+    for (name, a) in s.arcs.iter().filter(|(n, a)| keep(n, a.construction)) {
         at.entry(&a.from).or_default().push((name, &a.to, Some((&a.center, true))));
         at.entry(&a.to).or_default().push((name, &a.from, Some((&a.center, false))));
     }
-    let circles: Vec<(&String, &Circle)> = s.circles.iter().filter(|(_, c)| !c.construction).collect();
-    if at.is_empty() && circles.is_empty() {
-        return Err(BrepError::Sketch("the sketch has no profile lines, arcs or circles".into()));
-    }
+    let circles: Vec<(&String, &Circle)> = s.circles.iter().filter(|(n, c)| keep(n, c.construction)).collect();
     if let Some((p, _)) = at.iter().find(|(_, ls)| ls.len() != 2) {
         return Err(BrepError::Sketch(format!("the profile is open or branches at point `{p}`")));
     }
@@ -531,7 +616,7 @@ pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, B
                 None => return Err(BrepError::Sketch(format!("the profile does not close at point `{p}`"))),
             }
         }
-        loops.push(Found { ring, name: start.to_string() });
+        loops.push(Found { ring, name: start.to_string(), copy: None });
     }
     for (name, c) in circles {
         let (centre, r) = (point(&c.center), 0.5 * diameter(c));
@@ -550,7 +635,7 @@ pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, B
             sides: (0..3).map(|k| ids("extrude.circle.side", None, k)).collect(),
             arcs: vec![Some(ProfileArc { center: centre, ccw: true }); 3],
         };
-        loops.push(Found { ring, name: format!("circle {name}") });
+        loops.push(Found { ring, name: format!("circle {name}"), copy: None });
     }
     Ok(loops)
 }

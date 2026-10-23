@@ -134,6 +134,21 @@ impl Equations {
                 return invalid(format!("group `{g}`: unknown element `{n}`"));
             }
         }
+        for (n, p) in &sketch.patterns {
+            let curve = |c: &str| sketch.lines.contains_key(c) || sketch.arcs.contains_key(c) || sketch.circles.contains_key(c);
+            if sketch.points.contains_key(n) || curve(n) || sketch.measures.contains_key(n) || sketch.groups.contains_key(n) {
+                return invalid(format!("pattern `{n}`: an element or a group is named so too"));
+            }
+            if !(sketch.groups.contains_key(&p.of) || curve(&p.of)) {
+                return invalid(format!("pattern `{n}`: `of` names no group or curve: `{}`", p.of));
+            }
+            match (&p.count, &p.fill) {
+                (Some(_), None) => {}
+                (None, Some(f)) if sketch.groups.contains_key(f) || sketch.circles.contains_key(f) => {}
+                (None, Some(f)) => return invalid(format!("pattern `{n}`: `fill` names no group or circle: `{f}`")),
+                _ => return invalid(format!("pattern `{n}`: give `count` or `fill`, one of them")),
+            }
+        }
         let line_names: Vec<&String> = sketch.lines.keys().collect();
         let mut lines = Vec::with_capacity(sketch.lines.len());
         for (n, l) in &sketch.lines {

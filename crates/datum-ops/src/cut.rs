@@ -1,8 +1,8 @@
 //! Cuts through a plate or a rolled sheet (M5b–c, D63): the closed profiles of a sketch on a
 //! plane face cut perpendicular to the face through to the opposite one, or of a sketch in the
 //! development of a cylinder face cut along the radius through the sheet (as a hole punched in
-//! the blank before rolling); optionally repeated on a grid in the sketch's coordinates (punches
-//! of a turret press, PAINS P4).
+//! the blank before rolling); a pattern of the sketch's (D128) gives many profiles at once
+//! (punches of a turret press, PAINS P4).
 //!
 //! Every decision is a 2D one in the sketch's coordinates, by exact predicates on segments and
 //! arcs: a profile lies inside the entry face and inside the exit face, touches neither their
@@ -11,30 +11,16 @@
 //! coordinates of the body's vertices in the sketch's frame are rounded once; on a plane face
 //! along the axes, the usual case, they are exact.
 use datum_brep::{
-    Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Ix, Plane, ProfileArc, ProfileLoop, Rolled, Surface, TopoId, Vertex,
-    build_with_curves, in_order,
+    Arc, Body, Box2, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Ix, Plane, ProfileArc, ProfileLoop, Rolled, Surface, TopoId, Vertex,
+    build_with_curves, in_order, overlapping,
 };
 use datum_math::{Rigid, Vec2, Vec3};
 use rayon::prelude::*;
 
 use crate::sketch::{Developed, Placed, coaxial, opposite_cylinder, profile_loops};
 
-/// Copies of a sketch's profiles: copy `(i, j)` moved by `i·step[0] + j·step[1]`.
-#[derive(Clone, Copy, Debug)]
-pub struct ProfileGrid {
-    pub count: [u32; 2],
-    pub step: [Vec2; 2],
-}
-
-impl ProfileGrid {
-    pub const ONE: Self = Self { count: [1, 1], step: [Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.0)] };
-}
-
-/// A 2D box `(min, max)`.
-type Box2 = (Vec2, Vec2);
-
 /// The profiles of `sketch`, which lies on a face of `target`, cut through `target`.
-pub fn cut(feature: TopoId, target: &Body, sketch: &Placed, grid: ProfileGrid) -> Result<Body, BrepError> {
+pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, BrepError> {
     let unsupported = |m: String| BrepError::Unsupported(format!("cut: {m}"));
     let id = sketch.face.ok_or_else(|| BrepError::Sketch("a cut takes a sketch placed on a face of its body".into()))?;
     let f = target.faces().binary_search_by_key(&id, |f| f.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the body")))?;
@@ -46,36 +32,22 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed, grid: ProfileGrid) -
         (Surface::Cylinder(c), Some(d)) => Frame::Rolled { d, radius: c.radius, side: if c.convex { 1.0 } else { -1.0 } },
         _ => return Err(BrepError::Invalid("the sketch does not lie on its face".into())),
     };
-    if grid.count.contains(&0) {
-        return Err(BrepError::Degenerate("a cut pattern needs at least one copy".into()));
-    }
-
-    // The profiles, counterclockwise in the sketch, copied over the grid.
-    let base: Vec<ProfileLoop> =
-        profile_loops(feature, sketch)?.into_iter().map(|l| if l.ring.counterclockwise() { l.ring } else { l.ring.reversed() }).collect();
-    let copies: Vec<[u32; 2]> = (0..grid.count[1]).flat_map(|j| (0..grid.count[0]).map(move |i| [i, j])).collect();
-    let profiles: Vec<ProfileLoop> = copies
-        .par_iter()
-        .flat_map_iter(|&[i, j]| {
-            let d = Vec2::new(
-                grid.step[0].x * f64::from(i) + grid.step[1].x * f64::from(j),
-                grid.step[0].y * f64::from(i) + grid.step[1].y * f64::from(j),
-            );
-            let id = move |t: TopoId| {
-                if [i, j] == [0, 0] { t } else { TopoId::derive("cut.copy").id(feature).index(i.into()).index(j.into()).id(t).finish() }
-            };
-            base.iter().map(move |l| ProfileLoop {
-                points: l.points.iter().map(|p| Vec2::new(p.x + d.x, p.y + d.y)).collect(),
-                vertices: l.vertices.iter().map(|v| v.map(id)).collect(),
-                sides: l.sides.iter().map(|&s| id(s)).collect(),
-                arcs: l.arcs.iter().map(|a| a.map(|a| ProfileArc { center: Vec2::new(a.center.x + d.x, a.center.y + d.y), ..a })).collect(),
-            })
+    // The profiles, counterclockwise in the sketch; a pattern's copies among them, each turning
+    // as its loop of the cell does (found once).
+    let found = profile_loops(feature, sketch)?;
+    let mut turns: std::collections::BTreeMap<(usize, usize), bool> = std::collections::BTreeMap::new();
+    let ccw: Vec<bool> = found
+        .iter()
+        .map(|l| match l.copy {
+            None => l.ring.counterclockwise(),
+            Some(c) => *turns.entry((c.pattern, c.base)).or_insert_with(|| l.ring.counterclockwise()),
         })
         .collect();
+    let profiles: Vec<ProfileLoop> = found.into_par_iter().zip(ccw).map(|(l, ccw)| if ccw { l.ring } else { l.ring.reversed() }).collect();
     let boxes: Vec<Box2> = profiles.iter().map(ProfileLoop::bounds).collect();
 
     // Profiles neither touch nor hold one another.
-    in_order(within(&boxes).into_par_iter().map(|(a, b)| {
+    in_order(overlapping(&boxes).into_par_iter().map(|(a, b)| {
         if profiles[a].touches(&profiles[b]) {
             Err(BrepError::Degenerate("cut profiles touch".into()))
         } else if profiles[a].winding(profiles[b].points[0]) != 0 || profiles[b].winding(profiles[a].points[0]) != 0 {
@@ -373,27 +345,8 @@ fn outline(body: &Body, h: Ix, frame: &Frame) -> Result<Vec<ProfileLoop>, BrepEr
         .collect()
 }
 
-/// Overlapping pairs `(a, b)`, `a < b`, of `boxes`: a sweep along X.
-fn within(boxes: &[Box2]) -> Vec<(usize, usize)> {
-    let mut order: Vec<usize> = (0..boxes.len()).collect();
-    order.sort_unstable_by(|&a, &b| boxes[a].0.x.total_cmp(&boxes[b].0.x).then(a.cmp(&b)));
-    let mut active: Vec<usize> = Vec::new();
-    let mut pairs = Vec::new();
-    for &i in &order {
-        active.retain(|&a| boxes[a].1.x >= boxes[i].0.x);
-        pairs.extend(active.iter().filter(|&&a| overlap(boxes[a], boxes[i])).map(|&a| (a.min(i), a.max(i))));
-        active.push(i);
-    }
-    pairs.sort_unstable();
-    pairs
-}
-
 /// Overlapping pairs `(a, b)` of a box of `left` and one of `right`, sorted.
 fn between(left: &[Box2], right: &[Box2]) -> Vec<(usize, usize)> {
     let all: Vec<Box2> = left.iter().chain(right).copied().collect();
-    within(&all).into_iter().filter(|&(a, b)| a < left.len() && b >= left.len()).map(|(a, b)| (a, b - left.len())).collect()
-}
-
-fn overlap(a: Box2, b: Box2) -> bool {
-    a.0.x <= b.1.x && b.0.x <= a.1.x && a.0.y <= b.1.y && b.0.y <= a.1.y
+    overlapping(&all).into_iter().filter(|&(a, b)| a < left.len() && b >= left.len()).map(|(a, b)| (a, b - left.len())).collect()
 }

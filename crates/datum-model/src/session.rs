@@ -143,14 +143,20 @@ const COMMANDS: &[Command] = &[
                       `groups` and `project` are merged by name: an entry replaces the one of that name, null removes it, and with it \
                       whatever refers to it (the lines through a removed point, the constraints and dimensions naming either: \
                       listed in `also_removed`; a removed element leaves its groups, and a group left empty goes). A group is a \
-                      list of element names (`{\"cell\": [\"h1\", \"h2\"]}`): only a union, removing it removes no element. `add_constraints` appends constraints; `remove_constraints` removes those equal \
+                      list of element names (`{\"cell\": [\"h1\", \"h2\"]}`): only a union, removing it removes no element. \
+                      A pattern copies the closed profiles of a group (or a curve) `of` on the grid of `step`: `count` \
+                      copies along each step, or as many as `fill` (a group bounding a region, or a circle) holds, centred, \
+                      `clearance` from its edge and every other profile; `skip` [[i, j]] leaves copies out, `shift` \
+                      {\"i,j\": [dx, dy]} moves one: `{\"perf\": {\"of\": \"cell\", \"step\": [[19, 0], [0, 17]], \"fill\": \"panel\", \
+                      \"clearance\": 3}}`. A cut and an extrusion take the copies with the sketch's own profiles; `inspect` \
+                      gives each pattern's copies, profiles and open area. `add_constraints` appends constraints; `remove_constraints` removes those equal \
                       to the ones given (as `inspect` lists them).",
         params: || {
             let map = json!({"type": "object", "additionalProperties": true});
             let list = json!({"type": "array", "items": {"type": "object"}});
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
-                "points": map, "lines": map, "arcs": map, "circles": map, "measures": map, "groups": map, "project": map,
+                "points": map, "lines": map, "arcs": map, "circles": map, "measures": map, "groups": map, "patterns": map, "project": map,
                 "add_constraints": list, "remove_constraints": list
             }, "required": ["name"], "additionalProperties": false})
         },
@@ -628,7 +634,7 @@ impl Session {
         let Ok(Value::Object(mut op)) = serde_json::to_value(&self.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
         let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or_else(|| format!("`{feature}` is not a sketch"))?;
         // The names a sketch defines: its elements', its projections' and their points'.
-        let mut defined: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups"]
+        let mut defined: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups", "patterns"]
             .iter()
             .filter_map(|k| sketch.get(*k).and_then(Value::as_object))
             .flat_map(|m| m.keys().cloned())
@@ -776,7 +782,26 @@ impl Session {
                                     s.solved.free.iter().map(|(n, d)| (n.clone(), d.map_or(json!("plane"), |d| json!([d.x, d.y])))).collect();
                                 let [o, x, y, z] = s.frame;
                                 let frame = json!({"origin": o, "x": x, "y": y, "normal": z});
-                                json!({"sketch": {"dof": s.solved.dof, "free": free, "points": points, "measures": s.solved.measures, "frame": frame}, "hash": hash})
+                                // A pattern's totals: copies (punches), the profiles they make, the
+                                // area they open, and of a region filled its share.
+                                let patterns: Map<String, Value> = s
+                                    .patterns
+                                    .iter()
+                                    .map(|p| {
+                                        let n = p.at.len() as f64;
+                                        let mut t = json!({"copies": p.at.len(), "profiles": p.at.len() * p.loops, "open_area": p.area * n});
+                                        if let Some(r) = p.region.filter(|r| *r > 0.0) {
+                                            t["region_area"] = json!(r);
+                                            t["open_share"] = json!(p.area * n / r);
+                                        }
+                                        (p.name.clone(), t)
+                                    })
+                                    .collect();
+                                let mut sketch = json!({"dof": s.solved.dof, "free": free, "points": points, "measures": s.solved.measures, "frame": frame});
+                                if !patterns.is_empty() {
+                                    sketch["patterns"] = Value::Object(patterns);
+                                }
+                                json!({"sketch": sketch, "hash": hash})
                             }
                             Feature::Flat(f) => {
                                 let [lines, arcs, circles] = f.counts();
@@ -824,7 +849,7 @@ fn rename_names(op: &mut Map<String, Value>, renamed: &impl Fn(&str) -> Option<S
     }
     if let Some(sketch) = op.get_mut("sketch") {
         if let Some(sk) = sketch.as_object_mut() {
-            for key in ["points", "lines", "arcs", "circles", "measures", "groups"] {
+            for key in ["points", "lines", "arcs", "circles", "measures", "groups", "patterns"] {
                 if let Some(m) = sk.get_mut(key) {
                     rekey(m);
                 }
@@ -846,7 +871,8 @@ pub fn visit_names(v: &mut Value, f: &mut impl FnMut(&mut String)) {
         Value::Array(a) => a.iter_mut().for_each(|v| visit_names(v, f)),
         Value::Object(m) => {
             for (k, v) in m.iter_mut() {
-                if !["type", "value", "degrees", "diameter", "id"].contains(&k.as_str()) {
+                // Numbers (or parameters' names), and a pattern's: not elements.
+                if !["type", "value", "degrees", "diameter", "id", "step", "count", "clearance", "skip", "shift"].contains(&k.as_str()) {
                     visit_names(v, f);
                 }
             }
@@ -936,7 +962,7 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     let removed_in = |key: &str| -> Vec<String> {
         p.get(key).and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.is_null()).map(|(n, _)| n.clone()).collect()).unwrap_or_default()
     };
-    let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups"].iter().flat_map(|k| removed_in(k)).collect();
+    let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups", "patterns"].iter().flat_map(|k| removed_in(k)).collect();
     let projections = removed_in("project");
     gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
     merge(op, "project", p.get("project"))?;
@@ -951,7 +977,7 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
         let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
         constraints.remove(k);
     }
-    for key in ["points", "lines", "arcs", "circles", "measures", "groups"] {
+    for key in ["points", "lines", "arcs", "circles", "measures", "groups", "patterns"] {
         merge(sketch, key, p.get(key))?;
     }
     let mut also = Vec::new();
@@ -981,9 +1007,21 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
         for n in empty {
             groups.remove(&n);
             also.push(format!("groups: {n}"));
+            gone.push(n);
         }
         if groups.is_empty() {
             sketch.remove("groups");
+        }
+    }
+    // Patterns of what is gone: their cell or their region.
+    if let Some(m) = sketch.get_mut("patterns").and_then(Value::as_object_mut) {
+        let doomed: Vec<String> = m.iter().filter(|(_, v)| refers(v, &gone)).map(|(n, _)| n.clone()).collect();
+        for n in doomed {
+            m.remove(&n);
+            also.push(format!("patterns: {n}"));
+        }
+        if m.is_empty() {
+            sketch.remove("patterns");
         }
     }
     if let Some(c) = sketch.get_mut("constraints").and_then(Value::as_array_mut) {
