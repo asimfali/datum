@@ -65,11 +65,38 @@ enum Request {
     Editing(Option<String>),
 }
 
-/// A selection being kept in the library (D98): the element it makes, and why the last save
-/// failed.
+/// A selection being kept in the library (D98): the element it makes, why the last save
+/// failed, and which of its insertion points (0, 1) a click in the sketch picks now.
 struct Keep {
     element: Json,
     error: Option<String>,
+    picking: Option<usize>,
+}
+
+impl Keep {
+    fn new(element: Json) -> Self {
+        Self { element, error: None, picking: None }
+    }
+
+    /// Insertion point `k` (0: the first, 1: the second, if any) is point `p` of the piece, or
+    /// (`None`, the second) there is no second.
+    fn anchor(&mut self, k: usize, p: Option<String>) {
+        let mut anchors = datum_model::library::anchors(&self.element);
+        match p {
+            Some(p) if k < anchors.len() => anchors[k] = p,
+            Some(p) => anchors.push(p),
+            None => anchors.truncate(1),
+        }
+        anchors.dedup();
+        if anchors.len() < 2 {
+            if let Some(o) = self.element.as_object_mut() {
+                o.remove("fit");
+            }
+        } else if self.element.get("fit").is_none() {
+            self.element["fit"] = json!("stretch");
+        }
+        self.element["anchors"] = json!(anchors);
+    }
 }
 
 /// What the background thread hands the window after each rebuild.
@@ -322,6 +349,33 @@ impl Viewer {
                     ui.end_row();
                 }
             });
+            // Where the element is put: the engineer's choice of its points (D98).
+            let anchors = datum_model::library::anchors(&k.element);
+            egui::Grid::new("datum_keep_anchors").num_columns(3).show(ui, |ui| {
+                for (i, label) in [(0, "Insertion point"), (1, "Second point")] {
+                    ui.label(label);
+                    ui.strong(anchors.get(i).map_or("—", String::as_str));
+                    ui.horizontal(|ui| {
+                        let hint = "Click a point of the selection in the sketch";
+                        if ui.add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i))).on_hover_text(hint).clicked() {
+                            k.picking = if k.picking == Some(i) { None } else { Some(i) };
+                        }
+                        if i == 1 && anchors.len() > 1 && ui.button("✖").on_hover_text("No second point: the element is moved as it is").clicked() {
+                            k.anchor(1, None);
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            if k.picking.is_some() {
+                ui.colored_label(egui::Color32::from_rgb(230, 120, 20), "Click a point of the selection in the sketch · Esc cancels");
+            }
+            if anchors.len() > 1 {
+                let mut fit = k.element["fit"].as_str().unwrap_or("stretch").to_string();
+                ui.radio_value(&mut fit, "stretch".into(), "Stretch along the axes to the second point (a rectangle by its corners)");
+                ui.radio_value(&mut fit, "align".into(), "Turn toward the second point (a section between two points of a chain)");
+                k.element["fit"] = json!(fit);
+            }
             match k.element.get_mut("parameters").and_then(Json::as_array_mut) {
                 Some(list) => {
                     ui.label("Parameters, in the order they are asked:");
@@ -586,7 +640,7 @@ impl Viewer {
                 }
                 let hint = "The selection as a library element: dimensions given by model parameters become its parameters";
                 if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
-                    self.keeping = sk.extract("New element", Some(&sk.params)).map(|element| Keep { element, error: None });
+                    self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
                 }
             });
             ui.horizontal(|ui| {
@@ -827,6 +881,9 @@ impl Viewer {
             sk.paint(&painter, rect);
             sk.draft.paint(sk, &painter, rect);
             sk.paint_frame(&painter, rect);
+            if let Some(k) = &self.keeping {
+                sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
+            }
         }
         // The face a click would sketch on, tinted.
         if let (true, Some((b, id))) = (self.picking, self.face) {
@@ -1189,7 +1246,23 @@ impl Viewer {
         {
             sent.push(Request::Command("edit_sketch", p));
         }
-        if r.clicked() {
+        // Keeping a selection in the library: a click picks its insertion point instead.
+        if let Some(k) = self.keeping.as_mut().filter(|k| k.picking.is_some()) {
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                k.picking = None;
+            } else if r.clicked()
+                && let (Some(i), Some((x, y))) = (k.picking, offset)
+            {
+                match sk.point_at(x, y, h).filter(|p| k.element["sketch"]["points"].get(p).is_some()) {
+                    Some(p) => {
+                        k.anchor(i, Some(p));
+                        k.picking = None;
+                        k.error = None;
+                    }
+                    None => k.error = Some("Not a point of the selection: pick one of its own".into()),
+                }
+            }
+        } else if r.clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
             match sk.hover.clone() {
                 Some(p) if shift => {
@@ -1476,7 +1549,7 @@ mod tests {
         let names = |e: &Json| e["parameters"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let first = names(&element);
         assert_eq!(first.len(), 4, "w, h, pitch, hole: {element}");
-        v.keeping = Some(Keep { element, error: None });
+        v.keeping = Some(Keep::new(element));
         let shot = std::env::var_os("DATUM_KEEP_SHOT");
         let builder = egui_kittest::Harness::builder().with_size([520.0, 300.0]);
         let builder = if shot.is_some() { builder.wgpu() } else { builder };
@@ -1488,9 +1561,20 @@ mod tests {
         }
         h.get_all_by_label("⏶").nth(1).unwrap().click();
         h.run();
+        // The second insertion point: Pick, then a click in the sketch.
+        h.get_all_by_label("Pick").nth(1).unwrap().click();
+        h.run();
+        h.get_by_label("Click a point of the selection in the sketch · Esc cancels");
         drop(h);
-        let now = names(&v.keeping.as_ref().unwrap().element);
+        let k = v.keeping.as_mut().unwrap();
+        let now = names(&k.element);
         assert_eq!((&now[0], &now[1]), (&first[1], &first[0]), "the second moved up");
+        assert_eq!(k.picking, Some(1));
+        let proposed = datum_model::library::anchors(&k.element)[0].clone();
+        k.anchor(1, Some("b".into()));
+        assert_eq!((&k.element["anchors"], &k.element["fit"]), (&json!([proposed, "b"]), &json!("stretch")), "{}", k.element);
+        k.anchor(0, Some("b".into()));
+        assert_eq!((&k.element["anchors"], k.element.get("fit")), (&json!(["b"]), None), "one point twice is one point");
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

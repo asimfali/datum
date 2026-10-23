@@ -741,6 +741,19 @@ impl SketchEdit {
     }
 
     /// Draws the sketch over the view in `rect`.
+    /// The insertion points of a selection being kept in the library, marked 1 and 2.
+    pub fn paint_anchors(&self, painter: &egui::Painter, rect: egui::Rect, anchors: &[String]) {
+        let Ok(p) = &self.placed else { return };
+        let color = egui::Color32::from_rgb(230, 120, 20);
+        for (k, n) in anchors.iter().enumerate() {
+            let Some(q) = p.solved.points.get(n) else { continue };
+            let (x, y) = self.camera.offset([q.x, q.y], f64::from(rect.height()));
+            let at = rect.center() + egui::vec2(x as f32, y as f32);
+            painter.circle_stroke(at, 9.0, egui::Stroke::new(2.0, color));
+            painter.text(at + egui::vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, format!("{}", k + 1), egui::FontId::proportional(14.0), color);
+        }
+    }
+
     pub fn paint(&self, painter: &egui::Painter, rect: egui::Rect) {
         let Ok(p) = &self.placed else { return };
         let height = f64::from(rect.height());

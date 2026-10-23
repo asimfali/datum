@@ -182,9 +182,10 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "to_library",
         description: "Keep a piece of sketch feature `name` as a library element (D98): `select` names its curves (taken with \
-                      their points) and points; the constraints and reference dimensions among them come along, the lowest, \
-                      leftmost point is the anchor. The model's parameters its dimensions name become the element's, with their \
-                      values now; `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
+                      their points) and points; the constraints and reference dimensions among them come along. `anchors`: \
+                      its insertion points, one or two of its points (else the lowest, leftmost); with two, `fit` is `stretch` \
+                      (along the axes, the default) or `align` (turned toward the second: a section of a chain). The model's \
+                      parameters its dimensions name become the element's, with their values now; `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
                       with `description` to `path`, or else to `library/sketch` of the model's project (beside the program \
                       without one); an existing file is kept unless `replace`. The reply has the element and where it went.",
         params: || {
@@ -194,6 +195,8 @@ const COMMANDS: &[Command] = &[
                 "element": {"type": "string"},
                 "description": {"type": "string"},
                 "order": {"type": "array", "items": {"type": "string"}},
+                "anchors": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 2},
+                "fit": {"type": "string", "enum": ["stretch", "align"]},
                 "path": {"type": "string"},
                 "replace": {"type": "boolean"}
             }, "required": ["name", "select", "element"], "additionalProperties": false})
@@ -222,6 +225,12 @@ const COMMANDS: &[Command] = &[
             {
                 let rank = |v: &Value| order.iter().position(|o| *o == v["name"]).unwrap_or(order.len());
                 list.sort_by_key(rank);
+            }
+            if let Some(a) = p.get("anchors") {
+                element["anchors"] = a.clone();
+            }
+            if let Some(f) = p.get("fit") {
+                element["fit"] = f.clone();
             }
             library::check("sketch", &element)?;
             let path = match p.get("path").and_then(Value::as_str) {

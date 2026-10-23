@@ -279,8 +279,9 @@ fn a_selection_kept_in_the_library_and_placed_again() {
         &mut s,
         "to_library",
         json!({"name": "outline", "select": ["bottom", "right", "top", "left"], "element": "Plate: w × h",
-        "description": "a plate", "order": ["h"]}),
+        "description": "a plate", "order": ["h"], "anchors": ["a", "c"]}),
     );
+    assert_eq!((&r["element"]["anchors"], &r["element"]["fit"]), (&json!(["a", "c"]), &Value::Null), "the engineer's points: {r}");
     let saved = std::path::PathBuf::from(r["saved"].as_str().unwrap());
     assert_eq!(saved, root.join("library/sketch/Plate_ w × h.json"), "in the project's library, a name a file system takes");
     let e = &r["element"];
@@ -288,6 +289,8 @@ fn a_selection_kept_in_the_library_and_placed_again() {
     let c = e["sketch"]["constraints"].as_array().unwrap();
     assert!(!c.iter().any(|c| c.to_string().contains("origin")), "what ties to the origin stays behind: {e}");
     assert!(s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "Plate: w × h"})).unwrap_err().contains("exists"));
+    let refused = s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "x", "anchors": ["c"]})).unwrap_err();
+    assert!(refused.contains("anchor `c` is not a point"), "an insertion point outside the piece: {refused}");
     let lib = run(&mut s, "library", json!({}));
     assert!(lib["elements"].as_array().unwrap().iter().any(|e| e["name"] == "Plate: w × h" && e["source"] == "project"), "{lib}");
     run(&mut s, "add", json!({"name": "other", "op": "sketch", "sketch": {"points": {}}}));
