@@ -20,6 +20,15 @@ pub enum Entry {
     Edit(usize),
     /// A circle's diameter.
     Diameter(String),
+    /// Parameter `k` of the library element being placed (D98): Tab goes to the next.
+    Parameter(usize),
+}
+
+impl Entry {
+    /// Whether the field serves what is being drawn or placed, rather than a dimension.
+    pub fn drawing(&self) -> bool {
+        matches!(self, Self::Draw | Self::Parameter(_))
+    }
 }
 
 /// The field: what it is for, its text, and where it stands (sketch coordinates).
@@ -44,7 +53,7 @@ pub fn value_of(text: &str) -> Json {
 }
 
 /// A value as a field shows it: a number in its shortest form, an expression as it is.
-fn text_of(v: &Json) -> String {
+pub fn text_of(v: &Json) -> String {
     match v {
         Json::String(s) => s.clone(),
         v => v.as_f64().map_or_else(String::new, |x| {
@@ -198,7 +207,7 @@ impl SketchEdit {
         let sketch = &self.json["sketch"];
         let mut patch = Map::new();
         match &field.entry {
-            Entry::Draw => {
+            Entry::Draw | Entry::Parameter(_) => {
                 self.field = Some(field);
                 return None;
             }

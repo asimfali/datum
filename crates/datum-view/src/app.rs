@@ -497,9 +497,8 @@ impl Viewer {
                     let on = sk.draft.tool == Tool::Template && sk.draft.template.as_ref().is_some_and(|c| c["name"] == t.element["name"]);
                     let hint = format!("{} ({}; R: the first)", t.element["description"].as_str().unwrap_or(""), crate::templates::source(t));
                     if ui.selectable_label(on, t.name()).on_hover_text(hint).clicked() {
-                        sk.draft.cancel();
-                        sk.draft.tool = Tool::Template;
-                        sk.draft.template = Some(t.element.clone());
+                        sk.draft.choose(t.element.clone());
+                        sk.field = None;
                     }
                 }
             });
@@ -530,7 +529,10 @@ impl Viewer {
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
-                Tool::Template => "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · Esc ends",
+                Tool::Template => {
+                    "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
+                     parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · Enter puts it at the cursor · Esc ends"
+                }
                 _ => "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc ends the command",
             });
             done = ui.button("Done").clicked();
@@ -816,9 +818,8 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none())
                 && let Some(t) = self.library.first()
             {
-                sk.draft.cancel();
-                sk.draft.tool = Tool::Template;
-                sk.draft.template = Some(t.element.clone());
+                sk.draft.choose(t.element.clone());
+                sk.field = None;
             }
             // Copy: the selection as an element, on the clipboard as JSON. Paste: an element
             // from the clipboard (a copy, or one written by hand or by an agent), placed by clicks.
@@ -831,26 +832,88 @@ impl Viewer {
                 ui.ctx().copy_text(serde_json::to_string_pretty(&t).unwrap_or_default());
             }
             if let Some(t) = paste.and_then(|p| serde_json::from_str::<Json>(&p).ok()).filter(|t| datum_model::library::check("sketch", t).is_ok()) {
-                sk.draft.cancel();
-                sk.draft.tool = Tool::Template;
-                sk.draft.template = Some(t);
+                sk.draft.choose(t);
+                sk.field = None;
             }
             if ui.input(|i| i.key_pressed(egui::Key::T)) && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                 sk.draft.tangent = !sk.draft.tangent;
             }
         }
-        // The field by the cursor: a value typed while drawing, or a dimension's. Enter applies
-        // it, Esc drops it.
+        // Placing a library element with parameters: the field by the cursor asks them, one by
+        // one, Tab to the next; a preset fills them all (D98).
+        let names = sk
+            .draft
+            .template
+            .as_ref()
+            .filter(|_| sk.draft.tool == Tool::Template)
+            .and_then(|t| datum_model::library::parameter_names(t).ok())
+            .unwrap_or_default();
+        if names.is_empty() {
+            if sk.field.as_ref().is_some_and(|f| matches!(f.entry, Entry::Parameter(_))) {
+                sk.field = None;
+            }
+        } else if let Some(spot) = &sk.draft.cursor {
+            let k = sk.draft.asking % names.len();
+            match &mut sk.field {
+                Some(f) if f.entry == Entry::Parameter(k) => f.at = spot.at,
+                _ => {
+                    sk.field =
+                        Some(Field { entry: Entry::Parameter(k), text: crate::templates::asked(&sk.draft, &names[k], &sk.params), at: spot.at })
+                }
+            }
+        }
+        // The field by the cursor: a value typed while drawing, a parameter of an element placed,
+        // or a dimension's. Enter applies it, Esc drops it.
         let mut field_done = (false, false);
+        let mut parameter_done = None;
         if let Some(f) = &mut sk.field {
             let (x, y) = sk.camera.offset(f.at, h);
             let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
+            let draft = &mut sk.draft;
             egui::Area::new(egui::Id::new("datum_sketch_field")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                let id = egui::Id::new("datum_sketch_field_text");
+                let asking = if let Entry::Parameter(k) = f.entry { Some(k) } else { None };
+                let id = egui::Id::new("datum_sketch_field_text").with(asking);
                 let fresh = !ui.memory(|m| m.has_focus(id));
-                let mut out = egui::TextEdit::singleline(&mut f.text).id(id).desired_width(110.0).show(ui);
-                // A dimension's value comes selected, to be typed over; a value typed while
-                // drawing goes on from its first digit.
+                // Tab and Shift+Tab go through the parameters, not to another widget.
+                let tab = asking.map(|_| {
+                    ui.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::Tab), i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)))
+                });
+                let mut out = None;
+                // Over the sketch, a parameter's name needs a ground of its own to be read.
+                let frame = if asking.is_some() { egui::Frame::popup(ui.style()) } else { egui::Frame::NONE };
+                frame.show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if let Some(k) = asking {
+                            ui.label(format!("{} ({}/{})", names[k], k + 1, names.len()));
+                        }
+                        let o = egui::TextEdit::singleline(&mut f.text).id(id).desired_width(110.0).show(ui);
+                        if let Some(k) = asking
+                            && o.response.changed()
+                        {
+                            match f.text.trim() {
+                                "" => draft.answers.remove(&names[k]),
+                                t => draft.answers.insert(names[k].clone(), value_of(t)),
+                            };
+                        }
+                        if let Some(presets) = asking.and(draft.template.as_ref()).and_then(|t| t["presets"].as_object()).filter(|p| !p.is_empty()) {
+                            let shown = draft.preset.clone().unwrap_or_else(|| "Element's values".into());
+                            egui::ComboBox::from_id_salt("datum_sketch_preset").selected_text(shown).show_ui(ui, |ui| {
+                                for name in std::iter::once(None).chain(presets.keys().map(Some)) {
+                                    let label = name.map_or("Element's values", String::as_str);
+                                    if ui.selectable_label(draft.preset.as_ref() == name, label).clicked() {
+                                        draft.preset = name.cloned();
+                                        draft.answers.clear();
+                                        parameter_done = Some(0);
+                                    }
+                                }
+                            });
+                        }
+                        out = Some(o);
+                    })
+                });
+                let Some(mut out) = out else { return };
+                // A dimension's or a parameter's value comes selected, to be typed over; a value
+                // typed while drawing goes on from its first digit.
                 if fresh && f.entry != Entry::Draw {
                     out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
                         egui::text::CCursor::new(0),
@@ -858,8 +921,15 @@ impl Viewer {
                     )));
                     out.state.store(ui.ctx(), id);
                 }
-                out.response.request_focus();
+                if parameter_done.is_none() {
+                    out.response.request_focus();
+                }
                 field_done = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                if let (Some(k), Some((next, back))) = (asking, tab)
+                    && (next || back)
+                {
+                    parameter_done = Some(if next { k + 1 } else { k + names.len() - 1 } % names.len());
+                }
             });
             // While drawing, the value sizes what is drawn as it is typed.
             if f.entry == Entry::Draw {
@@ -868,6 +938,15 @@ impl Viewer {
                 let size = serde_json::from_value::<datum_math::expr::Num>(v.clone()).ok().and_then(|n| n.resolve(&lookup).ok());
                 sk.draft.typed = size.filter(|s| *s > 0.0).map(|s| (v, s));
             }
+        }
+        // Another parameter asked (Tab, or a preset chosen): the field opens again on it.
+        if let Some(k) = parameter_done {
+            sk.draft.asking = k;
+            sk.field = None;
+        }
+        // Esc on a parameter ends placing the element, as Esc ends any command.
+        if field_done.1 && sk.field.as_ref().is_some_and(|f| matches!(f.entry, Entry::Parameter(_))) {
+            sk.draft.escape();
         }
         let typing_field = sk.field.is_some();
         if field_done.1 {
@@ -942,9 +1021,16 @@ impl Viewer {
                     sk.field = None;
                 }
             }
+            // Enter while placing an element: it goes where the cursor is.
+            if field_done.0
+                && draft.tool == Tool::Template
+                && let Some(patch) = draft.enter(sk)
+            {
+                sent.push(Request::Command("edit_sketch", sk.apply(patch)));
+            }
             // Enter on a dimension's value (the dimension tool opened it).
             if field_done.0
-                && sk.field.as_ref().is_some_and(|f| f.entry != Entry::Draw)
+                && sk.field.as_ref().is_some_and(|f| !f.entry.drawing())
                 && let Some(p) = sk.commit_field()
             {
                 sent.push(Request::Command("edit_sketch", p));
@@ -1219,6 +1305,67 @@ mod tests {
         v.sync_sketch();
         assert!(v.sketch.is_none());
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
+    }
+
+    /// Placing a library element with parameters in one stream of input: the field by the
+    /// cursor asks the first, Tab the next, what is typed goes into its dimension, Enter puts the
+    /// element at the cursor, Esc ends the command.
+    #[test]
+    fn an_element_asked_in_one_stream() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let element = json!({"name": "Plate", "anchors": ["a", "c"],
+            "parameters": [{"name": "width", "value": 100}, {"name": "height", "value": 50}],
+            "presets": {"Small": {"width": 20, "height": 10}},
+            "sketch": {"points": {"a": [0, 0], "b": [1, 0], "c": [1, 1], "d": [0, 1]},
+                       "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+                       "constraints": [{"type": "length", "line": "bottom", "value": "width"}, {"type": "length", "line": "left", "value": "height"}]}});
+        v.sketch.as_mut().unwrap().draft.choose(element);
+        // `DATUM_ELEMENT_SHOT=file.png` saves a picture of the field and the preview.
+        let shot = std::env::var_os("DATUM_ELEMENT_SHOT");
+        let builder = egui_kittest::Harness::builder().with_size([600.0, 400.0]);
+        let builder = if shot.is_some() { builder.wgpu() } else { builder };
+        let mut h = builder.build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+            if let Some(sk) = &v.sketch {
+                let painter = ui.painter().with_clip_rect(rect);
+                sk.paint(&painter, rect);
+                sk.draft.paint(sk, &painter, rect);
+            }
+        });
+        h.hover_at(egui::pos2(300.0, 200.0));
+        h.run();
+        h.get_by_label("width (1/2)");
+        h.get_by_value("Element's values");
+        if let Some(path) = shot {
+            h.render().unwrap().save(path).unwrap();
+        }
+        h.key_press(egui::Key::Tab);
+        h.run();
+        h.get_by_label("height (2/2)");
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text("7");
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let edit = sent.iter().find_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p.clone()) } else { None }).expect("placed");
+        let lengths: Vec<&Json> = edit["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| &c["value"]).collect();
+        assert_eq!(lengths, [&json!(100.0), &json!(7.0)], "{edit}");
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.draft.tool == Tool::Select && sk.field.is_none(), "Esc ends the command");
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

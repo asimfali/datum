@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use datum_brep::{Body, Curve, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
-use datum_math::expr::{Num, parameter_values};
+use datum_math::expr::{ExprError, Num, parameter_values};
 use serde_json::{Map, Value, json};
 
 use crate::{SketchPatch, add_feature, feature_json, library, parse, to_json};
@@ -184,7 +184,8 @@ const COMMANDS: &[Command] = &[
         description: "Insert a library element into sketch feature `name` as a copy (D98): its geometry, constraints and \
                       dimensions under new names, nothing tied to the library. `element`: a name from `library`, or an element \
                       object itself. Parameter values: the element's, over them `preset`'s, over those `values` (a number, or an \
-                      expression of the model's parameters). `at`: a spot for the first anchor or for each, a point of the sketch \
+                      expression of the model's parameters); with a spot for each of two anchors of a stretched element, a parameter \
+                      not given that a dimension holds alone is measured between the spots. `at`: a spot for the first anchor or for each, a point of the sketch \
                       by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
                       sketch's axes, or with `fit: align` turn it toward the second. `names`: element names that take the given \
                       free names (a section put in place of one removed keeps its name, and so what referred to it downstream). \
@@ -213,9 +214,6 @@ const COMMANDS: &[Command] = &[
                     e.clone()
                 }
             };
-            let empty = Map::new();
-            let values =
-                library::values(&element, p.get("preset").and_then(Value::as_str), p.get("values").and_then(Value::as_object).unwrap_or(&empty))?;
             let Ok(Feature::Sketch(placed)) = s.value(name) else { return Err(format!("`{name}` is not a sketch that solves")) };
             let mut at = Vec::new();
             for spot in p.get("at").and_then(Value::as_array).into_iter().flatten() {
@@ -231,10 +229,16 @@ const COMMANDS: &[Command] = &[
                 Some(n) => serde_json::from_value(n.clone()).map_err(|e| format!("`names`: {e}"))?,
                 None => BTreeMap::new(),
             };
+            let parameters = parameter_values(s.graph.parameters());
+            let lookup = |n: &str| parameters.get(n).and_then(|v| v.as_ref().ok()).copied().ok_or_else(|| ExprError::Unknown(n.to_string()));
+            let empty = Map::new();
+            let given = p.get("values").and_then(Value::as_object).unwrap_or(&empty);
+            let spots: Vec<[f64; 2]> = at.iter().map(|a| a.at).collect();
+            let values = library::answers(&element, p.get("preset").and_then(Value::as_str), given, &spots, &lookup)?;
             let feature = serde_json::to_value(&s.graph.nodes()[s.find(name)? as usize].op).map_err(|e| e.to_string())?;
             let mut patch = SketchPatch::new(&feature);
             let construction = p.get("construction").and_then(Value::as_bool).unwrap_or(false);
-            let renamed = library::place(&mut patch, &element, &values, &at, &names, construction)?;
+            let renamed = library::place(&mut patch, &element, &values, &at, &names, construction, &lookup)?;
             let mut params = patch.done().unwrap_or_default();
             params.insert("name".into(), json!(name));
             let mut reply = s.edit_sketch(name, &params)?;
