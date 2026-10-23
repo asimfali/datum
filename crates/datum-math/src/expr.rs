@@ -110,12 +110,13 @@ enum Expr {
     Call(Func, Vec<Expr>),
 }
 
-/// A valid parameter name: a letter or `_`, then letters, digits or `_`; not `pi` or a function.
+/// A valid parameter name: a letter (of any alphabet: `диам`) or `_`, then letters, digits or
+/// `_`; not `pi` or a function.
 pub fn valid_name(s: &str) -> bool {
     let mut c = s.chars();
-    matches!(c.next(), Some(ch) if ch.is_ascii_alphabetic() || ch == '_')
-        && c.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
-        && s.len() <= 64
+    matches!(c.next(), Some(ch) if ch.is_alphabetic() || ch == '_')
+        && c.all(|ch| ch.is_alphanumeric() || ch == '_')
+        && s.chars().count() <= 64
         && !s.eq_ignore_ascii_case("pi")
         && !FUNCS.iter().any(|(n, _)| s.eq_ignore_ascii_case(n))
 }
@@ -213,10 +214,15 @@ impl Parser<'_> {
                 let t = std::str::from_utf8(&self.s[start..self.i]).unwrap_or_default();
                 t.parse().map(Expr::Num).map_err(|_| ExprError::Syntax(format!("bad number `{t}`")))
             }
-            Some(c) if c.is_ascii_alphabetic() || c == b'_' => {
+            // A name's letters may be of any alphabet: the bytes of a character beyond ASCII are
+            // taken whole, then the name is checked by its characters.
+            Some(c) if c.is_ascii_alphabetic() || c == b'_' || !c.is_ascii() => {
                 let start = self.i;
-                let name = self.word(|c| c.is_ascii_alphanumeric() || c == b'_').to_string();
+                let name = self.word(|c| c.is_ascii_alphanumeric() || c == b'_' || !c.is_ascii()).to_string();
                 let end = self.i;
+                if !name.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_') || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return Err(ExprError::Syntax(format!("`{name}` is not a name: letters, digits and `_`")));
+                }
                 if name.eq_ignore_ascii_case("pi") {
                     return Ok(Expr::Num(std::f64::consts::PI));
                 }
@@ -414,13 +420,29 @@ mod tests {
     fn errors() {
         assert_eq!(constant("1/0"), Err(ExprError::DivZero));
         assert!(matches!(constant("sqrt(-1)"), Err(ExprError::Domain(_))));
-        for bad in ["1+", "(1", "1 2", "", "1.2.3", "é", "foo(1)", "sqrt()", "sqrt(1, 2)", "min()"] {
+        for bad in ["1+", "(1", "1 2", "", "1.2.3", "×", "foo(1)", "sqrt()", "sqrt(1, 2)", "min()"] {
             assert!(matches!(constant(bad), Err(ExprError::Syntax(_))), "{bad}");
         }
         assert!(matches!(constant("x"), Err(ExprError::Unknown(_))));
         assert!(matches!(constant("1e308*1e308"), Err(ExprError::NotFinite)));
         assert!(matches!(constant(&"(".repeat(500)), Err(ExprError::TooDeep)));
         assert!(matches!(constant(&"-".repeat(500)), Err(ExprError::TooDeep)));
+    }
+
+    /// Names in any alphabet (issue #57): an engineer names a parameter in their own language.
+    #[test]
+    fn names_of_any_alphabet() {
+        assert!(valid_name("диам") && valid_name("ширина_2") && valid_name("é") && !valid_name("×") && !valid_name("2а") && !valid_name("а-б"));
+        let lookup = |n: &str| match n {
+            "диам" => Ok(10.0),
+            "w" => Ok(1.0),
+            _ => Err(ExprError::Unknown(n.into())),
+        };
+        assert_eq!(eval("диам / 2 + w", &lookup), Ok(6.0));
+        assert_eq!(eval("2*диам", &lookup), Ok(20.0));
+        assert!(matches!(eval("диам×2", &lookup), Err(ExprError::Syntax(_))));
+        let renamed = substitute("диам/2 + w", &|n| (n == "диам").then(|| "d".to_string())).unwrap();
+        assert_eq!(renamed, "(d)/2 + w");
     }
 
     #[test]

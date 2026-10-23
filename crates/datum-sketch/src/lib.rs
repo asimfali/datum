@@ -41,7 +41,8 @@ pub struct Sketch {
     /// Arcs between named points, counterclockwise around a named centre: dimensioned by radius.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub arcs: BTreeMap<String, Arc>,
-    /// Circles around named points: dimensioned by diameter, as on a drawing.
+    /// Circles around named points: dimensioned by diameter, as on a drawing. A circle equal to
+    /// another (`equal_radius`) takes that one's diameter instead of its own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub circles: BTreeMap<String, Circle>,
     #[serde(default)]
@@ -181,7 +182,7 @@ pub enum Constraint {
         points: [String; 2],
         line: String,
     },
-    /// Arcs or circles of one radius; two circles' diameters are given, so not both.
+    /// Arcs or circles of one radius; of two circles, the second takes the first's diameter.
     EqualRadius {
         curves: [String; 2],
     },
@@ -214,6 +215,12 @@ impl Sketch {
         for (name, c) in &mut s.circles {
             c.diameter = Num::Value(c.diameter.resolve(lookup).map_err(|e| format!("circle `{name}`: {e}"))?);
         }
+        for (circle, leader) in self.followed_circles()? {
+            let d = s.circles[&leader].diameter.clone();
+            if let Some(c) = s.circles.get_mut(&circle) {
+                c.diameter = d;
+            }
+        }
         for (k, c) in s.constraints.iter_mut().enumerate() {
             let describe = c.describe(k);
             if let Constraint::Distance { value, .. }
@@ -228,6 +235,34 @@ impl Sketch {
             }
         }
         Ok(s)
+    }
+}
+
+impl Sketch {
+    /// The circles whose diameter follows another's through `equal_radius` (the second named
+    /// follows the first), each by the circle the chain starts at. An error names a constraint
+    /// that ties circles of one diameter already.
+    pub fn followed_circles(&self) -> Result<BTreeMap<String, String>, String> {
+        fn first<'a>(followed: &'a BTreeMap<String, String>, mut n: &'a str) -> String {
+            while let Some(m) = followed.get(n) {
+                n = m;
+            }
+            n.to_string()
+        }
+        let mut followed = BTreeMap::new();
+        for (k, c) in self.constraints.iter().enumerate() {
+            if let Constraint::EqualRadius { curves: [a, b] } = c
+                && self.circles.contains_key(a)
+                && self.circles.contains_key(b)
+            {
+                let (a, b) = (first(&followed, a), first(&followed, b));
+                if a == b {
+                    return Err(format!("{}: the circles are of one diameter already", c.describe(k)));
+                }
+                followed.insert(b, a);
+            }
+        }
+        Ok(followed.keys().map(|n| (n.clone(), first(&followed, n))).collect())
     }
 }
 

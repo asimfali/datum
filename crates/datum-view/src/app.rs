@@ -26,7 +26,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     crate::log::write("opening the window");
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
-        // Restored, it is 1280 × 800; it opens maximized (see `Viewer::shown`).
+        // The window as it was left, size and place on the monitor (eframe keeps them); the first
+        // time 1280 × 800 restored, opening maximized (see `Viewer::shown`).
         viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
@@ -47,11 +48,18 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let info = rs.adapter.get_info();
             let adapter = format!("{} ({:?})", info.name, info.backend);
             crate::log::write(&format!("window on {adapter}"));
-            Ok(Box::new(Viewer::new(path, cc.egui_ctx.clone(), adapter)))
+            let maximized = cc.storage.and_then(|s| s.get_string(MAXIMIZED)).is_none_or(|m| m == "true");
+            let mut viewer = Viewer::new(path, cc.egui_ctx.clone(), adapter);
+            viewer.maximized = maximized;
+            Ok(Box::new(viewer))
         }),
     )
     .map_err(|e| e.to_string())
 }
+
+/// Whether the window was left maximized: kept apart from the window's size and place, which
+/// Windows does not restore maximized.
+const MAXIMIZED: &str = "datum_maximized";
 
 fn title(path: Option<&std::path::Path>) -> String {
     path.map_or_else(|| "Datum".into(), |p| format!("Datum — {}", p.display()))
@@ -256,8 +264,11 @@ struct Viewer {
     ui_ms: f64,
     /// The GPU drawing the view and its API: a software one explains a slow frame.
     adapter: String,
-    /// Parameter definitions as typed, by name.
+    /// Parameter definitions as typed, by name; a new one's name and definition.
     edits: BTreeMap<String, String>,
+    new_parameter: (String, String),
+    /// Why the window refused what was asked, before the model was asked.
+    local_error: Option<String>,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
     /// A newer release, once the background check finds one: its version and page.
@@ -277,8 +288,10 @@ struct Viewer {
     /// The folder of the model last opened or saved: where the next one is opened from.
     worked_in: Option<PathBuf>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
-    /// first). Asked of the window as it is made, Windows drops it when eframe shows the window.
+    /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
+    /// shows the window.
     shown: u8,
+    maximized: bool,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -315,6 +328,8 @@ impl Viewer {
             ui_ms: 0.0,
             adapter,
             edits: BTreeMap::new(),
+            new_parameter: Default::default(),
+            local_error: None,
             path: None,
             update,
             newer: None,
@@ -326,6 +341,7 @@ impl Viewer {
             quitting: None,
             worked_in: None,
             shown: 0,
+            maximized: false,
             picking: false,
             face: None,
         };
@@ -433,6 +449,17 @@ impl Viewer {
             rfd::MessageDialogResult::No => Some(false),
             _ => None,
         }
+    }
+
+    /// An empty model (New, Ctrl+N), once what is not saved is asked about.
+    fn new_model(&mut self, ui: &egui::Ui) {
+        if !self.may_leave(ui) {
+            return;
+        }
+        self.leave();
+        self.set_path(None);
+        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
+        self.send(Request::Command("new", json!({})));
     }
 
     /// Closes the model (Close, Ctrl+W): the window shows none.
@@ -798,11 +825,8 @@ impl Viewer {
             if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
                 self.open_by_dialog(ui);
             }
-            if ui.button("New").on_hover_text("An empty model").clicked() && self.may_leave(ui) {
-                self.leave();
-                self.set_path(None);
-                ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
-                self.send(Request::Command("new", json!({})));
+            if ui.button("New").on_hover_text("An empty model (Ctrl+N)").clicked() {
+                self.new_model(ui);
             }
             if ui.add_enabled(self.model.is_some(), egui::Button::new("Close")).on_hover_text("Close the model (Ctrl+W)").clicked() {
                 self.close(ui);
@@ -968,7 +992,7 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc ends",
                 Tool::Template => {
@@ -980,18 +1004,18 @@ impl Viewer {
             done = ui.button("Done").clicked();
             ui.separator();
         }
-        ui.heading("Parameters");
+        ui.heading("Parameters").on_hover_text(FORMULAS);
         let params = m.inspect["parameters"].as_object().cloned().unwrap_or_default();
-        if params.is_empty() {
-            ui.weak("none");
-        }
-        let mut send = Vec::new();
-        egui::Grid::new("parameters").num_columns(3).striped(true).show(ui, |ui| {
+        let (mut send, mut removed, mut added) = (Vec::new(), None, false);
+        let field = |ui: &mut egui::Ui, text: &mut String, hint: &str| {
+            ui.add_sized([170.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(text).hint_text(hint))
+        };
+        egui::Grid::new("parameters").num_columns(4).striped(true).show(ui, |ui| {
             for (name, p) in &params {
                 ui.label(name);
                 let text = self.edits.entry(name.clone()).or_default();
                 // A grid cell is as wide as its column was: sized explicitly, the field widens it.
-                let r = ui.add_sized([170.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(text));
+                let r = field(ui, text, "");
                 // Applied when the field is left (Enter, Tab or a click elsewhere) changed. The
                 // field itself takes the Enter key, so asking for it here would never fire.
                 if r.lost_focus() && *text != definition(&p["definition"]) {
@@ -1002,9 +1026,46 @@ impl Viewer {
                     (_, Some(e)) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
                     _ => ui.label(""),
                 };
+                if crate::icons::button(
+                    ui,
+                    crate::icons::Icon::Remove,
+                    "Remove the parameter",
+                    "Remove the parameter: what uses it then fails and says so",
+                    true,
+                )
+                .clicked()
+                {
+                    removed = Some(name.clone());
+                }
                 ui.end_row();
             }
+            // A new parameter: its name, then its value; Enter in the value or Add adds it.
+            let (name, value) = &mut self.new_parameter;
+            ui.add_sized([60.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(name).hint_text("name"));
+            let r = field(ui, value, "value or formula");
+            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            added = (ui.button("Add").on_hover_text(FORMULAS).clicked() || enter) && !name.trim().is_empty();
+            ui.end_row();
         });
+        ui.weak("A value may be a formula: w / 2 - gap. Sketch dimensions and depths take parameters too").on_hover_text(FORMULAS);
+        if added {
+            let (name, value) = std::mem::take(&mut self.new_parameter);
+            let name = name.trim().to_string();
+            if params.contains_key(&name) {
+                self.local_error = Some(format!("`{name}` is a parameter already: change its value in its row"));
+                self.new_parameter = (name, value);
+            } else {
+                self.local_error = None;
+                send.push((name, if value.trim().is_empty() { "0".into() } else { value }));
+            }
+        }
+        if let Some(e) = &self.local_error {
+            ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+        }
+        if let Some(name) = removed {
+            let _ = self.requests.send(Request::Command("remove_parameter", json!({"name": name})));
+            self.busy = true;
+        }
         for (name, text) in send {
             // A plain number stays a number; anything else is an expression.
             let value = text.trim().parse::<f64>().map_or_else(|_| json!(text.trim()), |v| json!(v));
@@ -1258,7 +1319,7 @@ impl Viewer {
             }
             sk.draft = draft;
         }
-        let typing = ui.ctx().egui_wants_keyboard_input();
+        let typing = ui.ctx().text_edit_focused();
         if !typing {
             let tool = ui.input(|i| {
                 [
@@ -1506,9 +1567,14 @@ impl Viewer {
                         let tried = match outcome {
                             Step::More => Ok(None),
                             Step::Done(c) => {
+                                // Two circles made equal fix a diameter, not a point: the kernel
+                                // refuses a repeat itself.
+                                let circles = &sk.json["sketch"]["circles"];
+                                let points = !(c["type"] == "equal_radius"
+                                    && c["curves"].as_array().into_iter().flatten().all(|n| n.as_str().is_some_and(|n| circles.get(n).is_some())));
                                 let mut patch = serde_json::Map::new();
                                 patch.insert("add_constraints".into(), json!([c]));
-                                sk.try_apply(patch, true).map(Some)
+                                sk.try_apply(patch, points).map(Some)
                             }
                             Step::Wrong(why) => Err(why),
                         };
@@ -1572,7 +1638,7 @@ impl Viewer {
         {
             let (x, y) = (f64::from(o.x - rect.center().x), f64::from(o.y - rect.center().y));
             sk.hover = sk.hit(x, y, h, |t| crate::sketch::label_size(ui.painter(), t));
-            if !sk.start_drag() && sk.hover.is_none() {
+            if !sk.start_drag(sk.camera.at(x, y, h)) && sk.hover.is_none() {
                 sk.frame = Some(SelectFrame { ends: [(x, y); 2], touching: false });
             }
         }
@@ -1646,7 +1712,7 @@ impl Viewer {
             let (x, y) = offset.unwrap_or((0.0, 0.0));
             sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
         }
-        if !ui.ctx().egui_wants_keyboard_input() && !typing_field && !field_done.1 {
+        if !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
             if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
                 && let Some(p) = sk.delete()
             {
@@ -1701,6 +1767,11 @@ fn beside(model: Option<&std::path::Path>, dialog: rfd::FileDialog) -> rfd::File
     }
 }
 
+/// How parameters are used, on hover over their heading and Add.
+const FORMULAS: &str = "A parameter is a number or a formula of other parameters: w / 2 - gap, sqrt(a*a + b*b), max(t, 2). \
+                        Operators + - * / and parentheses, pi, sqrt abs min max sin cos tan (degrees). A sketch dimension \
+                        or a feature's number (a depth, an angle) takes a parameter's name or a formula too: type it in the field";
+
 /// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
 /// expression as is.
 fn definition(v: &Json) -> String {
@@ -1711,15 +1782,49 @@ fn definition(v: &Json) -> String {
     }
 }
 
+impl Viewer {
+    /// The keys of the toolbar, unless a text field takes them. A button focused (by Tab) does
+    /// not: the keys would stop working until a click elsewhere.
+    fn shortcuts(&mut self, ui: &egui::Ui) {
+        if ui.ctx().text_edit_focused() {
+            return;
+        }
+        let pressed = |k| ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k)));
+        if pressed(egui::Key::Z) {
+            self.send(Request::Command("undo", json!({})));
+        }
+        if pressed(egui::Key::Y) {
+            self.send(Request::Command("redo", json!({})));
+        }
+        if pressed(egui::Key::N) {
+            self.new_model(ui);
+        }
+        if pressed(egui::Key::O) {
+            self.open_by_dialog(ui);
+        }
+        if pressed(egui::Key::W) {
+            self.close(ui);
+        }
+        if pressed(egui::Key::S) {
+            self.save(ui, false);
+        } else if self.sketch.is_none() && ui.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.is_none()) {
+            self.start_sketch();
+        }
+    }
+}
+
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
         if self.shown < 2 {
             self.shown += 1;
-            if self.shown == 2 {
+            if self.shown == 2 && self.maximized {
                 ui.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
             ui.ctx().request_repaint();
+        }
+        if self.shown == 2 {
+            self.maximized = ui.input(|i| i.viewport().maximized.unwrap_or(self.maximized));
         }
         self.receive();
         // The window closed with changes not saved: asked first; saved, it closes once the
@@ -1733,28 +1838,7 @@ impl eframe::App for Viewer {
         {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        // Undo and redo, unless a text field takes the keys.
-        if !ui.ctx().egui_wants_keyboard_input() {
-            let shortcut = |k| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k);
-            let (undo, redo) = ui.input_mut(|i| (i.consume_shortcut(&shortcut(egui::Key::Z)), i.consume_shortcut(&shortcut(egui::Key::Y))));
-            if undo {
-                self.send(Request::Command("undo", json!({})));
-            }
-            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::O))) {
-                self.open_by_dialog(ui);
-            }
-            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::W))) {
-                self.close(ui);
-            }
-            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::S))) {
-                self.save(ui, false);
-            } else if self.sketch.is_none() && ui.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.is_none()) {
-                self.start_sketch();
-            }
-            if redo {
-                self.send(Request::Command("redo", json!({})));
-            }
-        }
+        self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         if self.sketch.is_some() {
@@ -1768,6 +1852,10 @@ impl eframe::App for Viewer {
             }
         });
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(MAXIMIZED, self.maximized.to_string());
     }
 }
 
@@ -1816,6 +1904,8 @@ mod tests {
             ui_ms: 0.0,
             adapter: String::new(),
             edits,
+            new_parameter: Default::default(),
+            local_error: None,
             path: None,
             update: channel().1,
             newer: None,
@@ -1827,6 +1917,7 @@ mod tests {
             quitting: None,
             worked_in: None,
             shown: 0,
+            maximized: false,
             picking: false,
             face: None,
         };
@@ -2088,10 +2179,9 @@ mod tests {
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "two corners: nothing placed yet");
     }
 
-    /// Constraints by hand: the Concentric button, then a click on each hole. The plate is fully
-    /// defined and its holes 50 apart: refused with why, nothing sent. `DATUM_CONSTRAIN_SHOT`.
-    #[test]
-    fn a_constraint_by_hand() {
+    /// The plate's sketch in the window: the `button` of a constraint, then a click on each
+    /// hole. `DATUM_CONSTRAIN_SHOT=file.png` saves a picture of the panel.
+    fn both_holes_by_hand(button: &str, kind: crate::constrain::Kind) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
@@ -2102,7 +2192,6 @@ mod tests {
         v.entering = Some("outline".into());
         v.sync_sketch();
         {
-            // `DATUM_CONSTRAIN_SHOT=file.png` saves a picture of the panel.
             let shot = std::env::var_os("DATUM_CONSTRAIN_SHOT");
             let builder = egui_kittest::Harness::builder().with_size([360.0, 700.0]);
             let builder = if shot.is_some() { builder.wgpu() } else { builder };
@@ -2113,10 +2202,10 @@ mod tests {
             if let Some(path) = shot {
                 h.render().unwrap().save(path).unwrap();
             }
-            h.get_by_label("Concentric").click();
+            h.get_by_label(button).click();
             h.run();
         }
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Constrain(crate::constrain::Kind::Concentric));
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Constrain(kind));
         let area = std::cell::Cell::new(egui::Rect::NOTHING);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
             let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -2148,11 +2237,33 @@ mod tests {
             h.run();
         }
         drop(h);
+        (v, inbox)
+    }
+
+    /// Constraints by hand: the plate is fully defined and its holes 50 apart, so concentric is
+    /// refused with why, nothing sent.
+    #[test]
+    fn a_constraint_by_hand() {
+        let (v, inbox) = both_holes_by_hand("Concentric", crate::constrain::Kind::Concentric);
         let sk = v.sketch.as_ref().unwrap();
         assert!(sk.draft.picks.is_empty(), "two holes picked, then done: {:?}", sk.draft.picks);
         let why = &sk.conflict.as_ref().expect("refused").why;
         assert!(!why.is_empty(), "with why");
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "nothing sent");
+    }
+
+    /// Two circles made equal (issue #57): nothing moves, yet the second's diameter follows the
+    /// first's from now on, so it is sent; the second shows no diameter of its own.
+    #[test]
+    fn equal_circles_by_hand() {
+        let (v, inbox) = both_holes_by_hand("Equal", crate::constrain::Kind::Equal);
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.conflict.is_none(), "{:?}", sk.conflict.as_ref().map(|c| &c.why));
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0]["add_constraints"][0]["type"], "equal_radius", "{}", sent[0]);
+        let diameters: Vec<String> = sk.labels().into_iter().filter(|l| l.text.starts_with('Ø')).map(|l| l.text).collect();
+        assert_eq!(diameters, ["Øhole = 9"], "one diameter shown");
     }
 
     /// Close: a model with nothing unsaved closes without asking; the background thread is told,
@@ -2170,6 +2281,64 @@ mod tests {
         }
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));
         assert!(v.path.is_none() && v.sketch.is_none());
+    }
+
+    /// A new parameter from the panel (issue #57): Add sends it, a formula as typed; a name
+    /// taken already is refused in the window; ✖ removes one.
+    #[test]
+    fn parameters_are_added_and_removed() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let panel = |v: &mut Viewer, click: &str| {
+            let mut h = egui_kittest::Harness::builder().with_size([360.0, 700.0]).build_ui(|ui| v.side(ui));
+            h.run();
+            h.get_all_by_label(click).next().unwrap().click();
+            h.run();
+        };
+        v.new_parameter = ("gap".into(), "w / 10".into());
+        panel(&mut v, "Add");
+        assert!(v.new_parameter.0.is_empty() && v.local_error.is_none());
+        v.new_parameter = ("hole".into(), "5".into());
+        panel(&mut v, "Add");
+        assert!(v.local_error.as_ref().is_some_and(|e| e.contains("already")), "{:?}", v.local_error);
+        assert_eq!(v.new_parameter.0, "hole", "kept to be renamed");
+        panel(&mut v, "Remove the parameter");
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::SetParameter(n, val) if n == "gap" && val == "w / 10")));
+        assert!(!sent.iter().any(|r| matches!(r, Request::SetParameter(n, _) if n == "hole")));
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("remove_parameter", p) if p["name"] == "h")), "the first row's");
+    }
+
+    /// Ctrl+W closes and Ctrl+N gives an empty model (issue #57), with a button focused by Tab
+    /// too; while a text field is typed in, they are its own.
+    #[test]
+    fn keys_close_and_new() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.path = Some("plate.json".into());
+        let ctrl = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
+        let mut text = String::new();
+        let mut h = egui_kittest::Harness::builder().with_size([400.0, 80.0]).build_ui(|ui| {
+            ui.text_edit_singleline(&mut text);
+            let _ = ui.button("Focused");
+            v.shortcuts(ui);
+        });
+        h.run();
+        h.get_by_label("Focused").focus();
+        h.run();
+        h.event(ctrl(egui::Key::W));
+        h.run();
+        h.get_by_role(egui::accesskit::Role::TextInput).focus();
+        h.run();
+        h.event(ctrl(egui::Key::N));
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Close)), "closed");
+        assert!(!sent.iter().any(|r| matches!(r, Request::Command("new", _))), "typing: not a new model");
+        let mut h = egui_kittest::Harness::builder().with_size([400.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(ctrl(egui::Key::N));
+        h.run();
+        drop(h);
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("new", _))), "a new model");
     }
 
     /// Open looks where the engineer works: the open model's folder, after Close the last one's;
