@@ -65,17 +65,19 @@ enum Request {
     Editing(Option<String>),
 }
 
-/// A selection being kept in the library (D98): the element it makes, why the last save
-/// failed, and which of its insertion points (0, 1) a click in the sketch picks now.
+/// A selection being kept in the library (D98): the element it makes, why the last change or
+/// save failed, and which of its insertion points (0, 1) a click in the sketch picks now.
 struct Keep {
     element: Json,
     error: Option<String>,
     picking: Option<usize>,
+    /// The parameter names as typed, by dimension: one not taken yet is kept here meanwhile.
+    naming: BTreeMap<String, String>,
 }
 
 impl Keep {
     fn new(element: Json) -> Self {
-        Self { element, error: None, picking: None }
+        Self { element, error: None, picking: None, naming: BTreeMap::new() }
     }
 
     /// Insertion point `k` (0: the first, 1: the second, if any) is point `p` of the piece, or
@@ -352,12 +354,20 @@ impl Viewer {
             // Where the element is put: the engineer's choice of its points (D98).
             let anchors = datum_model::library::anchors(&k.element);
             egui::Grid::new("datum_keep_anchors").num_columns(3).show(ui, |ui| {
-                for (i, label) in [(0, "Insertion point"), (1, "Second point")] {
-                    ui.label(label);
+                for (i, label, hint) in [
+                    (0, "Insertion point", "The point of the element that goes where the first click is"),
+                    (
+                        1,
+                        "Second point",
+                        "Only for an element put by two clicks: a rectangle by its corners, or a section between two points of a chain",
+                    ),
+                ] {
+                    ui.label(label).on_hover_text(hint);
                     ui.strong(anchors.get(i).map_or("—", String::as_str));
                     ui.horizontal(|ui| {
                         let hint = "Click a point of the selection in the sketch";
-                        if ui.add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i))).on_hover_text(hint).clicked() {
+                        if ui.add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i))).on_hover_text(hint).clicked()
+                        {
                             k.picking = if k.picking == Some(i) { None } else { Some(i) };
                         }
                         if i == 1 && anchors.len() > 1 && ui.button("✖").on_hover_text("No second point: the element is moved as it is").clicked() {
@@ -376,24 +386,71 @@ impl Viewer {
                 ui.radio_value(&mut fit, "align".into(), "Turn toward the second point (a section between two points of a chain)");
                 k.element["fit"] = json!(fit);
             }
-            match k.element.get_mut("parameters").and_then(Json::as_array_mut) {
-                Some(list) => {
-                    ui.label("Parameters, in the order they are asked:");
-                    let mut up = None;
-                    for (i, p) in list.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui.add_enabled(i > 0, egui::Button::new("⏶")).clicked() {
-                                up = Some(i);
+            // The dimensions: a tick makes one a question of the element, under the name beside it.
+            use datum_model::library::{dimensions, parameter_names, parametrize, rename_parameter, unparametrize};
+            let dims = dimensions(&k.element);
+            if dims.is_empty() {
+                ui.weak("The selection has no dimensions: the element goes in as it is.");
+            } else {
+                ui.label("Dimensions — ticked ones are asked when the element is placed:");
+            }
+            let names = parameter_names(&k.element).unwrap_or_default();
+            let mut change: Option<Result<(), String>> = None;
+            egui::Grid::new("datum_keep_dims").num_columns(3).show(ui, |ui| {
+                for d in &dims {
+                    let asked = d.value.as_str().map(str::trim).filter(|t| names.iter().any(|n| n == t)).map(str::to_string);
+                    let mut on = asked.is_some();
+                    let given = d.value.is_number() || asked.is_some();
+                    if ui.add_enabled(given, egui::Checkbox::new(&mut on, &d.label)).changed() {
+                        change = Some(match &asked {
+                            Some(n) => unparametrize(&mut k.element, n),
+                            None => {
+                                let free = (1..).map(|i| format!("d{i}")).find(|n| !names.contains(n)).unwrap_or_default();
+                                parametrize(&mut k.element, &d.label, &free)
                             }
-                            ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
                         });
                     }
-                    if let Some(i) = up {
-                        list.swap(i - 1, i);
+                    match &asked {
+                        Some(n) => {
+                            let text = k.naming.entry(d.label.clone()).or_insert_with(|| n.clone());
+                            if ui.add(egui::TextEdit::singleline(text).desired_width(90.0)).changed() {
+                                match rename_parameter(&mut k.element, n, text.trim()) {
+                                    Ok(()) => change = Some(Ok(())),
+                                    Err(e) => k.error = Some(e),
+                                }
+                            }
+                        }
+                        None => {
+                            k.naming.remove(&d.label);
+                            ui.label("");
+                        }
                     }
+                    // The value: a parameter's own, a number or an expression as given.
+                    let value = asked
+                        .as_ref()
+                        .and_then(|n| k.element["parameters"].as_array()?.iter().find(|p| p["name"] == n.as_str()).map(|p| p["value"].clone()));
+                    ui.weak(crate::dims::text_of(value.as_ref().unwrap_or(&d.value)));
+                    ui.end_row();
                 }
-                None => {
-                    ui.weak("No dimension is given by a model parameter: the element goes in as it is. Give dimensions parameters (w, h…) to have it ask them.");
+            });
+            match change {
+                Some(Ok(())) => k.error = None,
+                Some(Err(e)) => k.error = Some(e),
+                None => {}
+            }
+            if let Some(list) = k.element.get_mut("parameters").and_then(Json::as_array_mut) {
+                ui.label("Asked in this order:");
+                let mut up = None;
+                for (i, p) in list.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui.add_enabled(i > 0, egui::Button::new("⏶")).clicked() {
+                            up = Some(i);
+                        }
+                        ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
+                    });
+                }
+                if let Some(i) = up {
+                    list.swap(i - 1, i);
                 }
             }
             if let Some(e) = &k.error {
@@ -1551,11 +1608,11 @@ mod tests {
         assert_eq!(first.len(), 4, "w, h, pitch, hole: {element}");
         v.keeping = Some(Keep::new(element));
         let shot = std::env::var_os("DATUM_KEEP_SHOT");
-        let builder = egui_kittest::Harness::builder().with_size([520.0, 300.0]);
+        let builder = egui_kittest::Harness::builder().with_size([560.0, 560.0]);
         let builder = if shot.is_some() { builder.wgpu() } else { builder };
         let mut h = builder.build_ui(|ui| v.keep(ui.ctx()));
         h.run();
-        h.get_by_label("Parameters, in the order they are asked:");
+        h.get_by_label("Asked in this order:");
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
@@ -1575,6 +1632,37 @@ mod tests {
         assert_eq!((&k.element["anchors"], &k.element["fit"]), (&json!([proposed, "b"]), &json!("stretch")), "{}", k.element);
         k.anchor(0, Some("b".into()));
         assert_eq!((&k.element["anchors"], k.element.get("fit")), (&json!(["b"]), None), "one point twice is one point");
+    }
+
+    /// Dimensions given as numbers (no model parameters at all): a tick asks one when placing,
+    /// under the name typed beside it. `DATUM_KEEP_SHOT=file.png` saves a picture.
+    #[test]
+    fn a_dimension_ticked_is_asked() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.keeping = Some(Keep::new(json!({"name": "test", "anchors": ["p5"],
+            "sketch": {"points": {"p5": [0, 0], "p6": [-4, -8], "p7": [5, -11]},
+                       "lines": {"l5": {"from": "p5", "to": "p6"}, "l6": {"from": "p6", "to": "p7"}},
+                       "constraints": [{"type": "perpendicular", "lines": ["l5", "l6"]},
+                                       {"type": "length", "line": "l5", "value": 8.900914}, {"type": "length", "line": "l6", "value": 6.62265}]}})));
+        let shot = std::env::var_os("DATUM_KEEP_SHOT");
+        let builder = egui_kittest::Harness::builder().with_size([560.0, 360.0]);
+        let builder = if shot.is_some() { builder.wgpu() } else { builder };
+        let mut h = builder.build_ui(|ui| v.keep(ui.ctx()));
+        h.run();
+        h.get_by_label("length l5").click();
+        h.run();
+        h.get_all_by_value("d1").next().unwrap().click();
+        h.run();
+        h.get_all_by_value("d1").next().unwrap().type_text("x");
+        h.run();
+        if let Some(path) = shot {
+            h.render().unwrap().save(path).unwrap();
+        }
+        drop(h);
+        let e = &v.keeping.as_ref().unwrap().element;
+        assert_eq!(e["parameters"], json!([{"name": "d1x", "value": 8.900914}]), "{e}");
+        assert_eq!(e["sketch"]["constraints"][1]["value"], "d1x");
+        assert!(datum_model::library::check("sketch", e).is_ok());
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

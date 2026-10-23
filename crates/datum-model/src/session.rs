@@ -185,7 +185,8 @@ const COMMANDS: &[Command] = &[
                       their points) and points; the constraints and reference dimensions among them come along. `anchors`: \
                       its insertion points, one or two of its points (else the lowest, leftmost); with two, `fit` is `stretch` \
                       (along the axes, the default) or `align` (turned toward the second: a section of a chain). The model's \
-                      parameters its dimensions name become the element's, with their values now; `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
+                      parameters its dimensions name become the element's, with their values now, and so do the dimensions \
+                      `ask` names (as `dimensions` of the reply lists them: `length l5` → its parameter name); `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
                       with `description` to `path`, or else to `library/sketch` of the model's project (beside the program \
                       without one); an existing file is kept unless `replace`. The reply has the element and where it went.",
         params: || {
@@ -196,6 +197,7 @@ const COMMANDS: &[Command] = &[
                 "description": {"type": "string"},
                 "order": {"type": "array", "items": {"type": "string"}},
                 "anchors": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 2},
+                "ask": {"type": "object", "additionalProperties": {"type": "string"}},
                 "fit": {"type": "string", "enum": ["stretch", "align"]},
                 "path": {"type": "string"},
                 "replace": {"type": "boolean"}
@@ -218,6 +220,9 @@ const COMMANDS: &[Command] = &[
                 parameter_values(s.graph.parameters()).into_iter().filter_map(|(n, v)| v.ok().map(|v| (n, v))).collect();
             let mut element =
                 library::extract(&feature, &placed.solved.points, &curves, &points, element_name, Some(&params)).ok_or("nothing to keep")?;
+            for (label, n) in p.get("ask").and_then(Value::as_object).into_iter().flatten() {
+                library::parametrize(&mut element, label, n.as_str().ok_or("`ask`: parameter names")?)?;
+            }
             if let Some(d) = p.get("description").and_then(Value::as_str) {
                 element["description"] = json!(d);
             }
@@ -245,7 +250,8 @@ const COMMANDS: &[Command] = &[
             }
             let text = serde_json::to_string_pretty(&element).map_err(|e| e.to_string())?;
             std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(json!({"element": element, "saved": path.display().to_string()}))
+            let dimensions: Vec<Value> = library::dimensions(&element).into_iter().map(|d| json!({"dimension": d.label, "value": d.value})).collect();
+            Ok(json!({"element": element, "saved": path.display().to_string(), "dimensions": dimensions}))
         },
     },
     Command {

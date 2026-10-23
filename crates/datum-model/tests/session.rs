@@ -289,6 +289,9 @@ fn a_selection_kept_in_the_library_and_placed_again() {
     let c = e["sketch"]["constraints"].as_array().unwrap();
     assert!(!c.iter().any(|c| c.to_string().contains("origin")), "what ties to the origin stays behind: {e}");
     assert!(s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "Plate: w × h"})).unwrap_err().contains("exists"));
+    let ask = |dim: &str| json!({"name": "outline", "select": ["bottom", "left"], "element": "Corner", "ask": {dim: "x"}});
+    assert!(s.execute("to_library", &ask("length bottom")).unwrap_err().contains("is not a number"), "given by `w` already");
+    assert!(s.execute("to_library", &ask("vertical right")).unwrap_err().contains("no dimension"), "a constraint without a value");
     let refused = s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "x", "anchors": ["c"]})).unwrap_err();
     assert!(refused.contains("anchor `c` is not a point"), "an insertion point outside the piece: {refused}");
     let lib = run(&mut s, "library", json!({}));

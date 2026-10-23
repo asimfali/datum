@@ -205,7 +205,8 @@ pub fn answers(
     if at.len() < 2 || anchors(e).len() < 2 || e["fit"] == "align" {
         return Ok(out);
     }
-    let held: Vec<String> = open.into_iter().filter(|n| dimensions(e).any(|v| v.as_str().is_some_and(|t| t.trim() == n))).collect();
+    let dims = dimensions(e);
+    let held: Vec<String> = open.into_iter().filter(|n| dims.iter().any(|d| d.value.as_str().is_some_and(|t| t.trim() == n))).collect();
     if !held.is_empty() {
         let (_, solved) = solve_placed(e, &out, at, &held, lookup)?;
         for n in held {
@@ -215,11 +216,6 @@ pub fn answers(
         }
     }
     Ok(out)
-}
-
-/// The values of the element's dimensions, as given in it.
-fn dimensions(e: &Value) -> impl Iterator<Item = &Value> {
-    e["sketch"]["constraints"].as_array().into_iter().flatten().filter_map(|c| c.get("value").or_else(|| c.get("degrees")))
 }
 
 /// `value` (a dimension's: a number, or an expression of the element's parameters) with the
@@ -551,6 +547,119 @@ pub fn extract(
     Some(element)
 }
 
+/// A dimension of an element, as a list of them shows it: what it holds (`length l5`,
+/// `diameter hole`) and its value as given (a number, a parameter, an expression).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dimension {
+    pub label: String,
+    pub value: Value,
+}
+
+/// Where a dimension's value is in the element's JSON: a constraint's `value` or `degrees`, or a
+/// circle's `diameter`.
+fn dimension_slots(e: &mut Value) -> Vec<(String, &mut Value)> {
+    let mut out = Vec::new();
+    let sketch = &mut e["sketch"];
+    let Some(sketch) = sketch.as_object_mut() else { return out };
+    let (mut constraints, mut circles) = (None, None);
+    for (k, v) in sketch.iter_mut() {
+        match k.as_str() {
+            "constraints" => constraints = v.as_array_mut(),
+            "circles" => circles = v.as_object_mut(),
+            _ => {}
+        }
+    }
+    for c in constraints.into_iter().flatten() {
+        let kind = c["type"].as_str().unwrap_or_default().to_string();
+        let mut names = Vec::new();
+        crate::visit_names(&mut c.clone(), &mut |n| names.push(n.clone()));
+        let Some(o) = c.as_object_mut() else { continue };
+        if let Some((_, v)) = o.iter_mut().find(|(k, _)| *k == "value" || *k == "degrees") {
+            out.push((format!("{kind} {}", names.join(" ")), v));
+        }
+    }
+    for (n, c) in circles.into_iter().flatten() {
+        if let Some(v) = c.get_mut("diameter") {
+            out.push((format!("diameter {n}"), v));
+        }
+    }
+    out
+}
+
+/// The dimensions of element `e`, in the order of its constraints, then its circles.
+pub fn dimensions(e: &Value) -> Vec<Dimension> {
+    dimension_slots(&mut e.clone()).into_iter().map(|(label, v)| Dimension { label, value: v.clone() }).collect()
+}
+
+/// Dimension `label` of element `e` (a number) asked as new parameter `name` when the element is
+/// placed: its value now is the parameter's, the last asked.
+pub fn parametrize(e: &mut Value, label: &str, name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(format!("`{name}` is not a name: a letter or _, then letters, digits or _"));
+    }
+    if parameter_names(e)?.iter().any(|n| n == name) {
+        return Err(format!("the element has a parameter `{name}` already"));
+    }
+    let mut slots = dimension_slots(e);
+    let (_, slot) = slots.iter_mut().find(|(l, _)| l == label).ok_or_else(|| format!("no dimension `{label}`"))?;
+    let value = slot.as_f64().ok_or_else(|| format!("`{label}` is not a number"))?;
+    **slot = json!(name);
+    if !e["parameters"].is_array() {
+        e["parameters"] = json!([]);
+    }
+    if let Some(list) = e["parameters"].as_array_mut() {
+        list.push(json!({"name": name, "value": value}));
+    }
+    Ok(())
+}
+
+/// Parameter `from` of element `e` renamed `to`, in the dimensions that use it and in its place
+/// among the questions.
+pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), String> {
+    if !valid_name(to) {
+        return Err(format!("`{to}` is not a name: a letter or _, then letters, digits or _"));
+    }
+    if from == to {
+        return Ok(());
+    }
+    if parameter_names(e)?.iter().any(|n| n == to) {
+        return Err(format!("the element has a parameter `{to}` already"));
+    }
+    let p = e["parameters"].as_array_mut().and_then(|l| l.iter_mut().find(|p| p["name"] == from)).ok_or_else(|| format!("no parameter `{from}`"))?;
+    p["name"] = json!(to);
+    for (_, v) in dimension_slots(e) {
+        if let Some(t) = v.as_str() {
+            *v = json!(substitute(t, &|n: &str| (n == from).then(|| to.to_string())).map_err(|err| err.to_string())?.replace(&format!("({to})"), to));
+        }
+    }
+    Ok(())
+}
+
+/// Parameter `name` of element `e` taken back: the dimensions it alone gives get its value as a
+/// number. An error if another dimension uses it within an expression.
+pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
+    let list = e["parameters"].as_array().ok_or("the element has no parameters")?;
+    let value = list.iter().find(|p| p["name"] == name).map(|p| p["value"].clone()).ok_or_else(|| format!("no parameter `{name}`"))?;
+    let used =
+        |v: &Value| v.as_str().is_some_and(|t| t.trim() != name && substitute(t, &|n: &str| (n == name).then(String::new)).is_ok_and(|s| s != t));
+    if let Some((label, _)) = dimension_slots(e).into_iter().find(|(_, v)| used(v)) {
+        return Err(format!("`{label}` uses `{name}` in an expression"));
+    }
+    for (_, v) in dimension_slots(e) {
+        if v.as_str().is_some_and(|t| t.trim() == name) {
+            *v = value.clone();
+        }
+    }
+    let none_left = e["parameters"].as_array_mut().is_some_and(|list| {
+        list.retain(|p| p["name"] != name);
+        list.is_empty()
+    });
+    if none_left && let Some(o) = e.as_object_mut() {
+        o.remove("parameters");
+    }
+    Ok(())
+}
+
 /// Where new elements of `level` are saved unless put elsewhere: the library of the model's
 /// project, or else the one beside the program.
 pub fn folder(level: &str, model: Option<&Path>) -> Option<PathBuf> {
@@ -636,6 +745,30 @@ mod tests {
         assert!(c.contains(&json!({"type": "length", "line": "l3", "value": 40.0})), "{p}");
         let mut again = SketchPatch::new(&json!({"sketch": {"points": {"p1": [0, 0]}, "lines": {"l3": {"from": "p1", "to": "p1"}}}}));
         assert!(place(&mut again, &e, &v, &at, &names, false, &none).unwrap_err().contains("`l3` is taken"));
+    }
+
+    /// A dimension given as a number made a parameter and taken back.
+    #[test]
+    fn a_number_made_a_parameter_and_back() {
+        let mut e = json!({"name": "Bar", "anchors": ["a"],
+            "sketch": {"points": {"a": [0, 0], "b": [8.9, 0], "c": [5, 5]}, "lines": {"l5": {"from": "a", "to": "b"}},
+                       "circles": {"hole": {"center": "c", "diameter": 4}},
+                       "constraints": [{"type": "length", "line": "l5", "value": 8.9}]}});
+        let labels: Vec<String> = dimensions(&e).into_iter().map(|d| d.label).collect();
+        assert_eq!(labels, ["length l5", "diameter hole"]);
+        parametrize(&mut e, "length l5", "len").unwrap();
+        parametrize(&mut e, "diameter hole", "d").unwrap();
+        assert_eq!(e["parameters"], json!([{"name": "len", "value": 8.9}, {"name": "d", "value": 4.0}]));
+        assert_eq!(e["sketch"]["constraints"][0]["value"], "len");
+        assert!(check("sketch", &e).is_ok(), "{e}");
+        assert!(parametrize(&mut e, "length l5", "x").unwrap_err().contains("not a number"));
+        assert!(parametrize(&mut e, "diameter hole", "len").unwrap_err().contains("already"));
+        rename_parameter(&mut e, "len", "length").unwrap();
+        assert_eq!((&e["sketch"]["constraints"][0]["value"], &e["parameters"][0]["name"]), (&json!("length"), &json!("length")));
+        unparametrize(&mut e, "length").unwrap();
+        assert_eq!(e["sketch"]["constraints"][0]["value"], json!(8.9));
+        unparametrize(&mut e, "d").unwrap();
+        assert!(e.get("parameters").is_none(), "{e}");
     }
 
     /// A rectangle with its width and height as parameters, by two corners: what is typed holds,
