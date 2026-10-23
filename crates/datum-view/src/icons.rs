@@ -1,0 +1,81 @@
+//! Icons drawn in lines (D119): the window's font has few symbols, and what it lacks shows as a
+//! box on Windows (↶ ↷ ✎ ⇄). One tile for every icon button and the constraint glyphs.
+
+use egui::{Color32, Painter, Pos2, Response, Sense, Stroke, Ui, Vec2, vec2};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Icon {
+    Undo,
+    Redo,
+    /// A pencil: edit.
+    Edit,
+    /// Move up in a list.
+    Up,
+    /// Take away.
+    Remove,
+}
+
+/// A square button with `paint` drawing its face in the given colour: `name` for screen
+/// readers and tests, `hint` on hover, highlighted when `on`.
+pub fn tile(ui: &mut Ui, name: &str, hint: &str, on: bool, enabled: bool, paint: impl FnOnce(&Painter, Pos2, Color32)) -> Response {
+    let sense = if enabled { Sense::click() } else { Sense::hover() };
+    // As high as a button with text, so a row of both lines up.
+    let side = ui.spacing().interact_size.y.max(20.0);
+    let (rect, r) = ui.allocate_exact_size(vec2(side, side), sense);
+    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, enabled, on, name));
+    let visuals = ui.visuals();
+    let fill = if on {
+        visuals.selection.bg_fill
+    } else if enabled && r.hovered() {
+        visuals.widgets.hovered.weak_bg_fill
+    } else {
+        visuals.widgets.inactive.weak_bg_fill
+    };
+    ui.painter().rect_filled(rect, 3.0, fill);
+    let colour = if enabled { visuals.strong_text_color() } else { visuals.weak_text_color() };
+    paint(ui.painter(), rect.center(), colour);
+    r.on_hover_text(hint)
+}
+
+/// An icon button.
+pub fn button(ui: &mut Ui, icon: Icon, name: &str, hint: &str, enabled: bool) -> Response {
+    tile(ui, name, hint, false, enabled, |p, c, colour| paint(p, c, icon, colour))
+}
+
+/// Draws `icon` around `c`, about 12 pixels across.
+pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
+    let stroke = Stroke::new(1.6, colour);
+    let at = |x: f32, y: f32| c + vec2(x, y);
+    // A hook: an arc over the top from the right to the left, its point down at the left end;
+    // mirrored for redo.
+    let turn = |mirror: f32| {
+        let r = 5.0;
+        let pts: Vec<Pos2> = (0..=20)
+            .map(|k| {
+                let a = (-35.0 + 215.0 * k as f32 / 20.0).to_radians();
+                at(mirror * r * a.cos(), 1.5 - r * a.sin())
+            })
+            .collect();
+        let end = pts[pts.len() - 1];
+        painter.add(egui::Shape::line(pts, stroke));
+        painter.add(egui::Shape::line(vec![end + Vec2::new(-3.0, -3.0), end, end + Vec2::new(3.0, -3.0)], stroke));
+    };
+    match icon {
+        Icon::Undo => turn(1.0),
+        Icon::Redo => turn(-1.0),
+        Icon::Edit => {
+            // The pencil's body along the diagonal, its point at the lower left.
+            let body = [at(-4.0, 6.0), at(-5.5, 6.5), at(-5.0, 5.0), at(4.0, -4.0), at(6.0, -2.0), at(-4.0, 6.0)];
+            painter.add(egui::Shape::line(body.to_vec(), stroke));
+            painter.line_segment([at(2.5, -5.5), at(5.5, -2.5)], stroke);
+            painter.line_segment([at(-5.0, 5.0), at(-4.0, 6.0)], stroke);
+        }
+        Icon::Up => {
+            painter.add(egui::Shape::convex_polygon(vec![at(0.0, -5.0), at(5.5, 3.5), at(-5.5, 3.5)], colour, Stroke::NONE));
+        }
+        Icon::Remove => {
+            painter.line_segment([at(-5.0, -5.0), at(5.0, 5.0)], stroke);
+            painter.line_segment([at(-5.0, 5.0), at(5.0, -5.0)], stroke);
+        }
+    }
+}

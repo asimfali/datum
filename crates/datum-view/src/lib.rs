@@ -7,6 +7,7 @@ pub mod capture;
 mod constrain;
 mod dims;
 mod draw;
+mod icons;
 pub mod log;
 pub mod render;
 pub mod scene;

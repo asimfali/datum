@@ -388,7 +388,13 @@ impl Viewer {
                 paint_outline(ui.painter(), thumb, &item.outline, visuals.text_color());
                 let text = rect.min + egui::vec2(56.0, 8.0);
                 ui.painter().text(text, egui::Align2::LEFT_TOP, name, egui::FontId::proportional(14.0), visuals.strong_text_color());
-                let from = crate::templates::source(&item.entry);
+                // Two of a name: which file each is.
+                let twin = self.library.iter().filter(|o| o.entry.name() == name).count() > 1;
+                let file = item.entry.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().to_string()).filter(|_| twin);
+                let from = match file {
+                    Some(f) => format!("{} · {f}", crate::templates::source(&item.entry)),
+                    None => crate::templates::source(&item.entry).to_string(),
+                };
                 ui.painter().text(
                     text + egui::vec2(0.0, 20.0),
                     egui::Align2::LEFT_TOP,
@@ -455,7 +461,17 @@ impl Viewer {
                         {
                             k.picking = if k.picking == Some(i) { None } else { Some(i) };
                         }
-                        if i == 1 && anchors.len() > 1 && ui.button("✖").on_hover_text("No second point: the element is moved as it is").clicked() {
+                        if i == 1
+                            && anchors.len() > 1
+                            && crate::icons::button(
+                                ui,
+                                crate::icons::Icon::Remove,
+                                "No second point",
+                                "No second point: the element is moved as it is",
+                                true,
+                            )
+                            .clicked()
+                        {
                             k.anchor(1, None);
                         }
                     });
@@ -551,7 +567,7 @@ impl Viewer {
                 let mut up = None;
                 for (i, p) in list.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(i > 0, egui::Button::new("⏶")).clicked() {
+                        if crate::icons::button(ui, crate::icons::Icon::Up, "Up", "Ask it earlier", i > 0).clicked() {
                             up = Some(i);
                         }
                         ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
@@ -590,10 +606,18 @@ impl Viewer {
                 dialog = dialog.set_directory(f);
             }
             let written = datum_model::library::check("sketch", &element).and_then(|()| match dialog.save_file() {
-                Some(path) => serde_json::to_string_pretty(&element)
-                    .map_err(|e| e.to_string())
-                    .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
-                    .map(|()| true),
+                Some(path) => {
+                    // A file named otherwise in the dialog names the element: the palette shows
+                    // what the folder does.
+                    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    if !stem.is_empty() && datum_model::library::file_name(&name) != datum_model::library::file_name(&stem) {
+                        element["name"] = json!(stem);
+                    }
+                    serde_json::to_string_pretty(&element)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
+                        .map(|()| true)
+                }
                 None => Ok(false),
             });
             match written {
@@ -709,10 +733,11 @@ impl Viewer {
             ui.checkbox(&mut self.smooth, "Smooth edges")
                 .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
             ui.separator();
-            if ui.button("↶").on_hover_text("Undo (Ctrl+Z)").clicked() {
+            use crate::icons::{Icon, button};
+            if button(ui, Icon::Undo, "Undo", "Undo (Ctrl+Z)", true).clicked() {
                 self.send(Request::Command("undo", json!({})));
             }
-            if ui.button("↷").on_hover_text("Redo (Ctrl+Y)").clicked() {
+            if button(ui, Icon::Redo, "Redo", "Redo (Ctrl+Y)", true).clicked() {
                 self.send(Request::Command("redo", json!({})));
             }
             ui.separator();
@@ -807,19 +832,10 @@ impl Viewer {
                 ui.label("Constrain");
                 for (kind, glyph, name, what) in crate::constrain::KINDS {
                     let on = sk.draft.tool == Tool::Constrain(kind);
-                    let (rect, r) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
-                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, name));
-                    let visuals = ui.visuals();
-                    let fill = if on {
-                        visuals.selection.bg_fill
-                    } else if r.hovered() {
-                        visuals.widgets.hovered.weak_bg_fill
-                    } else {
-                        visuals.widgets.inactive.weak_bg_fill
-                    };
-                    ui.painter().rect_filled(rect, 3.0, fill);
-                    crate::sketch::paint_glyph(ui.painter(), rect.center(), glyph, visuals.strong_text_color());
-                    if r.on_hover_text(format!("{name}: {what}")).clicked() {
+                    let r = crate::icons::tile(ui, name, &format!("{name}: {what}"), on, true, |p, c, colour| {
+                        crate::sketch::paint_glyph(p, c, glyph, colour)
+                    });
+                    if r.clicked() {
                         sk.draft.cancel();
                         sk.draft.tool = Tool::Constrain(kind);
                     }
@@ -931,7 +947,7 @@ impl Viewer {
                             ui.label(format!("✔ {name}  ·  {op}"));
                             let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
                             let label = serde_json::to_value(side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-                            if ui.button(format!("⇄ {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
+                            if ui.button(format!("Side: {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
                                 edit = Some((name.to_string(), json!({"side": side.next()})));
                             }
                         });
@@ -939,7 +955,7 @@ impl Viewer {
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
                             ui.label(format!("✔ {name}  ·  {op}"));
-                            if ui.button("✎").on_hover_text("Edit the sketch").clicked() {
+                            if crate::icons::button(ui, crate::icons::Icon::Edit, "Edit the sketch", "Edit the sketch", true).clicked() {
                                 enter = Some(name.to_string());
                             }
                         });
@@ -1720,7 +1736,7 @@ mod tests {
         }
     }
 
-    /// ✎ on a sketch asks to edit it; the model that comes back opens it in the view.
+    /// The pencil on a sketch asks to edit it; the model that comes back opens it in the view.
     #[test]
     fn a_sketch_opens_for_editing() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
@@ -1729,7 +1745,7 @@ mod tests {
                 egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
             });
             h.run();
-            h.get_by_label("✎").click();
+            h.get_by_label("Edit the sketch").click();
             h.run();
         }
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(Some(n))) if n == "outline"));
@@ -1817,7 +1833,7 @@ mod tests {
     }
 
     /// The whole plate kept in the library: its dimensions name w, h, pitch and hole, which the
-    /// dialog lists to be put in order; ⏶ moves one up. `DATUM_KEEP_SHOT=file.png` saves a picture.
+    /// dialog lists to be put in order; Up moves one up. `DATUM_KEEP_SHOT=file.png` saves a picture.
     #[test]
     fn a_selection_kept_in_the_library() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
@@ -1845,7 +1861,7 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
-        h.get_all_by_label("⏶").nth(1).unwrap().click();
+        h.get_all_by_label("Up").nth(1).unwrap().click();
         h.run();
         // The second insertion point: Pick, then a click in the sketch.
         h.get_all_by_label("Pick").nth(1).unwrap().click();
@@ -2046,7 +2062,7 @@ mod tests {
             egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
         });
         h.run();
-        h.get_by_label("⇄ left").click();
+        h.get_by_label("Side: left").click();
         h.run();
         let sent = inbox.try_recv();
         assert!(matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "panel", "side": "right"})), "an edit of the side");

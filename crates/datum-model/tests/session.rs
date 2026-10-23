@@ -243,6 +243,10 @@ fn the_project_library_comes_first() {
     let own = json!({"name": "Rectangle", "description": "ours", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
     std::fs::write(root.join("library/sketch/rect.json"), own.to_string()).unwrap();
     std::fs::write(root.join("library/sketch/broken.json"), "{\"name\": \"x\"}").unwrap();
+    // Two of a name in one folder: both kept, not one over the other.
+    let twin = json!({"name": "New element", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+    std::fs::write(root.join("library/sketch/test.json"), twin.to_string()).unwrap();
+    std::fs::write(root.join("library/sketch/test2.json"), twin.to_string()).unwrap();
     let mut s = Session::default();
     let lib = run(&mut s, "library", json!({}));
     assert_eq!(lib["elements"][0]["source"], "built_in", "no project without a model file: {lib}");
@@ -250,6 +254,7 @@ fn the_project_library_comes_first() {
     let lib = run(&mut s, "library", json!({}));
     assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["description"]), (&json!("project"), &json!("ours")), "{lib}");
     assert!(lib["skipped"][0].as_str().unwrap().contains("broken.json"), "{lib}");
+    assert_eq!(lib["elements"].as_array().unwrap().iter().filter(|e| e["name"] == "New element").count(), 2, "{lib}");
     let model = root.join("part/plate.json");
     assert_eq!(datum_model::library::workspace(Some(&model)), Some(root.clone()), "the project holds part, assembly, drawing, library");
     assert_eq!(datum_model::library::folder("sketch", Some(&model)), Some(root.join("library/sketch")));

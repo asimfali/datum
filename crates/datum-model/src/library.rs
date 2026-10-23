@@ -50,6 +50,8 @@ pub enum Source {
 pub struct Entry {
     pub source: Source,
     pub element: Value,
+    /// The file it was read from; none for a built-in one.
+    pub file: Option<PathBuf>,
 }
 
 impl Entry {
@@ -78,17 +80,24 @@ pub fn project_root(model: &Path) -> Option<PathBuf> {
 }
 
 /// The elements of `level`: built in, then beside the program, then in the project of the
-/// model at `model`, each folder by file name. One of a name already listed takes its place.
+/// model at `model`, each folder by file name. One of a name already listed from a less specific
+/// place takes its place; two of a name in one folder are both listed.
 pub fn load(level: &str, model: Option<&Path>) -> Library {
     let mut lib = Library::default();
-    let put = |lib: &mut Library, source: Source, element: Value| match lib.entries.iter_mut().find(|e| e.element["name"] == element["name"]) {
-        Some(e) => *e = Entry { source, element },
-        None => lib.entries.push(Entry { source, element }),
+    // One of a name from a more specific place takes the place of the other; two of a name in
+    // one folder are both kept.
+    let put = |lib: &mut Library, entry: Entry| match lib
+        .entries
+        .iter_mut()
+        .find(|e| e.element["name"] == entry.element["name"] && e.source != entry.source)
+    {
+        Some(e) => *e = entry,
+        None => lib.entries.push(entry),
     };
     if level == "sketch" {
         for t in BUILT_IN_SKETCH {
             if let Ok(e) = serde_json::from_str(t) {
-                put(&mut lib, Source::BuiltIn, e);
+                put(&mut lib, Entry { source: Source::BuiltIn, element: e, file: None });
             }
         }
     }
@@ -109,7 +118,7 @@ pub fn load(level: &str, model: Option<&Path>) -> Library {
                 .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
                 .and_then(|e| check(level, &e).map(|()| e));
             match element {
-                Ok(e) => put(&mut lib, source, e),
+                Ok(e) => put(&mut lib, Entry { source, element: e, file: Some(f) }),
                 Err(why) => lib.skipped.push(format!("{}: {why}", f.display())),
             }
         }
