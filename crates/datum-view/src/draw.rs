@@ -644,9 +644,12 @@ impl Patch {
         Self { taken, params: Map::new() }
     }
 
-    /// The first `prefix1`, `prefix2`… not taken.
+    /// `prefix` numbered past every `prefix<k>` taken. A name freed by a removal is not given
+    /// again: what referred to the removed element downstream reports it lost rather than
+    /// latching onto the new one.
     pub(crate) fn fresh(&mut self, prefix: &str) -> String {
-        let n = (1..).map(|k| format!("{prefix}{k}")).find(|n| !self.taken.contains(n)).unwrap_or_default();
+        let last = self.taken.iter().filter_map(|n| n.strip_prefix(prefix)?.parse::<u64>().ok()).max().unwrap_or(0);
+        let n = format!("{prefix}{}", last + 1);
         self.taken.push(n.clone());
         n
     }
@@ -783,6 +786,18 @@ mod tests {
         let p = click_at(&mut e, [0.1, 0.1], false).unwrap();
         assert_eq!(p["lines"]["l3"], json!({"from": "p4", "to": "p1"}), "{p}");
         assert!(e.draft.chain.is_none());
+    }
+
+    /// New names go past the highest taken, never into a gap a removal left: what referred to
+    /// the removed line `l2` downstream must not latch onto a new one.
+    #[test]
+    fn freed_names_are_not_given_again() {
+        let e = editor(
+            json!({"points": {"p1": [0, 0], "p3": [5, 5], "q7": [1, 1]}, "lines": {"l1": {"from": "p1", "to": "p3"}, "l3": {"from": "p3", "to": "p1"}}}),
+            false,
+        );
+        let mut patch = Patch::new(&e);
+        assert_eq!([patch.fresh("p"), patch.fresh("p"), patch.fresh("l"), patch.fresh("a")], ["p4", "p5", "l4", "a1"]);
     }
 
     /// What is half drawn shows: `DATUM_DRAFT_SHOT=file.png` saves a picture.

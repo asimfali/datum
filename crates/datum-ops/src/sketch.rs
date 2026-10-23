@@ -450,24 +450,29 @@ pub fn extrude_sketch(feature: TopoId, s: &Placed, z0: f64, z1: f64) -> Result<B
 }
 
 /// The regions the closed profiles of `s` bound, in its plane: a loop inside another is a hole,
-/// one inside a hole an island. Each region's caps are named by its lowest point.
+/// one inside a hole an island. Caps are named by the feature, and each of several regions' also
+/// by the point its outer loop starts at.
 pub fn profile_regions(feature: TopoId, s: &Placed) -> Result<Vec<Region>, BrepError> {
     let mut loops = profile_loops(feature, s)?;
-    // Each loop with the name its caps would be named by: its lowest point.
+    // Each loop with the name its caps would be named by: the point it starts at.
     let inside = |a: &Found, b: &Found| a.ring.winding(b.ring.points[0]) != 0;
     let n = loops.len();
     let depth: Vec<usize> = (0..n).map(|b| (0..n).filter(|&a| a != b && inside(&loops[a], &loops[b])).count()).collect();
     let parent = |b: usize| (0..n).find(|&a| a != b && inside(&loops[a], &loops[b]) && depth[a] + 1 == depth[b]);
     let parents: Vec<Option<usize>> = (0..n).map(parent).collect();
+    let outer: Vec<usize> = (0..n).filter(|&i| depth[i].is_multiple_of(2)).collect();
+    // The caps of a single region are the feature's own: a section of its outline replaced,
+    // the first point among those removed, keeps them.
+    let single = outer.len() == 1;
     let mut regions = Vec::new();
-    for i in (0..n).filter(|&i| depth[i].is_multiple_of(2)) {
+    for i in outer {
         let holes = (0..n).filter(|&j| !depth[j].is_multiple_of(2) && parents[j] == Some(i)).map(|j| loops[j].ring.clone()).collect();
         let first = std::mem::take(&mut loops[i].name);
-        regions.push(Region {
-            outer: loops[i].ring.clone(),
-            holes,
-            caps: ["extrude.cap_start", "extrude.cap_end"].map(|t| TopoId::derive(t).id(feature).tag(&first).finish()),
-        });
+        let cap = |t: &str| {
+            let h = TopoId::derive(t).id(feature);
+            if single { h.finish() } else { h.tag(&first).finish() }
+        };
+        regions.push(Region { outer: loops[i].ring.clone(), holes, caps: ["extrude.cap_start", "extrude.cap_end"].map(cap) });
     }
     Ok(regions)
 }

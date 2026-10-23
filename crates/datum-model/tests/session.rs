@@ -144,3 +144,55 @@ fn export_dxf() {
     assert_eq!(dxf.matches("\nCIRCLE\n").count(), 100);
     assert!(s.execute("export_dxf", &json!({"name": "sheet", "path": path.display().to_string()})).unwrap_err().contains("not an unfold"));
 }
+
+/// The middle of an outline replaced by another section (a library element in place of a piece
+/// of the chain): what stands on the faces of the sections kept, and on the caps, stays; what
+/// stood on a removed section's face is reported lost, not moved onto a new one.
+#[test]
+fn a_replaced_section_loses_only_its_own_faces() {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "add",
+        json!({"name": "profile", "op": "sketch", "sketch": {
+            "points": {"p1": [0, 0], "p2": [20, 60], "p3": [60, 80], "p4": [120, 50], "p5": [130, 0]},
+            "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}, "l3": {"from": "p3", "to": "p4"},
+                      "l4": {"from": "p4", "to": "p5"}, "base": {"from": "p5", "to": "p1"}},
+            "constraints": [{"type": "fix", "point": "p1"}, {"type": "length", "line": "l1", "value": 60}]
+        }}),
+    );
+    run(&mut s, "add", json!({"name": "body", "op": "extrude", "inputs": ["profile"], "z0": 0, "z1": 10}));
+    let face = |s: &mut Session, normal: [f64; 3]| {
+        let r = run(s, "query_faces", json!({"name": "body", "normal": normal}));
+        assert_eq!(r["count"].as_u64(), Some(1), "{r}");
+        r["faces"][0]["id"].clone()
+    };
+    for (name, normal) in [("on_l1", [-3.0, 1.0, 0.0]), ("on_l3", [1.0, 2.0, 0.0]), ("on_top", [0.0, 0.0, 1.0])] {
+        let id = face(&mut s, normal);
+        run(&mut s, "add", json!({"name": name, "op": "sketch", "inputs": ["body"], "face": id, "sketch": {"points": {"q": [0, 0]}}}));
+    }
+    let r = run(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "profile",
+        "points": {"p3": null, "p6": [50, 20], "p7": [80, 70]},
+        "lines": {"l5": {"from": "p2", "to": "p6"}, "l6": {"from": "p6", "to": "p7"}, "l7": {"from": "p7", "to": "p4"}}}),
+    );
+    let failed = |r: &Value| -> Vec<String> {
+        assert!(r["failed"].as_array().unwrap().iter().all(|f| f["error"].as_str().unwrap().contains("lost reference")), "{r}");
+        r["failed"].as_array().unwrap().iter().map(|f| f["feature"].as_str().unwrap().to_string()).collect()
+    };
+    assert_eq!(failed(&r), ["on_l3"]);
+    let kept = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"];
+    assert!(kept["constraints"].as_array().unwrap().contains(&json!({"type": "length", "line": "l1", "value": 60.0})), "{kept}");
+    // The corner the outline starts at replaced too: the caps are the feature's, not that point's.
+    let r = run(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "profile",
+        "points": {"p1": null, "p8": [0, 10], "p9": [10, 0]},
+        "lines": {"l8": {"from": "p9", "to": "p8"}, "l9": {"from": "p8", "to": "p2"}, "l10": {"from": "p5", "to": "p9"}},
+        "add_constraints": [{"type": "fix", "point": "p9"}]}),
+    );
+    assert_eq!(failed(&r), ["on_l1", "on_l3"]);
+}
