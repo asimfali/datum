@@ -337,6 +337,14 @@ impl Viewer {
         }
     }
 
+    /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
+    fn open_by_dialog(&mut self, ui: &egui::Ui) {
+        if let Some(p) = self.parts().pick_file() {
+            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+            self.open(p);
+        }
+    }
+
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
     fn save(&mut self, ui: &egui::Ui, ask: bool) {
         let path = match (&self.path, ask) {
@@ -675,11 +683,8 @@ impl Viewer {
     /// The toolbar: open a model by dialog; a `.json` dropped on the window opens too.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open…").clicked()
-                && let Some(p) = self.parts().pick_file()
-            {
-                ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-                self.open(p);
+            if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
+                self.open_by_dialog(ui);
             }
             if ui.button("New").on_hover_text("An empty model").clicked() {
                 self.leave();
@@ -1544,6 +1549,9 @@ impl eframe::App for Viewer {
             let (undo, redo) = ui.input_mut(|i| (i.consume_shortcut(&shortcut(egui::Key::Z)), i.consume_shortcut(&shortcut(egui::Key::Y))));
             if undo {
                 self.send(Request::Command("undo", json!({})));
+            }
+            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::O))) {
+                self.open_by_dialog(ui);
             }
             if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::S))) {
                 self.save(ui, false);
