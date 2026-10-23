@@ -257,7 +257,9 @@ struct Viewer {
     sketch: Option<SketchEdit>,
     entering: Option<String>,
     /// The sketch elements of the library (built in, beside the program, the project's).
-    library: Vec<datum_model::library::Entry>,
+    library: Vec<crate::templates::Item>,
+    /// What the library palette is filtered by.
+    library_filter: String,
     /// The selection being kept in the library.
     keeping: Option<Keep>,
     /// Picking a face to sketch on, and the body and face under the cursor.
@@ -302,6 +304,7 @@ impl Viewer {
             sketch: None,
             entering: None,
             library: crate::templates::library(None),
+            library_filter: String::new(),
             keeping: None,
             picking: false,
             face: None,
@@ -344,6 +347,68 @@ impl Viewer {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
             self.send(Request::Command("save", json!({"path": p.display().to_string()})));
             self.set_path(Some(p));
+        }
+    }
+
+    /// The library palette (D117): every sketch element with its outline, name and where it comes
+    /// from; a double click places one (asking its parameters, then its sockets), a drag onto
+    /// the sketch puts its first anchor where it is let go.
+    fn palette(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Library");
+        ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text("Search"));
+        ui.weak("Double-click to place · drag onto the sketch");
+        let current =
+            self.sketch.as_ref().filter(|s| s.draft.tool == Tool::Template).and_then(|s| s.draft.template.as_ref()).map(|t| t["name"].clone());
+        let filter = self.library_filter.trim().to_lowercase();
+        let mut chosen = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for item in &self.library {
+                let e = &item.entry.element;
+                let (name, description) = (item.entry.name(), e["description"].as_str().unwrap_or_default());
+                if !filter.is_empty() && !name.to_lowercase().contains(&filter) && !description.to_lowercase().contains(&filter) {
+                    continue;
+                }
+                let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::click_and_drag());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+                let visuals = ui.visuals();
+                if current.as_ref() == Some(&e["name"]) {
+                    ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill);
+                } else if r.hovered() {
+                    ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+                }
+                let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(44.0, 44.0));
+                paint_outline(ui.painter(), thumb, &item.outline, visuals.text_color());
+                let text = rect.min + egui::vec2(56.0, 8.0);
+                ui.painter().text(text, egui::Align2::LEFT_TOP, name, egui::FontId::proportional(14.0), visuals.strong_text_color());
+                let from = crate::templates::source(&item.entry);
+                ui.painter().text(
+                    text + egui::vec2(0.0, 20.0),
+                    egui::Align2::LEFT_TOP,
+                    from,
+                    egui::FontId::proportional(11.0),
+                    visuals.weak_text_color(),
+                );
+                let r = if description.is_empty() { r } else { r.on_hover_text(description) };
+                if r.double_clicked() {
+                    chosen = Some(e.clone());
+                }
+                if r.drag_started() {
+                    egui::DragAndDrop::set_payload(ui.ctx(), e.clone());
+                }
+            }
+        });
+        // While dragged, the element's name follows the pointer.
+        if let (Some(t), Some(pos)) = (egui::DragAndDrop::payload::<Json>(ui.ctx()), ui.input(|i| i.pointer.latest_pos())) {
+            egui::Area::new(egui::Id::new("datum_library_drag")).fixed_pos(pos + egui::vec2(12.0, 12.0)).order(egui::Order::Tooltip).show(
+                ui.ctx(),
+                |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(t["name"].as_str().unwrap_or_default()));
+                },
+            );
+        }
+        if let (Some(t), Some(sk)) = (chosen, &mut self.sketch) {
+            sk.draft.choose(t);
+            sk.field = None;
         }
     }
 
@@ -732,17 +797,9 @@ impl Viewer {
                     }
                 }
             });
-            // The library: pieces of sketch, placed by a click per anchor.
+            // The library is the palette on the right; a selection goes into it from here.
             ui.horizontal_wrapped(|ui| {
-                for t in &self.library {
-                    let on = sk.draft.tool == Tool::Template && sk.draft.template.as_ref().is_some_and(|c| c["name"] == t.element["name"]);
-                    let hint = format!("{} ({}; R: the first)", t.element["description"].as_str().unwrap_or(""), crate::templates::source(t));
-                    if ui.selectable_label(on, t.name()).on_hover_text(hint).clicked() {
-                        sk.draft.choose(t.element.clone());
-                        sk.field = None;
-                    }
-                }
-                let hint = "The selection as a library element: dimensions given by model parameters become its parameters";
+                let hint = "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside";
                 if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
                     self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
                 }
@@ -1049,6 +1106,18 @@ impl Viewer {
         let h = f64::from(rect.height());
         let mut sent = Vec::new();
         let mut leave = false;
+        // An element dragged from the palette and let go here: its first anchor goes there, as a
+        // click would put it (the pointer belongs to the palette while it is dragged).
+        if let (Some(t), Some(pos)) = (r.dnd_release_payload::<Json>(), ui.input(|i| i.pointer.latest_pos())) {
+            sk.draft.choose((*t).clone());
+            sk.field = None;
+            let mut draft = std::mem::take(&mut sk.draft);
+            draft.track(sk, f64::from(pos.x - rect.center().x), f64::from(pos.y - rect.center().y), h, false);
+            if let Some(patch) = draft.click(sk) {
+                sent.push(Request::Command("edit_sketch", sk.apply(patch)));
+            }
+            sk.draft = draft;
+        }
         let typing = ui.ctx().egui_wants_keyboard_input();
         if !typing {
             let tool = ui.input(|i| {
@@ -1070,7 +1139,7 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none())
                 && let Some(t) = self.library.first()
             {
-                sk.draft.choose(t.element.clone());
+                sk.draft.choose(t.entry.element.clone());
                 sk.field = None;
             }
             // Copy: the selection as an element, on the clipboard as JSON. Paste: an element
@@ -1429,6 +1498,23 @@ fn smooth(average: f64, sample: f64) -> f64 {
     if average == 0.0 { sample } else { average * 0.9 + sample * 0.1 }
 }
 
+/// An element's outline fitted into `rect`, the sketch's Y up.
+fn paint_outline(painter: &egui::Painter, rect: egui::Rect, outline: &[Vec<[f64; 2]>], color: egui::Color32) {
+    let points = || outline.iter().flatten();
+    let (Some(x0), Some(x1)) = (points().map(|q| q[0]).min_by(f64::total_cmp), points().map(|q| q[0]).max_by(f64::total_cmp)) else { return };
+    let (Some(y0), Some(y1)) = (points().map(|q| q[1]).min_by(f64::total_cmp), points().map(|q| q[1]).max_by(f64::total_cmp)) else { return };
+    let span = (x1 - x0).max(y1 - y0);
+    if span <= 0.0 {
+        return;
+    }
+    let k = f64::from(rect.width().min(rect.height())) / span;
+    let c = rect.center();
+    let at = |q: &[f64; 2]| egui::pos2(c.x + ((q[0] - 0.5 * (x0 + x1)) * k) as f32, c.y - ((q[1] - 0.5 * (y0 + y1)) * k) as f32);
+    for line in outline {
+        painter.add(egui::Shape::line(line.iter().map(at).collect(), egui::Stroke::new(1.2, color)));
+    }
+}
+
 /// `dialog` opened in the folder of the model's file, if it has one: what is made from a part
 /// goes beside it.
 fn beside(model: Option<&std::path::Path>, dialog: rfd::FileDialog) -> rfd::FileDialog {
@@ -1470,6 +1556,9 @@ impl eframe::App for Viewer {
         }
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
+        if self.sketch.is_some() {
+            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
+        }
         self.keep(ui.ctx());
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
@@ -1531,6 +1620,7 @@ mod tests {
             sketch: None,
             entering: None,
             library: crate::templates::library(None),
+            library_filter: String::new(),
             keeping: None,
             picking: false,
             face: None,
@@ -1735,6 +1825,62 @@ mod tests {
         assert_eq!(e["parameters"], json!([{"name": "d1x", "value": 8.900914}]), "{e}");
         assert_eq!(e["sketch"]["constraints"][1]["value"], "d1x");
         assert!(datum_model::library::check("sketch", e).is_ok());
+    }
+
+    /// The library palette: a double click on an element starts placing it, a drag onto the
+    /// sketch puts it where it is let go. `DATUM_PALETTE_SHOT=file.png` saves a picture.
+    #[test]
+    fn the_palette_places_by_double_click_and_drag() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let shot = std::env::var_os("DATUM_PALETTE_SHOT");
+        let ui = |v: &mut Viewer, ui: &mut egui::Ui| {
+            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| v.palette(ui));
+            egui::CentralPanel::default().show(ui, |ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+        };
+        {
+            // Frames of 1/60 s, as on a screen: kittest's own quarter second is longer than a
+            // double click.
+            let builder = egui_kittest::Harness::builder().with_size([800.0, 400.0]).with_step_dt(1.0 / 60.0);
+            let builder = if shot.is_some() { builder.wgpu() } else { builder };
+            let mut h = builder.build_ui(|u| ui(&mut v, u));
+            h.run();
+            if let Some(path) = &shot {
+                h.render().unwrap().save(path).unwrap();
+            }
+            // A double click: two clicks within egui's double-click time.
+            let item = h.get_by_label("Center rectangle");
+            item.click();
+            item.click();
+            h.run();
+        }
+        assert_eq!(v.sketch.as_ref().unwrap().draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Center rectangle")));
+        {
+            let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui(|u| ui(&mut v, u));
+            h.run();
+            let from = h.get_by_label("Rectangle").rect().center();
+            h.drag_at(from);
+            h.run();
+            h.hover_at(egui::pos2(300.0, 200.0));
+            h.run();
+            h.drop_at(egui::pos2(300.0, 200.0));
+            h.run();
+        }
+        let sk = v.sketch.as_ref().unwrap();
+        assert_eq!(sk.draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Rectangle")), "the dragged one is being placed");
+        assert_eq!(sk.draft.clicks.len(), 1, "its first corner where it was let go");
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "two corners: nothing placed yet");
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

@@ -13,14 +13,21 @@ use serde_json::{Map, Value as Json};
 use crate::draw::{Draft, Patch, Snap, Spot};
 use crate::sketch::{Pick, SketchEdit};
 
+/// An element of the library as the palette shows it: with its outline, drawn once.
+pub struct Item {
+    pub entry: Entry,
+    pub outline: Vec<Vec<[f64; 2]>>,
+}
+
 /// The sketch elements for the model at `model`: built in, beside the program, in its project.
 /// Files that are not elements go to the log.
-pub fn library(model: Option<&std::path::Path>) -> Vec<Entry> {
+pub fn library(model: Option<&std::path::Path>) -> Vec<Item> {
     let lib = library::load("sketch", model);
     for why in &lib.skipped {
         crate::log::write(&format!("{why}: not a sketch element"));
     }
-    lib.entries
+    let none = BTreeMap::new();
+    lib.entries.into_iter().map(|entry| Item { outline: outline(&entry.element, None, &Map::new(), &[[0.0, 0.0]], &none), entry }).collect()
 }
 
 /// Where an element in the list comes from, as the list shows it.
@@ -184,7 +191,7 @@ mod tests {
         e.camera.center = [0.0, 0.0];
         e.camera.half_height = 20.0;
         e.draft.tool = Tool::Template;
-        e.draft.template = Some(library(None)[1].element.clone());
+        e.draft.template = Some(library(None)[1].entry.element.clone());
         e.draft.clicks = vec![Spot { at: [0.0, 0.0], snap: Snap::Point("origin".into()) }];
         e.draft.cursor = Some(free([12.0, 7.0]));
         let shot = std::env::var_os("DATUM_TEMPLATE_SHOT");
@@ -201,19 +208,20 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
-        assert_eq!(outline(&library(None)[1].element, None, &Map::new(), &[[0.0, 0.0], [12.0, 7.0]], &BTreeMap::new()).len(), 6);
+        assert_eq!(outline(&library(None)[1].entry.element, None, &Map::new(), &[[0.0, 0.0], [12.0, 7.0]], &BTreeMap::new()).len(), 6);
     }
 
     #[test]
     fn the_library_loads() {
-        let names: Vec<String> = library(None).iter().map(|t| format!("{} ({})", t.name(), source(t))).collect();
+        let names: Vec<String> = library(None).iter().map(|t| format!("{} ({})", t.entry.name(), source(&t.entry))).collect();
+        assert!(library(None).iter().all(|t| t.outline.len() == 4 || t.outline.len() == 6), "outlines drawn for the palette");
         assert_eq!(names, ["Rectangle (built in)", "Center rectangle (built in)"]);
     }
 
     #[test]
     fn a_rectangle_by_two_corners() {
         let mut e = editor(json!({"points": {}}));
-        let p = place_by(&mut e, library(None)[0].element.clone(), &[free([2.0, 3.0]), free([12.0, 8.0])]);
+        let p = place_by(&mut e, library(None)[0].entry.element.clone(), &[free([2.0, 3.0]), free([12.0, 8.0])]);
         assert_eq!(p["points"], json!({"p1": [2.0, 3.0], "p2": [12.0, 3.0], "p3": [12.0, 8.0], "p4": [2.0, 8.0]}), "{p}");
         assert_eq!(p["lines"].as_object().unwrap().len(), 4);
         assert_eq!(p["add_constraints"][0], json!({"type": "horizontal", "line": "l1"}));
@@ -225,7 +233,11 @@ mod tests {
     #[test]
     fn a_rectangle_from_its_centre_on_the_origin() {
         let mut e = editor(json!({"points": {}}));
-        let p = place_by(&mut e, library(None)[1].element.clone(), &[Spot { at: [0.0, 0.0], snap: Snap::Point("origin".into()) }, free([5.0, 3.0])]);
+        let p = place_by(
+            &mut e,
+            library(None)[1].entry.element.clone(),
+            &[Spot { at: [0.0, 0.0], snap: Snap::Point("origin".into()) }, free([5.0, 3.0])],
+        );
         assert!(p["points"].get("origin").is_none(), "the origin is not made again: {p}");
         assert!(
             p["add_constraints"].as_array().unwrap().iter().any(|c| c["type"] == "coincident" && c["points"][1] == "origin"),
@@ -242,7 +254,7 @@ mod tests {
     #[test]
     fn copy_and_paste() {
         let mut e = editor(json!({"points": {}}));
-        place_by(&mut e, library(None)[0].element.clone(), &[free([0.5, 0.5]), free([10.5, 4.5])]);
+        place_by(&mut e, library(None)[0].entry.element.clone(), &[free([0.5, 0.5]), free([10.5, 4.5])]);
         e.apply(serde_json::from_value(json!({"add_constraints": [{"type": "length", "line": "l1", "value": 10}]})).unwrap());
         e.selected = ["l1", "l2", "l3", "l4"].iter().map(|n| Pick::Curve(n.to_string())).collect();
         let t = e.copy().unwrap();
