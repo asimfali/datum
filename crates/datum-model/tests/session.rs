@@ -344,3 +344,26 @@ fn a_constraint_reaching_out_is_a_socket() {
         s.execute("insert_element", &json!({"name": "path", "element": step, "at": [[60, 0]], "links": {"perpendicular ? l5": "p4"}})).unwrap_err();
     assert!(refused.contains("takes a line"), "{refused}");
 }
+
+/// A line and its dimension picked together and deleted: the dimension is removed by name, and
+/// the line's removal does not look for it again (a frame picks both).
+#[test]
+fn a_line_deleted_with_its_dimension() {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "add",
+        json!({"name": "s", "op": "sketch", "sketch": {
+            "points": {"p9": [0, 0], "p10": [5, 0]}, "lines": {"l8": {"from": "p9", "to": "p10"}},
+            "constraints": [{"type": "horizontal", "line": "l8"}, {"type": "length", "line": "l8", "value": 5.0}]
+        }}),
+    );
+    let r =
+        run(&mut s, "edit_sketch", json!({"name": "s", "lines": {"l8": null}, "remove_constraints": [{"type": "length", "line": "l8", "value": 5}]}));
+    assert_eq!(r["also_removed"], json!(["constraints: 1"]), "the horizontal went with the line: {r}");
+    assert!(
+        s.execute("edit_sketch", &json!({"name": "s", "remove_constraints": [{"type": "length", "line": "l8", "value": 5}]}))
+            .unwrap_err()
+            .contains("no constraint")
+    );
+}

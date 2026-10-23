@@ -934,6 +934,16 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
     merge(op, "project", p.get("project"))?;
     let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
+    // Constraints removed by name first: those of an element removed with them go with it below,
+    // and are not looked for again.
+    // Constraints compare as parsed: field order and number spelling do not matter.
+    let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
+    let constraints = sketch.entry("constraints").or_insert_with(|| json!([])).as_array_mut().ok_or("`constraints` is not a list")?;
+    for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
+        let gone = parse(gone)?;
+        let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
+        constraints.remove(k);
+    }
     for key in ["points", "lines", "arcs", "circles", "measures"] {
         merge(sketch, key, p.get(key))?;
     }
@@ -964,13 +974,6 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     }
     let constraints = sketch.entry("constraints").or_insert_with(|| json!([]));
     let constraints = constraints.as_array_mut().ok_or("`constraints` is not a list")?;
-    // Constraints compare as parsed: field order and number spelling do not matter.
-    let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
-    for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
-        let gone = parse(gone)?;
-        let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
-        constraints.remove(k);
-    }
     for added in p.get("add_constraints").and_then(Value::as_array).into_iter().flatten() {
         parse(added)?;
         constraints.push(added.clone());
