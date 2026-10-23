@@ -3,7 +3,7 @@
 //! through the commands an agent uses (`edit_sketch`). What the window shows is what it writes:
 //! when a drag ends, every point the solver moved is written where it stands.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 
 use datum_brep::TopoId;
@@ -49,8 +49,8 @@ pub struct SketchEdit {
     pub camera: SketchCamera,
     pub hover: Option<Pick>,
     pub selected: Vec<Pick>,
-    /// The point being dragged.
-    pub drag: Option<String>,
+    /// What is being dragged.
+    pub drag: Option<Drag>,
     /// The selection frame being dragged.
     pub frame: Option<SelectFrame>,
     /// Show element names.
@@ -63,6 +63,15 @@ pub struct SketchEdit {
     /// dimension that would over-constrain the sketch.
     pub field: Option<crate::dims::Field>,
     pub conflict: Option<crate::dims::Conflict>,
+}
+
+/// What a drag moves: the sketch's own points, each from where it stood, by the cursor's way
+/// from where it was grabbed. One point is grabbed where it stands: it goes under the cursor.
+pub struct Drag {
+    points: Vec<(String, [f64; 2])>,
+    grab: [f64; 2],
+    /// The own points as drawn before the drag: what it changes is written when it ends.
+    drawn: BTreeMap<String, [f64; 2]>,
 }
 
 /// A selection frame: where it began and where the cursor is, pixels from the middle of the
@@ -307,7 +316,7 @@ impl SketchEdit {
 
     /// Solves and places the sketch as the model would.
     pub fn solve(&mut self) {
-        self.set(self.placed_with(None));
+        self.set(self.placed_with(&[]));
     }
 
     /// Takes a solution, and the regions its profiles bound: the model's own (the regions an
@@ -333,12 +342,14 @@ impl SketchEdit {
         Json::Object(patch)
     }
 
-    /// The sketch solved and placed, with point `pin.0` held at `pin.1` if given (a drag).
-    fn placed_with(&self, pin: Option<(&str, [f64; 2])>) -> Result<Placed, String> {
+    /// The sketch solved and placed, with points `pins` held where given (a drag).
+    fn placed_with(&self, pins: &[(String, [f64; 2])]) -> Result<Placed, String> {
         let lookup = |n: &str| self.params.get(n).copied().ok_or_else(|| datum_math::expr::ExprError::Unknown(n.to_string()));
         let mut op = self.op()?;
-        if let (Some((n, at)), Op::Sketch { sketch, .. }) = (pin, &mut op) {
-            sketch.constraints.push(datum_sketch::Constraint::Fix { point: n.into(), at: Some(datum_math::Vec2::new(at[0], at[1])) });
+        if let Op::Sketch { sketch, .. } = &mut op {
+            for (n, at) in pins {
+                sketch.constraints.push(datum_sketch::Constraint::Fix { point: n.clone(), at: Some(datum_math::Vec2::new(at[0], at[1])) });
+            }
         }
         let op = op.resolve(&lookup)?;
         let inputs: Vec<&Value> = self.context.input.iter().map(|v| v.as_ref()).collect();
@@ -365,44 +376,86 @@ impl SketchEdit {
         self.projections().into_iter().find(|p| name == p || name.strip_prefix(p.as_str()).is_some_and(|r| r.starts_with('.')))
     }
 
-    /// Starts dragging the point under the cursor, if it is the sketch's own and can move.
-    pub fn start_drag(&mut self) -> bool {
-        let free = |n: &String| self.placed.as_ref().is_ok_and(|p| p.solved.free.contains_key(n));
-        match &self.hover {
-            Some(Pick::Point(n)) if self.drawn().contains_key(n) && free(n) => {
-                self.drag = Some(n.clone());
-                true
-            }
-            _ => false,
+    /// The sketch's own points of `picks`: the points, and the ends and centres of curves.
+    fn points_of(&self, picks: &[Pick]) -> BTreeSet<String> {
+        let sketch = &self.json["sketch"];
+        let drawn = self.drawn();
+        let mut out = BTreeSet::new();
+        for p in picks {
+            let names: Vec<&Json> = match p {
+                Pick::Point(n) => {
+                    out.insert(n.clone());
+                    Vec::new()
+                }
+                Pick::Curve(n) => ["lines", "arcs", "circles"]
+                    .iter()
+                    .filter_map(|k| sketch[*k].get(n))
+                    .flat_map(|c| ["from", "to", "center"].map(|e| &c[e]))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            out.extend(names.into_iter().filter_map(|n| n.as_str().map(String::from)));
         }
+        out.retain(|n| drawn.contains_key(n));
+        out
     }
 
-    /// Moves the dragged point toward sketch point `p`, as the cursor: the point stays under it
-    /// if the constraints let it; if not, it goes as far along the direction it is free in
-    /// (D89); failing that, the solver places it as drawn there. The others follow.
-    pub fn drag_to(&mut self, p: [f64; 2]) {
-        let Some(n) = self.drag.clone() else { return };
-        self.json["sketch"]["points"][&n] = json!(p);
-        // The direction it is free in, from the sketch solved without a pin: with one, the
-        // point would have none, and frames would alternate between two placements.
-        let plain = self.placed_with(None);
-        let along = plain.as_ref().ok().and_then(|pl| Some((pl.solved.points.get(&n).copied()?, pl.solved.free.get(&n).copied()?)));
-        let mut tries = vec![p];
-        if let Some((at, Some(d))) = along {
-            let t = (p[0] - at.x) * d.x + (p[1] - at.y) * d.y;
-            tries.push([at.x + d.x * t, at.y + d.y * t]);
+    /// Starts a drag from sketch point `at`, as in Inventor: of the selection, if what is under
+    /// the cursor is in it (all its points go together); else of the point or curve under the
+    /// cursor. Not if nothing of it can move.
+    pub fn start_drag(&mut self, at: [f64; 2]) -> bool {
+        let Some(hover) = self.hover.clone() else { return false };
+        let Ok(placed) = &self.placed else { return false };
+        let names = if self.selected.len() > 1 && self.selected.contains(&hover) {
+            self.points_of(&self.selected)
+        } else {
+            self.points_of(std::slice::from_ref(&hover))
+        };
+        if !names.iter().any(|n| placed.solved.free.contains_key(n)) {
+            return false;
         }
-        let placed = tries.into_iter().map(|q| self.placed_with(Some((&n, q)))).find(Result::is_ok).unwrap_or(plain);
+        let points: Vec<(String, [f64; 2])> =
+            names.into_iter().filter_map(|n| placed.solved.points.get(&n).map(|q| [q.x, q.y]).map(|q| (n, q))).collect();
+        let grab = match (&hover, &points[..]) {
+            (Pick::Point(_), [(_, q)]) => *q,
+            _ => at,
+        };
+        self.drag = Some(Drag { points, grab, drawn: self.drawn() });
+        true
+    }
+
+    /// Moves what is dragged by the cursor's way to sketch point `p`: its points keep their
+    /// places among themselves, the rest follow. One point goes under the cursor if the
+    /// constraints let it; if not, as far along the direction it is free in (D89). Failing that,
+    /// the solver places them as drawn there (what holds them does not move).
+    pub fn drag_to(&mut self, p: [f64; 2]) {
+        let Some(drag) = &self.drag else { return };
+        let (dx, dy) = (p[0] - drag.grab[0], p[1] - drag.grab[1]);
+        let pins: Vec<(String, [f64; 2])> = drag.points.iter().map(|(n, q)| (n.clone(), [q[0] + dx, q[1] + dy])).collect();
+        for (n, q) in &pins {
+            self.json["sketch"]["points"][n] = json!(q);
+        }
+        // The direction a point is free in, from the sketch solved without a pin: with one,
+        // the point would have none, and frames would alternate between two placements.
+        let plain = self.placed_with(&[]);
+        let mut tries = vec![pins.clone()];
+        if let [(n, q)] = &pins[..]
+            && let Some((at, Some(d))) = plain.as_ref().ok().and_then(|pl| Some((pl.solved.points.get(n).copied()?, pl.solved.free.get(n).copied()?)))
+        {
+            let t = (q[0] - at.x) * d.x + (q[1] - at.y) * d.y;
+            tries.push(vec![(n.clone(), [at.x + d.x * t, at.y + d.y * t])]);
+        }
+        let placed = tries.iter().map(|t| self.placed_with(t)).find(Result::is_ok).unwrap_or(plain);
         self.set(placed);
     }
 
     /// Ends the drag: `edit_sketch` parameters writing every own point where it now stands, or
     /// None if nothing moved. The window keeps showing the same until the model comes back.
     pub fn end_drag(&mut self) -> Option<Json> {
-        self.drag.take()?;
+        let drag = self.drag.take()?;
         let Ok(placed) = &self.placed else { return None };
         let mut patch = serde_json::Map::new();
-        for (n, d) in self.drawn() {
+        for (n, d) in drag.drawn {
             if let Some(s) = placed.solved.points.get(&n)
                 && [s.x, s.y] != d
             {
@@ -547,7 +600,8 @@ impl SketchEdit {
                 out.push(Label { pick: Pick::Measure(n.clone()), at, text: format!("({}{})", prefix(c), short(*v)) });
             }
         }
-        for (n, c) in &p.circles {
+        let followed = self.followed_circles();
+        for (n, c) in p.circles.iter().filter(|(n, _)| !followed.contains_key(*n)) {
             if let Some(v) = Self::curve_points(p, n) {
                 let d = self.json["sketch"]["circles"][n]["diameter"].clone();
                 let text = if d.is_null() { short(c.diameter.value().unwrap_or(0.0)) } else { shown(&d) };
@@ -556,6 +610,12 @@ impl SketchEdit {
             }
         }
         out
+    }
+
+    /// The circles equal to another, each by the one whose diameter it takes: they show no
+    /// diameter of their own.
+    pub fn followed_circles(&self) -> BTreeMap<String, String> {
+        serde_json::from_value::<datum_sketch::Sketch>(self.json["sketch"].clone()).ok().and_then(|s| s.followed_circles().ok()).unwrap_or_default()
     }
 
     /// The labels as shown in a picture `height` tall: each at its pixel offset from the middle,
@@ -1000,7 +1060,7 @@ mod tests {
         let (dx, dy) = e.camera.offset([12.0, 4.0], 600.0);
         e.hover = e.hit(dx, dy, 600.0, |_| (0.0, 0.0));
         assert_eq!(e.hover, Some(Pick::Point("c".into())));
-        assert!(e.start_drag());
+        assert!(e.start_drag([12.0, 4.0]));
         e.drag_to([13.0, 7.0]);
         let patch = e.end_drag().unwrap();
         // The corner keeps the width and the right angles: it rises to 7, its neighbour with it.
@@ -1012,7 +1072,41 @@ mod tests {
         assert_eq!(e.placed.as_ref().map(|p| p.solved.dof), Ok(1));
         // A defined point does not drag.
         e.hover = Some(Pick::Point("b".into()));
-        assert!(!e.start_drag());
+        assert!(!e.start_drag([12.0, 0.0]));
+        e.hover = Some(Pick::Curve("bottom".into()));
+        assert!(!e.start_drag([6.0, 0.0]), "nor a line of defined points");
+    }
+
+    /// A line dragged by its middle moves with the cursor, its ends together; the width given
+    /// and the corner fixed keep the rest where it is (issue #57).
+    #[test]
+    fn a_line_drags_whole() {
+        let mut e = edit();
+        e.hover = Some(Pick::Curve("top".into()));
+        assert!(e.start_drag([6.0, 4.0]));
+        e.drag_to([6.5, 6.0]);
+        let patch = e.end_drag().unwrap();
+        let near = |v: &Json, want: f64| (v.as_f64().unwrap() - want).abs() < 1e-9;
+        assert!(near(&patch["points"]["c"][1], 6.0) && near(&patch["points"]["d"][1], 6.0), "{patch}");
+        assert!(near(&patch["points"]["c"][0], 12.0) && near(&patch["points"]["d"][0], 0.0), "the sides stay vertical: {patch}");
+    }
+
+    /// Two lines selected and dragged by one of them go together, keeping their shape; what is
+    /// not selected stays.
+    #[test]
+    fn the_selection_drags_together() {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
+            "points": {"p1": [0, 0], "p2": [1, 4], "p3": [6, 6], "q": [20, 0]},
+            "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}},
+            "circles": {"c": {"center": "q", "diameter": 3}}}});
+        let id = TopoId::derive("feature").tag("s").finish();
+        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into())];
+        e.hover = Some(Pick::Curve("l2".into()));
+        assert!(e.start_drag([3.5, 5.0]));
+        e.drag_to([5.5, 2.0]);
+        let patch = e.end_drag().unwrap();
+        assert_eq!(patch["points"], json!({"p1": [2.0, -3.0], "p2": [3.0, 1.0], "p3": [8.0, 3.0]}));
     }
 
     /// Dragged where it cannot go, frame after frame, a point stays put: no flicker between the
@@ -1021,7 +1115,7 @@ mod tests {
     fn a_drag_is_steady() {
         let mut e = edit();
         e.hover = Some(Pick::Point("c".into()));
-        assert!(e.start_drag());
+        assert!(e.start_drag([12.0, 4.0]));
         let at = |e: &SketchEdit| e.placed.as_ref().map(|p| p.solved.points["c"]).unwrap();
         e.drag_to([15.0, 7.0]);
         let first = at(&e);

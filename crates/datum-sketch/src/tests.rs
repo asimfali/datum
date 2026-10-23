@@ -352,14 +352,36 @@ fn equal_radius_and_concentric() {
     let bad = |c: &str, why: &str| {
         let mut t = s.clone();
         t.circles.insert("other".into(), Circle { center: "o".into(), diameter: 3.0.into(), construction: false });
-        t.constraints = vec![serde_json::from_str(c).unwrap()];
+        t.constraints = serde_json::from_str(&format!("[{c}]")).unwrap();
         match solve(&t) {
             Err(SketchError::Invalid(m)) => assert!(m.contains(why), "{m}"),
             r => panic!("expected `{why}`, got {r:?}"),
         }
     };
-    bad(r#"{"type": "equal_radius", "curves": ["hole", "other"]}"#, "both diameters");
+    bad(r#"{"type": "equal_radius", "curves": ["hole", "other"]}, {"type": "equal_radius", "curves": ["other", "hole"]}"#, "of one diameter already");
     bad(r#"{"type": "concentric", "curves": ["hole", "nothing"]}"#, "unknown curve `nothing`");
+}
+
+/// Of two equal circles the second takes the first's diameter, through a chain too: in the
+/// solver, and in the sketch resolved for the profile and the view.
+#[test]
+fn equal_circles_follow_the_first() {
+    let s = sketch(
+        r#"{
+        "points": {"a": [0, 0], "b": [10, 0], "c": [20, 0]},
+        "circles": {"one": {"center": "a", "diameter": "d"}, "two": {"center": "b", "diameter": 3}, "three": {"center": "c", "diameter": 7}},
+        "constraints": [
+            {"type": "fix", "point": "a"}, {"type": "fix", "point": "b"},
+            {"type": "equal_radius", "curves": ["one", "two"]},
+            {"type": "equal_radius", "curves": ["two", "three"]},
+            {"type": "on", "point": "c", "curve": "two"}
+        ]
+        }"#,
+    );
+    let s = s.resolve(&|n| if n == "d" { Ok(4.0) } else { Err(datum_math::expr::ExprError::Unknown(n.into())) }).unwrap();
+    assert!(s.circles.values().all(|c| c.diameter == Num::Value(4.0)), "{:?}", s.circles);
+    let r = solve(&s).unwrap();
+    close(r.points["c"], [12.0, 0.0], 1e-9);
 }
 
 /// A reference dimension measures and constrains nothing: the sketch keeps its freedom.

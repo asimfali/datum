@@ -23,8 +23,9 @@ enum Eq {
     Perpendicular(usize, usize),
     Collinear(usize, usize),
     Equal(usize, usize),
-    /// No equation: the point is not a variable.
-    Fix,
+    /// No equation: a fixed point is not a variable; two circles of one diameter hold as given
+    /// (`Sketch::followed_circles`).
+    Held,
     Distance(usize, usize, f64),
     /// Two points, the axis (0 for X, 1 for Y), the distance along it, and the side the second
     /// point was drawn on.
@@ -137,11 +138,13 @@ impl Equations {
             }
             arcs.push((c, f, t));
         }
+        let followed = sketch.followed_circles().map_err(SketchError::Invalid)?;
         let mut circles = Vec::with_capacity(sketch.circles.len());
         for (n, c) in &sketch.circles {
+            let diameter = followed.get(n).map_or(&c.diameter, |l| &sketch.circles[l].diameter);
             circles.push((
                 point(&c.center)?,
-                c.diameter
+                diameter
                     .value()
                     .filter(|d| d.is_finite() && *d > 0.0)
                     .ok_or_else(|| SketchError::Invalid(format!("circle `{n}` needs a positive diameter")))?,
@@ -246,7 +249,7 @@ impl Equations {
                     }
                     fixed[p] = true;
                     fixed_at[p] = at.filter(|a| *a != start[p]);
-                    Eq::Fix
+                    Eq::Held
                 }
                 Constraint::Distance { points, value } => Eq::Distance(point(&points[0])?, point(&points[1])?, positive(value)?),
                 Constraint::HorizontalDistance { points, value } | Constraint::VerticalDistance { points, value } => {
@@ -282,9 +285,7 @@ impl Equations {
                     (Curve::Circle(c1, Rad::Point(f1), _), Curve::Circle(c2, Rad::Point(f2), _)) => Eq::EqualRadius(c1, f1, c2, f2),
                     (Curve::Circle(c1, Rad::Point(f1), _), Curve::Circle(_, Rad::Value(r), _))
                     | (Curve::Circle(_, Rad::Value(r), _), Curve::Circle(c1, Rad::Point(f1), _)) => Eq::Radius(c1, f1, r),
-                    (Curve::Circle(_, Rad::Value(_), _), Curve::Circle(_, Rad::Value(_), _)) => {
-                        return invalid(format!("{}: both diameters are given; give them one value", c.describe(k)));
-                    }
+                    (Curve::Circle(_, Rad::Value(_), _), Curve::Circle(_, Rad::Value(_), _)) => Eq::Held,
                     _ => return invalid(format!("{}: a line has no radius", c.describe(k))),
                 },
                 Constraint::Concentric { curves } => match (curve(&c.describe(k), &curves[0])?, curve(&c.describe(k), &curves[1])?) {
@@ -384,7 +385,7 @@ impl Equations {
             Eq::Midpoint(p, i) => [p].into_iter().chain(l(i)).collect(),
             Eq::Symmetric(a, b, i) => [a, b].into_iter().chain(l(i)).collect(),
             Eq::EqualRadius(c1, f1, c2, f2) => vec![c1, f1, c2, f2],
-            Eq::Fix => Vec::new(),
+            Eq::Held => Vec::new(),
         }
     }
 
@@ -524,7 +525,7 @@ impl Equations {
     pub fn conflicts(&self, g: &Group) -> Vec<String> {
         g.constraints
             .par_iter()
-            .filter(|&&k| !matches!(self.eqs[k], Eq::Fix))
+            .filter(|&&k| !matches!(self.eqs[k], Eq::Held))
             .filter(|&&k| {
                 let rest: Vec<usize> = g.constraints.iter().copied().filter(|&c| c != k).collect();
                 self.fit(g, &rest).is_some()
@@ -577,7 +578,7 @@ impl Equations {
         };
         for &k in use_ {
             match self.eqs[k] {
-                Eq::Fix => {}
+                Eq::Held => {}
                 Eq::Coincident(a, b) => {
                     let (pa, pb) = (at(a), at(b));
                     emit(pa[0] - pb[0], &[(a, [1.0, 0.0]), (b, [-1.0, 0.0])]);

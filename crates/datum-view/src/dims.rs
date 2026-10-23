@@ -180,8 +180,9 @@ impl SketchEdit {
     }
 
     /// Opens the field to change the dimension under a double click: a constraint's value or a
-    /// circle's diameter.
+    /// circle's diameter (of a circle equal to another, that one's).
     pub fn edit_label(&mut self, pick: &crate::sketch::Pick, at: [f64; 2]) {
+        let followed = self.followed_circles();
         let sketch = &self.json["sketch"];
         let field = match pick {
             Pick::Constraint(k) => {
@@ -189,6 +190,7 @@ impl SketchEdit {
                 c.get("value").or_else(|| c.get("degrees")).map(|v| Field { entry: Entry::Edit(*k), text: text_of(v), at })
             }
             Pick::Curve(n) if sketch["circles"].get(n).is_some() => {
+                let n = followed.get(n).unwrap_or(n);
                 Some(Field { entry: Entry::Diameter(n.clone()), text: text_of(&sketch["circles"][n]["diameter"]), at })
             }
             _ => None,
