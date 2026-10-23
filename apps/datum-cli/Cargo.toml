@@ -22,7 +22,3 @@ datum-model = { workspace = true }
 datum-mcp = { workspace = true }
 rayon = { workspace = true }
 datum-view = { workspace = true }
-
-[[bin]]
-name = "datum-view"
-path = "src/bin/datum-view.rs"

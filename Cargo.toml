@@ -38,7 +38,8 @@ rfd = "0.17"
 egui_kittest = "0.36"
 
 [workspace.lints.rust]
-unsafe_code = "forbid"
+# Denied, not forbidden: the one exception (Windows, `datum-cli`) is allowed where it stands.
+unsafe_code = "deny"
 
 [workspace.lints.clippy]
 unwrap_used = "deny"

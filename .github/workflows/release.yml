@@ -44,12 +44,12 @@ jobs:
           cp -r tests/models "$dir"/models
           cp README.md README.ru.md TESTERS.md LICENSE-MIT LICENSE-APACHE "$dir"/
           if [ "${{ runner.os }}" = Windows ]; then
-            cp target/release/datum.exe target/release/datum-view.exe "$dir"/
+            cp target/release/datum.exe "$dir"/
             7z a "${{ matrix.archive }}" "$dir" > /dev/null
           else
-            cp target/release/datum target/release/datum-view "$dir"/
+            cp target/release/datum "$dir"/
             # The release profile keeps debug info for profiling; testers need none of it.
-            strip "$dir"/datum "$dir"/datum-view
+            strip "$dir"/datum
             tar czf "${{ matrix.archive }}" "$dir"
           fi
       - uses: actions/upload-artifact@v7
