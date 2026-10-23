@@ -89,6 +89,13 @@ struct Model {
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
 /// while a rebuild runs are folded: only the latest value of each parameter is applied.
+/// Runs a command of the engineer's, journaled for the agent to read (D110).
+fn journaled(session: &mut Session, command: &str, params: &Json) -> Result<Json, String> {
+    let r = session.execute(command, params);
+    crate::log::action(command, params, r.as_ref().err().map(String::as_str));
+    r
+}
+
 fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context) {
     let mut session = Session::default();
     let mut meshes = MeshCache::default();
@@ -112,14 +119,14 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 Request::Open(p) => {
                     latest.clear();
                     opened = true;
-                    if let Err(e) = session.execute("open", &json!({"path": p.display().to_string()})) {
+                    if let Err(e) = journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
                         error = Some(e);
                     }
                 }
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
                 }
-                Request::Command(command, params) => match session.execute(command, &params) {
+                Request::Command(command, params) => match journaled(&mut session, command, &params) {
                     Ok(reply) => note(&reply),
                     Err(e) => {
                         crate::log::write(&format!("{command} refused: {e}"));
@@ -130,7 +137,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             }
         }
         for (name, value) in latest {
-            match session.execute("set_parameter", &json!({"name": name, "value": value})) {
+            match journaled(&mut session, "set_parameter", &json!({"name": name, "value": value})) {
                 Ok(reply) => note(&reply),
                 Err(e) => error = Some(e),
             }
@@ -434,6 +441,7 @@ impl Viewer {
             return;
         };
         ui.weak(format!("Datum {} · problems are logged to {}", env!("CARGO_PKG_VERSION"), crate::log::path().display()));
+        ui.weak(format!("Actions, for an agent to read: {}", crate::log::actions_path().display()));
         if let Some(e) = &m.error {
             ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
         }
