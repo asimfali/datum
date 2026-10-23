@@ -246,7 +246,8 @@ impl Draft {
     /// The constraint a line from `from` to the free spot `to` leans to, and where that puts
     /// its end: on along the arc the chain ends in (`last`, with the direction it arrived in),
     /// then horizontal or vertical, then parallel or perpendicular to the nearest line by
-    /// angle. None beyond a few degrees.
+    /// angle, the line the chain ends in first: of parallel lines, the one drawn from. None
+    /// beyond a few degrees.
     pub fn lean(&self, edit: &SketchEdit, from: [f64; 2], to: [f64; 2], last: Option<&(String, [f64; 2])>) -> Option<(Lean, [f64; 2])> {
         let d = [to[0] - from[0], to[1] - from[1]];
         let len = libm::hypot(d[0], d[1]);
@@ -277,7 +278,10 @@ impl Draft {
         }
         let p = edit.placed.as_ref().ok()?;
         let mut best: Option<(f64, Lean, [f64; 2])> = None;
-        for (n, pts) in p.lines.keys().filter_map(|n| Some((n, SketchEdit::curve_points(p, n)?))) {
+        // The chain's own line first: a tie stays with it.
+        let own = last.map(|(n, _)| n).filter(|n| p.lines.contains_key(*n));
+        let lines = own.into_iter().chain(p.lines.keys().filter(|n| Some(*n) != own));
+        for (n, pts) in lines.filter_map(|n| Some((n, SketchEdit::curve_points(p, n)?))) {
             let (a, b) = (pts[0], pts[1]);
             let l = libm::hypot(b[0] - a[0], b[1] - a[1]);
             if l == 0.0 {
@@ -885,6 +889,19 @@ mod tests {
         let p = click_at(&mut e, [12.93 + dir[0] * 10.0 + 0.2, 7.07 + dir[1] * 10.0], false).unwrap();
         assert_eq!(p["add_constraints"], json!([{"type": "tangent", "curves": ["a1", "l2"]}]), "{p}");
         assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+    }
+
+    /// Of parallel lines, a line leaning perpendicular takes the one the chain is drawn from.
+    #[test]
+    fn a_line_leans_to_the_line_it_is_drawn_from() {
+        // `far` is parallel to the chain's line, and first by name.
+        let mut e = editor(json!({"points": {"p": [-20, 0], "q": [-15, 10]}, "lines": {"far": {"from": "p", "to": "q"}}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        click_at(&mut e, [5.0, 10.0], true);
+        // Perpendicular to both: (5, 10) + 10 · (0.894, −0.447).
+        let p = click_at(&mut e, [13.94, 5.53], false).unwrap();
+        assert_eq!(p["add_constraints"], json!([{"type": "perpendicular", "lines": ["l1", "l2"]}]), "{p}");
     }
 
     /// The arc tool's start and end level with or plumb above the centre take that constraint.
