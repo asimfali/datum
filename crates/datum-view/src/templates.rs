@@ -1,94 +1,46 @@
-//! Sketch templates (M7e, D94): pieces of sketch as data — points, lines, arcs, circles and the
-//! constraints between them — placed by clicks. A template names one or two of its points
-//! `anchors`: the clicks land there. Two anchors stretch it along the sketch's axes (a rectangle
-//! by two corners, or by its centre and a corner); one moves it as it is (a copy pasted). Names
-//! are made new on placing; an anchor clicked on a point of the sketch becomes that point. The
-//! built-in templates are JSON files in `library/sketches`; a copy of a selection is a template
-//! too, on the clipboard as JSON.
+//! Library elements in the sketch (M7e, D94; D98, D99): pieces of sketch as data, placed by
+//! clicks, one per anchor; two anchors stretch the piece (a rectangle by two corners, or by its
+//! centre and a corner). Loading and placing are the model's (`datum_model::library`), shared
+//! with the agent; here: the preview, the snaps of the clicks, and the copy of a selection,
+//! which is an element too, on the clipboard as JSON.
 
 use std::collections::BTreeMap;
 
+use datum_model::library::{self, Anchor, Entry, Source};
 use serde_json::{Map, Value as Json, json};
 
-use crate::draw::{Patch, Spot};
+use crate::draw::{Patch, Snap, Spot};
 use crate::sketch::{Pick, SketchEdit};
 
-/// The templates: the built-in ones, then those in `library/sketches` beside the program, by
-/// file name (a file that is no template is left out, and logged).
-pub fn library() -> Vec<Json> {
-    let mut out: Vec<Json> =
-        [include_str!("../../../library/sketches/rectangle.json"), include_str!("../../../library/sketches/center_rectangle.json")]
-            .iter()
-            .filter_map(|t| serde_json::from_str(t).ok())
-            .collect();
-    let folder = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("library").join("sketches")));
-    let mut files: Vec<std::path::PathBuf> = folder
-        .and_then(|d| std::fs::read_dir(d).ok())
-        .into_iter()
-        .flatten()
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .collect();
-    files.sort();
-    for f in files {
-        match std::fs::read_to_string(&f).ok().and_then(|t| serde_json::from_str::<Json>(&t).ok()).filter(|t| !anchors(t).is_empty()) {
-            // A built-in one shipped beside the program too is not listed twice.
-            Some(t) if !out.iter().any(|o| o["name"] == t["name"]) => out.push(t),
-            Some(_) => {}
-            None => crate::log::write(&format!("{}: not a sketch template (JSON with `anchors` and `points`)", f.display())),
-        }
+/// The sketch elements for the model at `model`: built in, beside the program, in its project.
+/// Files that are not elements go to the log.
+pub fn library(model: Option<&std::path::Path>) -> Vec<Entry> {
+    let lib = library::load("sketch", model);
+    for why in &lib.skipped {
+        crate::log::write(&format!("{why}: not a sketch element"));
     }
-    out
+    lib.entries
 }
 
-/// The anchors of a template: one or two of its points, in order.
-pub fn anchors(t: &Json) -> Vec<String> {
-    t["anchors"].as_array().into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).collect()
-}
-
-fn point(t: &Json, n: &str) -> Option<[f64; 2]> {
-    let p = &t["points"][n];
-    Some([p[0].as_f64()?, p[1].as_f64()?])
-}
-
-/// How a template's coordinates go to the sketch's: its first anchor `from` onto the first click
-/// `to`, stretched along each axis by `scale`.
-pub struct Placement {
-    from: [f64; 2],
-    to: [f64; 2],
-    pub scale: [f64; 2],
-}
-
-impl Placement {
-    pub fn map(&self, p: [f64; 2]) -> [f64; 2] {
-        [self.to[0] + (p[0] - self.from[0]) * self.scale[0], self.to[1] + (p[1] - self.from[1]) * self.scale[1]]
+/// Where an element in the list comes from, as the list shows it.
+pub fn source(e: &Entry) -> &'static str {
+    match e.source {
+        Source::BuiltIn => "built in",
+        Source::Program => "beside the program",
+        Source::Project => "the project's",
     }
 }
 
-/// The placement of template `t` by clicks `at` (one per anchor): moved, or stretched along
-/// each axis so the anchors land on the clicks.
-pub fn placement(t: &Json, at: &[[f64; 2]]) -> Option<Placement> {
-    let names = anchors(t);
-    let a = point(t, names.first()?)?;
-    let c1 = *at.first()?;
-    let scale = match (names.get(1), at.get(1)) {
-        (Some(b), Some(c2)) => {
-            let b = point(t, b)?;
-            let s = |k: usize| if b[k] == a[k] { 1.0 } else { (c2[k] - c1[k]) / (b[k] - a[k]) };
-            [s(0), s(1)]
-        }
-        _ => [1.0, 1.0],
-    };
-    Some(Placement { from: a, to: c1, scale })
-}
-
-/// The polylines of the template placed by clicks `at`: its lines, arcs and circles.
+/// The polylines of element `t` placed by clicks `at`: its lines, arcs and circles.
 pub fn outline(t: &Json, at: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
-    let Some(place) = placement(t, at) else { return Vec::new() };
-    let scale = place.scale;
-    let pt = |n: &Json| n.as_str().and_then(|n| point(t, n)).map(|p| place.map(p));
+    let Some(place) = library::placement(t, at) else { return Vec::new() };
+    let sketch = &t["sketch"];
+    let pt = |n: &Json| {
+        let p = &sketch["points"][n.as_str()?];
+        Some(place.map([p[0].as_f64()?, p[1].as_f64()?]))
+    };
     let mut out = Vec::new();
-    for l in t["lines"].as_object().into_iter().flat_map(|m| m.values()) {
+    for l in sketch["lines"].as_object().into_iter().flat_map(|m| m.values()) {
         if let (Some(a), Some(b)) = (pt(&l["from"]), pt(&l["to"])) {
             out.push(vec![a, b]);
         }
@@ -99,76 +51,45 @@ pub fn outline(t: &Json, at: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
             [c[0] + r * co, c[1] + r * s]
         })
     };
-    for a in t["arcs"].as_object().into_iter().flat_map(|m| m.values()) {
+    for a in sketch["arcs"].as_object().into_iter().flat_map(|m| m.values()) {
         if let (Some(c), Some(f), Some(e)) = (pt(&a["center"]), pt(&a["from"]), pt(&a["to"])) {
             let start = libm::atan2(f[1] - c[1], f[0] - c[0]);
             let sweep = (libm::atan2(e[1] - c[1], e[0] - c[0]) - start).rem_euclid(std::f64::consts::TAU);
             out.push(ring(c, libm::hypot(f[0] - c[0], f[1] - c[1]), start, sweep).collect());
         }
     }
-    for k in t["circles"].as_object().into_iter().flat_map(|m| m.values()) {
+    for k in sketch["circles"].as_object().into_iter().flat_map(|m| m.values()) {
         if let (Some(c), Some(d)) = (pt(&k["center"]), k["diameter"].as_f64()) {
-            out.push(ring(c, 0.5 * d * libm::sqrt((scale[0] * scale[1]).abs()), 0.0, std::f64::consts::TAU).collect());
+            out.push(ring(c, 0.5 * d * place.scale(), 0.0, std::f64::consts::TAU).collect());
         }
     }
     out
 }
 
-/// Places template `t` by `spots` (one per anchor) into `patch`: new names for all, the
-/// anchors made from the spots as any click is (on a point of the sketch: that point).
+/// Places element `t` with its own parameter values by `spots` (one per anchor) into `patch`.
+/// An anchor clicked on a point of the sketch is made coincident with it; on a vertex of the
+/// face, with its projection; on a middle, a curve or an edge, held there as any click is.
 pub fn place(patch: &mut Patch, t: &Json, spots: &[Spot], construction: bool) -> Option<()> {
-    let at: Vec<[f64; 2]> = spots.iter().map(|s| s.at).collect();
-    let place = placement(t, &at)?;
-    let scale = place.scale;
-    let mut names: BTreeMap<String, String> = BTreeMap::new();
-    for (a, s) in anchors(t).iter().zip(spots) {
-        names.insert(a.clone(), patch.point(s));
-    }
-    let others: Vec<String> = t["points"].as_object()?.keys().filter(|n| !names.contains_key(*n)).cloned().collect();
-    for n in others {
-        let new = patch.fresh("p");
-        names.insert(n, new);
-    }
-    for (key, prefix) in [("lines", "l"), ("arcs", "a"), ("circles", "c"), ("measures", "d")] {
-        for n in t[key].as_object().into_iter().flat_map(|m| m.keys()) {
-            let new = patch.fresh(prefix);
-            names.insert(n.clone(), new);
-        }
-    }
-    let rename = |v: &Json| {
-        let mut v = v.clone();
-        datum_model::visit_names(&mut v, &mut |s| {
-            if let Some(n) = names.get(s.as_str()) {
-                *s = n.clone();
-            }
-        });
-        v
-    };
-    for (n, p) in t["points"].as_object()?.iter().filter(|(n, _)| !anchors(t).contains(n)) {
-        let q = place.map([p[0].as_f64()?, p[1].as_f64()?]);
-        patch.set("points", &names[n], json!(q));
-    }
-    for key in ["lines", "arcs", "circles"] {
-        for (n, v) in t[key].as_object().into_iter().flatten() {
-            let mut v = rename(v);
-            // A circle keeps its shape: its diameter stretched by the mean of the two stretches.
-            if let Some(d) = v["diameter"].as_f64() {
-                v["diameter"] = json!(d * libm::sqrt((scale[0] * scale[1]).abs()));
-            }
-            patch.add(key, &names[n], v, construction);
-        }
-    }
-    for (n, v) in t["measures"].as_object().into_iter().flatten() {
-        patch.set("measures", &names[n], rename(v));
-    }
-    for c in t["constraints"].as_array().into_iter().flatten() {
-        patch.constrain(rename(c));
+    let values = library::values(t, None, &Map::new()).ok()?;
+    let at: Vec<Anchor> = spots
+        .iter()
+        .map(|s| Anchor {
+            at: s.at,
+            point: match &s.snap {
+                Snap::Point(_) | Snap::Vertex(_) => Some(patch.point(s)),
+                _ => None,
+            },
+        })
+        .collect();
+    let renamed = library::place(patch, t, &values, &at, &BTreeMap::new(), construction).ok()?;
+    for (a, s) in library::anchors(t).iter().zip(spots) {
+        patch.tie(&renamed[a], s);
     }
     Some(())
 }
 
 impl SketchEdit {
-    /// The selection as a template to paste: the curves picked with their points, the points
+    /// The selection as an element to paste: the curves picked with their points, the points
     /// picked, and the constraints and reference dimensions among them; the point lowest and
     /// leftmost is the anchor. Projections and the origin stay behind, and so does what ties to
     /// them.
@@ -222,14 +143,12 @@ impl SketchEdit {
                 (pa[1], pa[0]).partial_cmp(&(pb[1], pb[0])).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(n, _)| n.clone())?;
-        out.insert("name".into(), json!("Copy"));
-        out.insert("anchors".into(), json!([anchor]));
         out.insert("points".into(), Json::Object(points));
         out.insert("constraints".into(), json!(constraints));
         if !measures.is_empty() {
             out.insert("measures".into(), Json::Object(measures));
         }
-        Some(Json::Object(out))
+        Some(json!({"name": "Copy", "anchors": [anchor], "sketch": out}))
     }
 }
 
@@ -279,7 +198,7 @@ mod tests {
         e.camera.center = [0.0, 0.0];
         e.camera.half_height = 20.0;
         e.draft.tool = Tool::Template;
-        e.draft.template = Some(library()[1].clone());
+        e.draft.template = Some(library(None)[1].element.clone());
         e.draft.clicks = vec![Spot { at: [0.0, 0.0], snap: Snap::Point("origin".into()) }];
         e.draft.cursor = Some(free([12.0, 7.0]));
         let shot = std::env::var_os("DATUM_TEMPLATE_SHOT");
@@ -296,20 +215,20 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
-        assert_eq!(outline(&library()[1], &[[0.0, 0.0], [12.0, 7.0]]).len(), 6);
+        assert_eq!(outline(&library(None)[1].element, &[[0.0, 0.0], [12.0, 7.0]]).len(), 6);
     }
 
     #[test]
     fn the_library_loads() {
-        let names: Vec<String> = library().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect();
-        assert_eq!(names, ["Rectangle", "Center rectangle"]);
+        let names: Vec<String> = library(None).iter().map(|t| format!("{} ({})", t.name(), source(t))).collect();
+        assert_eq!(names, ["Rectangle (built in)", "Center rectangle (built in)"]);
     }
 
     #[test]
     fn a_rectangle_by_two_corners() {
         let mut e = editor(json!({"points": {}}));
-        let p = place_by(&mut e, library()[0].clone(), &[free([2.0, 3.0]), free([12.0, 8.0])]);
-        assert_eq!(p["points"], json!({"p1": [2.0, 3.0], "p2": [12.0, 8.0], "p3": [12.0, 3.0], "p4": [2.0, 8.0]}), "{p}");
+        let p = place_by(&mut e, library(None)[0].element.clone(), &[free([2.0, 3.0]), free([12.0, 8.0])]);
+        assert_eq!(p["points"], json!({"p1": [2.0, 3.0], "p2": [12.0, 3.0], "p3": [12.0, 8.0], "p4": [2.0, 8.0]}), "{p}");
         assert_eq!(p["lines"].as_object().unwrap().len(), 4);
         assert_eq!(p["add_constraints"][0], json!({"type": "horizontal", "line": "l1"}));
         let placed = e.placed.as_ref().unwrap();
@@ -320,9 +239,12 @@ mod tests {
     #[test]
     fn a_rectangle_from_its_centre_on_the_origin() {
         let mut e = editor(json!({"points": {}}));
-        let p = place_by(&mut e, library()[1].clone(), &[Spot { at: [0.0, 0.0], snap: Snap::Point("origin".into()) }, free([5.0, 3.0])]);
+        let p = place_by(&mut e, library(None)[1].element.clone(), &[Spot { at: [0.0, 0.0], snap: Snap::Point("origin".into()) }, free([5.0, 3.0])]);
         assert!(p["points"].get("origin").is_none(), "the origin is not made again: {p}");
-        assert!(p["add_constraints"].as_array().unwrap().iter().any(|c| c["point"] == "origin"), "{p}");
+        assert!(
+            p["add_constraints"].as_array().unwrap().iter().any(|c| c["type"] == "coincident" && c["points"][1] == "origin"),
+            "coincident, not merged: {p}"
+        );
         let placed = e.placed.as_ref().unwrap();
         assert_eq!(placed.solved.dof, 2, "width and height: {:?}", placed.solved.free);
         let corner = placed.solved.points[p["lines"]["l2"]["to"].as_str().unwrap()];
@@ -334,12 +256,13 @@ mod tests {
     #[test]
     fn copy_and_paste() {
         let mut e = editor(json!({"points": {}}));
-        place_by(&mut e, library()[0].clone(), &[free([0.5, 0.5]), free([10.5, 4.5])]);
+        place_by(&mut e, library(None)[0].element.clone(), &[free([0.5, 0.5]), free([10.5, 4.5])]);
         e.apply(serde_json::from_value(json!({"add_constraints": [{"type": "length", "line": "l1", "value": 10}]})).unwrap());
         e.selected = ["l1", "l2", "l3", "l4"].iter().map(|n| Pick::Curve(n.to_string())).collect();
         let t = e.copy().unwrap();
-        assert_eq!(anchors(&t), ["p1"], "the lowest, leftmost point: {t}");
-        assert_eq!(t["constraints"].as_array().unwrap().len(), 5, "{t}");
+        assert_eq!(library::anchors(&t), ["p1"], "the lowest, leftmost point: {t}");
+        assert!(library::check("sketch", &t).is_ok(), "a copy is an element: {t}");
+        assert_eq!(t["sketch"]["constraints"].as_array().unwrap().len(), 5, "{t}");
         let p = place_by(&mut e, t, &[free([30.0, 0.0])]);
         let mut corners: Vec<String> = p["points"].as_object().unwrap().values().map(|v| v.to_string()).collect();
         corners.sort();

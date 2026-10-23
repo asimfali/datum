@@ -196,3 +196,58 @@ fn a_replaced_section_loses_only_its_own_faces() {
     );
     assert_eq!(failed(&r), ["on_l1", "on_l3"]);
 }
+
+/// The user's chain with its middle cut out: a section from the library put between the two
+/// ends left, turned toward the second, coincident with both; one of its lines keeps the name
+/// of the line it replaces.
+#[test]
+fn an_element_between_two_points_of_a_chain() {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "add",
+        json!({"name": "path", "op": "sketch", "sketch": {
+            "points": {"p1": [0, 0], "p2": [20, 60], "p4": [120, 50], "p5": [130, 0]},
+            "lines": {"l1": {"from": "p1", "to": "p2"}, "l4": {"from": "p4", "to": "p5"}},
+            "constraints": [{"type": "fix", "point": "p1"}, {"type": "fix", "point": "p2"}, {"type": "fix", "point": "p4"}, {"type": "fix", "point": "p5"}]
+        }}),
+    );
+    // A notch: in, across, out; the width across a parameter.
+    let notch = json!({"name": "Notch", "anchors": ["s", "e"], "fit": "align",
+        "parameters": [{"name": "width", "value": 15}],
+        "sketch": {"points": {"s": [0, 0], "a": [3, -1], "b": [7, -1], "e": [10, 0]},
+                   "lines": {"in": {"from": "s", "to": "a"}, "bottom": {"from": "a", "to": "b"}, "out": {"from": "b", "to": "e"}},
+                   "constraints": [{"type": "equal", "lines": ["in", "out"]}, {"type": "distance", "points": ["a", "b"], "value": "width"}]}});
+    let r = run(&mut s, "insert_element", json!({"name": "path", "element": notch, "at": ["p2", "p4"], "names": {"bottom": "l3"}}));
+    assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
+    assert_eq!(r["names"]["bottom"], "l3", "{r}");
+    let sketch = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"];
+    let c = sketch["constraints"].as_array().unwrap();
+    let start = r["names"]["s"].as_str().unwrap();
+    assert!(c.contains(&json!({"type": "coincident", "points": [start, "p2"]})), "{sketch}");
+    assert!(c.contains(&json!({"type": "distance", "points": [r["names"]["a"], r["names"]["b"]], "value": 15.0})), "{sketch}");
+    assert!(sketch["points"].get("s").is_none(), "new names, not the element's");
+    // Unknown elements and spots are refused, the model left as it was.
+    assert!(s.execute("insert_element", &json!({"name": "path", "element": "Nothing", "at": ["p2"]})).unwrap_err().contains("no element"));
+    assert!(s.execute("insert_element", &json!({"name": "path", "element": "Rectangle", "at": ["q"]})).unwrap_err().contains("no point `q`"));
+}
+
+/// A project's library comes over the built-in one: an element of the same name replaces it.
+#[test]
+fn the_project_library_comes_first() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_project");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("library/sketch")).unwrap();
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let own = json!({"name": "Rectangle", "description": "ours", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+    std::fs::write(root.join("library/sketch/rect.json"), own.to_string()).unwrap();
+    std::fs::write(root.join("library/sketch/broken.json"), "{\"name\": \"x\"}").unwrap();
+    let mut s = Session::default();
+    let lib = run(&mut s, "library", json!({}));
+    assert_eq!(lib["elements"][0]["source"], "built_in", "no project without a model file: {lib}");
+    run(&mut s, "save", json!({"path": root.join("part/plate.json")}));
+    let lib = run(&mut s, "library", json!({}));
+    assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["description"]), (&json!("project"), &json!("ours")), "{lib}");
+    assert!(lib["skipped"][0].as_str().unwrap().contains("broken.json"), "{lib}");
+}

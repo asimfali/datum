@@ -1,6 +1,7 @@
 //! An editing session and the command registry (ARCHITECTURE §6.1): one table of commands with
 //! JSON parameters, used by MCP and any other front end.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use datum_brep::{Body, Curve, Ix, Surface};
@@ -9,7 +10,7 @@ use datum_math::Vec3;
 use datum_math::expr::{Num, parameter_values};
 use serde_json::{Map, Value, json};
 
-use crate::{add_feature, feature_json, parse, to_json};
+use crate::{SketchPatch, add_feature, feature_json, library, parse, to_json};
 
 /// The model being edited, its cache and its latest evaluation. Every edit re-evaluates; the
 /// cache makes that cost proportional to what changed.
@@ -149,17 +150,95 @@ const COMMANDS: &[Command] = &[
                 "add_constraints": list, "remove_constraints": list
             }, "required": ["name"], "additionalProperties": false})
         },
+        run: |s, p| s.edit_sketch(text(p, "name")?, p),
+    },
+    Command {
+        name: "library",
+        description: "The library's elements of a `level` (VISION §10; `sketch` so far): built in, then from `library/<level>` \
+                      beside the program, then from `library/<level>` of the model's project (the nearest folder above the model \
+                      file with `datum-project.json`); one of a name already listed takes its place. Each with its `source`, \
+                      `parameters` in the order they are asked, `presets` (typical values by name) and `anchors`. `skipped`: \
+                      files that are not elements, with why.",
+        params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
-            let ix = s.find(text(p, "name")?)?;
-            let Ok(Value::Object(mut op)) = serde_json::to_value(&s.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
-            if op.get("op") != Some(&json!("sketch")) {
-                return Err(format!("`{}` is not a sketch", text(p, "name")?));
+            let level = p.get("level").and_then(Value::as_str).unwrap_or("sketch");
+            let lib = library::load(level, s.path.as_deref());
+            let list: Vec<Value> = lib
+                .entries
+                .iter()
+                .map(|e| {
+                    let mut v = json!({"source": e.source});
+                    for k in ["name", "description", "parameters", "presets", "anchors", "fit"] {
+                        if let Some(x) = e.element.get(k) {
+                            v[k] = x.clone();
+                        }
+                    }
+                    v
+                })
+                .collect();
+            Ok(json!({"elements": list, "skipped": lib.skipped}))
+        },
+    },
+    Command {
+        name: "insert_element",
+        description: "Insert a library element into sketch feature `name` as a copy (D98): its geometry, constraints and \
+                      dimensions under new names, nothing tied to the library. `element`: a name from `library`, or an element \
+                      object itself. Parameter values: the element's, over them `preset`'s, over those `values` (a number, or an \
+                      expression of the model's parameters). `at`: a spot for the first anchor or for each, a point of the sketch \
+                      by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
+                      sketch's axes, or with `fit: align` turn it toward the second. `names`: element names that take the given \
+                      free names (a section put in place of one removed keeps its name, and so what referred to it downstream). \
+                      The reply has the edit's result and `names`: each element name with the name it got.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "element": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+                "preset": {"type": "string"},
+                "values": {"type": "object", "additionalProperties": {"oneOf": [{"type": "number"}, {"type": "string"}]}},
+                "at": {"type": "array", "minItems": 1, "maxItems": 2,
+                       "items": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}]}},
+                "names": {"type": "object", "additionalProperties": {"type": "string"}},
+                "construction": {"type": "boolean"}
+            }, "required": ["name", "element", "at"], "additionalProperties": false})
+        },
+        run: |s, p| {
+            let name = text(p, "name")?;
+            let element = match &p["element"] {
+                Value::String(n) => library::load("sketch", s.path.as_deref())
+                    .get(n)
+                    .map(|e| e.element.clone())
+                    .ok_or_else(|| format!("no element `{n}` in the library"))?,
+                e => {
+                    library::check("sketch", e)?;
+                    e.clone()
+                }
+            };
+            let empty = Map::new();
+            let values =
+                library::values(&element, p.get("preset").and_then(Value::as_str), p.get("values").and_then(Value::as_object).unwrap_or(&empty))?;
+            let Ok(Feature::Sketch(placed)) = s.value(name) else { return Err(format!("`{name}` is not a sketch that solves")) };
+            let mut at = Vec::new();
+            for spot in p.get("at").and_then(Value::as_array).into_iter().flatten() {
+                at.push(match spot {
+                    Value::String(n) => {
+                        let q = placed.solved.points.get(n).ok_or_else(|| format!("`at`: `{name}` has no point `{n}`"))?;
+                        library::Anchor { at: [q.x, q.y], point: Some(n.clone()) }
+                    }
+                    q => library::Anchor { at: serde_json::from_value(q.clone()).map_err(|e| format!("`at`: {e}"))?, point: None },
+                });
             }
-            let also = patch_sketch(&mut op, p)?;
-            let op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
-            s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
-            let mut reply = s.rebuild_recording(ix);
-            reply["also_removed"] = json!(also);
+            let names: BTreeMap<String, String> = match p.get("names") {
+                Some(n) => serde_json::from_value(n.clone()).map_err(|e| format!("`names`: {e}"))?,
+                None => BTreeMap::new(),
+            };
+            let feature = serde_json::to_value(&s.graph.nodes()[s.find(name)? as usize].op).map_err(|e| e.to_string())?;
+            let mut patch = SketchPatch::new(&feature);
+            let construction = p.get("construction").and_then(Value::as_bool).unwrap_or(false);
+            let renamed = library::place(&mut patch, &element, &values, &at, &names, construction)?;
+            let mut params = patch.done().unwrap_or_default();
+            params.insert("name".into(), json!(name));
+            let mut reply = s.edit_sketch(name, &params)?;
+            reply["names"] = json!(renamed);
             Ok(reply)
         },
     },
@@ -321,6 +400,21 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
 }
 
 impl Session {
+    /// Applies `edit_sketch` patch `p` to sketch feature `name`.
+    fn edit_sketch(&mut self, name: &str, p: &Map<String, Value>) -> Result<Value, String> {
+        let ix = self.find(name)?;
+        let Ok(Value::Object(mut op)) = serde_json::to_value(&self.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
+        if op.get("op") != Some(&json!("sketch")) {
+            return Err(format!("`{name}` is not a sketch"));
+        }
+        let also = patch_sketch(&mut op, p)?;
+        let op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
+        self.graph.set_op(ix, op).map_err(|e| e.to_string())?;
+        let mut reply = self.rebuild_recording(ix);
+        reply["also_removed"] = json!(also);
+        Ok(reply)
+    }
+
     /// The last evaluation: a result per feature.
     pub fn evaluation(&self) -> &Evaluation {
         &self.last

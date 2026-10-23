@@ -211,8 +211,8 @@ struct Viewer {
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
-    /// The built-in sketch templates.
-    library: Vec<Json>,
+    /// The sketch elements of the library (built in, beside the program, the project's).
+    library: Vec<datum_model::library::Entry>,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -254,7 +254,7 @@ impl Viewer {
             newer: None,
             sketch: None,
             entering: None,
-            library: crate::templates::library(),
+            library: crate::templates::library(None),
             picking: false,
             face: None,
         };
@@ -266,8 +266,14 @@ impl Viewer {
 
     fn open(&mut self, path: PathBuf) {
         self.leave();
-        self.path = Some(path.clone());
+        self.set_path(Some(path.clone()));
         self.send(Request::Open(path));
+    }
+
+    /// The model's file, and with it the project whose library elements are listed.
+    fn set_path(&mut self, path: Option<PathBuf>) {
+        self.library = crate::templates::library(path.as_deref());
+        self.path = path;
     }
 
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
@@ -279,7 +285,7 @@ impl Viewer {
         if let Some(p) = path {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
             self.send(Request::Command("save", json!({"path": p.display().to_string()})));
-            self.path = Some(p);
+            self.set_path(Some(p));
         }
     }
 
@@ -364,7 +370,7 @@ impl Viewer {
             }
             if ui.button("New").on_hover_text("An empty model").clicked() {
                 self.leave();
-                self.path = None;
+                self.set_path(None);
                 ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
                 self.send(Request::Command("new", json!({})));
             }
@@ -470,16 +476,15 @@ impl Viewer {
                     }
                 }
             });
-            // Templates: pieces of sketch from the library, placed by a click per anchor.
+            // The library: pieces of sketch, placed by a click per anchor.
             ui.horizontal_wrapped(|ui| {
                 for t in &self.library {
-                    let name = t["name"].as_str().unwrap_or("template");
-                    let on = sk.draft.tool == Tool::Template && sk.draft.template.as_ref().is_some_and(|c| c["name"] == t["name"]);
-                    let hint = format!("{} (R: the first)", t["description"].as_str().unwrap_or(""));
-                    if ui.selectable_label(on, name).on_hover_text(hint).clicked() {
+                    let on = sk.draft.tool == Tool::Template && sk.draft.template.as_ref().is_some_and(|c| c["name"] == t.element["name"]);
+                    let hint = format!("{} ({}; R: the first)", t.element["description"].as_str().unwrap_or(""), crate::templates::source(t));
+                    if ui.selectable_label(on, t.name()).on_hover_text(hint).clicked() {
                         sk.draft.cancel();
                         sk.draft.tool = Tool::Template;
-                        sk.draft.template = Some(t.clone());
+                        sk.draft.template = Some(t.element.clone());
                     }
                 }
             });
@@ -798,9 +803,9 @@ impl Viewer {
             {
                 sk.draft.cancel();
                 sk.draft.tool = Tool::Template;
-                sk.draft.template = Some(t.clone());
+                sk.draft.template = Some(t.element.clone());
             }
-            // Copy: the selection as a template, on the clipboard as JSON. Paste: a template
+            // Copy: the selection as an element, on the clipboard as JSON. Paste: an element
             // from the clipboard (a copy, or one written by hand or by an agent), placed by clicks.
             let (copy, paste) = ui.input(|i| {
                 let copy = i.events.iter().any(|e| matches!(e, egui::Event::Copy));
@@ -810,7 +815,7 @@ impl Viewer {
             if copy && let Some(t) = sk.copy() {
                 ui.ctx().copy_text(serde_json::to_string_pretty(&t).unwrap_or_default());
             }
-            if let Some(t) = paste.and_then(|p| serde_json::from_str::<Json>(&p).ok()).filter(|t| !crate::templates::anchors(t).is_empty()) {
+            if let Some(t) = paste.and_then(|p| serde_json::from_str::<Json>(&p).ok()).filter(|t| datum_model::library::check("sketch", t).is_ok()) {
                 sk.draft.cancel();
                 sk.draft.tool = Tool::Template;
                 sk.draft.template = Some(t);
@@ -1136,7 +1141,7 @@ mod tests {
             newer: None,
             sketch: None,
             entering: None,
-            library: crate::templates::library(),
+            library: crate::templates::library(None),
             picking: false,
             face: None,
         };

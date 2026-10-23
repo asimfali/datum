@@ -18,4 +18,5 @@ datum-brep = { workspace = true }
 datum-math = { workspace = true }
 datum-sketch = { workspace = true }
 datum-ops = { workspace = true }
+libm = { workspace = true }
 

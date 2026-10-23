@@ -40,7 +40,7 @@ jobs:
         run: |
           dir=datum-${{ github.ref_name }}
           mkdir -p "$dir"
-          cp -r library examples "$dir"/
+          cp -r examples "$dir"/
           cp -r tests/models "$dir"/models
           cp README.md README.ru.md TESTERS.md LICENSE-MIT LICENSE-APACHE "$dir"/
           if [ "${{ runner.os }}" = Windows ]; then
