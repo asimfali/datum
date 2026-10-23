@@ -65,6 +65,13 @@ enum Request {
     Editing(Option<String>),
 }
 
+/// A selection being kept in the library (D98): the element it makes, and why the last save
+/// failed.
+struct Keep {
+    element: Json,
+    error: Option<String>,
+}
+
 /// What the background thread hands the window after each rebuild.
 struct Model {
     /// `inspect` of the session: features with status, parameters with values.
@@ -220,6 +227,8 @@ struct Viewer {
     entering: Option<String>,
     /// The sketch elements of the library (built in, beside the program, the project's).
     library: Vec<datum_model::library::Entry>,
+    /// The selection being kept in the library.
+    keeping: Option<Keep>,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -262,6 +271,7 @@ impl Viewer {
             sketch: None,
             entering: None,
             library: crate::templates::library(None),
+            keeping: None,
             picking: false,
             face: None,
         };
@@ -293,6 +303,79 @@ impl Viewer {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
             self.send(Request::Command("save", json!({"path": p.display().to_string()})));
             self.set_path(Some(p));
+        }
+    }
+
+    /// The dialog keeping a selection in the library: its name, description and the order its
+    /// parameters are asked in; saved where the engineer chooses, the library's folder first.
+    fn keep(&mut self, ctx: &egui::Context) {
+        let Some(k) = &mut self.keeping else { return };
+        let (mut save, mut close) = (false, false);
+        egui::Window::new("To library").collapsible(false).resizable(false).show(ctx, |ui| {
+            egui::Grid::new("datum_keep").num_columns(2).show(ui, |ui| {
+                for (key, label) in [("name", "Name"), ("description", "Description")] {
+                    ui.label(label);
+                    let mut text = k.element[key].as_str().unwrap_or_default().to_string();
+                    if ui.text_edit_singleline(&mut text).changed() {
+                        k.element[key] = json!(text);
+                    }
+                    ui.end_row();
+                }
+            });
+            match k.element.get_mut("parameters").and_then(Json::as_array_mut) {
+                Some(list) => {
+                    ui.label("Parameters, in the order they are asked:");
+                    let mut up = None;
+                    for (i, p) in list.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if ui.add_enabled(i > 0, egui::Button::new("⏶")).clicked() {
+                                up = Some(i);
+                            }
+                            ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
+                        });
+                    }
+                    if let Some(i) = up {
+                        list.swap(i - 1, i);
+                    }
+                }
+                None => {
+                    ui.weak("No dimension is given by a model parameter: the element goes in as it is. Give dimensions parameters (w, h…) to have it ask them.");
+                }
+            }
+            if let Some(e) = &k.error {
+                ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+            }
+            ui.horizontal(|ui| {
+                save = ui.button("Save…").clicked();
+                close = ui.button("Cancel").clicked();
+            });
+        });
+        if save {
+            let element = k.element.clone();
+            let name = element["name"].as_str().unwrap_or_default().to_string();
+            let folder = datum_model::library::folder("sketch", self.path.as_deref());
+            let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(datum_model::library::file_name(&name));
+            if let Some(f) = folder.filter(|f| std::fs::create_dir_all(f).is_ok()) {
+                dialog = dialog.set_directory(f);
+            }
+            let written = datum_model::library::check("sketch", &element).and_then(|()| match dialog.save_file() {
+                Some(path) => serde_json::to_string_pretty(&element)
+                    .map_err(|e| e.to_string())
+                    .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
+                    .map(|()| true),
+                None => Ok(false),
+            });
+            match written {
+                Ok(true) => {
+                    close = true;
+                    self.library = crate::templates::library(self.path.as_deref());
+                }
+                Ok(false) => {}
+                Err(e) => k.error = Some(e),
+            }
+        }
+        if close {
+            self.keeping = None;
         }
     }
 
@@ -500,6 +583,10 @@ impl Viewer {
                         sk.draft.choose(t.element.clone());
                         sk.field = None;
                     }
+                }
+                let hint = "The selection as a library element: dimensions given by model parameters become its parameters";
+                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
+                    self.keeping = sk.extract("New element", Some(&sk.params)).map(|element| Keep { element, error: None });
                 }
             });
             ui.horizontal(|ui| {
@@ -1183,6 +1270,7 @@ impl eframe::App for Viewer {
         }
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
+        self.keep(ui.ctx());
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
             if let Some(rs) = frame.wgpu_render_state() {
@@ -1243,6 +1331,7 @@ mod tests {
             sketch: None,
             entering: None,
             library: crate::templates::library(None),
+            keeping: None,
             picking: false,
             face: None,
         };
@@ -1366,6 +1455,42 @@ mod tests {
         assert_eq!(lengths, [&json!(100.0), &json!(7.0)], "{edit}");
         let sk = v.sketch.as_ref().unwrap();
         assert!(sk.draft.tool == Tool::Select && sk.field.is_none(), "Esc ends the command");
+    }
+
+    /// The whole plate kept in the library: its dimensions name w, h, pitch and hole, which the
+    /// dialog lists to be put in order; ⏶ moves one up. `DATUM_KEEP_SHOT=file.png` saves a picture.
+    #[test]
+    fn a_selection_kept_in_the_library() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.selected = ["bottom", "right", "top", "left", "axis", "left_hole", "right_hole"].iter().map(|n| Pick::Curve(n.to_string())).collect();
+        let element = sk.extract("Plate", Some(&sk.params)).unwrap();
+        let names = |e: &Json| e["parameters"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let first = names(&element);
+        assert_eq!(first.len(), 4, "w, h, pitch, hole: {element}");
+        v.keeping = Some(Keep { element, error: None });
+        let shot = std::env::var_os("DATUM_KEEP_SHOT");
+        let builder = egui_kittest::Harness::builder().with_size([520.0, 300.0]);
+        let builder = if shot.is_some() { builder.wgpu() } else { builder };
+        let mut h = builder.build_ui(|ui| v.keep(ui.ctx()));
+        h.run();
+        h.get_by_label("Parameters, in the order they are asked:");
+        if let Some(path) = shot {
+            h.render().unwrap().save(path).unwrap();
+        }
+        h.get_all_by_label("⏶").nth(1).unwrap().click();
+        h.run();
+        drop(h);
+        let now = names(&v.keeping.as_ref().unwrap().element);
+        assert_eq!((&now[0], &now[1]), (&first[1], &first[0]), "the second moved up");
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

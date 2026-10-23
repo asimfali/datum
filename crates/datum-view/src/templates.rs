@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use datum_math::expr::ExprError;
 use datum_model::library::{self, Anchor, Entry, Source};
-use serde_json::{Map, Value as Json, json};
+use serde_json::{Map, Value as Json};
 
 use crate::draw::{Draft, Patch, Snap, Spot};
 use crate::sketch::{Pick, SketchEdit};
@@ -116,71 +116,27 @@ pub fn place(
 }
 
 impl SketchEdit {
-    /// The selection as an element to paste: the curves picked with their points, the points
-    /// picked, and the constraints and reference dimensions among them; the point lowest and
-    /// leftmost is the anchor. Projections and the origin stay behind, and so does what ties to
-    /// them.
-    pub fn copy(&self) -> Option<Json> {
+    /// The selection as an element named `name`: the curves picked with their points, the
+    /// points picked, and the constraints and reference dimensions among them (see
+    /// [`library::extract`]). With `params`, the model's parameters its dimensions name become
+    /// the element's (to keep in the library); without, a copy to paste.
+    pub fn extract(&self, name: &str, params: Option<&BTreeMap<String, f64>>) -> Option<Json> {
         let p = self.placed.as_ref().ok()?;
-        let sketch = &self.json["sketch"];
-        let own = |n: &str| sketch["points"].get(n).is_some();
-        let mut names: Vec<String> = Vec::new();
-        let mut out = Map::new();
+        let (mut curves, mut points) = (Vec::new(), Vec::new());
         for pick in &self.selected {
             match pick {
-                Pick::Curve(n) => {
-                    for key in ["lines", "arcs", "circles"] {
-                        if let Some(v) = sketch[key].get(n) {
-                            let mut v = v.clone();
-                            let mut ends = Vec::new();
-                            datum_model::visit_names(&mut v, &mut |s| ends.push(s.clone()));
-                            if ends.iter().all(|e| own(e)) {
-                                out.entry(key).or_insert_with(|| json!({}))[n] = v;
-                                names.push(n.clone());
-                                names.extend(ends);
-                            }
-                        }
-                    }
-                }
-                Pick::Point(n) if own(n) => names.push(n.clone()),
+                Pick::Curve(n) => curves.push(n.clone()),
+                Pick::Point(n) => points.push(n.clone()),
                 _ => {}
             }
         }
-        names.sort();
-        names.dedup();
-        let points: Map<String, Json> =
-            names.iter().filter_map(|n| p.solved.points.get(n).filter(|_| own(n)).map(|v| (n.clone(), json!([v.x, v.y])))).collect();
-        if points.is_empty() {
-            return None;
-        }
-        // Constraints and measures whose names are all copied come along.
-        let within = |v: &Json| {
-            let mut v = v.clone();
-            let mut all = true;
-            datum_model::visit_names(&mut v, &mut |s| all &= names.contains(s));
-            all
-        };
-        let constraints: Vec<Json> = sketch["constraints"].as_array().into_iter().flatten().filter(|c| within(c)).cloned().collect();
-        let measures: Map<String, Json> =
-            sketch["measures"].as_object().into_iter().flatten().filter(|(_, v)| within(v)).map(|(n, v)| (n.clone(), v.clone())).collect();
-        let anchor = points
-            .iter()
-            .min_by(|a, b| {
-                let (pa, pb) = (point_of(a.1), point_of(b.1));
-                (pa[1], pa[0]).partial_cmp(&(pb[1], pb[0])).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(n, _)| n.clone())?;
-        out.insert("points".into(), Json::Object(points));
-        out.insert("constraints".into(), json!(constraints));
-        if !measures.is_empty() {
-            out.insert("measures".into(), Json::Object(measures));
-        }
-        Some(json!({"name": "Copy", "anchors": [anchor], "sketch": out}))
+        library::extract(&self.json, &p.solved.points, &curves, &points, name, params)
     }
-}
 
-fn point_of(v: &Json) -> [f64; 2] {
-    [v[0].as_f64().unwrap_or(0.0), v[1].as_f64().unwrap_or(0.0)]
+    /// The selection as an element to paste (Ctrl+C), its dimensions as they are.
+    pub fn copy(&self) -> Option<Json> {
+        self.extract("Copy", None)
+    }
 }
 
 #[cfg(test)]
@@ -193,6 +149,7 @@ mod tests {
     use super::*;
     use crate::draw::{Snap, Tool};
     use crate::sketch::Context;
+    use serde_json::json;
 
     fn editor(sketch: Json) -> SketchEdit {
         let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": sketch});
