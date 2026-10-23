@@ -50,6 +50,11 @@ pub struct Sketch {
     /// Reference dimensions by name: measured on the solved sketch, they constrain nothing.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub measures: BTreeMap<String, Measure>,
+    /// Groups by name: sets of the sketch's points, lines, arcs and circles, to name together
+    /// (a pattern's cell, a path). Only a union: they hold nothing, may share elements, hold no
+    /// groups. A group's name is no element's.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub groups: BTreeMap<String, Vec<String>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]

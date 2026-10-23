@@ -13,8 +13,11 @@ impl SketchPatch {
     /// A patch to sketch feature `feature` (its JSON: `sketch` and `project`).
     pub fn new(feature: &Value) -> Self {
         let sketch = &feature["sketch"];
-        let mut taken: Vec<String> =
-            ["points", "lines", "arcs", "circles", "measures"].iter().filter_map(|k| sketch[k].as_object()).flat_map(|m| m.keys().cloned()).collect();
+        let mut taken: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups"]
+            .iter()
+            .filter_map(|k| sketch[k].as_object())
+            .flat_map(|m| m.keys().cloned())
+            .collect();
         taken.extend(feature["project"].as_object().into_iter().flat_map(|m| m.keys().cloned()));
         Self { taken, params: Map::new() }
     }

@@ -139,17 +139,18 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "edit_sketch",
-        description: "Change part of a sketch feature `name` without rewriting it. `points`, `lines`, `arcs`, `circles`, `measures` \
-                      and `project` are merged by name: an entry replaces the one of that name, null removes it, and with it \
+        description: "Change part of a sketch feature `name` without rewriting it. `points`, `lines`, `arcs`, `circles`, `measures`, \
+                      `groups` and `project` are merged by name: an entry replaces the one of that name, null removes it, and with it \
                       whatever refers to it (the lines through a removed point, the constraints and dimensions naming either: \
-                      listed in `also_removed`). `add_constraints` appends constraints; `remove_constraints` removes those equal \
+                      listed in `also_removed`; a removed element leaves its groups, and a group left empty goes). A group is a \
+                      list of element names (`{\"cell\": [\"h1\", \"h2\"]}`): only a union, removing it removes no element. `add_constraints` appends constraints; `remove_constraints` removes those equal \
                       to the ones given (as `inspect` lists them).",
         params: || {
             let map = json!({"type": "object", "additionalProperties": true});
             let list = json!({"type": "array", "items": {"type": "object"}});
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
-                "points": map, "lines": map, "arcs": map, "circles": map, "measures": map, "project": map,
+                "points": map, "lines": map, "arcs": map, "circles": map, "measures": map, "groups": map, "project": map,
                 "add_constraints": list, "remove_constraints": list
             }, "required": ["name"], "additionalProperties": false})
         },
@@ -344,8 +345,8 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "rename_in_sketch",
-        description: "Rename a point, line, arc, circle, reference dimension or projection of sketch feature `name` from `from` to \
-                      `to`, everywhere it is used: the sketch's constraints, a sheet's `start`. Names of faces made from the sketch \
+        description: "Rename a point, line, arc, circle, reference dimension, group or projection of sketch feature `name` from `from` \
+                      to `to`, everywhere it is used: the sketch's constraints and groups, a sheet's `start`. Names of faces made from the sketch \
                       change with it; faces, edges and vertices referred to downstream by ID are found again by their geometry, \
                       which a rename leaves as it was. The reply lists references it could not find again.",
         params: || {
@@ -627,7 +628,7 @@ impl Session {
         let Ok(Value::Object(mut op)) = serde_json::to_value(&self.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
         let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or_else(|| format!("`{feature}` is not a sketch"))?;
         // The names a sketch defines: its elements', its projections' and their points'.
-        let mut defined: Vec<String> = ["points", "lines", "arcs", "circles", "measures"]
+        let mut defined: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups"]
             .iter()
             .filter_map(|k| sketch.get(*k).and_then(Value::as_object))
             .flat_map(|m| m.keys().cloned())
@@ -823,7 +824,7 @@ fn rename_names(op: &mut Map<String, Value>, renamed: &impl Fn(&str) -> Option<S
     }
     if let Some(sketch) = op.get_mut("sketch") {
         if let Some(sk) = sketch.as_object_mut() {
-            for key in ["points", "lines", "arcs", "circles", "measures"] {
+            for key in ["points", "lines", "arcs", "circles", "measures", "groups"] {
                 if let Some(m) = sk.get_mut(key) {
                     rekey(m);
                 }
@@ -935,7 +936,7 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     let removed_in = |key: &str| -> Vec<String> {
         p.get(key).and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.is_null()).map(|(n, _)| n.clone()).collect()).unwrap_or_default()
     };
-    let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures"].iter().flat_map(|k| removed_in(k)).collect();
+    let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups"].iter().flat_map(|k| removed_in(k)).collect();
     let projections = removed_in("project");
     gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
     merge(op, "project", p.get("project"))?;
@@ -950,7 +951,7 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
         let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
         constraints.remove(k);
     }
-    for key in ["points", "lines", "arcs", "circles", "measures"] {
+    for key in ["points", "lines", "arcs", "circles", "measures", "groups"] {
         merge(sketch, key, p.get(key))?;
     }
     let mut also = Vec::new();
@@ -969,6 +970,20 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
                 also.push(format!("{key}: {n}"));
                 gone.push(n);
             }
+        }
+    }
+    // Groups lose what was removed; one left empty goes.
+    if let Some(groups) = sketch.get_mut("groups").and_then(Value::as_object_mut) {
+        for members in groups.values_mut().filter_map(Value::as_array_mut) {
+            members.retain(|n| !n.as_str().is_some_and(|n| gone.iter().any(|g| g == n)));
+        }
+        let empty: Vec<String> = groups.iter().filter(|(_, m)| m.as_array().is_some_and(Vec::is_empty)).map(|(n, _)| n.clone()).collect();
+        for n in empty {
+            groups.remove(&n);
+            also.push(format!("groups: {n}"));
+        }
+        if groups.is_empty() {
+            sketch.remove("groups");
         }
     }
     if let Some(c) = sketch.get_mut("constraints").and_then(Value::as_array_mut) {
