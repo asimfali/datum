@@ -441,7 +441,14 @@ impl Viewer {
             return;
         };
         ui.weak(format!("Datum {} · problems are logged to {}", env!("CARGO_PKG_VERSION"), crate::log::path().display()));
-        ui.weak(format!("Actions, for an agent to read: {}", crate::log::actions_path().display()));
+        let mut on = crate::log::recording();
+        let hint = "Every command you run, as a line an agent can read and repeat; begun anew each time. Off by default: models may be confidential";
+        if ui.checkbox(&mut on, "Record actions for an agent").on_hover_text(hint).changed() {
+            crate::log::record(on);
+        }
+        if on {
+            ui.weak(format!("Recording to {}", crate::log::actions_path().display()));
+        }
         if let Some(e) = &m.error {
             ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
         }
