@@ -95,8 +95,12 @@ pub struct Draft {
     pub typed: Option<(Json, f64)>,
     /// Dimension tool: what is picked so far.
     pub picks: Vec<crate::dims::Pick2>,
-    /// Template tool: the library element placed.
+    /// Template tool: the library element placed, the preset chosen, the parameter values
+    /// typed (by name), and the parameter the field by the cursor asks.
     pub template: Option<Json>,
+    pub preset: Option<String>,
+    pub answers: Map<String, Json>,
+    pub asking: usize,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
     /// Where the cursor would click, and the inferred constraint of a line.
@@ -119,6 +123,9 @@ impl Default for Draft {
             typed: None,
             picks: Vec::new(),
             template: None,
+            preset: None,
+            answers: Map::new(),
+            asking: 0,
             tangent: false,
             cursor: None,
             lean: None,
@@ -167,6 +174,33 @@ impl Draft {
         self.tangent = false;
         self.typed = None;
         busy
+    }
+
+    /// Starts placing library element `t`: no preset, nothing typed yet.
+    pub fn choose(&mut self, t: Json) {
+        self.cancel();
+        self.tool = Tool::Template;
+        self.template = Some(t);
+        self.preset = None;
+        self.answers.clear();
+        self.asking = 0;
+    }
+
+    /// Enter while placing an element: it goes where the cursor is, with the anchors clicked so
+    /// far; the size its other anchors would give, its parameters give.
+    pub fn enter(&mut self, edit: &SketchEdit) -> Option<Map<String, Json>> {
+        let spot = self.cursor.clone().filter(|_| self.tool == Tool::Template)?;
+        let mut patch = Patch::new(edit);
+        self.place(&mut patch, edit, spot)?;
+        patch.done()
+    }
+
+    /// The element placed by the clicks so far and `spot`. The values typed stay for the next.
+    fn place(&mut self, patch: &mut Patch, edit: &SketchEdit, spot: Spot) -> Option<()> {
+        let t = self.template.clone()?;
+        let mut spots = std::mem::take(&mut self.clicks);
+        spots.push(spot);
+        crate::templates::place(patch, &t, self.preset.as_deref(), &self.answers, &spots, self.construction, &edit.params)
     }
 
     /// Whether a value typed now would size what is being drawn: a line from the chain's end,
@@ -348,14 +382,11 @@ impl Draft {
         match self.tool {
             Tool::Select | Tool::Dimension => return None,
             Tool::Template => {
-                let t = self.template.clone()?;
-                if self.clicks.len() + 1 < datum_model::library::anchors(&t).len() {
+                if self.clicks.len() + 1 < datum_model::library::anchors(self.template.as_ref()?).len() {
                     self.clicks.push(spot);
                     return None;
                 }
-                let mut spots = std::mem::take(&mut self.clicks);
-                spots.push(spot);
-                crate::templates::place(&mut patch, &t, &spots, self.construction)?;
+                self.place(&mut patch, edit, spot)?;
             }
             Tool::Point => {
                 // A point already there needs no other; a vertex of the face is projected.
@@ -511,7 +542,7 @@ impl Draft {
             (Tool::Template, _, clicks) => {
                 if let Some(t) = &self.template {
                     let at: Vec<[f64; 2]> = clicks.iter().map(|c| c.at).chain([spot.at]).collect();
-                    for line in crate::templates::outline(t, &at) {
+                    for line in crate::templates::outline(t, self.preset.as_deref(), &self.answers, &at, &edit.params) {
                         polyline(line);
                     }
                 }

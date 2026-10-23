@@ -6,10 +6,11 @@
 
 use std::collections::BTreeMap;
 
+use datum_math::expr::ExprError;
 use datum_model::library::{self, Anchor, Entry, Source};
 use serde_json::{Map, Value as Json, json};
 
-use crate::draw::{Patch, Snap, Spot};
+use crate::draw::{Draft, Patch, Snap, Spot};
 use crate::sketch::{Pick, SketchEdit};
 
 /// The sketch elements for the model at `model`: built in, beside the program, in its project.
@@ -31,17 +32,22 @@ pub fn source(e: &Entry) -> &'static str {
     }
 }
 
-/// The polylines of element `t` placed by clicks `at`: its lines, arcs and circles.
-pub fn outline(t: &Json, at: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
-    let Some(place) = library::placement(t, at) else { return Vec::new() };
-    let sketch = &t["sketch"];
-    let pt = |n: &Json| {
-        let p = &sketch["points"][n.as_str()?];
-        Some(place.map([p[0].as_f64()?, p[1].as_f64()?]))
-    };
+/// The model's parameter values, for expressions in answers.
+fn lookup(params: &BTreeMap<String, f64>) -> impl Fn(&str) -> Result<f64, ExprError> + '_ {
+    |n: &str| params.get(n).copied().ok_or_else(|| ExprError::Unknown(n.to_string()))
+}
+
+/// The polylines of element `t` placed by clicks `at` with the parameter values of `preset` and
+/// `given` (the clicks answering the rest, D98): its lines, arcs and circles as it will be, or
+/// as drawn where it does not solve alone.
+pub fn outline(t: &Json, preset: Option<&str>, given: &Map<String, Json>, at: &[[f64; 2]], params: &BTreeMap<String, f64>) -> Vec<Vec<[f64; 2]>> {
+    let lookup = lookup(params);
+    let Ok(values) = library::answers(t, preset, given, at, &lookup) else { return Vec::new() };
+    let Ok(s) = library::shape(t, &values, at, &lookup).or_else(|_| library::placed(t, &values, at, &lookup)) else { return Vec::new() };
+    let pt = |n: &str| s.points.get(n).map(|q| [q.x, q.y]);
     let mut out = Vec::new();
-    for l in sketch["lines"].as_object().into_iter().flat_map(|m| m.values()) {
-        if let (Some(a), Some(b)) = (pt(&l["from"]), pt(&l["to"])) {
+    for l in s.lines.values() {
+        if let (Some(a), Some(b)) = (pt(&l.from), pt(&l.to)) {
             out.push(vec![a, b]);
         }
     }
@@ -51,27 +57,48 @@ pub fn outline(t: &Json, at: &[[f64; 2]]) -> Vec<Vec<[f64; 2]>> {
             [c[0] + r * co, c[1] + r * s]
         })
     };
-    for a in sketch["arcs"].as_object().into_iter().flat_map(|m| m.values()) {
-        if let (Some(c), Some(f), Some(e)) = (pt(&a["center"]), pt(&a["from"]), pt(&a["to"])) {
+    for a in s.arcs.values() {
+        if let (Some(c), Some(f), Some(e)) = (pt(&a.center), pt(&a.from), pt(&a.to)) {
             let start = libm::atan2(f[1] - c[1], f[0] - c[0]);
             let sweep = (libm::atan2(e[1] - c[1], e[0] - c[0]) - start).rem_euclid(std::f64::consts::TAU);
             out.push(ring(c, libm::hypot(f[0] - c[0], f[1] - c[1]), start, sweep).collect());
         }
     }
-    for k in sketch["circles"].as_object().into_iter().flat_map(|m| m.values()) {
-        if let (Some(c), Some(d)) = (pt(&k["center"]), k["diameter"].as_f64()) {
-            out.push(ring(c, 0.5 * d * place.scale(), 0.0, std::f64::consts::TAU).collect());
+    for k in s.circles.values() {
+        if let (Some(c), Some(d)) = (pt(&k.center), k.diameter.value()) {
+            out.push(ring(c, 0.5 * d, 0.0, std::f64::consts::TAU).collect());
         }
     }
     out
 }
 
-/// Places element `t` with its own parameter values by `spots` (one per anchor) into `patch`.
-/// An anchor clicked on a point of the sketch is made coincident with it; on a vertex of the
-/// face, with its projection; on a middle, a curve or an edge, held there as any click is.
-pub fn place(patch: &mut Patch, t: &Json, spots: &[Spot], construction: bool) -> Option<()> {
-    let values = library::values(t, None, &Map::new()).ok()?;
-    let at: Vec<Anchor> = spots
+/// The value parameter `name` of the element being placed has now, as the field shows it: typed,
+/// else the preset's, else the element's own.
+pub fn asked(draft: &Draft, name: &str, params: &BTreeMap<String, f64>) -> String {
+    let Some(t) = &draft.template else { return String::new() };
+    library::answers(t, draft.preset.as_deref(), &draft.answers, &[], &lookup(params))
+        .ok()
+        .and_then(|v| v.get(name).map(crate::dims::text_of))
+        .unwrap_or_default()
+}
+
+/// Places element `t` by `spots` (a spot for its first anchor or for each) into `patch`, with
+/// the parameter values of `preset` and `given`, the clicks answering the rest. An anchor
+/// clicked on a point of the sketch is made coincident with it; on a vertex of the face, with
+/// its projection; on a middle, a curve or an edge, held there as any click is.
+pub fn place(
+    patch: &mut Patch,
+    t: &Json,
+    preset: Option<&str>,
+    given: &Map<String, Json>,
+    spots: &[Spot],
+    construction: bool,
+    params: &BTreeMap<String, f64>,
+) -> Option<()> {
+    let lookup = lookup(params);
+    let at: Vec<[f64; 2]> = spots.iter().map(|s| s.at).collect();
+    let values = library::answers(t, preset, given, &at, &lookup).ok()?;
+    let anchors: Vec<Anchor> = spots
         .iter()
         .map(|s| Anchor {
             at: s.at,
@@ -81,7 +108,7 @@ pub fn place(patch: &mut Patch, t: &Json, spots: &[Spot], construction: bool) ->
             },
         })
         .collect();
-    let renamed = library::place(patch, t, &values, &at, &BTreeMap::new(), construction).ok()?;
+    let renamed = library::place(patch, t, &values, &anchors, &BTreeMap::new(), construction, &lookup).ok()?;
     for (a, s) in library::anchors(t).iter().zip(spots) {
         patch.tie(&renamed[a], s);
     }
@@ -176,6 +203,7 @@ mod tests {
     fn place_by(e: &mut SketchEdit, t: Json, spots: &[Spot]) -> Json {
         e.draft.tool = Tool::Template;
         e.draft.template = Some(t);
+        e.draft.clicks.clear();
         let mut patch = None;
         for s in spots {
             e.draft.cursor = Some(s.clone());
@@ -215,7 +243,7 @@ mod tests {
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
-        assert_eq!(outline(&library(None)[1].element, &[[0.0, 0.0], [12.0, 7.0]]).len(), 6);
+        assert_eq!(outline(&library(None)[1].element, None, &Map::new(), &[[0.0, 0.0], [12.0, 7.0]], &BTreeMap::new()).len(), 6);
     }
 
     #[test]
@@ -269,5 +297,55 @@ mod tests {
         assert_eq!(corners, ["[30.0,0.0]", "[30.0,4.0]", "[40.0,0.0]", "[40.0,4.0]"], "moved by the click: {p}");
         assert!(p["add_constraints"].as_array().unwrap().contains(&json!({"type": "length", "line": "l5", "value": 10})), "{p}");
         assert_eq!(e.placed.as_ref().unwrap().solved.dof, 6, "two rectangles, each 10 wide");
+    }
+
+    /// A plate with its width and height as parameters, a preset, two corners as anchors.
+    fn plate() -> Json {
+        json!({"name": "Plate", "anchors": ["a", "c"],
+            "parameters": [{"name": "width", "value": 100}, {"name": "height", "value": 50}],
+            "presets": {"Small": {"width": 20, "height": 10}},
+            "sketch": {"points": {"a": [0, 0], "b": [1, 0], "c": [1, 1], "d": [0, 1]},
+                       "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+                       "constraints": [{"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"},
+                                       {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
+                                       {"type": "length", "line": "bottom", "value": "width"}, {"type": "length", "line": "left", "value": "height"}]}})
+    }
+
+    fn lengths(p: &Json) -> Vec<Json> {
+        p["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| c["value"].clone()).collect()
+    }
+
+    /// One stream of input: the field asks the parameters (typed, else the preset's, else the
+    /// element's), Enter puts the element where the cursor is.
+    #[test]
+    fn parameters_typed_then_enter() {
+        let mut e = editor(json!({"points": {}}));
+        e.draft.choose(plate());
+        assert_eq!(asked(&e.draft, "width", &e.params), "100");
+        e.draft.preset = Some("Small".into());
+        e.draft.answers.insert("height".into(), json!("h + 1"));
+        e.params.insert("h".into(), 4.0);
+        assert_eq!((asked(&e.draft, "width", &e.params), asked(&e.draft, "height", &e.params)), ("20".into(), "h + 1".into()));
+        e.draft.cursor = Some(free([3.0, 4.0]));
+        let mut d = std::mem::take(&mut e.draft);
+        let patch = d.enter(&e).unwrap();
+        e.draft = d;
+        let p = e.apply(patch);
+        assert_eq!(lengths(&p), [json!(20.0), json!("(h + 1)")], "{p}");
+        assert!(e.draft.answers.contains_key("height"), "the values stay for the next one");
+        let placed = e.placed.as_ref().unwrap();
+        assert_eq!(placed.solved.dof, 2, "sized, free to move: {:?}", placed.solved.free);
+    }
+
+    /// Two clicks answer what is not typed: the width between them, the height as typed.
+    #[test]
+    fn clicks_answer_the_rest() {
+        let mut e = editor(json!({"points": {}}));
+        e.draft.choose(plate());
+        e.draft.answers.insert("height".into(), json!(5));
+        let t = e.draft.template.clone().unwrap();
+        let p = place_by(&mut e, t, &[free([0.0, 0.0]), free([30.0, 20.0])]);
+        let l = lengths(&p);
+        assert!((l[0].as_f64().unwrap() - 30.0).abs() < 1e-9 && l[1] == json!(5.0), "{p}");
     }
 }

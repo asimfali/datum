@@ -17,7 +17,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use datum_math::Vec2;
 use datum_math::expr::{ExprError, eval, substitute, valid_name};
+use datum_sketch::{Constraint, Sketch};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -123,7 +125,7 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
     if !e["name"].as_str().is_some_and(|n| !n.is_empty()) {
         return Err("an element needs a `name`".into());
     }
-    let sketch: datum_sketch::Sketch = serde_json::from_value(e["sketch"].clone()).map_err(|err| format!("`sketch`: {err}"))?;
+    let sketch: Sketch = serde_json::from_value(e["sketch"].clone()).map_err(|err| format!("`sketch`: {err}"))?;
     let anchors = anchors(e);
     if anchors.is_empty() || anchors.len() > 2 {
         return Err("`anchors`: one or two of its points".into());
@@ -152,7 +154,7 @@ pub fn anchors(e: &Value) -> Vec<String> {
 }
 
 /// The parameters' names, in the order they are asked.
-fn parameter_names(e: &Value) -> Result<Vec<String>, String> {
+pub fn parameter_names(e: &Value) -> Result<Vec<String>, String> {
     let mut names: Vec<String> = Vec::new();
     for p in e.get("parameters").and_then(Value::as_array).into_iter().flatten() {
         let n = p["name"].as_str().filter(|n| valid_name(n)).ok_or_else(|| format!("parameter {p}: `name` must be a name"))?;
@@ -167,9 +169,19 @@ fn parameter_names(e: &Value) -> Result<Vec<String>, String> {
     Ok(names)
 }
 
-/// The value of every parameter: the element's own, over it the preset's, over that the
-/// answers. Each is a number or an expression (of the model's parameters, or of the element's).
-pub fn values(e: &Value, preset: Option<&str>, answers: &Map<String, Value>) -> Result<BTreeMap<String, Value>, String> {
+/// The value of every parameter for placing element `e` by `at` (a spot per anchor given): the
+/// element's own, over them the preset's, over those `given`. With both anchors' spots of a
+/// stretched element, a parameter neither given nor in the preset that a dimension holds alone
+/// (`"value": "width"`) is what the spots make it, measured (D98: clicks answer the same
+/// questions). Each is a number
+/// or an expression; `lookup` gives the model's parameter values.
+pub fn answers(
+    e: &Value,
+    preset: Option<&str>,
+    given: &Map<String, Value>,
+    at: &[[f64; 2]],
+    lookup: &impl Fn(&str) -> Result<f64, ExprError>,
+) -> Result<BTreeMap<String, Value>, String> {
     let mut out: BTreeMap<String, Value> = BTreeMap::new();
     for p in e.get("parameters").and_then(Value::as_array).into_iter().flatten() {
         if let Some(n) = p["name"].as_str() {
@@ -180,14 +192,34 @@ pub fn values(e: &Value, preset: Option<&str>, answers: &Map<String, Value>) -> 
         Some(name) => Some(e["presets"].get(name).and_then(Value::as_object).ok_or_else(|| format!("no preset `{name}`"))?),
         None => None,
     };
-    for (n, v) in preset.into_iter().flatten().chain(answers) {
+    let mut open: Vec<String> = out.keys().cloned().collect();
+    for (n, v) in preset.into_iter().flatten().chain(given) {
         let slot = out.get_mut(n).ok_or_else(|| format!("no parameter `{n}`"))?;
         if !(v.is_number() || v.is_string()) {
             return Err(format!("parameter `{n}`: a number or an expression"));
         }
         *slot = v.clone();
+        open.retain(|o| o != n);
+    }
+    // Spots answer only by stretching: an aligned element's second spot is where it joins.
+    if at.len() < 2 || anchors(e).len() < 2 || e["fit"] == "align" {
+        return Ok(out);
+    }
+    let held: Vec<String> = open.into_iter().filter(|n| dimensions(e).any(|v| v.as_str().is_some_and(|t| t.trim() == n))).collect();
+    if !held.is_empty() {
+        let (_, solved) = solve_placed(e, &out, at, &held, lookup)?;
+        for n in held {
+            if let Some(v) = solved.measures.get(&n) {
+                out.insert(n, json!(v));
+            }
+        }
     }
     Ok(out)
+}
+
+/// The values of the element's dimensions, as given in it.
+fn dimensions(e: &Value) -> impl Iterator<Item = &Value> {
+    e["sketch"]["constraints"].as_array().into_iter().flatten().filter_map(|c| c.get("value").or_else(|| c.get("degrees")))
 }
 
 /// `value` (a dimension's: a number, or an expression of the element's parameters) with the
@@ -277,10 +309,105 @@ pub struct Anchor {
     pub point: Option<String>,
 }
 
-/// Places element `e` into `patch` with parameter values `values` (see [`values`]) by `at`, a
-/// spot for its first anchor or for each. Its elements take the names `names` gives them
-/// (element name → name in the sketch, free), the others new ones. Returns every element name
-/// with the name it got.
+/// The element's sketch placed by `at` with parameter values `values` put in: its points moved,
+/// diameters given as numbers scaled, dimensions' values resolved; the dimensions held by a
+/// parameter in `measure` become reference dimensions named by it.
+fn placed_sketch(e: &Value, values: &BTreeMap<String, Value>, at: &[[f64; 2]], measure: &[String]) -> Result<Value, String> {
+    let place = placement(e, at).ok_or("the element has no anchor point")?;
+    let mut sketch = e["sketch"].clone();
+    let mapped = |q: &Value| -> Option<[f64; 2]> { Some(place.map([q.get(0)?.as_f64()?, q.get(1)?.as_f64()?])) };
+    for q in sketch.get_mut("points").and_then(Value::as_object_mut).into_iter().flat_map(|m| m.values_mut()) {
+        *q = json!(mapped(q).ok_or("a point is not [x, y]")?);
+    }
+    for c in sketch.get_mut("circles").and_then(Value::as_object_mut).into_iter().flat_map(|m| m.values_mut()) {
+        // A circle keeps its shape: a diameter given as a number scales with the placement.
+        c["diameter"] = match c["diameter"].as_f64() {
+            Some(d) => json!(d * place.scale()),
+            None => resolve(&c["diameter"], values)?,
+        };
+    }
+    let mut constraints = Vec::new();
+    for mut c in sketch.get("constraints").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let key = ["value", "degrees"].into_iter().find(|k| c.get(*k).is_some());
+        if let Some(k) = key {
+            if let Some(n) = c[k].as_str().map(str::trim).filter(|t| measure.iter().any(|m| m == t)) {
+                let n = n.to_string();
+                let mut m = c.clone();
+                if let Some(o) = m.as_object_mut() {
+                    o.remove(k);
+                }
+                sketch["measures"][n.as_str()] = m;
+                continue;
+            }
+            c[k] = resolve(&c[k], values)?;
+        }
+        if let Some(q) = c.get("at").and_then(mapped) {
+            c["at"] = json!(q);
+        }
+        constraints.push(c);
+    }
+    sketch["constraints"] = json!(constraints);
+    Ok(sketch)
+}
+
+/// The element placed by `at` with parameter values `values` put in (see [`placed_sketch`]),
+/// every value a number: the model's parameters from `lookup`. Not solved.
+fn placed_with(
+    e: &Value,
+    values: &BTreeMap<String, Value>,
+    at: &[[f64; 2]],
+    measure: &[String],
+    lookup: &impl Fn(&str) -> Result<f64, ExprError>,
+) -> Result<Sketch, String> {
+    let sketch: Sketch = serde_json::from_value(placed_sketch(e, values, at, measure)?).map_err(|e| e.to_string())?;
+    sketch.resolve(lookup)
+}
+
+/// The placed element solved on its own, its first anchor held at the first spot.
+fn solve_placed(
+    e: &Value,
+    values: &BTreeMap<String, Value>,
+    at: &[[f64; 2]],
+    measure: &[String],
+    lookup: &impl Fn(&str) -> Result<f64, ExprError>,
+) -> Result<(Sketch, datum_sketch::Solved), String> {
+    let mut sketch = placed_with(e, values, at, measure, lookup)?;
+    let first = anchors(e).into_iter().next().ok_or("the element has no anchor")?;
+    let q = at.first().ok_or("no spot for the anchor")?;
+    sketch.constraints.push(Constraint::Fix { point: first, at: Some(Vec2::new(q[0], q[1])) });
+    let solved = datum_sketch::solve(&sketch).map_err(|e| e.to_string())?;
+    Ok((sketch, solved))
+}
+
+/// Element `e` placed by `at` with parameter values `values` (see [`answers`]), every value a
+/// number, as drawn: not solved. What a preview shows where [`shape`] fails.
+pub fn placed(
+    e: &Value,
+    values: &BTreeMap<String, Value>,
+    at: &[[f64; 2]],
+    lookup: &impl Fn(&str) -> Result<f64, ExprError>,
+) -> Result<Sketch, String> {
+    placed_with(e, values, at, &[], lookup)
+}
+
+/// Element `e` placed as [`placed`], solved on its own with its first anchor held at the first
+/// spot: what a preview shows, and where [`place`] puts its points.
+pub fn shape(
+    e: &Value,
+    values: &BTreeMap<String, Value>,
+    at: &[[f64; 2]],
+    lookup: &impl Fn(&str) -> Result<f64, ExprError>,
+) -> Result<Sketch, String> {
+    let (mut sketch, solved) = solve_placed(e, values, at, &[], lookup)?;
+    sketch.points = solved.points;
+    Ok(sketch)
+}
+
+/// Places element `e` into `patch` with parameter values `values` (see [`answers`]) by `at`, a
+/// spot for its first anchor or for each. Its points start where [`shape`] puts them (where
+/// the element alone does not solve, where the spots put them). Its elements take the names
+/// `names` gives them (element name → name in the sketch, free), the others new ones. Returns
+/// every element name with the name it got.
 pub fn place(
     patch: &mut SketchPatch,
     e: &Value,
@@ -288,14 +415,15 @@ pub fn place(
     at: &[Anchor],
     names: &BTreeMap<String, String>,
     construction: bool,
+    lookup: &impl Fn(&str) -> Result<f64, ExprError>,
 ) -> Result<BTreeMap<String, String>, String> {
     let anchor_names = anchors(e);
     if at.is_empty() || at.len() > anchor_names.len() {
         return Err(format!("`at`: a spot for the first anchor or for each of its {}", anchor_names.len()));
     }
     let spots: Vec<[f64; 2]> = at.iter().map(|a| a.at).collect();
-    let place = placement(e, &spots).ok_or("the element has no anchor point")?;
-    let sketch = &e["sketch"];
+    let sketch = placed_sketch(e, values, &spots, &[])?;
+    let solved = shape(e, values, &spots, lookup).ok().map(|s| s.points);
     if let Some(n) = names.keys().find(|n| !["points", "lines", "arcs", "circles", "measures"].iter().any(|k| sketch[*k].get(n.as_str()).is_some())) {
         return Err(format!("`names`: the element has no `{n}`"));
     }
@@ -321,9 +449,9 @@ pub fn place(
         });
         v
     };
-    for (n, p) in sketch["points"].as_object().into_iter().flatten() {
-        let q = place.map([p[0].as_f64().unwrap_or_default(), p[1].as_f64().unwrap_or_default()]);
-        patch.set("points", &renamed[n], json!(q));
+    for (n, q) in sketch["points"].as_object().into_iter().flatten() {
+        let q = solved.as_ref().and_then(|s| s.get(n)).map_or_else(|| q.clone(), |q| json!([q.x, q.y]));
+        patch.set("points", &renamed[n], q);
     }
     for (a, spot) in anchor_names.iter().zip(at) {
         if let Some(p) = &spot.point {
@@ -332,30 +460,14 @@ pub fn place(
     }
     for key in ["lines", "arcs", "circles"] {
         for (n, v) in sketch[key].as_object().into_iter().flatten() {
-            let mut v = rename(v);
-            // A circle keeps its shape: a diameter given as a number scales with the placement.
-            if let Some(d) = v["diameter"].as_f64() {
-                v["diameter"] = json!(d * place.scale());
-            } else if v["diameter"].is_string() {
-                v["diameter"] = resolve(&v["diameter"], values)?;
-            }
-            patch.add(key, &renamed[n], v, construction);
+            patch.add(key, &renamed[n], rename(v), construction);
         }
     }
     for (n, v) in sketch["measures"].as_object().into_iter().flatten() {
         patch.set("measures", &renamed[n], rename(v));
     }
     for c in sketch["constraints"].as_array().into_iter().flatten() {
-        let mut c = rename(c);
-        for k in ["value", "degrees"] {
-            if c.get(k).is_some() {
-                c[k] = resolve(&c[k], values)?;
-            }
-        }
-        if let Some(q) = c["at"].as_array().and_then(|q| Some([q.first()?.as_f64()?, q.get(1)?.as_f64()?])) {
-            c["at"] = json!(place.map(q));
-        }
-        patch.constrain(c);
+        patch.constrain(rename(c));
     }
     Ok(renamed)
 }
@@ -364,6 +476,10 @@ pub fn place(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    fn none(n: &str) -> Result<f64, ExprError> {
+        Err(ExprError::Unknown(n.to_string()))
+    }
 
     /// A slot-like piece: a line whose length is a parameter, the other derived from it.
     fn element() -> Value {
@@ -391,17 +507,17 @@ mod tests {
     #[test]
     fn answers_go_into_the_dimensions() {
         let e = element();
-        let v = values(&e, None, &Map::new()).unwrap();
+        let v = answers(&e, None, &Map::new(), &[], &none).unwrap();
         assert_eq!(resolve(&json!("len"), &v).unwrap(), json!(40.0));
         assert_eq!(resolve(&json!("half"), &v).unwrap(), json!(20.0), "a parameter of another");
-        let v = values(&e, Some("short"), &Map::new()).unwrap();
+        let v = answers(&e, Some("short"), &Map::new(), &[], &none).unwrap();
         assert_eq!(resolve(&json!("half"), &v).unwrap(), json!(5.0));
         // An answer of the model's parameters stays an expression of them.
-        let answers = json!({"len": "w - 2*gap"});
-        let v = values(&e, Some("short"), answers.as_object().unwrap()).unwrap();
+        let given = json!({"len": "w - 2*gap"});
+        let v = answers(&e, Some("short"), given.as_object().unwrap(), &[], &none).unwrap();
         assert_eq!(resolve(&json!("2 * len"), &v).unwrap(), json!("2 * (w - 2*gap)"));
         assert_eq!(resolve(&json!("half"), &v).unwrap(), json!("((w - 2*gap) / 2)"));
-        assert!(values(&e, Some("long"), &Map::new()).is_err());
+        assert!(answers(&e, Some("long"), &Map::new(), &[], &none).is_err());
         let looped = BTreeMap::from([("x".to_string(), json!("y + 1")), ("y".to_string(), json!("x"))]);
         assert!(resolve(&json!("x"), &looped).unwrap_err().contains("depend on themselves"));
     }
@@ -413,19 +529,44 @@ mod tests {
         let feature = json!({"sketch": {"points": {"p1": [0, 0], "p2": [0, 10], "p4": [6, 18]}, "lines": {"l1": {"from": "p1", "to": "p2"}}}});
         let mut patch = SketchPatch::new(&feature);
         let e = element();
-        let v = values(&e, None, &Map::new()).unwrap();
+        let v = answers(&e, None, &Map::new(), &[], &none).unwrap();
         let at = [Anchor { at: [0.0, 10.0], point: Some("p2".into()) }, Anchor { at: [6.0, 18.0], point: Some("p4".into()) }];
         let names = BTreeMap::from([("bar".to_string(), "l3".to_string())]);
-        let renamed = place(&mut patch, &e, &v, &at, &names, false).unwrap();
+        let renamed = place(&mut patch, &e, &v, &at, &names, false, &none).unwrap();
         assert_eq!(renamed["bar"], "l3", "named as asked");
         assert_eq!((renamed["a"].as_str(), renamed["b"].as_str(), renamed["m"].as_str()), ("p5", "p6", "p7"));
         let p = Value::Object(patch.done().unwrap());
-        assert_eq!(p["points"]["p6"], json!([6.0, 18.0]));
-        assert_eq!(p["points"]["p7"], json!([3.0, 14.0]), "halfway, turned along p2 → p4");
+        let near = |n: &str, q: [f64; 2]| (p["points"][n][0].as_f64().unwrap() - q[0]).hypot(p["points"][n][1].as_f64().unwrap() - q[1]) < 1e-9;
+        assert!(near("p6", [24.0, 42.0]), "40 long, as its dimension says, turned along p2 → p4: {p}");
+        assert!(near("p7", [12.0, 26.0]), "halfway: {p}");
         let c = p["add_constraints"].as_array().unwrap();
         assert!(c.contains(&json!({"type": "coincident", "points": ["p5", "p2"]})), "{p}");
         assert!(c.contains(&json!({"type": "length", "line": "l3", "value": 40.0})), "{p}");
         let mut again = SketchPatch::new(&json!({"sketch": {"points": {"p1": [0, 0]}, "lines": {"l3": {"from": "p1", "to": "p1"}}}}));
-        assert!(place(&mut again, &e, &v, &at, &names, false).unwrap_err().contains("`l3` is taken"));
+        assert!(place(&mut again, &e, &v, &at, &names, false, &none).unwrap_err().contains("`l3` is taken"));
+    }
+
+    /// A rectangle with its width and height as parameters, by two corners: what is typed holds,
+    /// what is not comes from the clicks.
+    #[test]
+    fn clicks_answer_what_is_not_typed() {
+        let e = json!({"name": "Plate", "anchors": ["a", "c"],
+            "parameters": [{"name": "width", "value": 100}, {"name": "height", "value": 50}],
+            "sketch": {"points": {"a": [0, 0], "b": [1, 0], "c": [1, 1], "d": [0, 1]},
+                       "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+                       "constraints": [{"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"},
+                                       {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
+                                       {"type": "length", "line": "bottom", "value": "width"}, {"type": "length", "line": "left", "value": "height"}]}});
+        let at = [[10.0, 10.0], [40.0, 30.0]];
+        let given = json!({"height": 5});
+        let v = answers(&e, None, given.as_object().unwrap(), &at, &none).unwrap();
+        let width = v["width"].as_f64().unwrap();
+        assert!((width - 30.0).abs() < 1e-9, "measured between the clicks: {v:?}");
+        assert_eq!(v["height"], json!(5));
+        // One click: the element's own size, put there.
+        assert_eq!(answers(&e, None, &Map::new(), &at[..1], &none).unwrap()["width"], json!(100));
+        let q = shape(&e, &v, &at, &none).unwrap().points;
+        assert_eq!(q["a"], Vec2::new(10.0, 10.0), "the first anchor where clicked");
+        assert!((q["c"].x - 40.0).abs() < 1e-9 && (q["c"].y - 15.0).abs() < 1e-9, "5 high as typed: {q:?}");
     }
 }
