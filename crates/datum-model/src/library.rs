@@ -50,6 +50,8 @@ pub enum Source {
 pub struct Entry {
     pub source: Source,
     pub element: Value,
+    /// The file it was read from; none for a built-in one.
+    pub file: Option<PathBuf>,
 }
 
 impl Entry {
@@ -78,17 +80,24 @@ pub fn project_root(model: &Path) -> Option<PathBuf> {
 }
 
 /// The elements of `level`: built in, then beside the program, then in the project of the
-/// model at `model`, each folder by file name. One of a name already listed takes its place.
+/// model at `model`, each folder by file name. One of a name already listed from a less specific
+/// place takes its place; two of a name in one folder are both listed.
 pub fn load(level: &str, model: Option<&Path>) -> Library {
     let mut lib = Library::default();
-    let put = |lib: &mut Library, source: Source, element: Value| match lib.entries.iter_mut().find(|e| e.element["name"] == element["name"]) {
-        Some(e) => *e = Entry { source, element },
-        None => lib.entries.push(Entry { source, element }),
+    // One of a name from a more specific place takes the place of the other; two of a name in
+    // one folder are both kept.
+    let put = |lib: &mut Library, entry: Entry| match lib
+        .entries
+        .iter_mut()
+        .find(|e| e.element["name"] == entry.element["name"] && e.source != entry.source)
+    {
+        Some(e) => *e = entry,
+        None => lib.entries.push(entry),
     };
     if level == "sketch" {
         for t in BUILT_IN_SKETCH {
             if let Ok(e) = serde_json::from_str(t) {
-                put(&mut lib, Source::BuiltIn, e);
+                put(&mut lib, Entry { source: Source::BuiltIn, element: e, file: None });
             }
         }
     }
@@ -109,7 +118,7 @@ pub fn load(level: &str, model: Option<&Path>) -> Library {
                 .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
                 .and_then(|e| check(level, &e).map(|()| e));
             match element {
-                Ok(e) => put(&mut lib, source, e),
+                Ok(e) => put(&mut lib, Entry { source, element: e, file: Some(f) }),
                 Err(why) => lib.skipped.push(format!("{}: {why}", f.display())),
             }
         }
@@ -137,6 +146,20 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
         None | Some(Some("stretch")) => {}
         Some(Some("align")) if anchors.len() == 2 => {}
         _ => return Err("`fit`: `stretch`, or `align` with two anchors".into()),
+    }
+    let own: Vec<&String> = sketch.points.keys().chain(sketch.lines.keys()).chain(sketch.arcs.keys()).chain(sketch.circles.keys()).collect();
+    for l in e.get("links").and_then(Value::as_array).into_iter().flatten() {
+        let c = &l["constraint"];
+        let label = label_of(c);
+        serde_json::from_value::<Constraint>(c.clone()).map_err(|err| format!("link `{label}`: {err}"))?;
+        let mut names = Vec::new();
+        crate::visit_names(&mut c.clone(), &mut |n| names.push(n.clone()));
+        if names.iter().filter(|n| *n == SOCKET).count() != 1 || names.iter().any(|n| n != SOCKET && !own.contains(&n)) {
+            return Err(format!("link `{label}`: one `{SOCKET}` for the side outside, the rest the element's own"));
+        }
+        if !l["kind"].as_str().is_some_and(|k| KINDS.contains(&k)) {
+            return Err(format!("link `{label}`: `kind` is one of {KINDS:?}"));
+        }
     }
     let names = parameter_names(e)?;
     for (preset, values) in e.get("presets").and_then(Value::as_object).into_iter().flatten() {
@@ -205,7 +228,8 @@ pub fn answers(
     if at.len() < 2 || anchors(e).len() < 2 || e["fit"] == "align" {
         return Ok(out);
     }
-    let held: Vec<String> = open.into_iter().filter(|n| dimensions(e).any(|v| v.as_str().is_some_and(|t| t.trim() == n))).collect();
+    let dims = dimensions(e);
+    let held: Vec<String> = open.into_iter().filter(|n| dims.iter().any(|d| d.value.as_str().is_some_and(|t| t.trim() == n))).collect();
     if !held.is_empty() {
         let (_, solved) = solve_placed(e, &out, at, &held, lookup)?;
         for n in held {
@@ -215,11 +239,6 @@ pub fn answers(
         }
     }
     Ok(out)
-}
-
-/// The values of the element's dimensions, as given in it.
-fn dimensions(e: &Value) -> impl Iterator<Item = &Value> {
-    e["sketch"]["constraints"].as_array().into_iter().flatten().filter_map(|c| c.get("value").or_else(|| c.get("degrees")))
 }
 
 /// `value` (a dimension's: a number, or an expression of the element's parameters) with the
@@ -472,6 +491,97 @@ pub fn place(
     Ok(renamed)
 }
 
+/// What stands for the outside side of a socket's constraint (see [`Link`]).
+pub const SOCKET: &str = "?";
+
+/// What a socket takes: a point, a line, an arc or circle, or any curve (a projected edge).
+pub const KINDS: [&str; 4] = ["point", "line", "circle", "curve"];
+
+/// What name `n` of sketch feature `feature` is, as a socket would take it.
+fn kind_of(feature: &Value, n: &str) -> Option<&'static str> {
+    let sketch = &feature["sketch"];
+    let has = |key: &str| sketch[key].get(n).is_some();
+    if has("points") || n == datum_ops::ORIGIN || n.contains('.') {
+        Some("point")
+    } else if has("lines") {
+        Some("line")
+    } else if has("arcs") || has("circles") {
+        Some("circle")
+    } else {
+        feature["project"].get(n).map(|_| "curve")
+    }
+}
+
+/// A socket of a placed element: a constraint between it and something outside it, completed
+/// by naming that (D116). Kept when the piece was taken from a sketch with the constraint
+/// reaching out of it: parallel to a line outside, concentric with a circle outside, a distance
+/// to a point outside.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    /// How it reads, by the element's names (`perpendicular l5 ?`): how the agent names it.
+    pub label: String,
+    /// How it reads once placed, by the sketch's names.
+    pub shown: String,
+    /// What it takes: one of [`KINDS`].
+    pub kind: String,
+    /// The constraint, by the sketch's names, [`SOCKET`] for the side outside.
+    pub constraint: Value,
+}
+
+impl Link {
+    /// The constraint with `target` (a name in the sketch) for the side outside.
+    pub fn to(&self, target: &str) -> Value {
+        let mut c = self.constraint.clone();
+        crate::visit_names(&mut c, &mut |s| {
+            if s == SOCKET {
+                *s = target.to_string();
+            }
+        });
+        c
+    }
+}
+
+/// Whether `target` is something of sketch `placed` a socket of `kind` takes.
+pub fn fits(placed: &datum_ops::Placed, kind: &str, target: &str) -> bool {
+    let line = placed.lines.contains_key(target);
+    let circle = placed.arcs.contains_key(target) || placed.circles.contains_key(target);
+    match kind {
+        "point" => placed.solved.points.contains_key(target),
+        "line" => line,
+        "circle" => circle,
+        _ => line || circle,
+    }
+}
+
+/// How a constraint reads: its type and the names it ties, `perpendicular l5 ?`.
+fn label_of(c: &Value) -> String {
+    let mut names = Vec::new();
+    crate::visit_names(&mut c.clone(), &mut |n| names.push(n.clone()));
+    format!("{} {}", c["type"].as_str().unwrap_or_default(), names.join(" "))
+}
+
+/// The sockets of element `e` placed with parameter values `values` and its names `renamed`
+/// (as [`place`] gave them), in order.
+pub fn links(e: &Value, values: &BTreeMap<String, Value>, renamed: &BTreeMap<String, String>) -> Result<Vec<Link>, String> {
+    let mut out = Vec::new();
+    for l in e["links"].as_array().into_iter().flatten() {
+        let mut c = l["constraint"].clone();
+        let label = label_of(&c);
+        crate::visit_names(&mut c, &mut |s| {
+            if let Some(n) = renamed.get(s.as_str()) {
+                *s = n.clone();
+            }
+        });
+        for k in ["value", "degrees"] {
+            if c.get(k).is_some() {
+                c[k] = resolve(&c[k], values)?;
+            }
+        }
+        out.push(Link { label, shown: label_of(&c), kind: l["kind"].as_str().unwrap_or("curve").to_string(), constraint: c });
+    }
+    Ok(out)
+}
+
 /// The piece of sketch feature `feature` (its JSON) picked: curves `curves` with their points,
 /// points `picked`, and the constraints and reference dimensions among them, as element `name`
 /// with its point lowest and leftmost (by `points`, the solved ones) as anchor. Projections and
@@ -524,10 +634,35 @@ pub fn extract(
     let constraints: Vec<Value> = sketch["constraints"].as_array().into_iter().flatten().filter(|c| within(c)).cloned().collect();
     let measures: Map<String, Value> =
         sketch["measures"].as_object().into_iter().flatten().filter(|(_, v)| within(v)).map(|(n, v)| (n.clone(), v.clone())).collect();
+    // Constraints with one side outside: kept as sockets, completed when the element is placed.
+    let mut links = Vec::new();
+    for c in sketch["constraints"].as_array().into_iter().flatten().filter(|c| c["type"] != "fix") {
+        let mut v = c.clone();
+        let mut outside: Vec<String> = Vec::new();
+        let mut inside = false;
+        crate::visit_names(&mut v, &mut |n| match names.contains(n) {
+            true => inside = true,
+            false if !outside.contains(n) => outside.push(n.clone()),
+            false => {}
+        });
+        let ([n], true) = (&outside[..], inside) else { continue };
+        let Some(kind) = kind_of(feature, n) else { continue };
+        let n = n.clone();
+        crate::visit_names(&mut v, &mut |s| {
+            if *s == n {
+                *s = SOCKET.to_string();
+            }
+        });
+        links.push(json!({"constraint": v, "kind": kind}));
+    }
     let mut element = json!({"name": name, "anchors": [anchor]});
+    if !links.is_empty() {
+        element["links"] = json!(links);
+    }
     if let Some(params) = params {
         let named = std::cell::RefCell::new(Vec::<String>::new());
-        let values = constraints.iter().filter_map(|c| c.get("value").or_else(|| c.get("degrees")));
+        let linked = links.iter().map(|l| &l["constraint"]);
+        let values = constraints.iter().chain(linked).filter_map(|c| c.get("value").or_else(|| c.get("degrees")));
         let diameters = out.get("circles").and_then(Value::as_object).into_iter().flat_map(|m| m.values()).map(|c| &c["diameter"]);
         for text in values.chain(diameters).filter_map(Value::as_str) {
             let _ = substitute(text, &|n: &str| {
@@ -551,11 +686,130 @@ pub fn extract(
     Some(element)
 }
 
-/// Where new elements of `level` are saved unless put elsewhere: the library of the model's
-/// project, or else the one beside the program.
+/// A dimension of an element, as a list of them shows it: what it holds (`length l5`,
+/// `diameter hole`) and its value as given (a number, a parameter, an expression).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Dimension {
+    pub label: String,
+    pub value: Value,
+}
+
+/// Where a dimension's value is in the element's JSON: a constraint's `value` or `degrees`, or a
+/// circle's `diameter`.
+fn dimension_slots(e: &mut Value) -> Vec<(String, &mut Value)> {
+    let mut out = Vec::new();
+    let sketch = &mut e["sketch"];
+    let Some(sketch) = sketch.as_object_mut() else { return out };
+    let (mut constraints, mut circles) = (None, None);
+    for (k, v) in sketch.iter_mut() {
+        match k.as_str() {
+            "constraints" => constraints = v.as_array_mut(),
+            "circles" => circles = v.as_object_mut(),
+            _ => {}
+        }
+    }
+    for c in constraints.into_iter().flatten() {
+        let kind = c["type"].as_str().unwrap_or_default().to_string();
+        let mut names = Vec::new();
+        crate::visit_names(&mut c.clone(), &mut |n| names.push(n.clone()));
+        let Some(o) = c.as_object_mut() else { continue };
+        if let Some((_, v)) = o.iter_mut().find(|(k, _)| *k == "value" || *k == "degrees") {
+            out.push((format!("{kind} {}", names.join(" ")), v));
+        }
+    }
+    for (n, c) in circles.into_iter().flatten() {
+        if let Some(v) = c.get_mut("diameter") {
+            out.push((format!("diameter {n}"), v));
+        }
+    }
+    out
+}
+
+/// The dimensions of element `e`, in the order of its constraints, then its circles.
+pub fn dimensions(e: &Value) -> Vec<Dimension> {
+    dimension_slots(&mut e.clone()).into_iter().map(|(label, v)| Dimension { label, value: v.clone() }).collect()
+}
+
+/// Dimension `label` of element `e` (a number) asked as new parameter `name` when the element is
+/// placed: its value now is the parameter's, the last asked.
+pub fn parametrize(e: &mut Value, label: &str, name: &str) -> Result<(), String> {
+    if !valid_name(name) {
+        return Err(format!("`{name}` is not a name: a letter or _, then letters, digits or _"));
+    }
+    if parameter_names(e)?.iter().any(|n| n == name) {
+        return Err(format!("the element has a parameter `{name}` already"));
+    }
+    let mut slots = dimension_slots(e);
+    let (_, slot) = slots.iter_mut().find(|(l, _)| l == label).ok_or_else(|| format!("no dimension `{label}`"))?;
+    let value = slot.as_f64().ok_or_else(|| format!("`{label}` is not a number"))?;
+    **slot = json!(name);
+    if !e["parameters"].is_array() {
+        e["parameters"] = json!([]);
+    }
+    if let Some(list) = e["parameters"].as_array_mut() {
+        list.push(json!({"name": name, "value": value}));
+    }
+    Ok(())
+}
+
+/// Parameter `from` of element `e` renamed `to`, in the dimensions that use it and in its place
+/// among the questions.
+pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), String> {
+    if !valid_name(to) {
+        return Err(format!("`{to}` is not a name: a letter or _, then letters, digits or _"));
+    }
+    if from == to {
+        return Ok(());
+    }
+    if parameter_names(e)?.iter().any(|n| n == to) {
+        return Err(format!("the element has a parameter `{to}` already"));
+    }
+    let p = e["parameters"].as_array_mut().and_then(|l| l.iter_mut().find(|p| p["name"] == from)).ok_or_else(|| format!("no parameter `{from}`"))?;
+    p["name"] = json!(to);
+    for (_, v) in dimension_slots(e) {
+        if let Some(t) = v.as_str() {
+            *v = json!(substitute(t, &|n: &str| (n == from).then(|| to.to_string())).map_err(|err| err.to_string())?.replace(&format!("({to})"), to));
+        }
+    }
+    Ok(())
+}
+
+/// Parameter `name` of element `e` taken back: the dimensions it alone gives get its value as a
+/// number. An error if another dimension uses it within an expression.
+pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
+    let list = e["parameters"].as_array().ok_or("the element has no parameters")?;
+    let value = list.iter().find(|p| p["name"] == name).map(|p| p["value"].clone()).ok_or_else(|| format!("no parameter `{name}`"))?;
+    let used =
+        |v: &Value| v.as_str().is_some_and(|t| t.trim() != name && substitute(t, &|n: &str| (n == name).then(String::new)).is_ok_and(|s| s != t));
+    if let Some((label, _)) = dimension_slots(e).into_iter().find(|(_, v)| used(v)) {
+        return Err(format!("`{label}` uses `{name}` in an expression"));
+    }
+    for (_, v) in dimension_slots(e) {
+        if v.as_str().is_some_and(|t| t.trim() == name) {
+            *v = value.clone();
+        }
+    }
+    let none_left = e["parameters"].as_array_mut().is_some_and(|list| {
+        list.retain(|p| p["name"] != name);
+        list.is_empty()
+    });
+    if none_left && let Some(o) = e.as_object_mut() {
+        o.remove("parameters");
+    }
+    Ok(())
+}
+
+/// The folder work is kept in: the project of the model at `model`, or else the folder beside
+/// the program. Its subfolders: `part`, `assembly`, `drawing` for documents, `library` for
+/// elements (D115).
+pub fn workspace(model: Option<&Path>) -> Option<PathBuf> {
+    model.and_then(project_root).or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))
+}
+
+/// Where new elements of `level` are saved unless put elsewhere: `library/<level>` of the
+/// [`workspace`].
 pub fn folder(level: &str, model: Option<&Path>) -> Option<PathBuf> {
-    let root = model.and_then(project_root).or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))?;
-    Some(root.join("library").join(level))
+    Some(workspace(model)?.join("library").join(level))
 }
 
 /// A file name for element `name`: what a file system would refuse, replaced.
@@ -636,6 +890,30 @@ mod tests {
         assert!(c.contains(&json!({"type": "length", "line": "l3", "value": 40.0})), "{p}");
         let mut again = SketchPatch::new(&json!({"sketch": {"points": {"p1": [0, 0]}, "lines": {"l3": {"from": "p1", "to": "p1"}}}}));
         assert!(place(&mut again, &e, &v, &at, &names, false, &none).unwrap_err().contains("`l3` is taken"));
+    }
+
+    /// A dimension given as a number made a parameter and taken back.
+    #[test]
+    fn a_number_made_a_parameter_and_back() {
+        let mut e = json!({"name": "Bar", "anchors": ["a"],
+            "sketch": {"points": {"a": [0, 0], "b": [8.9, 0], "c": [5, 5]}, "lines": {"l5": {"from": "a", "to": "b"}},
+                       "circles": {"hole": {"center": "c", "diameter": 4}},
+                       "constraints": [{"type": "length", "line": "l5", "value": 8.9}]}});
+        let labels: Vec<String> = dimensions(&e).into_iter().map(|d| d.label).collect();
+        assert_eq!(labels, ["length l5", "diameter hole"]);
+        parametrize(&mut e, "length l5", "len").unwrap();
+        parametrize(&mut e, "diameter hole", "d").unwrap();
+        assert_eq!(e["parameters"], json!([{"name": "len", "value": 8.9}, {"name": "d", "value": 4.0}]));
+        assert_eq!(e["sketch"]["constraints"][0]["value"], "len");
+        assert!(check("sketch", &e).is_ok(), "{e}");
+        assert!(parametrize(&mut e, "length l5", "x").unwrap_err().contains("not a number"));
+        assert!(parametrize(&mut e, "diameter hole", "len").unwrap_err().contains("already"));
+        rename_parameter(&mut e, "len", "length").unwrap();
+        assert_eq!((&e["sketch"]["constraints"][0]["value"], &e["parameters"][0]["name"]), (&json!("length"), &json!("length")));
+        unparametrize(&mut e, "length").unwrap();
+        assert_eq!(e["sketch"]["constraints"][0]["value"], json!(8.9));
+        unparametrize(&mut e, "d").unwrap();
+        assert!(e.get("parameters").is_none(), "{e}");
     }
 
     /// A rectangle with its width and height as parameters, by two corners: what is typed holds,

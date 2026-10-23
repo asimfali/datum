@@ -19,6 +19,8 @@ pub struct Session {
     evaluator: Evaluator,
     last: Evaluation,
     path: Option<PathBuf>,
+    /// The model as last opened or saved: what differs from it is not saved yet.
+    saved: Graph,
     /// Models before each change, the latest last; and those undone, for `redo`.
     undo: Vec<Graph>,
     redo: Vec<Graph>,
@@ -31,7 +33,7 @@ impl Default for Session {
     fn default() -> Self {
         let evaluator = Evaluator::default();
         let last = evaluator.evaluate(&Graph::default());
-        Self { graph: Graph::default(), evaluator, last, path: None, undo: Vec::new(), redo: Vec::new() }
+        Self { graph: Graph::default(), evaluator, last, path: None, saved: Graph::default(), undo: Vec::new(), redo: Vec::new() }
     }
 }
 
@@ -78,6 +80,7 @@ const COMMANDS: &[Command] = &[
             };
             std::fs::write(&path, to_json(&s.graph)).map_err(|e| format!("{}: {e}", path.display()))?;
             s.path = Some(path.clone());
+            s.saved = s.graph.clone();
             Ok(json!({"saved": path.display().to_string()}))
         },
     },
@@ -168,7 +171,7 @@ const COMMANDS: &[Command] = &[
                 .iter()
                 .map(|e| {
                     let mut v = json!({"source": e.source});
-                    for k in ["name", "description", "parameters", "presets", "anchors", "fit"] {
+                    for k in ["name", "description", "parameters", "presets", "anchors", "fit", "links"] {
                         if let Some(x) = e.element.get(k) {
                             v[k] = x.clone();
                         }
@@ -182,9 +185,11 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "to_library",
         description: "Keep a piece of sketch feature `name` as a library element (D98): `select` names its curves (taken with \
-                      their points) and points; the constraints and reference dimensions among them come along, the lowest, \
-                      leftmost point is the anchor. The model's parameters its dimensions name become the element's, with their \
-                      values now; `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
+                      their points) and points; the constraints and reference dimensions among them come along. `anchors`: \
+                      its insertion points, one or two of its points (else the lowest, leftmost); with two, `fit` is `stretch` \
+                      (along the axes, the default) or `align` (turned toward the second: a section of a chain). The model's \
+                      parameters its dimensions name become the element's, with their values now, and so do the dimensions \
+                      `ask` names (as `dimensions` of the reply lists them: `length l5` → its parameter name); `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
                       with `description` to `path`, or else to `library/sketch` of the model's project (beside the program \
                       without one); an existing file is kept unless `replace`. The reply has the element and where it went.",
         params: || {
@@ -194,6 +199,9 @@ const COMMANDS: &[Command] = &[
                 "element": {"type": "string"},
                 "description": {"type": "string"},
                 "order": {"type": "array", "items": {"type": "string"}},
+                "anchors": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 2},
+                "ask": {"type": "object", "additionalProperties": {"type": "string"}},
+                "fit": {"type": "string", "enum": ["stretch", "align"]},
                 "path": {"type": "string"},
                 "replace": {"type": "boolean"}
             }, "required": ["name", "select", "element"], "additionalProperties": false})
@@ -215,6 +223,9 @@ const COMMANDS: &[Command] = &[
                 parameter_values(s.graph.parameters()).into_iter().filter_map(|(n, v)| v.ok().map(|v| (n, v))).collect();
             let mut element =
                 library::extract(&feature, &placed.solved.points, &curves, &points, element_name, Some(&params)).ok_or("nothing to keep")?;
+            for (label, n) in p.get("ask").and_then(Value::as_object).into_iter().flatten() {
+                library::parametrize(&mut element, label, n.as_str().ok_or("`ask`: parameter names")?)?;
+            }
             if let Some(d) = p.get("description").and_then(Value::as_str) {
                 element["description"] = json!(d);
             }
@@ -222,6 +233,12 @@ const COMMANDS: &[Command] = &[
             {
                 let rank = |v: &Value| order.iter().position(|o| *o == v["name"]).unwrap_or(order.len());
                 list.sort_by_key(rank);
+            }
+            if let Some(a) = p.get("anchors") {
+                element["anchors"] = a.clone();
+            }
+            if let Some(f) = p.get("fit") {
+                element["fit"] = f.clone();
             }
             library::check("sketch", &element)?;
             let path = match p.get("path").and_then(Value::as_str) {
@@ -236,7 +253,8 @@ const COMMANDS: &[Command] = &[
             }
             let text = serde_json::to_string_pretty(&element).map_err(|e| e.to_string())?;
             std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(json!({"element": element, "saved": path.display().to_string()}))
+            let dimensions: Vec<Value> = library::dimensions(&element).into_iter().map(|d| json!({"dimension": d.label, "value": d.value})).collect();
+            Ok(json!({"element": element, "saved": path.display().to_string(), "dimensions": dimensions}))
         },
     },
     Command {
@@ -249,7 +267,9 @@ const COMMANDS: &[Command] = &[
                       by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
                       sketch's axes, or with `fit: align` turn it toward the second. `names`: element names that take the given \
                       free names (a section put in place of one removed keeps its name, and so what referred to it downstream). \
-                      The reply has the edit's result and `names`: each element name with the name it got.",
+                      `links`: the element's sockets (constraints reaching out of it, `perpendicular l5 ?`, as `library` lists \
+                      them) completed by a point, line or curve of the sketch. The reply has the edit's result, `names`: each \
+                      element name with the name it got, and `open_links`: the sockets left open.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -259,6 +279,7 @@ const COMMANDS: &[Command] = &[
                 "at": {"type": "array", "minItems": 1, "maxItems": 2,
                        "items": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}]}},
                 "names": {"type": "object", "additionalProperties": {"type": "string"}},
+                "links": {"type": "object", "additionalProperties": {"type": "string"}},
                 "construction": {"type": "boolean"}
             }, "required": ["name", "element", "at"], "additionalProperties": false})
         },
@@ -299,10 +320,25 @@ const COMMANDS: &[Command] = &[
             let mut patch = SketchPatch::new(&feature);
             let construction = p.get("construction").and_then(Value::as_bool).unwrap_or(false);
             let renamed = library::place(&mut patch, &element, &values, &at, &names, construction, &lookup)?;
+            // Sockets completed now, by the names given; the rest stay open, listed in the reply.
+            let mut open = Vec::new();
+            let given = p.get("links").and_then(Value::as_object);
+            let sockets = library::links(&element, &values, &renamed)?;
+            if let Some(l) = given.into_iter().flat_map(|g| g.keys()).find(|l| !sockets.iter().any(|k| k.label == **l)) {
+                return Err(format!("`links`: the element has no socket `{l}`"));
+            }
+            for link in sockets {
+                match given.and_then(|g| g.get(&link.label)).and_then(Value::as_str) {
+                    Some(target) if library::fits(placed, &link.kind, target) => patch.constrain(link.to(target)),
+                    Some(target) => return Err(format!("`links`: `{}` takes a {}, `{target}` is not one in `{name}`", link.label, link.kind)),
+                    None => open.push(link.shown),
+                }
+            }
             let mut params = patch.done().unwrap_or_default();
             params.insert("name".into(), json!(name));
             let mut reply = s.edit_sketch(name, &params)?;
             reply["names"] = json!(renamed);
+            reply["open_links"] = json!(open);
             Ok(reply)
         },
     },
@@ -344,7 +380,8 @@ const COMMANDS: &[Command] = &[
     Command { name: "redo", description: "Make a change undone again.", params: no_params, run: |s, _| s.step(false) },
     Command {
         name: "inspect",
-        description: "The feature history with each feature's status: volume, element counts and hash, or why it failed.",
+        description: "The feature history with each feature's status: volume, element counts and hash, or why it failed; \
+                      `modified`: whether the model differs from its file as last opened or saved.",
         params: no_params,
         run: |s, _| Ok(s.inspect()),
     },
@@ -567,6 +604,7 @@ impl Session {
     }
 
     fn replace(&mut self, g: Graph, path: Option<PathBuf>) -> Value {
+        self.saved = g.clone();
         self.graph = g;
         self.path = path;
         self.rebuild()
@@ -766,7 +804,8 @@ impl Session {
                 (n.clone(), v)
             })
             .collect();
-        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "parameters": parameters, "features": features})
+        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.graph != self.saved, "parameters": parameters,
+               "features": features})
     }
 }
 
@@ -901,6 +940,16 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
     merge(op, "project", p.get("project"))?;
     let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
+    // Constraints removed by name first: those of an element removed with them go with it below,
+    // and are not looked for again.
+    // Constraints compare as parsed: field order and number spelling do not matter.
+    let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
+    let constraints = sketch.entry("constraints").or_insert_with(|| json!([])).as_array_mut().ok_or("`constraints` is not a list")?;
+    for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
+        let gone = parse(gone)?;
+        let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
+        constraints.remove(k);
+    }
     for key in ["points", "lines", "arcs", "circles", "measures"] {
         merge(sketch, key, p.get(key))?;
     }
@@ -931,13 +980,6 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     }
     let constraints = sketch.entry("constraints").or_insert_with(|| json!([]));
     let constraints = constraints.as_array_mut().ok_or("`constraints` is not a list")?;
-    // Constraints compare as parsed: field order and number spelling do not matter.
-    let parse = |v: &Value| serde_json::from_value::<datum_sketch::Constraint>(v.clone()).map_err(|e| format!("constraint {v}: {e}"));
-    for gone in p.get("remove_constraints").and_then(Value::as_array).into_iter().flatten() {
-        let gone = parse(gone)?;
-        let k = constraints.iter().position(|c| parse(c).is_ok_and(|c| c == gone)).ok_or_else(|| format!("no constraint {gone:?}"))?;
-        constraints.remove(k);
-    }
     for added in p.get("add_constraints").and_then(Value::as_array).into_iter().flatten() {
         parse(added)?;
         constraints.push(added.clone());

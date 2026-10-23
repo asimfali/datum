@@ -243,6 +243,10 @@ fn the_project_library_comes_first() {
     let own = json!({"name": "Rectangle", "description": "ours", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
     std::fs::write(root.join("library/sketch/rect.json"), own.to_string()).unwrap();
     std::fs::write(root.join("library/sketch/broken.json"), "{\"name\": \"x\"}").unwrap();
+    // Two of a name in one folder: both kept, not one over the other.
+    let twin = json!({"name": "New element", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+    std::fs::write(root.join("library/sketch/test.json"), twin.to_string()).unwrap();
+    std::fs::write(root.join("library/sketch/test2.json"), twin.to_string()).unwrap();
     let mut s = Session::default();
     let lib = run(&mut s, "library", json!({}));
     assert_eq!(lib["elements"][0]["source"], "built_in", "no project without a model file: {lib}");
@@ -250,6 +254,10 @@ fn the_project_library_comes_first() {
     let lib = run(&mut s, "library", json!({}));
     assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["description"]), (&json!("project"), &json!("ours")), "{lib}");
     assert!(lib["skipped"][0].as_str().unwrap().contains("broken.json"), "{lib}");
+    assert_eq!(lib["elements"].as_array().unwrap().iter().filter(|e| e["name"] == "New element").count(), 2, "{lib}");
+    let model = root.join("part/plate.json");
+    assert_eq!(datum_model::library::workspace(Some(&model)), Some(root.clone()), "the project holds part, assembly, drawing, library");
+    assert_eq!(datum_model::library::folder("sketch", Some(&model)), Some(root.join("library/sketch")));
 }
 
 /// A piece of sketch kept in the project's library and placed again: the model's parameters its
@@ -279,8 +287,9 @@ fn a_selection_kept_in_the_library_and_placed_again() {
         &mut s,
         "to_library",
         json!({"name": "outline", "select": ["bottom", "right", "top", "left"], "element": "Plate: w × h",
-        "description": "a plate", "order": ["h"]}),
+        "description": "a plate", "order": ["h"], "anchors": ["a", "c"]}),
     );
+    assert_eq!((&r["element"]["anchors"], &r["element"]["fit"]), (&json!(["a", "c"]), &Value::Null), "the engineer's points: {r}");
     let saved = std::path::PathBuf::from(r["saved"].as_str().unwrap());
     assert_eq!(saved, root.join("library/sketch/Plate_ w × h.json"), "in the project's library, a name a file system takes");
     let e = &r["element"];
@@ -288,6 +297,11 @@ fn a_selection_kept_in_the_library_and_placed_again() {
     let c = e["sketch"]["constraints"].as_array().unwrap();
     assert!(!c.iter().any(|c| c.to_string().contains("origin")), "what ties to the origin stays behind: {e}");
     assert!(s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "Plate: w × h"})).unwrap_err().contains("exists"));
+    let ask = |dim: &str| json!({"name": "outline", "select": ["bottom", "left"], "element": "Corner", "ask": {dim: "x"}});
+    assert!(s.execute("to_library", &ask("length bottom")).unwrap_err().contains("is not a number"), "given by `w` already");
+    assert!(s.execute("to_library", &ask("vertical right")).unwrap_err().contains("no dimension"), "a constraint without a value");
+    let refused = s.execute("to_library", &json!({"name": "outline", "select": ["bottom"], "element": "x", "anchors": ["c"]})).unwrap_err();
+    assert!(refused.contains("anchor `c` is not a point"), "an insertion point outside the piece: {refused}");
     let lib = run(&mut s, "library", json!({}));
     assert!(lib["elements"].as_array().unwrap().iter().any(|e| e["name"] == "Plate: w × h" && e["source"] == "project"), "{lib}");
     run(&mut s, "add", json!({"name": "other", "op": "sketch", "sketch": {"points": {}}}));
@@ -296,4 +310,85 @@ fn a_selection_kept_in_the_library_and_placed_again() {
     let other = &run(&mut s, "inspect", json!({}))["features"][1]["sketch"];
     let lengths: Vec<&Value> = other["constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| &c["value"]).collect();
     assert_eq!(lengths, [&json!(80.0), &json!(20.0)], "w as kept, h answered 10: {other}");
+}
+
+/// A constraint reaching out of the piece kept (l5 ⊥ l4, l4 left behind) becomes a socket: put
+/// again, it is completed by a line of the sketch, or left open and said so.
+#[test]
+fn a_constraint_reaching_out_is_a_socket() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_links");
+    let _ = std::fs::remove_dir_all(&root);
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "add",
+        json!({"name": "path", "op": "sketch", "sketch": {
+            "points": {"p4": [0, 0], "p5": [10, 2], "p6": [11, -3], "p7": [16, -2]},
+            "lines": {"l4": {"from": "p4", "to": "p5"}, "l5": {"from": "p5", "to": "p6"}, "l6": {"from": "p6", "to": "p7"}},
+            "constraints": [{"type": "perpendicular", "lines": ["l4", "l5"]}, {"type": "perpendicular", "lines": ["l5", "l6"]},
+                            {"type": "length", "line": "l5", "value": 5}]
+        }}),
+    );
+    let r = run(
+        &mut s,
+        "to_library",
+        json!({"name": "path", "select": ["l5", "l6"], "element": "Step", "anchors": ["p5"], "path": root.join("step.json")}),
+    );
+    assert_eq!(r["element"]["links"], json!([{"constraint": {"type": "perpendicular", "lines": ["?", "l5"]}, "kind": "line"}]), "{r}");
+    let step = r["element"].clone();
+    // Put at the end of l6, its socket given l6: the new l5 is perpendicular to it.
+    let r = run(&mut s, "insert_element", json!({"name": "path", "element": step, "at": ["p7"], "links": {"perpendicular ? l5": "l6"}}));
+    assert!(r["failed"].as_array().unwrap().is_empty() && r["open_links"] == json!([]), "{r}");
+    let new_l5 = r["names"]["l5"].as_str().unwrap();
+    let c = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"]["constraints"];
+    assert!(c.as_array().unwrap().contains(&json!({"type": "perpendicular", "lines": ["l6", new_l5]})), "{c}");
+    // Not given: open, and said so; given a point: refused.
+    let r = run(&mut s, "insert_element", json!({"name": "path", "element": step, "at": [[40, 0]]}));
+    assert_eq!(r["open_links"].as_array().unwrap().len(), 1, "{r}");
+    let refused =
+        s.execute("insert_element", &json!({"name": "path", "element": step, "at": [[60, 0]], "links": {"perpendicular ? l5": "p4"}})).unwrap_err();
+    assert!(refused.contains("takes a line"), "{refused}");
+}
+
+/// A line and its dimension picked together and deleted: the dimension is removed by name, and
+/// the line's removal does not look for it again (a frame picks both).
+#[test]
+fn a_line_deleted_with_its_dimension() {
+    let mut s = Session::default();
+    run(
+        &mut s,
+        "add",
+        json!({"name": "s", "op": "sketch", "sketch": {
+            "points": {"p9": [0, 0], "p10": [5, 0]}, "lines": {"l8": {"from": "p9", "to": "p10"}},
+            "constraints": [{"type": "horizontal", "line": "l8"}, {"type": "length", "line": "l8", "value": 5.0}]
+        }}),
+    );
+    let r =
+        run(&mut s, "edit_sketch", json!({"name": "s", "lines": {"l8": null}, "remove_constraints": [{"type": "length", "line": "l8", "value": 5}]}));
+    assert_eq!(r["also_removed"], json!(["constraints: 1"]), "the horizontal went with the line: {r}");
+    assert!(
+        s.execute("edit_sketch", &json!({"name": "s", "remove_constraints": [{"type": "length", "line": "l8", "value": 5}]}))
+            .unwrap_err()
+            .contains("no constraint")
+    );
+}
+
+/// `inspect` says whether the model differs from its file: after an edit it does, after a save
+/// or an undo back to what was saved it does not.
+#[test]
+fn modified_since_saved() {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("modified.json");
+    let mut s = Session::default();
+    let modified = |s: &mut Session| run(s, "inspect", json!({}))["modified"].as_bool().unwrap();
+    assert!(!modified(&mut s), "an empty new model");
+    plate(&mut s);
+    assert!(modified(&mut s));
+    run(&mut s, "save", json!({"path": path}));
+    assert!(!modified(&mut s));
+    run(&mut s, "edit", json!({"name": "moved", "angle_deg": 30}));
+    assert!(modified(&mut s));
+    run(&mut s, "undo", json!({}));
+    assert!(!modified(&mut s), "back to what was saved");
+    run(&mut s, "open", json!({"path": path}));
+    assert!(!modified(&mut s));
 }

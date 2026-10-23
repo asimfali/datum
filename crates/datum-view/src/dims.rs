@@ -230,31 +230,36 @@ impl SketchEdit {
                 patch.insert("circles".into(), json!({ n.as_str(): circle }));
             }
         }
-        // Tried on a copy first: a dimension that cannot hold, or only repeats what is defined
-        // already (no freedom less), is not sent.
+        let adds = matches!(field.entry, Entry::New { .. });
+        match self.try_apply(patch, adds) {
+            Ok(sent) => Some(sent),
+            Err(why) => {
+                let constraint = match &field.entry {
+                    Entry::New { constraint, key } if !why.starts_with("invalid") => {
+                        let mut c = constraint.clone();
+                        c[*key] = value_of(&field.text);
+                        c
+                    }
+                    _ => Json::Null,
+                };
+                self.conflict = Some(Conflict { constraint, why });
+                None
+            }
+        }
+    }
+
+    /// Applies `patch` if the sketch still solves with it and, when it `adds` a constraint, is
+    /// defined further by it: tried on a copy first, so one that cannot hold or only repeats
+    /// what is defined already is not sent. The `edit_sketch` parameters to send, or why not.
+    pub fn try_apply(&mut self, patch: Map<String, Json>, adds: bool) -> Result<Json, String> {
         let mut trial = self.clone_for_probe();
         trial.apply(patch.clone());
         let dof = |e: &SketchEdit| e.placed.as_ref().map(|p| p.solved.dof).ok();
-        let why = match (&trial.placed, &field.entry) {
-            (Err(why), _) => Some(why.clone()),
-            (Ok(_), Entry::New { .. }) if dof(&trial) >= dof(self) => {
-                Some("the sketch is defined there already: this dimension would only repeat it".into())
-            }
-            _ => None,
-        };
-        if let Some(why) = why {
-            let constraint = match &field.entry {
-                Entry::New { constraint, key } if !why.starts_with("invalid") => {
-                    let mut c = constraint.clone();
-                    c[*key] = value_of(&field.text);
-                    c
-                }
-                _ => Json::Null,
-            };
-            self.conflict = Some(Conflict { constraint, why });
-            return None;
+        match &trial.placed {
+            Err(why) => Err(why.clone()),
+            Ok(_) if adds && dof(&trial) >= dof(self) => Err("the sketch is defined there already: this would only repeat it".into()),
+            Ok(_) => Ok(self.apply(patch)),
         }
-        Some(self.apply(patch))
     }
 
     /// The conflicting dimension as a reference dimension instead: measured, holding nothing.

@@ -26,6 +26,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
     crate::log::write("opening the window");
     let mut options = eframe::NativeOptions {
         renderer: eframe::Renderer::Wgpu,
+        // Restored, it is 1280 × 800; it opens maximized (see `Viewer::shown`).
         viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
@@ -58,6 +59,8 @@ fn title(path: Option<&std::path::Path>) -> String {
 
 enum Request {
     Open(PathBuf),
+    /// No model any more: the session starts empty, the window shows none.
+    Close,
     SetParameter(String, Json),
     /// Any other command of the session, with its parameters.
     Command(&'static str, Json),
@@ -65,11 +68,42 @@ enum Request {
     Editing(Option<String>),
 }
 
-/// A selection being kept in the library (D98): the element it makes, and why the last save
-/// failed.
+/// A selection being kept in the library (D98): the element it makes, why the last change or
+/// save failed, and which of its insertion points (0, 1) a click in the sketch picks now.
 struct Keep {
     element: Json,
     error: Option<String>,
+    picking: Option<usize>,
+    /// The parameter names as typed, by dimension: one not taken yet is kept here meanwhile.
+    naming: BTreeMap<String, String>,
+    /// The sockets (by place in `links`) left out: not asked when placing.
+    unlinked: std::collections::BTreeSet<usize>,
+}
+
+impl Keep {
+    fn new(element: Json) -> Self {
+        Self { element, error: None, picking: None, naming: BTreeMap::new(), unlinked: std::collections::BTreeSet::new() }
+    }
+
+    /// Insertion point `k` (0: the first, 1: the second, if any) is point `p` of the piece, or
+    /// (`None`, the second) there is no second.
+    fn anchor(&mut self, k: usize, p: Option<String>) {
+        let mut anchors = datum_model::library::anchors(&self.element);
+        match p {
+            Some(p) if k < anchors.len() => anchors[k] = p,
+            Some(p) => anchors.push(p),
+            None => anchors.truncate(1),
+        }
+        anchors.dedup();
+        if anchors.len() < 2 {
+            if let Some(o) = self.element.as_object_mut() {
+                o.remove("fit");
+            }
+        } else if self.element.get("fit").is_none() {
+            self.element["fit"] = json!("stretch");
+        }
+        self.element["anchors"] = json!(anchors);
+    }
 }
 
 /// What the background thread hands the window after each rebuild.
@@ -85,6 +119,8 @@ struct Model {
     notes: Vec<String>,
     /// A model was opened in this rebuild: the view fits it.
     opened: bool,
+    /// Closed: the window shows no model.
+    closed: bool,
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
     rebuild_ms: f64,
     scene_ms: f64,
@@ -112,7 +148,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         pending.extend(requests.try_iter());
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
-        let (mut error, mut opened) = (None, false);
+        let (mut error, mut opened, mut closed) = (None, false, false);
         let mut notes = Vec::new();
         // A body whose shape an edit changed (pieces, through holes): worth a word.
         let mut note = |reply: &Json| {
@@ -125,13 +161,18 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             match r {
                 Request::Open(p) => {
                     latest.clear();
-                    opened = true;
+                    (opened, closed) = (true, false);
                     if let Err(e) = journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
                         error = Some(e);
                     }
                 }
                 Request::SetParameter(name, value) => {
                     latest.insert(name, value);
+                }
+                Request::Close => {
+                    latest.clear();
+                    session = Session::default();
+                    (opened, closed) = (false, true);
                 }
                 Request::Command(command, params) => match journaled(&mut session, command, &params) {
                     Ok(reply) => note(&reply),
@@ -168,7 +209,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, notes, opened, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
+        if models.send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
             return;
         }
         ctx.request_repaint();
@@ -226,9 +267,16 @@ struct Viewer {
     sketch: Option<SketchEdit>,
     entering: Option<String>,
     /// The sketch elements of the library (built in, beside the program, the project's).
-    library: Vec<datum_model::library::Entry>,
+    library: Vec<crate::templates::Item>,
+    /// What the library palette is filtered by.
+    library_filter: String,
     /// The selection being kept in the library.
     keeping: Option<Keep>,
+    /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
+    quitting: Option<bool>,
+    /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
+    /// first). Asked of the window as it is made, Windows drops it when eframe shows the window.
+    shown: u8,
     /// Picking a face to sketch on, and the body and face under the cursor.
     picking: bool,
     face: Option<(usize, datum_brep::TopoId)>,
@@ -271,7 +319,10 @@ impl Viewer {
             sketch: None,
             entering: None,
             library: crate::templates::library(None),
+            library_filter: String::new(),
             keeping: None,
+            quitting: None,
+            shown: 0,
             picking: false,
             face: None,
         };
@@ -293,16 +344,143 @@ impl Viewer {
         self.path = path;
     }
 
+    /// Where models are opened and saved by dialog: `part` of the workspace (the project, or
+    /// the folder beside the program), made if it is not there yet (D115).
+    fn parts(&self) -> rfd::FileDialog {
+        let dialog = rfd::FileDialog::new().add_filter("Datum model", &["json"]);
+        match datum_model::library::workspace(self.path.as_deref()).map(|w| w.join("part")).filter(|d| std::fs::create_dir_all(d).is_ok()) {
+            Some(d) => dialog.set_directory(d),
+            None => dialog,
+        }
+    }
+
+    /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
+    fn open_by_dialog(&mut self, ui: &egui::Ui) {
+        if !self.may_leave(ui) {
+            return;
+        }
+        if let Some(p) = self.parts().pick_file() {
+            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+            self.open(p);
+        }
+    }
+
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
-    fn save(&mut self, ui: &egui::Ui, ask: bool) {
+    fn save(&mut self, ui: &egui::Ui, ask: bool) -> bool {
         let path = match (&self.path, ask) {
             (Some(p), false) => Some(p.clone()),
-            _ => rfd::FileDialog::new().add_filter("Datum model", &["json"]).set_file_name("model.json").save_file(),
+            _ => self.parts().set_file_name("model.json").save_file(),
         };
-        if let Some(p) = path {
-            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-            self.send(Request::Command("save", json!({"path": p.display().to_string()})));
-            self.set_path(Some(p));
+        let Some(p) = path else { return false };
+        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
+        self.send(Request::Command("save", json!({"path": p.display().to_string()})));
+        self.set_path(Some(p));
+        true
+    }
+
+    /// Whether the model is changed since it was opened or saved.
+    fn modified(&self) -> bool {
+        self.model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
+    }
+
+    /// Whether the model may be left (closed, replaced): asked first if it has changes not saved
+    /// — saved, dropped, or kept open.
+    fn may_leave(&mut self, ui: &egui::Ui) -> bool {
+        !self.modified() || self.ask_to_save(ui).is_some()
+    }
+
+    /// Asks whether to save the changes: `Some(true)` saved (sent to be written), `Some(false)`
+    /// dropped, `None` kept open.
+    fn ask_to_save(&mut self, ui: &egui::Ui) -> Option<bool> {
+        let file = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new model".to_string(), |f| f.to_string_lossy().to_string());
+        let answer = rfd::MessageDialog::new()
+            .set_title("Datum")
+            .set_description(format!("Save the changes to {file}?"))
+            .set_buttons(rfd::MessageButtons::YesNoCancel)
+            .show();
+        match answer {
+            rfd::MessageDialogResult::Yes => self.save(ui, false).then_some(true),
+            rfd::MessageDialogResult::No => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Closes the model (Close, Ctrl+W): the window shows none.
+    fn close(&mut self, ui: &egui::Ui) {
+        if self.model.is_none() || !self.may_leave(ui) {
+            return;
+        }
+        self.leave();
+        self.set_path(None);
+        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
+        self.send(Request::Close);
+    }
+
+    /// The library palette (D117): every sketch element with its outline, name and where it comes
+    /// from; a double click places one (asking its parameters, then its sockets), a drag onto
+    /// the sketch puts its first anchor where it is let go.
+    fn palette(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Library");
+        ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text("Search"));
+        ui.weak("Double-click to place · drag onto the sketch");
+        let current =
+            self.sketch.as_ref().filter(|s| s.draft.tool == Tool::Template).and_then(|s| s.draft.template.as_ref()).map(|t| t["name"].clone());
+        let filter = self.library_filter.trim().to_lowercase();
+        let mut chosen = None;
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for item in &self.library {
+                let e = &item.entry.element;
+                let (name, description) = (item.entry.name(), e["description"].as_str().unwrap_or_default());
+                if !filter.is_empty() && !name.to_lowercase().contains(&filter) && !description.to_lowercase().contains(&filter) {
+                    continue;
+                }
+                let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::click_and_drag());
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+                let visuals = ui.visuals();
+                if current.as_ref() == Some(&e["name"]) {
+                    ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill);
+                } else if r.hovered() {
+                    ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+                }
+                let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(44.0, 44.0));
+                paint_outline(ui.painter(), thumb, &item.outline, visuals.text_color());
+                let text = rect.min + egui::vec2(56.0, 8.0);
+                ui.painter().text(text, egui::Align2::LEFT_TOP, name, egui::FontId::proportional(14.0), visuals.strong_text_color());
+                // Two of a name: which file each is.
+                let twin = self.library.iter().filter(|o| o.entry.name() == name).count() > 1;
+                let file = item.entry.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().to_string()).filter(|_| twin);
+                let from = match file {
+                    Some(f) => format!("{} · {f}", crate::templates::source(&item.entry)),
+                    None => crate::templates::source(&item.entry).to_string(),
+                };
+                ui.painter().text(
+                    text + egui::vec2(0.0, 20.0),
+                    egui::Align2::LEFT_TOP,
+                    from,
+                    egui::FontId::proportional(11.0),
+                    visuals.weak_text_color(),
+                );
+                let r = if description.is_empty() { r } else { r.on_hover_text(description) };
+                if r.double_clicked() {
+                    chosen = Some(e.clone());
+                }
+                if r.drag_started() {
+                    egui::DragAndDrop::set_payload(ui.ctx(), e.clone());
+                }
+            }
+        });
+        // While dragged, the element's name follows the pointer.
+        if let (Some(t), Some(pos)) = (egui::DragAndDrop::payload::<Json>(ui.ctx()), ui.input(|i| i.pointer.latest_pos())) {
+            egui::Area::new(egui::Id::new("datum_library_drag")).fixed_pos(pos + egui::vec2(12.0, 12.0)).order(egui::Order::Tooltip).show(
+                ui.ctx(),
+                |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(t["name"].as_str().unwrap_or_default()));
+                },
+            );
+        }
+        if let (Some(t), Some(sk)) = (chosen, &mut self.sketch) {
+            sk.draft.choose(t);
+            sk.field = None;
         }
     }
 
@@ -322,24 +500,139 @@ impl Viewer {
                     ui.end_row();
                 }
             });
-            match k.element.get_mut("parameters").and_then(Json::as_array_mut) {
-                Some(list) => {
-                    ui.label("Parameters, in the order they are asked:");
-                    let mut up = None;
-                    for (i, p) in list.iter().enumerate() {
-                        ui.horizontal(|ui| {
-                            if ui.add_enabled(i > 0, egui::Button::new("⏶")).clicked() {
-                                up = Some(i);
+            // Where the element is put: the engineer's choice of its points (D98).
+            let anchors = datum_model::library::anchors(&k.element);
+            egui::Grid::new("datum_keep_anchors").num_columns(3).show(ui, |ui| {
+                for (i, label, hint) in [
+                    (0, "Insertion point", "The point of the element that goes where the first click is"),
+                    (
+                        1,
+                        "Second point",
+                        "Only for an element put by two clicks: a rectangle by its corners, or a section between two points of a chain",
+                    ),
+                ] {
+                    ui.label(label).on_hover_text(hint);
+                    ui.strong(anchors.get(i).map_or("—", String::as_str));
+                    ui.horizontal(|ui| {
+                        let hint = "Click a point of the selection in the sketch";
+                        if ui.add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i))).on_hover_text(hint).clicked()
+                        {
+                            k.picking = if k.picking == Some(i) { None } else { Some(i) };
+                        }
+                        if i == 1
+                            && anchors.len() > 1
+                            && crate::icons::button(
+                                ui,
+                                crate::icons::Icon::Remove,
+                                "No second point",
+                                "No second point: the element is moved as it is",
+                                true,
+                            )
+                            .clicked()
+                        {
+                            k.anchor(1, None);
+                        }
+                    });
+                    ui.end_row();
+                }
+            });
+            if k.picking.is_some() {
+                ui.colored_label(egui::Color32::from_rgb(230, 120, 20), "Click a point of the selection in the sketch · Esc cancels");
+            }
+            if anchors.len() > 1 {
+                let mut fit = k.element["fit"].as_str().unwrap_or("stretch").to_string();
+                ui.radio_value(&mut fit, "stretch".into(), "Stretch along the axes to the second point (a rectangle by its corners)");
+                ui.radio_value(&mut fit, "align".into(), "Turn toward the second point (a section between two points of a chain)");
+                k.element["fit"] = json!(fit);
+            }
+            // The dimensions: a tick makes one a question of the element, under the name beside it.
+            use datum_model::library::{dimensions, parameter_names, parametrize, rename_parameter, unparametrize};
+            let dims = dimensions(&k.element);
+            if dims.is_empty() {
+                ui.weak("The selection has no dimensions: the element goes in as it is.");
+            } else {
+                ui.label("Dimensions — ticked ones are asked when the element is placed:");
+            }
+            let names = parameter_names(&k.element).unwrap_or_default();
+            let mut change: Option<Result<(), String>> = None;
+            egui::Grid::new("datum_keep_dims").num_columns(3).show(ui, |ui| {
+                for d in &dims {
+                    let asked = d.value.as_str().map(str::trim).filter(|t| names.iter().any(|n| n == t)).map(str::to_string);
+                    let mut on = asked.is_some();
+                    let given = d.value.is_number() || asked.is_some();
+                    if ui.add_enabled(given, egui::Checkbox::new(&mut on, &d.label)).changed() {
+                        change = Some(match &asked {
+                            Some(n) => unparametrize(&mut k.element, n),
+                            None => {
+                                let free = (1..).map(|i| format!("d{i}")).find(|n| !names.contains(n)).unwrap_or_default();
+                                parametrize(&mut k.element, &d.label, &free)
                             }
-                            ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
                         });
                     }
-                    if let Some(i) = up {
-                        list.swap(i - 1, i);
+                    match &asked {
+                        Some(n) => {
+                            let text = k.naming.entry(d.label.clone()).or_insert_with(|| n.clone());
+                            if ui.add(egui::TextEdit::singleline(text).desired_width(90.0)).changed() {
+                                match rename_parameter(&mut k.element, n, text.trim()) {
+                                    Ok(()) => change = Some(Ok(())),
+                                    Err(e) => k.error = Some(e),
+                                }
+                            }
+                        }
+                        None => {
+                            k.naming.remove(&d.label);
+                            ui.label("");
+                        }
+                    }
+                    // The value: a parameter's own, a number or an expression as given.
+                    let value = asked
+                        .as_ref()
+                        .and_then(|n| k.element["parameters"].as_array()?.iter().find(|p| p["name"] == n.as_str()).map(|p| p["value"].clone()));
+                    ui.weak(crate::dims::text_of(value.as_ref().unwrap_or(&d.value)));
+                    ui.end_row();
+                }
+            });
+            match change {
+                Some(Ok(())) => k.error = None,
+                Some(Err(e)) => k.error = Some(e),
+                None => {}
+            }
+            // Constraints reaching out of the selection: asked to be completed when placing (D116).
+            let links = k.element["links"].as_array().cloned().unwrap_or_default();
+            if !links.is_empty() {
+                ui.label("Constraints to what is outside — ticked ones are completed by a click when placing:");
+                for (i, l) in links.iter().enumerate() {
+                    let mut names = Vec::new();
+                    datum_model::visit_names(&mut l["constraint"].clone(), &mut |n| names.push(n.clone()));
+                    let label = format!(
+                        "{} {} (? a {})",
+                        l["constraint"]["type"].as_str().unwrap_or_default(),
+                        names.join(" "),
+                        l["kind"].as_str().unwrap_or_default()
+                    );
+                    let mut on = !k.unlinked.contains(&i);
+                    if ui.checkbox(&mut on, label).changed() {
+                        if on {
+                            k.unlinked.remove(&i);
+                        } else {
+                            k.unlinked.insert(i);
+                        }
                     }
                 }
-                None => {
-                    ui.weak("No dimension is given by a model parameter: the element goes in as it is. Give dimensions parameters (w, h…) to have it ask them.");
+            }
+            if let Some(list) = k.element.get_mut("parameters").and_then(Json::as_array_mut) {
+                ui.label("Asked in this order:");
+                let mut up = None;
+                for (i, p) in list.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if crate::icons::button(ui, crate::icons::Icon::Up, "Up", "Ask it earlier", i > 0).clicked() {
+                            up = Some(i);
+                        }
+                        ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
+                    });
+                }
+                if let Some(i) = up {
+                    list.swap(i - 1, i);
                 }
             }
             if let Some(e) = &k.error {
@@ -351,7 +644,19 @@ impl Viewer {
             });
         });
         if save {
-            let element = k.element.clone();
+            let mut element = k.element.clone();
+            if let Some(links) = element.get_mut("links").and_then(Json::as_array_mut) {
+                let mut i = 0;
+                links.retain(|_| {
+                    i += 1;
+                    !k.unlinked.contains(&(i - 1))
+                });
+                if links.is_empty()
+                    && let Some(o) = element.as_object_mut()
+                {
+                    o.remove("links");
+                }
+            }
             let name = element["name"].as_str().unwrap_or_default().to_string();
             let folder = datum_model::library::folder("sketch", self.path.as_deref());
             let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(datum_model::library::file_name(&name));
@@ -359,10 +664,18 @@ impl Viewer {
                 dialog = dialog.set_directory(f);
             }
             let written = datum_model::library::check("sketch", &element).and_then(|()| match dialog.save_file() {
-                Some(path) => serde_json::to_string_pretty(&element)
-                    .map_err(|e| e.to_string())
-                    .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
-                    .map(|()| true),
+                Some(path) => {
+                    // A file named otherwise in the dialog names the element: the palette shows
+                    // what the folder does.
+                    let stem = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    if !stem.is_empty() && datum_model::library::file_name(&name) != datum_model::library::file_name(&stem) {
+                        element["name"] = json!(stem);
+                    }
+                    serde_json::to_string_pretty(&element)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
+                        .map(|()| true)
+                }
                 None => Ok(false),
             });
             match written {
@@ -452,17 +765,17 @@ impl Viewer {
     /// The toolbar: open a model by dialog; a `.json` dropped on the window opens too.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open…").clicked()
-                && let Some(p) = rfd::FileDialog::new().add_filter("Datum model", &["json"]).pick_file()
-            {
-                ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-                self.open(p);
+            if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
+                self.open_by_dialog(ui);
             }
-            if ui.button("New").on_hover_text("An empty model").clicked() {
+            if ui.button("New").on_hover_text("An empty model").clicked() && self.may_leave(ui) {
                 self.leave();
                 self.set_path(None);
                 ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
                 self.send(Request::Command("new", json!({})));
+            }
+            if ui.add_enabled(self.model.is_some(), egui::Button::new("Close")).on_hover_text("Close the model (Ctrl+W)").clicked() {
+                self.close(ui);
             }
             if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
                 self.save(ui, false);
@@ -481,10 +794,11 @@ impl Viewer {
             ui.checkbox(&mut self.smooth, "Smooth edges")
                 .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
             ui.separator();
-            if ui.button("↶").on_hover_text("Undo (Ctrl+Z)").clicked() {
+            use crate::icons::{Icon, button};
+            if button(ui, Icon::Undo, "Undo", "Undo (Ctrl+Z)", true).clicked() {
                 self.send(Request::Command("undo", json!({})));
             }
-            if ui.button("↷").on_hover_text("Redo (Ctrl+Y)").clicked() {
+            if button(ui, Icon::Redo, "Redo", "Redo (Ctrl+Y)", true).clicked() {
                 self.send(Request::Command("redo", json!({})));
             }
             ui.separator();
@@ -513,7 +827,11 @@ impl Viewer {
             if let Some(p) = m.inspect["parameters"].as_object() {
                 self.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
-            self.model = Some(m);
+            // A save that failed while closing the window: it stays open, the error shown.
+            if self.quitting == Some(true) && m.error.is_some() {
+                self.quitting = None;
+            }
+            self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
         }
     }
@@ -574,19 +892,25 @@ impl Viewer {
                     }
                 }
             });
-            // The library: pieces of sketch, placed by a click per anchor.
+            // Geometric constraints by hand: a kind, then a click on each thing it ties (D118).
             ui.horizontal_wrapped(|ui| {
-                for t in &self.library {
-                    let on = sk.draft.tool == Tool::Template && sk.draft.template.as_ref().is_some_and(|c| c["name"] == t.element["name"]);
-                    let hint = format!("{} ({}; R: the first)", t.element["description"].as_str().unwrap_or(""), crate::templates::source(t));
-                    if ui.selectable_label(on, t.name()).on_hover_text(hint).clicked() {
-                        sk.draft.choose(t.element.clone());
-                        sk.field = None;
+                ui.label("Constrain");
+                for (kind, glyph, name, what) in crate::constrain::KINDS {
+                    let on = sk.draft.tool == Tool::Constrain(kind);
+                    let r = crate::icons::tile(ui, name, &format!("{name}: {what}"), on, true, |p, c, colour| {
+                        crate::sketch::paint_glyph(p, c, glyph, colour)
+                    });
+                    if r.clicked() {
+                        sk.draft.cancel();
+                        sk.draft.tool = Tool::Constrain(kind);
                     }
                 }
-                let hint = "The selection as a library element: dimensions given by model parameters become its parameters";
+            });
+            // The library is the palette on the right; a selection goes into it from here.
+            ui.horizontal_wrapped(|ui| {
+                let hint = "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside";
                 if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
-                    self.keeping = sk.extract("New element", Some(&sk.params)).map(|element| Keep { element, error: None });
+                    self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
                 }
             });
             ui.horizontal(|ui| {
@@ -616,6 +940,7 @@ impl Viewer {
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
+                Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
                      parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · Enter puts it at the cursor · Esc ends"
@@ -671,7 +996,11 @@ impl Viewer {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
                             if ui.button("DXF…").clicked()
-                                && let Some(p) = rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name(format!("{name}.dxf")).save_file()
+                                && let Some(p) = beside(
+                                    self.path.as_deref(),
+                                    rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name(format!("{name}.dxf")),
+                                )
+                                .save_file()
                             {
                                 export = Some((name.to_string(), p));
                             }
@@ -683,7 +1012,7 @@ impl Viewer {
                             ui.label(format!("✔ {name}  ·  {op}"));
                             let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
                             let label = serde_json::to_value(side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-                            if ui.button(format!("⇄ {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
+                            if ui.button(format!("Side: {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
                                 edit = Some((name.to_string(), json!({"side": side.next()})));
                             }
                         });
@@ -691,7 +1020,7 @@ impl Viewer {
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
                             ui.label(format!("✔ {name}  ·  {op}"));
-                            if ui.button("✎").on_hover_text("Edit the sketch").clicked() {
+                            if crate::icons::button(ui, crate::icons::Icon::Edit, "Edit the sketch", "Edit the sketch", true).clicked() {
                                 enter = Some(name.to_string());
                             }
                         });
@@ -827,6 +1156,9 @@ impl Viewer {
             sk.paint(&painter, rect);
             sk.draft.paint(sk, &painter, rect);
             sk.paint_frame(&painter, rect);
+            if let Some(k) = &self.keeping {
+                sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
+            }
         }
         // The face a click would sketch on, tinted.
         if let (true, Some((b, id))) = (self.picking, self.face) {
@@ -884,6 +1216,18 @@ impl Viewer {
         let h = f64::from(rect.height());
         let mut sent = Vec::new();
         let mut leave = false;
+        // An element dragged from the palette and let go here: its first anchor goes there, as a
+        // click would put it (the pointer belongs to the palette while it is dragged).
+        if let (Some(t), Some(pos)) = (r.dnd_release_payload::<Json>(), ui.input(|i| i.pointer.latest_pos())) {
+            sk.draft.choose((*t).clone());
+            sk.field = None;
+            let mut draft = std::mem::take(&mut sk.draft);
+            draft.track(sk, f64::from(pos.x - rect.center().x), f64::from(pos.y - rect.center().y), h, false);
+            if let Some(patch) = draft.click(sk) {
+                sent.push(Request::Command("edit_sketch", sk.apply(patch)));
+            }
+            sk.draft = draft;
+        }
         let typing = ui.ctx().egui_wants_keyboard_input();
         if !typing {
             let tool = ui.input(|i| {
@@ -905,7 +1249,7 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none())
                 && let Some(t) = self.library.first()
             {
-                sk.draft.choose(t.element.clone());
+                sk.draft.choose(t.entry.element.clone());
                 sk.field = None;
             }
             // Copy: the selection as an element, on the clipboard as JSON. Paste: an element
@@ -932,9 +1276,18 @@ impl Viewer {
             .draft
             .template
             .as_ref()
-            .filter(|_| sk.draft.tool == Tool::Template)
+            .filter(|_| sk.draft.tool == Tool::Template && sk.draft.linking.is_empty())
             .and_then(|t| datum_model::library::parameter_names(t).ok())
             .unwrap_or_default();
+        // Its sockets next, one by one: what the one asked takes, by the cursor (D116).
+        if let (Some(link), Some(spot)) = (sk.draft.linking.first(), &sk.draft.cursor) {
+            let (x, y) = sk.camera.offset(spot.at, h);
+            let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
+            let text = format!("{} — click a {} · Enter skips ({} left)", link.shown, link.kind, sk.draft.linking.len());
+            egui::Area::new(egui::Id::new("datum_sketch_link")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text));
+            });
+        }
         if names.is_empty() {
             if sk.field.as_ref().is_some_and(|f| matches!(f.entry, Entry::Parameter(_))) {
                 sk.field = None;
@@ -1102,14 +1455,52 @@ impl Viewer {
                         }
                     }
                 }
+            } else if let Tool::Constrain(kind) = draft.tool {
+                if r.clicked()
+                    && let (Some((x, y)), Ok(placed)) = (offset, &sk.placed)
+                {
+                    use crate::constrain::{Step, Want, step, wants};
+                    let point = || sk.point_at(x, y, h).map(Pick2::Point);
+                    let curve = || sk.curve_at(x, y, h).map(Pick2::Curve);
+                    let pick = match wants(kind, &draft.picks) {
+                        Want::Point => point(),
+                        Want::Curve => curve(),
+                        Want::Either => point().or_else(curve),
+                    };
+                    if let Some(p) = pick {
+                        draft.picks.push(p);
+                        let outcome = step(kind, &draft.picks, placed);
+                        if outcome != Step::More {
+                            draft.picks.clear();
+                        }
+                        let tried = match outcome {
+                            Step::More => Ok(None),
+                            Step::Done(c) => {
+                                let mut patch = serde_json::Map::new();
+                                patch.insert("add_constraints".into(), json!([c]));
+                                sk.try_apply(patch, true).map(Some)
+                            }
+                            Step::Wrong(why) => Err(why),
+                        };
+                        match tried {
+                            Ok(Some(p)) => {
+                                sk.conflict = None;
+                                sent.push(Request::Command("edit_sketch", p));
+                            }
+                            Ok(None) => {}
+                            Err(why) => sk.conflict = Some(crate::dims::Conflict { constraint: Json::Null, why }),
+                        }
+                    }
+                }
             } else if placing && let Some(patch) = draft.click(sk) {
                 sent.push(Request::Command("edit_sketch", sk.apply(patch)));
                 if field_done.0 || typing_field {
                     sk.field = None;
                 }
             }
-            // Enter while placing an element: it goes where the cursor is.
-            if field_done.0
+            // Enter while placing an element: it goes where the cursor is; on a socket, skips it.
+            let skip = !draft.linking.is_empty() && !typing && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if (field_done.0 || skip)
                 && draft.tool == Tool::Template
                 && let Some(patch) = draft.enter(sk)
             {
@@ -1189,7 +1580,23 @@ impl Viewer {
         {
             sent.push(Request::Command("edit_sketch", p));
         }
-        if r.clicked() {
+        // Keeping a selection in the library: a click picks its insertion point instead.
+        if let Some(k) = self.keeping.as_mut().filter(|k| k.picking.is_some()) {
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                k.picking = None;
+            } else if r.clicked()
+                && let (Some(i), Some((x, y))) = (k.picking, offset)
+            {
+                match sk.point_at(x, y, h).filter(|p| k.element["sketch"]["points"].get(p).is_some()) {
+                    Some(p) => {
+                        k.anchor(i, Some(p));
+                        k.picking = None;
+                        k.error = None;
+                    }
+                    None => k.error = Some("Not a point of the selection: pick one of its own".into()),
+                }
+            }
+        } else if r.clicked() {
             let shift = ui.input(|i| i.modifiers.shift);
             match sk.hover.clone() {
                 Some(p) if shift => {
@@ -1238,6 +1645,32 @@ fn smooth(average: f64, sample: f64) -> f64 {
     if average == 0.0 { sample } else { average * 0.9 + sample * 0.1 }
 }
 
+/// An element's outline fitted into `rect`, the sketch's Y up.
+fn paint_outline(painter: &egui::Painter, rect: egui::Rect, outline: &[Vec<[f64; 2]>], color: egui::Color32) {
+    let points = || outline.iter().flatten();
+    let (Some(x0), Some(x1)) = (points().map(|q| q[0]).min_by(f64::total_cmp), points().map(|q| q[0]).max_by(f64::total_cmp)) else { return };
+    let (Some(y0), Some(y1)) = (points().map(|q| q[1]).min_by(f64::total_cmp), points().map(|q| q[1]).max_by(f64::total_cmp)) else { return };
+    let span = (x1 - x0).max(y1 - y0);
+    if span <= 0.0 {
+        return;
+    }
+    let k = f64::from(rect.width().min(rect.height())) / span;
+    let c = rect.center();
+    let at = |q: &[f64; 2]| egui::pos2(c.x + ((q[0] - 0.5 * (x0 + x1)) * k) as f32, c.y - ((q[1] - 0.5 * (y0 + y1)) * k) as f32);
+    for line in outline {
+        painter.add(egui::Shape::line(line.iter().map(at).collect(), egui::Stroke::new(1.2, color)));
+    }
+}
+
+/// `dialog` opened in the folder of the model's file, if it has one: what is made from a part
+/// goes beside it.
+fn beside(model: Option<&std::path::Path>, dialog: rfd::FileDialog) -> rfd::FileDialog {
+    match model.and_then(std::path::Path::parent) {
+        Some(d) => dialog.set_directory(d),
+        None => dialog,
+    }
+}
+
 /// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
 /// expression as is.
 fn definition(v: &Json) -> String {
@@ -1251,13 +1684,37 @@ fn definition(v: &Json) -> String {
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
+        if self.shown < 2 {
+            self.shown += 1;
+            if self.shown == 2 {
+                ui.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
+            ui.ctx().request_repaint();
+        }
         self.receive();
+        // The window closed with changes not saved: asked first; saved, it closes once the
+        // background thread has written the file.
+        if ui.input(|i| i.viewport().close_requested()) && self.quitting.is_none() && self.modified() {
+            ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.quitting = self.ask_to_save(ui);
+        }
+        if let Some(saving) = self.quitting
+            && (!saving || (!self.busy && !self.modified()))
+        {
+            ui.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
         // Undo and redo, unless a text field takes the keys.
         if !ui.ctx().egui_wants_keyboard_input() {
             let shortcut = |k| egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k);
             let (undo, redo) = ui.input_mut(|i| (i.consume_shortcut(&shortcut(egui::Key::Z)), i.consume_shortcut(&shortcut(egui::Key::Y))));
             if undo {
                 self.send(Request::Command("undo", json!({})));
+            }
+            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::O))) {
+                self.open_by_dialog(ui);
+            }
+            if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::W))) {
+                self.close(ui);
             }
             if ui.input_mut(|i| i.consume_shortcut(&shortcut(egui::Key::S))) {
                 self.save(ui, false);
@@ -1270,6 +1727,9 @@ impl eframe::App for Viewer {
         }
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
+        if self.sketch.is_some() {
+            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
+        }
         self.keep(ui.ctx());
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
@@ -1307,6 +1767,7 @@ mod tests {
                 error: None,
                 notes: Vec::new(),
                 opened: false,
+                closed: false,
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
                 bodies: Vec::new(),
@@ -1331,7 +1792,10 @@ mod tests {
             sketch: None,
             entering: None,
             library: crate::templates::library(None),
+            library_filter: String::new(),
             keeping: None,
+            quitting: None,
+            shown: 0,
             picking: false,
             face: None,
         };
@@ -1361,7 +1825,7 @@ mod tests {
         }
     }
 
-    /// ✎ on a sketch asks to edit it; the model that comes back opens it in the view.
+    /// The pencil on a sketch asks to edit it; the model that comes back opens it in the view.
     #[test]
     fn a_sketch_opens_for_editing() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
@@ -1370,7 +1834,7 @@ mod tests {
                 egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
             });
             h.run();
-            h.get_by_label("✎").click();
+            h.get_by_label("Edit the sketch").click();
             h.run();
         }
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(Some(n))) if n == "outline"));
@@ -1458,7 +1922,7 @@ mod tests {
     }
 
     /// The whole plate kept in the library: its dimensions name w, h, pitch and hole, which the
-    /// dialog lists to be put in order; ⏶ moves one up. `DATUM_KEEP_SHOT=file.png` saves a picture.
+    /// dialog lists to be put in order; Up moves one up. `DATUM_KEEP_SHOT=file.png` saves a picture.
     #[test]
     fn a_selection_kept_in_the_library() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
@@ -1476,21 +1940,205 @@ mod tests {
         let names = |e: &Json| e["parameters"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let first = names(&element);
         assert_eq!(first.len(), 4, "w, h, pitch, hole: {element}");
-        v.keeping = Some(Keep { element, error: None });
+        v.keeping = Some(Keep::new(element));
         let shot = std::env::var_os("DATUM_KEEP_SHOT");
-        let builder = egui_kittest::Harness::builder().with_size([520.0, 300.0]);
+        let builder = egui_kittest::Harness::builder().with_size([560.0, 560.0]);
         let builder = if shot.is_some() { builder.wgpu() } else { builder };
         let mut h = builder.build_ui(|ui| v.keep(ui.ctx()));
         h.run();
-        h.get_by_label("Parameters, in the order they are asked:");
+        h.get_by_label("Asked in this order:");
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
-        h.get_all_by_label("⏶").nth(1).unwrap().click();
+        h.get_all_by_label("Up").nth(1).unwrap().click();
+        h.run();
+        // The second insertion point: Pick, then a click in the sketch.
+        h.get_all_by_label("Pick").nth(1).unwrap().click();
+        h.run();
+        h.get_by_label("Click a point of the selection in the sketch · Esc cancels");
+        drop(h);
+        let k = v.keeping.as_mut().unwrap();
+        let now = names(&k.element);
+        assert_eq!((&now[0], &now[1]), (&first[1], &first[0]), "the second moved up");
+        assert_eq!(k.picking, Some(1));
+        let proposed = datum_model::library::anchors(&k.element)[0].clone();
+        k.anchor(1, Some("b".into()));
+        assert_eq!((&k.element["anchors"], &k.element["fit"]), (&json!([proposed, "b"]), &json!("stretch")), "{}", k.element);
+        k.anchor(0, Some("b".into()));
+        assert_eq!((&k.element["anchors"], k.element.get("fit")), (&json!(["b"]), None), "one point twice is one point");
+    }
+
+    /// Dimensions given as numbers (no model parameters at all): a tick asks one when placing,
+    /// under the name typed beside it. `DATUM_KEEP_SHOT=file.png` saves a picture.
+    #[test]
+    fn a_dimension_ticked_is_asked() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.keeping = Some(Keep::new(json!({"name": "test", "anchors": ["p5"],
+            "links": [{"constraint": {"type": "perpendicular", "lines": ["?", "l5"]}, "kind": "line"}],
+            "sketch": {"points": {"p5": [0, 0], "p6": [-4, -8], "p7": [5, -11]},
+                       "lines": {"l5": {"from": "p5", "to": "p6"}, "l6": {"from": "p6", "to": "p7"}},
+                       "constraints": [{"type": "perpendicular", "lines": ["l5", "l6"]},
+                                       {"type": "length", "line": "l5", "value": 8.900914}, {"type": "length", "line": "l6", "value": 6.62265}]}})));
+        let shot = std::env::var_os("DATUM_KEEP_SHOT");
+        let builder = egui_kittest::Harness::builder().with_size([560.0, 360.0]);
+        let builder = if shot.is_some() { builder.wgpu() } else { builder };
+        let mut h = builder.build_ui(|ui| v.keep(ui.ctx()));
+        h.run();
+        h.get_by_label("length l5").click();
+        h.run();
+        h.get_by_label("perpendicular ? l5 (? a line)");
+        h.get_all_by_value("d1").next().unwrap().click();
+        h.run();
+        h.get_all_by_value("d1").next().unwrap().type_text("x");
+        h.run();
+        if let Some(path) = shot {
+            h.render().unwrap().save(path).unwrap();
+        }
+        drop(h);
+        let e = &v.keeping.as_ref().unwrap().element;
+        assert_eq!(e["parameters"], json!([{"name": "d1x", "value": 8.900914}]), "{e}");
+        assert_eq!(e["sketch"]["constraints"][1]["value"], "d1x");
+        assert!(datum_model::library::check("sketch", e).is_ok());
+    }
+
+    /// The library palette: a double click on an element starts placing it, a drag onto the
+    /// sketch puts it where it is let go. `DATUM_PALETTE_SHOT=file.png` saves a picture.
+    #[test]
+    fn the_palette_places_by_double_click_and_drag() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let shot = std::env::var_os("DATUM_PALETTE_SHOT");
+        let ui = |v: &mut Viewer, ui: &mut egui::Ui| {
+            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| v.palette(ui));
+            egui::CentralPanel::default().show(ui, |ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+        };
+        {
+            // Frames of 1/60 s, as on a screen: kittest's own quarter second is longer than a
+            // double click.
+            let builder = egui_kittest::Harness::builder().with_size([800.0, 400.0]).with_step_dt(1.0 / 60.0);
+            let builder = if shot.is_some() { builder.wgpu() } else { builder };
+            let mut h = builder.build_ui(|u| ui(&mut v, u));
+            h.run();
+            if let Some(path) = &shot {
+                h.render().unwrap().save(path).unwrap();
+            }
+            // A double click: two clicks within egui's double-click time.
+            let item = h.get_by_label("Center rectangle");
+            item.click();
+            item.click();
+            h.run();
+        }
+        assert_eq!(v.sketch.as_ref().unwrap().draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Center rectangle")));
+        {
+            let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui(|u| ui(&mut v, u));
+            h.run();
+            let from = h.get_by_label("Rectangle").rect().center();
+            h.drag_at(from);
+            h.run();
+            h.hover_at(egui::pos2(300.0, 200.0));
+            h.run();
+            h.drop_at(egui::pos2(300.0, 200.0));
+            h.run();
+        }
+        let sk = v.sketch.as_ref().unwrap();
+        assert_eq!(sk.draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Rectangle")), "the dragged one is being placed");
+        assert_eq!(sk.draft.clicks.len(), 1, "its first corner where it was let go");
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "two corners: nothing placed yet");
+    }
+
+    /// Constraints by hand: the Concentric button, then a click on each hole. The plate is fully
+    /// defined and its holes 50 apart: refused with why, nothing sent. `DATUM_CONSTRAIN_SHOT`.
+    #[test]
+    fn a_constraint_by_hand() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        {
+            // `DATUM_CONSTRAIN_SHOT=file.png` saves a picture of the panel.
+            let shot = std::env::var_os("DATUM_CONSTRAIN_SHOT");
+            let builder = egui_kittest::Harness::builder().with_size([360.0, 700.0]);
+            let builder = if shot.is_some() { builder.wgpu() } else { builder };
+            let mut h = builder.build_ui(|ui| {
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+            });
+            h.run();
+            if let Some(path) = shot {
+                h.render().unwrap().save(path).unwrap();
+            }
+            h.get_by_label("Concentric").click();
+            h.run();
+        }
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Constrain(crate::constrain::Kind::Concentric));
+        let area = std::cell::Cell::new(egui::Rect::NOTHING);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            area.set(rect);
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
         h.run();
         drop(h);
-        let now = names(&v.keeping.as_ref().unwrap().element);
-        assert_eq!((&now[0], &now[1]), (&first[1], &first[0]), "the second moved up");
+        // Where each hole's rightmost point is on the screen.
+        let sk = v.sketch.as_ref().unwrap();
+        let rect = area.get();
+        let at = |c: &str| {
+            let q = sk.placed.as_ref().unwrap().solved.points[c];
+            let (x, y) = sk.camera.offset([q.x + 4.5, q.y], f64::from(rect.height()));
+            rect.center() + egui::vec2(x as f32, y as f32)
+        };
+        let (first, second) = (at("h1"), at("h2"));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        for pos in [first, second] {
+            h.hover_at(pos);
+            h.run();
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+        }
+        drop(h);
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.draft.picks.is_empty(), "two holes picked, then done: {:?}", sk.draft.picks);
+        let why = &sk.conflict.as_ref().expect("refused").why;
+        assert!(!why.is_empty(), "with why");
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "nothing sent");
+    }
+
+    /// Close: a model with nothing unsaved closes without asking; the background thread is told,
+    /// the file and title go.
+    #[test]
+    fn close_a_saved_model() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.path = Some("plate.json".into());
+        assert!(!v.modified());
+        {
+            let mut h = egui_kittest::Harness::builder().with_size([800.0, 40.0]).build_ui(|ui| v.toolbar(ui));
+            h.run();
+            h.get_by_label("Close").click();
+            h.run();
+        }
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));
+        assert!(v.path.is_none() && v.sketch.is_none());
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.
@@ -1520,7 +2168,7 @@ mod tests {
             egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
         });
         h.run();
-        h.get_by_label("⇄ left").click();
+        h.get_by_label("Side: left").click();
         h.run();
         let sent = inbox.try_recv();
         assert!(matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "panel", "side": "right"})), "an edit of the side");

@@ -23,6 +23,8 @@ pub enum Tool {
     Dimension,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
+    /// Add a geometric constraint of this kind: click what it ties (D118).
+    Constrain(crate::constrain::Kind),
 }
 
 /// What a click lands on.
@@ -101,6 +103,9 @@ pub struct Draft {
     pub preset: Option<String>,
     pub answers: Map<String, Json>,
     pub asking: usize,
+    /// The sockets of the element just placed, the one asked first: a click on what it takes
+    /// completes it, Enter skips it (D116).
+    pub linking: Vec<datum_model::library::Link>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
     /// Where the cursor would click, and the inferred constraint of a line.
@@ -126,6 +131,7 @@ impl Default for Draft {
             preset: None,
             answers: Map::new(),
             asking: 0,
+            linking: Vec::new(),
             tangent: false,
             cursor: None,
             lean: None,
@@ -167,7 +173,8 @@ pub fn face_edges(body: &Body, placed: &Placed) -> Vec<FaceEdge> {
 impl Draft {
     /// Cancels what is half drawn; true if there was something.
     pub fn cancel(&mut self) -> bool {
-        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty();
+        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty() || !self.linking.is_empty();
+        self.linking.clear();
         self.chain = None;
         self.clicks.clear();
         self.picks.clear();
@@ -189,18 +196,40 @@ impl Draft {
     /// Enter while placing an element: it goes where the cursor is, with the anchors clicked so
     /// far; the size its other anchors would give, its parameters give.
     pub fn enter(&mut self, edit: &SketchEdit) -> Option<Map<String, Json>> {
+        if !self.linking.is_empty() {
+            self.linking.remove(0);
+            return None;
+        }
         let spot = self.cursor.clone().filter(|_| self.tool == Tool::Template)?;
         let mut patch = Patch::new(edit);
         self.place(&mut patch, edit, spot)?;
         patch.done()
     }
 
-    /// The element placed by the clicks so far and `spot`. The values typed stay for the next.
+    /// The element placed by the clicks so far and `spot`; its sockets are asked next. The values
+    /// typed stay for the next.
     fn place(&mut self, patch: &mut Patch, edit: &SketchEdit, spot: Spot) -> Option<()> {
         let t = self.template.clone()?;
         let mut spots = std::mem::take(&mut self.clicks);
         spots.push(spot);
-        crate::templates::place(patch, &t, self.preset.as_deref(), &self.answers, &spots, self.construction, &edit.params)
+        self.linking = crate::templates::place(patch, &t, self.preset.as_deref(), &self.answers, &spots, self.construction, &edit.params)?;
+        Some(())
+    }
+
+    /// A click completing the socket asked: on a point, a line or a curve, as it takes.
+    fn link(&mut self, edit: &SketchEdit, spot: &Spot) -> Option<Map<String, Json>> {
+        let link = self.linking.first()?;
+        let target = match &spot.snap {
+            Snap::Point(n) | Snap::Middle(n) | Snap::On(n) => n,
+            _ => return None,
+        };
+        if !datum_model::library::fits(edit.placed.as_ref().ok()?, &link.kind, target) {
+            return None;
+        }
+        let mut patch = Patch::new(edit);
+        patch.constrain(link.to(target));
+        self.linking.remove(0);
+        patch.done()
     }
 
     /// Whether a value typed now would size what is being drawn: a line from the chain's end,
@@ -380,7 +409,8 @@ impl Draft {
         let spot = self.cursor.clone()?;
         let mut patch = Patch::new(edit);
         match self.tool {
-            Tool::Select | Tool::Dimension => return None,
+            Tool::Select | Tool::Dimension | Tool::Constrain(_) => return None,
+            Tool::Template if !self.linking.is_empty() => return self.link(edit, &spot),
             Tool::Template => {
                 if self.clicks.len() + 1 < datum_model::library::anchors(self.template.as_ref()?).len() {
                     self.clicks.push(spot);
@@ -519,6 +549,24 @@ impl Draft {
                 })
                 .collect::<Vec<_>>()
         };
+        // What the dimension or constraint tool has picked so far, marked.
+        if let Ok(p) = &edit.placed {
+            let mark = egui::Stroke::new(3.0, DRAFT);
+            for pick in &self.picks {
+                match pick {
+                    crate::dims::Pick2::Point(n) => {
+                        if let Some(q) = p.solved.points.get(n) {
+                            painter.circle_stroke(screen([q.x, q.y]), 7.0, mark);
+                        }
+                    }
+                    crate::dims::Pick2::Curve(n) => {
+                        if let Some(pts) = SketchEdit::curve_points(p, n) {
+                            painter.add(egui::Shape::line(pts.into_iter().map(screen).collect(), mark));
+                        }
+                    }
+                }
+            }
+        }
         match (self.tool, &self.chain, &self.clicks[..]) {
             (Tool::Line, Some(c), _) => match (&c.last, self.tangent) {
                 (Some((_, dir)), true) => {
@@ -539,7 +587,7 @@ impl Draft {
                 polyline(arc(c.at, r, 0.0, std::f64::consts::TAU));
             }
             (Tool::Arc, _, [c]) => polyline(vec![c.at, spot.at]),
-            (Tool::Template, _, clicks) => {
+            (Tool::Template, _, clicks) if self.linking.is_empty() => {
                 if let Some(t) = &self.template {
                     let at: Vec<[f64; 2]> = clicks.iter().map(|c| c.at).chain([spot.at]).collect();
                     for line in crate::templates::outline(t, self.preset.as_deref(), &self.answers, &at, &edit.params) {
