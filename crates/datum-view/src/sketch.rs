@@ -144,7 +144,7 @@ fn glyph_of(c: &Json) -> Option<(Glyph, Vec<String>)> {
 }
 
 /// Draws glyph `g` in a badge centred at `c`.
-fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colour: egui::Color32) {
+pub(crate) fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colour: egui::Color32) {
     let s = 4.5;
     let p = |x: f32, y: f32| c + egui::vec2(x * s, y * s);
     let stroke = egui::Stroke::new(1.3, colour);

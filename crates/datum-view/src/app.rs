@@ -802,6 +802,29 @@ impl Viewer {
                     }
                 }
             });
+            // Geometric constraints by hand: a kind, then a click on each thing it ties (D118).
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Constrain");
+                for (kind, glyph, name, what) in crate::constrain::KINDS {
+                    let on = sk.draft.tool == Tool::Constrain(kind);
+                    let (rect, r) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                    r.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, on, name));
+                    let visuals = ui.visuals();
+                    let fill = if on {
+                        visuals.selection.bg_fill
+                    } else if r.hovered() {
+                        visuals.widgets.hovered.weak_bg_fill
+                    } else {
+                        visuals.widgets.inactive.weak_bg_fill
+                    };
+                    ui.painter().rect_filled(rect, 3.0, fill);
+                    crate::sketch::paint_glyph(ui.painter(), rect.center(), glyph, visuals.strong_text_color());
+                    if r.on_hover_text(format!("{name}: {what}")).clicked() {
+                        sk.draft.cancel();
+                        sk.draft.tool = Tool::Constrain(kind);
+                    }
+                }
+            });
             // The library is the palette on the right; a selection goes into it from here.
             ui.horizontal_wrapped(|ui| {
                 let hint = "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside";
@@ -836,6 +859,7 @@ impl Viewer {
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
+                Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
                      parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · Enter puts it at the cursor · Esc ends"
@@ -1347,6 +1371,43 @@ impl Viewer {
                                 sk.ask(c, key, now, at);
                             }
                             draft.picks.clear();
+                        }
+                    }
+                }
+            } else if let Tool::Constrain(kind) = draft.tool {
+                if r.clicked()
+                    && let (Some((x, y)), Ok(placed)) = (offset, &sk.placed)
+                {
+                    use crate::constrain::{Step, Want, step, wants};
+                    let point = || sk.point_at(x, y, h).map(Pick2::Point);
+                    let curve = || sk.curve_at(x, y, h).map(Pick2::Curve);
+                    let pick = match wants(kind, &draft.picks) {
+                        Want::Point => point(),
+                        Want::Curve => curve(),
+                        Want::Either => point().or_else(curve),
+                    };
+                    if let Some(p) = pick {
+                        draft.picks.push(p);
+                        let outcome = step(kind, &draft.picks, placed);
+                        if outcome != Step::More {
+                            draft.picks.clear();
+                        }
+                        let tried = match outcome {
+                            Step::More => Ok(None),
+                            Step::Done(c) => {
+                                let mut patch = serde_json::Map::new();
+                                patch.insert("add_constraints".into(), json!([c]));
+                                sk.try_apply(patch, true).map(Some)
+                            }
+                            Step::Wrong(why) => Err(why),
+                        };
+                        match tried {
+                            Ok(Some(p)) => {
+                                sk.conflict = None;
+                                sent.push(Request::Command("edit_sketch", p));
+                            }
+                            Ok(None) => {}
+                            Err(why) => sk.conflict = Some(crate::dims::Conflict { constraint: Json::Null, why }),
                         }
                     }
                 }
@@ -1889,6 +1950,73 @@ mod tests {
         assert_eq!(sk.draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Rectangle")), "the dragged one is being placed");
         assert_eq!(sk.draft.clicks.len(), 1, "its first corner where it was let go");
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "two corners: nothing placed yet");
+    }
+
+    /// Constraints by hand: the Concentric button, then a click on each hole. The plate is fully
+    /// defined and its holes 50 apart: refused with why, nothing sent. `DATUM_CONSTRAIN_SHOT`.
+    #[test]
+    fn a_constraint_by_hand() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        {
+            // `DATUM_CONSTRAIN_SHOT=file.png` saves a picture of the panel.
+            let shot = std::env::var_os("DATUM_CONSTRAIN_SHOT");
+            let builder = egui_kittest::Harness::builder().with_size([360.0, 700.0]);
+            let builder = if shot.is_some() { builder.wgpu() } else { builder };
+            let mut h = builder.build_ui(|ui| {
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+            });
+            h.run();
+            if let Some(path) = shot {
+                h.render().unwrap().save(path).unwrap();
+            }
+            h.get_by_label("Concentric").click();
+            h.run();
+        }
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Constrain(crate::constrain::Kind::Concentric));
+        let area = std::cell::Cell::new(egui::Rect::NOTHING);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            area.set(rect);
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.run();
+        drop(h);
+        // Where each hole's rightmost point is on the screen.
+        let sk = v.sketch.as_ref().unwrap();
+        let rect = area.get();
+        let at = |c: &str| {
+            let q = sk.placed.as_ref().unwrap().solved.points[c];
+            let (x, y) = sk.camera.offset([q.x + 4.5, q.y], f64::from(rect.height()));
+            rect.center() + egui::vec2(x as f32, y as f32)
+        };
+        let (first, second) = (at("h1"), at("h2"));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        for pos in [first, second] {
+            h.hover_at(pos);
+            h.run();
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+            h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+        }
+        drop(h);
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.draft.picks.is_empty(), "two holes picked, then done: {:?}", sk.draft.picks);
+        let why = &sk.conflict.as_ref().expect("refused").why;
+        assert!(!why.is_empty(), "with why");
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "nothing sent");
     }
 
     /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.

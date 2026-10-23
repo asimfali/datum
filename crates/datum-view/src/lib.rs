@@ -4,6 +4,7 @@
 mod app;
 pub mod camera;
 pub mod capture;
+mod constrain;
 mod dims;
 mod draw;
 pub mod log;

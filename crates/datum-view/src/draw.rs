@@ -23,6 +23,8 @@ pub enum Tool {
     Dimension,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
+    /// Add a geometric constraint of this kind: click what it ties (D118).
+    Constrain(crate::constrain::Kind),
 }
 
 /// What a click lands on.
@@ -407,7 +409,7 @@ impl Draft {
         let spot = self.cursor.clone()?;
         let mut patch = Patch::new(edit);
         match self.tool {
-            Tool::Select | Tool::Dimension => return None,
+            Tool::Select | Tool::Dimension | Tool::Constrain(_) => return None,
             Tool::Template if !self.linking.is_empty() => return self.link(edit, &spot),
             Tool::Template => {
                 if self.clicks.len() + 1 < datum_model::library::anchors(self.template.as_ref()?).len() {
@@ -547,6 +549,24 @@ impl Draft {
                 })
                 .collect::<Vec<_>>()
         };
+        // What the dimension or constraint tool has picked so far, marked.
+        if let Ok(p) = &edit.placed {
+            let mark = egui::Stroke::new(3.0, DRAFT);
+            for pick in &self.picks {
+                match pick {
+                    crate::dims::Pick2::Point(n) => {
+                        if let Some(q) = p.solved.points.get(n) {
+                            painter.circle_stroke(screen([q.x, q.y]), 7.0, mark);
+                        }
+                    }
+                    crate::dims::Pick2::Curve(n) => {
+                        if let Some(pts) = SketchEdit::curve_points(p, n) {
+                            painter.add(egui::Shape::line(pts.into_iter().map(screen).collect(), mark));
+                        }
+                    }
+                }
+            }
+        }
         match (self.tool, &self.chain, &self.clicks[..]) {
             (Tool::Line, Some(c), _) => match (&c.last, self.tangent) {
                 (Some((_, dir)), true) => {
