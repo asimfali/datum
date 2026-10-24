@@ -75,9 +75,6 @@ pub struct Chain {
 pub struct Heading {
     pub curve: String,
     pub dir: [f64; 2],
-    /// A line's start: with the chain's end, the line exactly, so whether a point lies straight
-    /// on along it is decided exactly. None after an arc.
-    pub start: Option<[f64; 2]>,
 }
 
 /// An edge of the face the sketch lies on, in sketch coordinates: its ID, its ends (vertex ID
@@ -389,7 +386,11 @@ impl Draft {
         let found = match (self.tool, &self.chain, &self.clicks[..]) {
             _ if !leaning => None,
             (Tool::Line, Some(c), _) if !self.tangent => self.lean(edit, c.at, spot.at, c.last.as_ref()),
-            (Tool::Line, Some(Chain { at, last: Some(h), .. }), _) => tangent_lean(*at, h, spot.at),
+            (Tool::Line, Some(c @ Chain { last: Some(h), .. }), _) => match tangent_arc(c.at, h, spot.at) {
+                Some(_) => tangent_lean(c.at, h, spot.at),
+                // Straight on: a line, leaning as one does.
+                None => self.lean(edit, c.at, spot.at, c.last.as_ref()),
+            },
             (Tool::Arc, _, [c] | [c, _]) => axis_lean(c.at, spot.at),
             _ => None,
         };
@@ -516,7 +517,7 @@ impl Draft {
                     let w = [spot.at[0] - c[0], spot.at[1] - c[1]];
                     let l = libm::hypot(w[0], w[1]);
                     let dir = if ccw { [-w[1] / l, w[0] / l] } else { [w[1] / l, -w[0] / l] };
-                    Heading { curve: name, dir, start: None }
+                    Heading { curve: name, dir }
                 } else {
                     let l = libm::hypot(spot.at[0] - chain.at[0], spot.at[1] - chain.at[1]);
                     if l == 0.0 {
@@ -536,7 +537,7 @@ impl Draft {
                         None => {}
                     }
                     let dir = [(spot.at[0] - chain.at[0]) / l, (spot.at[1] - chain.at[1]) / l];
-                    Heading { curve: name, dir, start: Some(chain.at) }
+                    Heading { curve: name, dir }
                 };
                 self.tangent = false;
                 // Closing on a point of the sketch ends the chain, as Inventor does.
@@ -659,21 +660,17 @@ impl Draft {
 }
 
 /// The centre of the arc leaving `from` as `heading` does and passing through `to`, and whether
-/// it turns counterclockwise; None if `to` lies straight ahead (or behind): no arc, a line. After
-/// a line that is decided exactly: rounding would put the centre some 10¹⁸ away instead.
+/// it turns counterclockwise; None if `to` lies straight ahead or behind, within a line's lean:
+/// no arc. Nearer than that the arc only grows, to 10¹⁸ from rounding alone (the cursor, a
+/// line's middle are on it only as near as rounding goes), too large to draw or to hold.
 pub fn tangent_arc(from: [f64; 2], heading: &Heading, to: [f64; 2]) -> Option<([f64; 2], bool)> {
     let dir = heading.dir;
     let v = [to[0] - from[0], to[1] - from[1]];
-    let n = [-dir[1], dir[0]];
-    let across = v[0] * n[0] + v[1] * n[1];
-    let vec2 = |p: [f64; 2]| datum_math::Vec2::new(p[0], p[1]);
-    let straight = match heading.start {
-        Some(s) => datum_math::orient2d(vec2(s), vec2(from), vec2(to)) == datum_math::Sign::Zero,
-        None => across == 0.0,
-    };
-    if straight {
+    if v == [0.0, 0.0] || !(LEAN_DEG..=180.0 - LEAN_DEG).contains(&degrees(v, dir)) {
         return None;
     }
+    let n = [-dir[1], dir[0]];
+    let across = v[0] * n[0] + v[1] * n[1];
     // The centre on the normal at `from`, as far from `to` as from `from`.
     let r = (v[0] * v[0] + v[1] * v[1]) / (2.0 * across);
     Some(([from[0] + n[0] * r, from[1] + n[1] * r], r > 0.0))
@@ -1154,7 +1151,7 @@ mod tests {
     #[test]
     fn a_tangent_arc_turns_the_way_the_cursor_is() {
         // Along +X from the origin, to (5, 5): a quarter turn left around (0, 5).
-        let east = Heading { curve: "l".into(), dir: [1.0, 0.0], start: None };
+        let east = Heading { curve: "l".into(), dir: [1.0, 0.0] };
         let (c, ccw) = tangent_arc([0.0, 0.0], &east, [5.0, 5.0]).unwrap();
         assert_eq!((c, ccw), ([0.0, 5.0], true));
         let (c, ccw) = tangent_arc([0.0, 0.0], &east, [5.0, -5.0]).unwrap();
@@ -1162,31 +1159,51 @@ mod tests {
         assert!(tangent_arc([0.0, 0.0], &east, [7.0, 0.0]).is_none());
     }
 
-    /// Back to the start of the line it continues: no arc, whatever the line's direction. Rounding alone put the centre up to 3.6·10¹⁸ away, and the window hung drawing it.
+    /// Back to the start of the line it continues: no arc, whatever the line's direction.
+    /// Rounding alone put the centre up to 3.6·10¹⁸ away, and the window hung drawing it.
     #[test]
     fn no_tangent_arc_straight_along_a_line() {
         for k in 1..400 {
             let a = [0.37 * f64::from(k), -1.3 + 0.11 * f64::from(k)];
             let b = [a[0] + 10.0 * libm::cos(f64::from(k)), a[1] + 7.0 * libm::sin(f64::from(k) * 1.7)];
             let l = libm::hypot(b[0] - a[0], b[1] - a[1]);
-            let h = Heading { curve: "l".into(), dir: [(b[0] - a[0]) / l, (b[1] - a[1]) / l], start: Some(a) };
+            let h = Heading { curve: "l".into(), dir: [(b[0] - a[0]) / l, (b[1] - a[1]) / l] };
             assert!(tangent_arc(b, &h, a).is_none(), "back to the start of line {k}");
         }
     }
 
-    /// A tangent continuation back to the line's start is refused: no arc goes there, and a line
-    /// back over the first is not drawn instead. Straight ahead it is a line, as before.
+    /// A tangent continuation straight back (to the line's start, its middle) is refused, and
+    /// straight on is a line, in any direction: the cursor and a middle lie on the line only as
+    /// near as rounding goes, and an arc through them was some 10¹⁶ large, the sketch unsolvable.
     #[test]
-    fn no_tangent_click_back_along_the_line() {
-        let mut e = editor(json!({"points": {}}), false);
-        e.draft.tool = Tool::Line;
-        click_at(&mut e, [0.0, 0.0], false);
-        click_at(&mut e, [10.0, 3.0], false);
-        e.draft.tangent = true;
-        assert!(click_at(&mut e, [0.0, 0.0], false).is_none(), "back to the start");
-        assert!(e.draft.tangent && e.draft.chain.is_some(), "still continuing, still tangent");
-        let p = click_at(&mut e, [20.0, 6.0], false).unwrap();
-        assert_eq!(p["lines"]["l2"], json!({"from": "p2", "to": "p3"}), "straight ahead: {p}");
+    fn no_tangent_arc_straight_back_or_on() {
+        for k in 1..60 {
+            let f = f64::from(k);
+            let a = [0.37 * f - 20.0, 0.11 * f - 13.3];
+            let b = [a[0] + 10.0 * libm::cos(f), a[1] + 7.0 * libm::sin(1.7 * f)];
+            for to in 0..3 {
+                let mut e = editor(json!({"points": {}}), false);
+                e.draft.tool = Tool::Line;
+                click_at(&mut e, a, false);
+                click_at(&mut e, b, false);
+                // Where the line ended up, leaning or not.
+                let Some(Chain { at: b, last: Some(Heading { dir, .. }), .. }) = e.draft.chain.clone() else { panic!("{k}: a chain") };
+                let (to, back) = match to {
+                    0 => (a, true),
+                    1 => ([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], true),
+                    _ => ([b[0] + 10.0 * dir[0], b[1] + 10.0 * dir[1]], false),
+                };
+                e.draft.tangent = true;
+                let p = click_at(&mut e, to, false);
+                assert!(e.placed.is_ok(), "{k} {to:?}: {:?}", e.placed.as_ref().err());
+                if back {
+                    assert!(p.is_none() && e.draft.tangent && e.draft.chain.is_some(), "{k} back to {to:?}: refused, still tangent");
+                } else {
+                    let p = p.unwrap();
+                    assert!(p["lines"]["l2"].is_object() && p.get("arcs").is_none(), "{k} straight on: a line, {p}");
+                }
+            }
+        }
     }
 
     /// Dashes only where the view shows them: a curve 10¹⁸ long is drawn at once.
