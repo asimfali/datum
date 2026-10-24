@@ -10,6 +10,18 @@ use egui_wgpu::wgpu;
 
 use crate::scene::{Geometry, LINE_VERTEX, Part, TRIANGLE_VERTEX};
 
+/// The GPU interfaces the window and headless pictures open, `WGPU_BACKEND` still choosing. On
+/// Windows, DirectX 12 with OpenGL for GPUs without it, not Vulkan: a laptop's Vulkan driver
+/// killed the window with an access violation no log could catch, and broke headless pictures
+/// at the device's teardown (D103).
+pub fn backends() -> wgpu::Backends {
+    match wgpu::Backends::from_env() {
+        Some(chosen) => chosen,
+        None if cfg!(windows) => wgpu::Backends::DX12 | wgpu::Backends::GL,
+        None => wgpu::Backends::all(),
+    }
+}
+
 const SHADER: &str = r"
 struct U { vp: mat4x4<f32>, eye: vec4<f32> };
 @group(0) @binding(0) var<uniform> u: U;
