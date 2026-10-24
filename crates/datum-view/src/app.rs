@@ -31,14 +31,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
         viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
-    // On Windows, DirectX 12 with OpenGL for GPUs without it, not Vulkan: a laptop's Vulkan
-    // driver killed the process with an access violation that no log can catch (D103).
-    // `WGPU_BACKEND` still chooses.
-    if cfg!(windows)
-        && wgpu::Backends::from_env().is_none()
-        && let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup
-    {
-        setup.instance_descriptor.backends = wgpu::Backends::DX12 | wgpu::Backends::GL;
+    if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
+        setup.instance_descriptor.backends = crate::render::backends();
     }
     eframe::run_native(
         "Datum",

@@ -24,7 +24,9 @@ struct Offscreen {
 impl Offscreen {
     /// Any adapter wgpu finds, software ones included; the fastest first.
     fn new(width: u32, height: u32) -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle_from_env();
+        descriptor.backends = crate::render::backends();
+        let instance = wgpu::Instance::new(descriptor);
         let options = wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
         let adapter = pollster::block_on(instance.request_adapter(&options)).map_err(|e| format!("no GPU adapter, not even a software one: {e}"))?;
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
