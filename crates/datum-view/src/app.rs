@@ -12,6 +12,7 @@ use datum_model::Session;
 use egui_wgpu::wgpu;
 use serde_json::{Value as Json, json};
 
+use crate::actions::{ACTIONS, Act, Action};
 use crate::camera::Camera;
 use crate::dims::{Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
@@ -43,8 +44,10 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let adapter = format!("{} ({:?})", info.name, info.backend);
             crate::log::write(&format!("window on {adapter}"));
             let maximized = cc.storage.and_then(|s| s.get_string(MAXIMIZED)).is_none_or(|m| m == "true");
+            let recent = cc.storage.and_then(|s| s.get_string(RECENT)).and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
             let mut viewer = Viewer::new(path, cc.egui_ctx.clone(), adapter);
             viewer.maximized = maximized;
+            viewer.recent = recent;
             Ok(Box::new(viewer))
         }),
     )
@@ -54,6 +57,17 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
 /// Whether the window was left maximized: kept apart from the window's size and place, which
 /// Windows does not restore maximized.
 const MAXIMIZED: &str = "datum_maximized";
+
+/// The models opened or saved last, the latest first: state beside the window's, not a setting.
+const RECENT: &str = "datum_recent";
+const RECENT_KEPT: usize = 10;
+
+/// `path` as the latest of `recent`, once, the oldest dropped past [`RECENT_KEPT`].
+fn remember(recent: &mut Vec<PathBuf>, path: PathBuf) {
+    recent.retain(|p| *p != path);
+    recent.insert(0, path);
+    recent.truncate(RECENT_KEPT);
+}
 
 fn title(path: Option<&std::path::Path>) -> String {
     path.map_or_else(|| "Datum".into(), |p| format!("Datum — {}", p.display()))
@@ -281,6 +295,7 @@ struct Viewer {
     quitting: Option<bool>,
     /// The folder of the model last opened or saved: where the next one is opened from.
     worked_in: Option<PathBuf>,
+    recent: Vec<PathBuf>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -334,6 +349,7 @@ impl Viewer {
             keeping: None,
             quitting: None,
             worked_in: None,
+            recent: Vec::new(),
             shown: 0,
             maximized: false,
             picking: false,
@@ -354,6 +370,9 @@ impl Viewer {
     /// The model's file, and with it the project whose library elements are listed.
     fn set_path(&mut self, path: Option<PathBuf>) {
         self.library = crate::templates::library(path.as_deref());
+        if let Some(p) = &path {
+            remember(&mut self.recent, std::path::absolute(p).unwrap_or_else(|_| p.clone()));
+        }
         if let Some(d) = path.as_deref().and_then(std::path::Path::parent) {
             self.worked_in = Some(d.to_path_buf());
         }
@@ -396,8 +415,27 @@ impl Viewer {
             return;
         }
         if let Some(p) = self.where_working().pick_file() {
-            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-            self.open(p);
+            self.open_titled(ui, p);
+        }
+    }
+
+    /// Opens `path`, the window titled with it.
+    fn open_titled(&mut self, ui: &egui::Ui, path: PathBuf) {
+        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&path))));
+        self.open(path);
+    }
+
+    /// A recent model chosen: opened once what is not saved is asked about; one no longer there
+    /// leaves the list, saying so.
+    fn open_recent(&mut self, ui: &egui::Ui, path: PathBuf) {
+        if !path.exists() {
+            self.recent.retain(|p| *p != path);
+            rfd::MessageDialog::new()
+                .set_title("Datum")
+                .set_description(format!("{} is no longer there: it leaves the recent files.", path.display()))
+                .show();
+        } else if self.may_leave(ui) {
+            self.open_titled(ui, path);
         }
     }
 
@@ -813,25 +851,9 @@ impl Viewer {
         }
     }
 
-    /// The toolbar: open a model by dialog; a `.json` dropped on the window opens too.
+    /// The toolbar under the menu; a `.json` dropped on the window opens.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui.button("Open…").on_hover_text("Ctrl+O").clicked() {
-                self.open_by_dialog(ui);
-            }
-            if ui.button("New").on_hover_text("An empty model (Ctrl+N)").clicked() {
-                self.new_model(ui);
-            }
-            if ui.add_enabled(self.model.is_some(), egui::Button::new("Close")).on_hover_text("Close the model (Ctrl+W)").clicked() {
-                self.close(ui);
-            }
-            if ui.button("Save").on_hover_text("Ctrl+S").clicked() {
-                self.save(ui, false);
-            }
-            if ui.button("Save as…").clicked() {
-                self.save(ui, true);
-            }
-            ui.separator();
             if let Ok(n) = self.update.try_recv() {
                 self.newer = Some(n);
             }
@@ -839,29 +861,21 @@ impl Viewer {
                 ui.hyperlink_to(format!("⬆ Datum {version} is out"), url).on_hover_text("Its page: what is new, and the download");
                 ui.separator();
             }
-            ui.checkbox(&mut self.smooth, "Smooth edges")
-                .on_hover_text("Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it.");
-            ui.separator();
             use crate::icons::{Icon, button};
-            if button(ui, Icon::Undo, "Undo", "Undo (Ctrl+Z)", true).clicked() {
-                self.send(Request::Command("undo", json!({})));
-            }
-            if button(ui, Icon::Redo, "Redo", "Redo (Ctrl+Y)", true).clicked() {
-                self.send(Request::Command("redo", json!({})));
+            for (act, icon) in [(Act::Undo, Icon::Undo), (Act::Redo, Icon::Redo)] {
+                let a = act.action();
+                if button(ui, icon, a.label, &a.hint(ui.ctx()), self.available(a)).clicked() {
+                    self.run(ui, act);
+                }
             }
             ui.separator();
-            if ui.button("New sketch").on_hover_text("A sketch on the XY plane").clicked() {
-                self.new_sketch(json!({}));
-            }
-            if ui.selectable_label(self.picking, "Sketch on face").on_hover_text("Then click a plane face of the model (S)").clicked() {
-                self.leave();
-                self.picking = !self.picking;
+            for act in [Act::NewSketch, Act::SketchOnFace] {
+                self.item(ui, act, false);
             }
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
-            ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
-            self.open(p);
+            self.open_titled(ui, p);
         }
     }
 
@@ -922,21 +936,10 @@ impl Viewer {
                 }
             }
             ui.horizontal_wrapped(|ui| {
-                for (tool, label, hint) in [
-                    (Tool::Select, "Select", "Select and drag (Esc)"),
-                    (Tool::Line, "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends (L)"),
-                    (Tool::Arc, "Arc", "Centre, start, end (A)"),
-                    (Tool::Circle, "Circle", "Centre, then a point on it (C)"),
-                    (Tool::Point, "Point", "A point (P)"),
-                    (
-                        Tool::Dimension,
-                        "Dimension",
-                        "Click a line, an arc or a circle; a point, then a line; two points, then where it goes. Frame two lines: their angle (D)",
-                    ),
-                ] {
-                    if ui.selectable_label(sk.draft.tool == tool, label).on_hover_text(hint).clicked() {
-                        sk.draft.cancel();
-                        sk.draft.tool = tool;
+                for act in TOOLS {
+                    let (a, tool) = (act.action(), tool(act));
+                    if ui.selectable_label(sk.draft.tool == tool, a.label).on_hover_text(a.hint(ui.ctx())).clicked() {
+                        sk.draft.take_up(tool);
                     }
                 }
             });
@@ -949,8 +952,7 @@ impl Viewer {
                         crate::sketch::paint_glyph(p, c, glyph, colour)
                     });
                     if r.clicked() {
-                        sk.draft.cancel();
-                        sk.draft.tool = Tool::Constrain(kind);
+                        sk.draft.take_up(Tool::Constrain(kind));
                     }
                 }
             });
@@ -982,7 +984,7 @@ impl Viewer {
                 ui.checkbox(&mut sk.constraints, "Constraints")
                     .on_hover_text("Badges of the geometric constraints: click one to select it, Del removes it");
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
-                    ui.checkbox(&mut sk.draft.tangent, "Tangent arc (T)");
+                    ui.checkbox(&mut sk.draft.tangent, Act::Tangent.action().labelled(ui.ctx()));
                 }
             });
             // A dimension that would over-constrain the sketch: as a reference one, or not at all.
@@ -1330,28 +1332,6 @@ impl Viewer {
         }
         let typing = ui.ctx().text_edit_focused();
         if !typing {
-            let tool = ui.input(|i| {
-                [
-                    (egui::Key::L, Tool::Line),
-                    (egui::Key::A, Tool::Arc),
-                    (egui::Key::C, Tool::Circle),
-                    (egui::Key::P, Tool::Point),
-                    (egui::Key::D, Tool::Dimension),
-                ]
-                .into_iter()
-                .find(|(k, _)| i.key_pressed(*k) && i.modifiers.is_none())
-                .map(|(_, t)| t)
-            });
-            if let Some(t) = tool {
-                sk.draft.cancel();
-                sk.draft.tool = t;
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::R) && i.modifiers.is_none())
-                && let Some(t) = self.library.first()
-            {
-                sk.draft.choose(t.entry.element.clone());
-                sk.field = None;
-            }
             // Copy: the selection as an element, on the clipboard as JSON. Paste: an element
             // from the clipboard (a copy, or one written by hand or by an agent), placed by clicks.
             let (copy, paste) = ui.input(|i| {
@@ -1365,9 +1345,6 @@ impl Viewer {
             if let Some(t) = paste.and_then(|p| serde_json::from_str::<Json>(&p).ok()).filter(|t| datum_model::library::check("sketch", t).is_ok()) {
                 sk.draft.choose(t);
                 sk.field = None;
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::T)) && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
-                sk.draft.tangent = !sk.draft.tangent;
             }
         }
         // Placing a library element with parameters: the field by the cursor asks them, one by
@@ -1795,33 +1772,165 @@ fn definition(v: &Json) -> String {
     }
 }
 
+/// The sketch tools, as the side panel lists them.
+const TOOLS: [Act; 6] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Dimension];
+
+/// The sketch tool action `act` takes up.
+fn tool(act: Act) -> Tool {
+    match act {
+        Act::Line => Tool::Line,
+        Act::Arc => Tool::Arc,
+        Act::Circle => Tool::Circle,
+        Act::Point => Tool::Point,
+        Act::Dimension => Tool::Dimension,
+        _ => Tool::Select,
+    }
+}
+
 impl Viewer {
-    /// The keys of the toolbar, unless a text field takes them. A button focused (by Tab) does
-    /// not: the keys would stop working until a click elsewhere.
+    /// The actions' keys, unless a text field takes them. A button focused (by Tab) does not:
+    /// the keys would stop working until a click elsewhere.
     fn shortcuts(&mut self, ui: &egui::Ui) {
         if ui.ctx().text_edit_focused() {
             return;
         }
-        let pressed = |k| ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, k)));
-        if pressed(egui::Key::Z) {
-            self.send(Request::Command("undo", json!({})));
+        for a in &ACTIONS {
+            if let Some(key) = &a.key
+                && self.available(a)
+                && ui.input_mut(|i| crate::actions::pressed(i, key))
+            {
+                self.run(ui, a.act);
+            }
         }
-        if pressed(egui::Key::Y) {
-            self.send(Request::Command("redo", json!({})));
+    }
+
+    /// Whether `a` can run now: where the window is, and what it needs.
+    fn available(&self, a: &Action) -> bool {
+        use crate::actions::Context;
+        let here = match a.context {
+            Context::Anywhere => true,
+            Context::Model => self.sketch.is_none(),
+            Context::Sketch => self.sketch.is_some(),
+        };
+        here && match a.act {
+            Act::Save | Act::SaveAs | Act::Close => self.model.is_some(),
+            Act::Rectangle => !self.library.is_empty(),
+            Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
+            _ => true,
         }
-        if pressed(egui::Key::N) {
-            self.new_model(ui);
+    }
+
+    /// Whether `act` is on, for those that are turned on and off or chosen.
+    fn checked(&self, act: Act) -> bool {
+        let draft = self.sketch.as_ref().map(|sk| &sk.draft);
+        match act {
+            Act::SmoothEdges => self.smooth,
+            Act::SketchOnFace => self.picking,
+            Act::Tangent => draft.is_some_and(|d| d.tangent),
+            _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
+            _ => false,
         }
-        if pressed(egui::Key::O) {
-            self.open_by_dialog(ui);
+    }
+
+    fn run(&mut self, ui: &egui::Ui, act: Act) {
+        match act {
+            Act::New => self.new_model(ui),
+            Act::Open => self.open_by_dialog(ui),
+            Act::Save => {
+                self.save(ui, false);
+            }
+            Act::SaveAs => {
+                self.save(ui, true);
+            }
+            Act::Close => self.close(ui),
+            Act::Exit => ui.send_viewport_cmd(egui::ViewportCommand::Close),
+            Act::Undo => self.send(Request::Command("undo", json!({}))),
+            Act::Redo => self.send(Request::Command("redo", json!({}))),
+            Act::SmoothEdges => self.smooth = !self.smooth,
+            Act::NewSketch => self.new_sketch(json!({})),
+            Act::SketchOnFace => {
+                self.leave();
+                self.start_sketch();
+            }
+            Act::Rectangle => {
+                if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
+                    sk.draft.choose(t.entry.element.clone());
+                    sk.field = None;
+                }
+            }
+            Act::Tangent => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.draft.tangent = !sk.draft.tangent;
+                }
+            }
+            Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Dimension => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.draft.take_up(tool(act));
+                }
+            }
         }
-        if pressed(egui::Key::W) {
-            self.close(ui);
+    }
+
+    /// `act` as a button: in the menu with its key beside it, on the toolbar with it in the hint.
+    fn item(&mut self, ui: &mut egui::Ui, act: Act, menu: bool) {
+        let a = act.action();
+        let mut button = egui::Button::new(a.label).selected(self.checked(act));
+        if menu && let Some(k) = &a.key {
+            button = button.shortcut_text(ui.ctx().format_shortcut(k));
         }
-        if pressed(egui::Key::S) {
-            self.save(ui, false);
-        } else if self.sketch.is_none() && ui.input(|i| i.key_pressed(egui::Key::S) && i.modifiers.is_none()) {
-            self.start_sketch();
+        if ui.add_enabled(self.available(a), button).on_hover_text(a.hint(ui.ctx())).clicked() {
+            self.run(ui, act);
+        }
+    }
+
+    /// The menu (D131): every action, grouped as in other programs.
+    fn menu(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.menu_button("File", |ui| {
+                self.item(ui, Act::New, true);
+                self.item(ui, Act::Open, true);
+                ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+                    ui.menu_button("Open recent", |ui| self.recent_menu(ui));
+                });
+                ui.separator();
+                for act in [Act::Save, Act::SaveAs, Act::Close] {
+                    self.item(ui, act, true);
+                }
+                ui.separator();
+                self.item(ui, Act::Exit, true);
+            });
+            ui.menu_button("Edit", |ui| {
+                self.item(ui, Act::Undo, true);
+                self.item(ui, Act::Redo, true);
+            });
+            ui.menu_button("View", |ui| self.item(ui, Act::SmoothEdges, true));
+            ui.menu_button("Sketch", |ui| {
+                self.item(ui, Act::NewSketch, true);
+                self.item(ui, Act::SketchOnFace, true);
+                ui.separator();
+                for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent]) {
+                    self.item(ui, act, true);
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                ui.hyperlink_to(format!("Datum {}", env!("CARGO_PKG_VERSION")), env!("CARGO_PKG_REPOSITORY"));
+                ui.weak(format!("Problems are logged to {}", crate::log::path().display()));
+            });
+        });
+    }
+
+    /// The recent models: a file no longer there shows grey.
+    fn recent_menu(&mut self, ui: &mut egui::Ui) {
+        let mut chosen = None;
+        for p in &self.recent {
+            let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_string());
+            let text = if p.exists() { egui::RichText::new(name) } else { egui::RichText::new(name).weak() };
+            if ui.button(text).on_hover_text(p.display().to_string()).clicked() {
+                chosen = Some(p.clone());
+            }
+        }
+        if let Some(p) = chosen {
+            self.open_recent(ui, p);
         }
     }
 }
@@ -1852,6 +1961,7 @@ impl eframe::App for Viewer {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.shortcuts(ui);
+        egui::Panel::top("datum_menu").show(ui, |ui| self.menu(ui));
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         if self.sketch.is_some() {
@@ -1869,6 +1979,7 @@ impl eframe::App for Viewer {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
+        storage.set_string(RECENT, json!(self.recent).to_string());
     }
 }
 
@@ -1929,6 +2040,7 @@ mod tests {
             keeping: None,
             quitting: None,
             worked_in: None,
+            recent: Vec::new(),
             shown: 0,
             maximized: false,
             picking: false,
@@ -2194,7 +2306,8 @@ mod tests {
 
     /// The plate's sketch in the window: the `button` of a constraint, then a click on each
     /// hole. `DATUM_CONSTRAIN_SHOT=file.png` saves a picture of the panel.
-    fn both_holes_by_hand(button: &str, kind: crate::constrain::Kind) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+    /// A viewer editing the sketch of the symmetric plate.
+    fn sketching() -> (Viewer, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
@@ -2204,6 +2317,48 @@ mod tests {
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
+        (v, inbox)
+    }
+
+    /// The actions' keys in a sketch: L takes up the line, Shift+L does not; S, the model's key
+    /// for a sketch, does nothing there.
+    #[test]
+    fn keys_in_a_sketch() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        let mut press = |key, modifiers| {
+            let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+            h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+            h.run();
+        };
+        press(egui::Key::L, egui::Modifiers::SHIFT);
+        press(egui::Key::S, egui::Modifiers::NONE);
+        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select));
+        assert!(!v.picking && inbox.try_iter().next().is_none(), "no other sketch");
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+    }
+
+    /// The recent models: the latest first, each once, ten kept.
+    #[test]
+    fn recent_latest_first_once() {
+        let mut recent = Vec::new();
+        for k in 0..12 {
+            remember(&mut recent, format!("/m/{k}.json").into());
+        }
+        remember(&mut recent, "/m/5.json".into());
+        let names: Vec<String> = recent.iter().map(|p| p.display().to_string()).collect();
+        assert_eq!(
+            names,
+            ["/m/5.json", "/m/11.json", "/m/10.json", "/m/9.json", "/m/8.json", "/m/7.json", "/m/6.json", "/m/4.json", "/m/3.json", "/m/2.json"]
+        );
+    }
+
+    fn both_holes_by_hand(button: &str, kind: crate::constrain::Kind) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = sketching();
         {
             let shot = std::env::var_os("DATUM_CONSTRAIN_SHOT");
             let builder = egui_kittest::Harness::builder().with_size([360.0, 700.0]);
@@ -2279,7 +2434,7 @@ mod tests {
         assert_eq!(diameters, ["Øhole = 9"], "one diameter shown");
     }
 
-    /// Close: a model with nothing unsaved closes without asking; the background thread is told,
+    /// Close (in the menu): a model with nothing unsaved closes without asking; the background thread is told,
     /// the file and title go.
     #[test]
     fn close_a_saved_model() {
@@ -2287,9 +2442,18 @@ mod tests {
         v.path = Some("plate.json".into());
         assert!(!v.modified());
         {
-            let mut h = egui_kittest::Harness::builder().with_size([800.0, 40.0]).build_ui(|ui| v.toolbar(ui));
+            // `DATUM_MENU_SHOT=file.png` saves a picture of the open File menu.
+            let shot = std::env::var_os("DATUM_MENU_SHOT");
+            let builder = egui_kittest::Harness::builder().with_size([800.0, 300.0]);
+            let builder = if shot.is_some() { builder.wgpu() } else { builder };
+            let mut h = builder.build_ui(|ui| v.menu(ui));
             h.run();
-            h.get_by_label("Close").click();
+            h.get_by_label("File").click();
+            h.run();
+            if let Some(path) = shot {
+                h.render().unwrap().save(path).unwrap();
+            }
+            h.get_by_label("Close Ctrl+W").click();
             h.run();
         }
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));

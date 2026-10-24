@@ -183,6 +183,12 @@ impl Draft {
         busy
     }
 
+    /// Takes up `tool`, what is half drawn dropped.
+    pub fn take_up(&mut self, tool: Tool) {
+        self.cancel();
+        self.tool = tool;
+    }
+
     /// Starts placing library element `t`: no preset, nothing typed yet.
     pub fn choose(&mut self, t: Json) {
         self.cancel();
