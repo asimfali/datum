@@ -256,8 +256,18 @@ fn the_project_library_comes_first() {
     assert!(lib["skipped"][0].as_str().unwrap().contains("broken.json"), "{lib}");
     assert_eq!(lib["elements"].as_array().unwrap().iter().filter(|e| e["name"] == "New element").count(), 2, "{lib}");
     let model = root.join("part/plate.json");
-    assert_eq!(datum_model::library::workspace(Some(&model)), Some(root.clone()), "the project holds part, assembly, drawing, library");
-    assert_eq!(datum_model::library::folder("sketch", Some(&model)), Some(root.join("library/sketch")));
+    assert_eq!(datum_model::workspace::root(Some(&model)), Some(root.clone()), "the project holds part, assembly, drawing, library");
+    assert_eq!(datum_model::library::folder("sketch", Some(&model)), Ok(root.join("library/sketch")));
+    // The project names its library otherwise (D141): read from there, the old folder said.
+    std::fs::write(root.join("datum-project.json"), r#"{"folders": {"library": "Библиотека"}}"#).unwrap();
+    std::fs::create_dir_all(root.join("Библиотека/sketch")).unwrap();
+    let mut renamed = own.clone();
+    renamed["description"] = json!("renamed");
+    std::fs::write(root.join("Библиотека/sketch/rect.json"), renamed.to_string()).unwrap();
+    let lib = run(&mut s, "library", json!({}));
+    assert_eq!(lib["elements"][0]["description"], "renamed", "{lib}");
+    assert!(lib["skipped"].as_array().unwrap().iter().any(|w| w.as_str().unwrap().contains("the project keeps its library in")), "{lib}");
+    assert_eq!(datum_model::library::folder("sketch", Some(&model)), Ok(root.join("Библиотека/sketch")));
 }
 
 /// A piece of sketch kept in the project's library and placed again: the model's parameters its

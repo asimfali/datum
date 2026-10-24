@@ -250,7 +250,7 @@ const COMMANDS: &[Command] = &[
             library::check("sketch", &element)?;
             let path = match p.get("path").and_then(Value::as_str) {
                 Some(x) => PathBuf::from(x),
-                None => library::folder("sketch", s.path.as_deref()).ok_or("no library folder")?.join(library::file_name(element_name)),
+                None => library::folder("sketch", s.path.as_deref())?.join(library::file_name(element_name)),
             };
             if path.exists() && !p.get("replace").and_then(Value::as_bool).unwrap_or(false) {
                 return Err(format!("{} exists: give `replace` to write over it", path.display()));

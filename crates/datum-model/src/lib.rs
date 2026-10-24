@@ -21,6 +21,7 @@ use datum_math::expr::Num;
 pub mod library;
 mod patch;
 mod session;
+pub mod workspace;
 
 pub use patch::SketchPatch;
 pub use session::{Session, patch_sketch, visit_names};
