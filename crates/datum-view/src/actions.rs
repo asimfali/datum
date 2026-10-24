@@ -27,6 +27,9 @@ pub enum Act {
     Dimension,
     Rectangle,
     Tangent,
+    NewProject,
+    OpenProject,
+    CloseProject,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -70,7 +73,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 19] = [
+pub const ACTIONS: [Action; 22] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -104,6 +107,9 @@ pub const ACTIONS: [Action; 19] = [
     ),
     action(Act::Rectangle, "sketch.library_first", "Rectangle", "The first element of the library", plain(Key::R), Sketch),
     action(Act::Tangent, "sketch.tangent_arc", "Tangent arc", "The next segment of the line: an arc tangent to the last one", plain(Key::T), Sketch),
+    action(Act::NewProject, "file.new_project", "New project…", "A folder made a project: new models and exports go into it", None, Anywhere),
+    action(Act::OpenProject, "file.open_project", "Open project…", "New models, dialogs and the library work in it", None, Anywhere),
+    action(Act::CloseProject, "file.close_project", "Close project", "Back to the folder beside the program", None, Anywhere),
 ];
 
 impl Act {

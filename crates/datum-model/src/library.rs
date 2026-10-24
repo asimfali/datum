@@ -70,10 +70,10 @@ impl Library {
     }
 }
 
-/// The elements of `level`: built in, then beside the program, then in the project of the
-/// model at `model`, each folder by file name. One of a name already listed from a less specific
-/// place takes its place; two of a name in one folder are both listed.
-pub fn load(level: &str, model: Option<&Path>) -> Library {
+/// The elements of `level`: built in, then beside the program, then in `project` (its root),
+/// each folder by file name. One of a name already listed from a less specific place takes its
+/// place; two of a name in one folder are both listed.
+pub fn load(level: &str, project: Option<&Path>) -> Library {
     let mut lib = Library::default();
     // One of a name from a more specific place takes the place of the other; two of a name in
     // one folder are both kept.
@@ -93,8 +93,7 @@ pub fn load(level: &str, model: Option<&Path>) -> Library {
         }
     }
     let program = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
-    let project = model.and_then(workspace::project_root);
-    for (source, root) in [(Source::Program, program), (Source::Project, project)] {
+    for (source, root) in [(Source::Program, program), (Source::Project, project.map(Path::to_path_buf))] {
         let Some(root) = root else { continue };
         let dir = match workspace::folder_in(&root, "library") {
             Ok(d) => d,
