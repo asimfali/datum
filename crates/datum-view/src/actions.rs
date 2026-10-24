@@ -1,6 +1,7 @@
 //! The window's actions (D131): one list behind the menu, the keys and the hints. An action has
-//! a name (the one key settings will use), a label, a default key and where it applies; the
-//! window says when it is available and runs it.
+//! a name (the one `settings.json` uses), a label, a default key and where it applies; the
+//! window says when it is available and runs it. The keys in force are the defaults with the
+//! engineer's changes (D132).
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 
@@ -36,12 +37,21 @@ pub enum Context {
     Sketch,
 }
 
+impl Context {
+    /// Whether a key could run in both: the same key may serve the model and a sketch, never
+    /// anywhere and either.
+    fn overlaps(self, other: Self) -> bool {
+        self == other || self == Context::Anywhere || other == Context::Anywhere
+    }
+}
+
 pub struct Action {
     pub act: Act,
     pub name: &'static str,
     pub label: &'static str,
     /// What it does, for the hint; empty when the label says it.
     pub about: &'static str,
+    /// The default key; the one in force is in [`Keys`].
     pub key: Option<KeyboardShortcut>,
     pub context: Context,
 }
@@ -102,21 +112,57 @@ impl Act {
     }
 }
 
-impl Action {
+/// The key of every action in force, by [`Act`].
+pub struct Keys([Option<KeyboardShortcut>; ACTIONS.len()]);
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self(ACTIONS.map(|a| a.key))
+    }
+}
+
+impl Keys {
+    pub fn get(&self, act: Act) -> Option<&KeyboardShortcut> {
+        self.0[act as usize].as_ref()
+    }
+
+    /// Gives `act` `key` (none: no key), taken from the actions it would run with too; returns
+    /// those.
+    pub fn set(&mut self, act: Act, key: Option<KeyboardShortcut>) -> Vec<Act> {
+        let mut taken = Vec::new();
+        if key.is_some() {
+            for a in &ACTIONS {
+                if a.act != act && a.context.overlaps(act.action().context) && self.0[a.act as usize] == key {
+                    self.0[a.act as usize] = None;
+                    taken.push(a.act);
+                }
+            }
+        }
+        self.0[act as usize] = key;
+        taken
+    }
+
+    /// The actions whose key is `key`.
+    pub fn with(&self, key: &KeyboardShortcut) -> Vec<Act> {
+        ACTIONS.iter().map(|a| a.act).filter(|a| self.get(*a) == Some(key)).collect()
+    }
+
     /// The label with its key, as a checkbox shows it: "Tangent arc (T)".
-    pub fn labelled(&self, ctx: &egui::Context) -> String {
-        match &self.key {
-            Some(k) => format!("{} ({})", self.label, ctx.format_shortcut(k)),
-            None => self.label.to_string(),
+    pub fn labelled(&self, ctx: &egui::Context, act: Act) -> String {
+        let label = act.action().label;
+        match self.get(act) {
+            Some(k) => format!("{label} ({})", ctx.format_shortcut(k)),
+            None => label.to_string(),
         }
     }
 
     /// The hover text: what it does, its key and its name.
-    pub fn hint(&self, ctx: &egui::Context) -> String {
-        let about = if self.about.is_empty() { self.label } else { self.about };
-        match &self.key {
-            Some(k) => format!("{about} ({})\n{}", ctx.format_shortcut(k), self.name),
-            None => format!("{about}\n{}", self.name),
+    pub fn hint(&self, ctx: &egui::Context, act: Act) -> String {
+        let a = act.action();
+        let about = if a.about.is_empty() { a.label } else { a.about };
+        match self.get(act) {
+            Some(k) => format!("{about} ({})\n{}", ctx.format_shortcut(k), a.name),
+            None => format!("{about}\n{}", a.name),
         }
     }
 }
@@ -143,16 +189,27 @@ mod tests {
         }
     }
 
-    /// No key runs two actions: the same key may serve the model and a sketch, never anywhere
-    /// and either.
+    /// No default key runs two actions.
     #[test]
     fn no_key_twice() {
         for (i, a) in ACTIONS.iter().enumerate() {
             for b in &ACTIONS[i + 1..] {
-                let overlap = a.context == b.context || a.context == Anywhere || b.context == Anywhere;
-                assert!(!(overlap && a.key.is_some() && a.key == b.key), "{} and {}", a.name, b.name);
+                assert!(!(a.context.overlaps(b.context) && a.key.is_some() && a.key == b.key), "{} and {}", a.name, b.name);
             }
         }
+    }
+
+    /// A key given to one action is taken from another it would run with, not from one in
+    /// another context.
+    #[test]
+    fn a_key_taken() {
+        let mut keys = Keys::default();
+        let s = KeyboardShortcut::new(Modifiers::NONE, Key::S);
+        assert_eq!(keys.set(Act::Line, Some(s)), [], "S of the model is not the sketch's");
+        assert_eq!(keys.with(&s), [Act::SketchOnFace, Act::Line]);
+        let ctrl_s = Act::Save.action().key;
+        assert_eq!(keys.set(Act::Line, ctrl_s), [Act::Save], "Ctrl+S works in a sketch too");
+        assert_eq!((keys.get(Act::Save), keys.get(Act::Line)), (None, ctrl_s.as_ref()));
     }
 
     #[test]
