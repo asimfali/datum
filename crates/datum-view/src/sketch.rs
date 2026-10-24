@@ -247,7 +247,12 @@ pub struct Label {
     pub pick: Pick,
     pub at: [f64; 2],
     pub text: String,
+    /// An arc's length: the arc sign before the text (the window's font has no ⌒).
+    pub arc: bool,
 }
+
+/// The width of the arc sign before an arc length's text, in pixels.
+const ARC_SIGN: f64 = 12.0;
 
 impl SketchEdit {
     /// Starts editing feature `feature`, listed as `json`, viewed whole in a picture of width /
@@ -383,6 +388,35 @@ impl SketchEdit {
     }
 
     /// The projection a name is of: the projection itself or one of its points.
+    /// What dimension or constraint `pick` ties: its points and curves, as picks; nothing for
+    /// any other pick.
+    pub fn referred(&self, pick: &Pick) -> Vec<Pick> {
+        let sketch = &self.json["sketch"];
+        let c = match pick {
+            Pick::Constraint(k) => &sketch["constraints"][*k],
+            Pick::Measure(n) => &sketch["measures"][n],
+            _ => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for (key, point) in
+            [("point", true), ("points", true), ("line", false), ("lines", false), ("arc", false), ("curve", false), ("curves", false)]
+        {
+            let names: Vec<&str> = match &c[key] {
+                Json::String(n) => vec![n.as_str()],
+                Json::Array(v) => v.iter().filter_map(Json::as_str).collect(),
+                _ => continue,
+            };
+            for n in names {
+                out.push(match self.projection_of(n) {
+                    Some(p) => Pick::Projection(p),
+                    None if point => Pick::Point(n.to_string()),
+                    None => Pick::Curve(n.to_string()),
+                });
+            }
+        }
+        out
+    }
+
     fn projection_of(&self, name: &str) -> Option<String> {
         self.projections().into_iter().find(|p| name == p || name.strip_prefix(p.as_str()).is_some_and(|r| r.starts_with('.')))
     }
@@ -655,12 +689,13 @@ impl SketchEdit {
                     pick: Pick::Constraint(k),
                     at,
                     text: format!("{}{}{}", prefix(c), shown(v), if c["type"] == "angle" { "°" } else { "" }),
+                    arc: c["type"] == "arc_length",
                 });
             }
         }
         for (n, c) in self.json["sketch"]["measures"].as_object().into_iter().flatten() {
             if let (Some(at), Some(v)) = (place(c), p.solved.measures.get(n)) {
-                out.push(Label { pick: Pick::Measure(n.clone()), at, text: format!("({}{})", prefix(c), short(*v)) });
+                out.push(Label { pick: Pick::Measure(n.clone()), at, text: format!("({}{})", prefix(c), short(*v)), arc: c["type"] == "arc_length" });
             }
         }
         let followed = self.followed_circles();
@@ -669,7 +704,7 @@ impl SketchEdit {
                 let d = self.json["sketch"]["circles"][n]["diameter"].clone();
                 let text = if d.is_null() { short(c.diameter.value().unwrap_or(0.0)) } else { shown(&d) };
                 // Ø: the window's font has no ⌀.
-                out.push(Label { pick: Pick::Curve(n.clone()), at: v[v.len() / 4], text: format!("Ø{text}") });
+                out.push(Label { pick: Pick::Curve(n.clone()), at: v[v.len() / 4], text: format!("Ø{text}"), arc: false });
             }
         }
         out
@@ -688,6 +723,7 @@ impl SketchEdit {
         let mut placed: Vec<Laid> = Vec::new();
         for l in self.labels() {
             let (w, h) = size(&l.text);
+            let w = if l.arc { w + ARC_SIGN } else { w };
             let (x, mut y) = self.camera.offset(l.at, height);
             while placed.iter().any(|(_, (px, py), (pw, ph))| (x - px).abs() * 2.0 < w + pw && (y - py).abs() * 2.0 < h + ph) {
                 y += h + 1.0;
@@ -900,13 +936,17 @@ impl SketchEdit {
             let (x, y) = self.camera.offset(q, height);
             rect.center() + egui::vec2(x as f32, y as f32)
         };
-        let held = match &self.hover {
+        let mut held = match &self.hover {
             Some(Pick::Group(g)) => self.group_picks(g),
-            _ => Vec::new(),
+            Some(p) => self.referred(p),
+            None => Vec::new(),
         };
+        // What a selected dimension or constraint ties shows with it, in its colour.
+        let tied: Vec<Pick> = self.selected.iter().flat_map(|p| self.referred(p)).collect();
+        held.extend(tied.iter().cloned());
         let marked = |pick: &Pick| self.selected.contains(pick) || self.hover.as_ref() == Some(pick) || held.contains(pick);
         let colour = |pick: &Pick, ends: &[String]| {
-            if self.selected.contains(pick) {
+            if self.selected.contains(pick) || tied.contains(pick) {
                 SELECTED
             } else if matches!(pick, Pick::Projection(_)) {
                 PROJECTED
@@ -1012,7 +1052,17 @@ impl SketchEdit {
             if marked(&l.pick) {
                 painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
             }
-            painter.galley(r.min + egui::vec2(2.0, 1.0), painter.layout_no_wrap(l.text, LABEL, c), c);
+            let sign = if l.arc { ARC_SIGN as f32 } else { 0.0 };
+            if l.arc {
+                // ⌒: a flat arc over the middle of its room.
+                let (centre, radius) = (egui::pos2(r.left() + 2.0 + sign * 0.5, r.center().y + 3.0), sign * 0.4);
+                let pts = (0..=8).map(|k| {
+                    let (s, co) = libm::sincosf(std::f32::consts::PI * (0.15 + 0.7 * k as f32 / 8.0));
+                    centre + egui::vec2(radius * co, -radius * s)
+                });
+                painter.add(egui::Shape::line(pts.collect(), egui::Stroke::new(1.2, c)));
+            }
+            painter.galley(r.min + egui::vec2(2.0 + sign, 1.0), painter.layout_no_wrap(l.text, LABEL, c), c);
         }
     }
 }
@@ -1269,6 +1319,44 @@ mod tests {
         e.json["sketch"]["points"]["h"] = json!([30, 2]);
         e.solve();
         assert!(area(&e) > 48.0 + 3.0, "outside, a disc: {}", area(&e));
+    }
+
+    /// A dimension tells what it ties, to be shown with it: a point and a line, an arc; a
+    /// measure too. An arc's length takes room for its sign.
+    #[test]
+    fn dimensions_tell_what_they_tie() {
+        let mut e = edit();
+        e.json["sketch"]["points"]["o"] = json!([20, 0]);
+        e.json["sketch"]["points"]["s"] = json!([25, 0]);
+        e.json["sketch"]["points"]["t"] = json!([20, 5]);
+        e.json["sketch"]["arcs"] = json!({"bend": {"center": "o", "from": "s", "to": "t"}});
+        e.json["sketch"]["constraints"].as_array_mut().unwrap().extend([
+            json!({"type": "point_line", "point": "c", "line": "bottom", "value": 4}),
+            json!({"type": "arc_length", "arc": "bend", "value": 7.85}),
+        ]);
+        e.solve();
+        assert_eq!(e.referred(&Pick::Constraint(6)), [Pick::Point("c".into()), Pick::Curve("bottom".into())]);
+        assert_eq!(e.referred(&Pick::Constraint(7)), [Pick::Curve("bend".into())]);
+        assert_eq!(e.referred(&Pick::Measure("height".into())), [Pick::Curve("left".into())]);
+        assert!(e.referred(&Pick::Curve("top".into())).is_empty());
+        let laid = e.laid_out(600.0, |_| (40.0, 14.0));
+        let width = |arc: bool| laid.iter().find(|(l, ..)| l.arc == arc).map(|(.., (w, _))| *w);
+        assert_eq!((width(true), width(false)), (Some(40.0 + ARC_SIGN), Some(40.0)));
+        // `DATUM_TIE_SHOT=file.png` saves a picture: the arc's length selected, the point's
+        // distance under the cursor.
+        if let Some(path) = std::env::var_os("DATUM_TIE_SHOT") {
+            e.selected = vec![Pick::Constraint(7)];
+            e.hover = Some(Pick::Constraint(6));
+            e.camera.center = [13.0, 2.5];
+            e.camera.half_height = 6.0;
+            let mut h = egui_kittest::Harness::builder().with_size([700.0, 400.0]).wgpu().build_ui(|ui| {
+                let rect = ui.max_rect();
+                ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
+                e.paint(ui.painter(), rect);
+            });
+            h.run();
+            h.render().unwrap().save(path).unwrap();
+        }
     }
 
     #[test]
