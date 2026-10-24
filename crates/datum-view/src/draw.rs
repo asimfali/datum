@@ -498,7 +498,11 @@ impl Draft {
                 let end = patch.point(&spot);
                 let from = chain.point.clone();
                 let arc = match (&chain.last, self.tangent) {
-                    (Some(h), true) => tangent_arc(chain.at, h, spot.at).map(|(c, ccw)| (h.curve.clone(), c, ccw)),
+                    (Some(h), true) => match tangent_arc(chain.at, h, spot.at) {
+                        Some((c, ccw)) => Some((h.curve.clone(), c, ccw)),
+                        None if behind(chain.at, h, spot.at) => return None,
+                        None => None,
+                    },
                     _ => None,
                 };
                 let next_dir = if let Some((curve, c, ccw)) = arc {
@@ -591,7 +595,7 @@ impl Draft {
                         let a1 = libm::atan2(spot.at[1] - centre[1], spot.at[0] - centre[0]);
                         let sweep = if ccw { (a1 - a0).rem_euclid(std::f64::consts::TAU) } else { -(a0 - a1).rem_euclid(std::f64::consts::TAU) };
                         polyline(arc(centre, r, a0, sweep));
-                    } else {
+                    } else if !behind(c.at, h, spot.at) {
                         polyline(vec![c.at, spot.at]);
                     }
                 }
@@ -673,6 +677,12 @@ pub fn tangent_arc(from: [f64; 2], heading: &Heading, to: [f64; 2]) -> Option<([
     // The centre on the normal at `from`, as far from `to` as from `from`.
     let r = (v[0] * v[0] + v[1] * v[1]) / (2.0 * across);
     Some(([from[0] + n[0] * r, from[1] + n[1] * r], r > 0.0))
+}
+
+/// Whether `to` lies behind `from` as `heading` goes: no tangent arc goes there, and a line
+/// back over the last segment is no tangent continuation either, so it is not drawn.
+fn behind(from: [f64; 2], heading: &Heading, to: [f64; 2]) -> bool {
+    (to[0] - from[0]) * heading.dir[0] + (to[1] - from[1]) * heading.dir[1] < 0.0
 }
 
 /// `pts` (on screen) dashed, only where the painter shows them: a curve far larger than the view
@@ -1162,6 +1172,21 @@ mod tests {
             let h = Heading { curve: "l".into(), dir: [(b[0] - a[0]) / l, (b[1] - a[1]) / l], start: Some(a) };
             assert!(tangent_arc(b, &h, a).is_none(), "back to the start of line {k}");
         }
+    }
+
+    /// A tangent continuation back to the line's start is refused: no arc goes there, and a line
+    /// back over the first is not drawn instead. Straight ahead it is a line, as before.
+    #[test]
+    fn no_tangent_click_back_along_the_line() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        click_at(&mut e, [10.0, 3.0], false);
+        e.draft.tangent = true;
+        assert!(click_at(&mut e, [0.0, 0.0], false).is_none(), "back to the start");
+        assert!(e.draft.tangent && e.draft.chain.is_some(), "still continuing, still tangent");
+        let p = click_at(&mut e, [20.0, 6.0], false).unwrap();
+        assert_eq!(p["lines"]["l2"], json!({"from": "p2", "to": "p3"}), "straight ahead: {p}");
     }
 
     /// Dashes only where the view shows them: a curve 10¹⁸ long is drawn at once.
