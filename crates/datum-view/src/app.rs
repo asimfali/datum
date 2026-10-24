@@ -29,7 +29,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
         renderer: eframe::Renderer::Wgpu,
         // The window as it was left, size and place on the monitor (eframe keeps them); the first
         // time 1280 × 800 restored, opening maximized (see `Viewer::shown`).
-        viewport: egui::ViewportBuilder::default().with_title(title(path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
+        viewport: egui::ViewportBuilder::default().with_title(title(None, path.as_deref())).with_inner_size([1280.0, 800.0]).with_drag_and_drop(true),
         ..Default::default()
     };
     if let egui_wgpu::WgpuSetup::CreateNew(setup) = &mut options.wgpu_options.wgpu_setup {
@@ -44,10 +44,15 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let adapter = format!("{} ({:?})", info.name, info.backend);
             crate::log::write(&format!("window on {adapter}"));
             let maximized = cc.storage.and_then(|s| s.get_string(MAXIMIZED)).is_none_or(|m| m == "true");
-            let recent = cc.storage.and_then(|s| s.get_string(RECENT)).and_then(|r| serde_json::from_str(&r).ok()).unwrap_or_default();
+            let kept = |key| cc.storage.and_then(|s| s.get_string(key)).unwrap_or_default();
             let mut viewer = Viewer::new(path, cc.egui_ctx.clone(), adapter);
             viewer.maximized = maximized;
-            viewer.recent = recent;
+            viewer.recent = serde_json::from_str(&kept(RECENT)).unwrap_or_default();
+            viewer.recent_projects = serde_json::from_str(&kept(RECENT_PROJECTS)).unwrap_or_default();
+            // The project left open opens again, if it is still one (D142).
+            if let Some(p) = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p)) {
+                viewer.set_project(Some(p));
+            }
             Ok(Box::new(viewer))
         }),
     )
@@ -62,6 +67,15 @@ const MAXIMIZED: &str = "datum_maximized";
 const RECENT: &str = "datum_recent";
 const RECENT_KEPT: usize = 10;
 
+/// The project open, and the projects opened last, the latest first.
+const PROJECT: &str = "datum_project";
+const RECENT_PROJECTS: &str = "datum_recent_projects";
+
+/// Whether `folder` is a Datum project.
+fn is_project(folder: &std::path::Path) -> bool {
+    folder.join(datum_model::workspace::PROJECT_FILE).is_file()
+}
+
 /// `path` as the latest of `recent`, once, the oldest dropped past [`RECENT_KEPT`].
 fn remember(recent: &mut Vec<PathBuf>, path: PathBuf) {
     recent.retain(|p| *p != path);
@@ -69,8 +83,16 @@ fn remember(recent: &mut Vec<PathBuf>, path: PathBuf) {
     recent.truncate(RECENT_KEPT);
 }
 
-fn title(path: Option<&std::path::Path>) -> String {
-    path.map_or_else(|| "Datum".into(), |p| format!("Datum — {}", p.display()))
+/// The window's title: the project open and the model's file.
+fn title(project: Option<&std::path::Path>, path: Option<&std::path::Path>) -> String {
+    let mut t = "Datum".to_string();
+    if let Some(name) = project.and_then(std::path::Path::file_name) {
+        t += &format!(" — [{}]", name.to_string_lossy());
+    }
+    if let Some(p) = path {
+        t += &format!(" — {}", p.display());
+    }
+    t
 }
 
 enum Request {
@@ -296,6 +318,12 @@ struct Viewer {
     /// The folder of the model last opened or saved: where the next one is opened from.
     worked_in: Option<PathBuf>,
     recent: Vec<PathBuf>,
+    /// The project open (its folder): where a new model is saved and the dialogs look while no
+    /// model file says otherwise; it stays when a model of another project is opened (D142).
+    project: Option<PathBuf>,
+    recent_projects: Vec<PathBuf>,
+    /// The title the window was last given.
+    titled: String,
     /// The keys in force, the settings file they come from, and what in it could not be
     /// applied, shown until dismissed.
     keys: Keys,
@@ -360,6 +388,9 @@ impl Viewer {
             quitting: None,
             worked_in: None,
             recent: Vec::new(),
+            project: None,
+            recent_projects: Vec::new(),
+            titled: String::new(),
             keys,
             settings,
             settings_problems,
@@ -382,7 +413,6 @@ impl Viewer {
 
     /// The model's file, and with it the project whose library elements are listed.
     fn set_path(&mut self, path: Option<PathBuf>) {
-        self.library = crate::templates::library(path.as_deref());
         if let Some(p) = &path {
             remember(&mut self.recent, std::path::absolute(p).unwrap_or_else(|_| p.clone()));
         }
@@ -390,6 +420,31 @@ impl Viewer {
             self.worked_in = Some(d.to_path_buf());
         }
         self.path = path;
+        self.reload_library();
+    }
+
+    /// Opens project `folder`, or none: new models and the dialogs go there.
+    fn set_project(&mut self, folder: Option<PathBuf>) {
+        if let Some(f) = &folder {
+            remember(&mut self.recent_projects, std::path::absolute(f).unwrap_or_else(|_| f.clone()));
+        }
+        // Open… looks in the project now, not where the last one was worked in.
+        self.worked_in = None;
+        self.project = folder;
+        self.reload_library();
+    }
+
+    /// The project the window works in: the model file's own (a model keeps its project's
+    /// rules), else, for a model without a file, the project open.
+    fn current_project(&self) -> Option<PathBuf> {
+        match &self.path {
+            Some(p) => datum_model::workspace::project_root(p),
+            None => self.project.clone(),
+        }
+    }
+
+    fn reload_library(&mut self) {
+        self.library = crate::templates::library(self.current_project().as_deref());
     }
 
     /// A dialog for models opened in `folder`.
@@ -404,7 +459,18 @@ impl Viewer {
     /// Where a new model is saved by dialog: `part` of the workspace (the project, or the folder
     /// beside the program), made if it is not there yet (D115).
     fn parts(&self) -> rfd::FileDialog {
-        Self::models_in(kept_in("part", self.path.as_deref()))
+        Self::models_in(kept_in(self.current_project().as_deref(), "part"))
+    }
+
+    /// The dialog to export as `kind` (`dxf`, …): in that folder of the workspace, named after the
+    /// model, or after `feature` while the model has no file (D133).
+    fn exported(&self, kind: &str, feature: &str) -> rfd::FileDialog {
+        let stem = self.path.as_deref().and_then(std::path::Path::file_stem).map_or_else(|| feature.to_string(), |s| s.to_string_lossy().to_string());
+        let dialog = rfd::FileDialog::new().add_filter(kind.to_uppercase(), &[kind]).set_file_name(format!("{stem}.{kind}"));
+        match kept_in(self.current_project().as_deref(), kind) {
+            Some(d) => dialog.set_directory(d),
+            None => dialog,
+        }
     }
 
     /// Where a model is opened, or saved again elsewhere, by dialog: where the engineer works —
@@ -422,37 +488,64 @@ impl Viewer {
     }
 
     /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
-    fn open_by_dialog(&mut self, ui: &egui::Ui) {
-        if !self.may_leave(ui) {
+    fn open_by_dialog(&mut self) {
+        if !self.may_leave() {
             return;
         }
         if let Some(p) = self.where_working().pick_file() {
-            self.open_titled(ui, p);
+            self.open(p);
         }
     }
 
-    /// Opens `path`, the window titled with it.
-    fn open_titled(&mut self, ui: &egui::Ui, path: PathBuf) {
-        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&path))));
-        self.open(path);
+    /// A recent model chosen: opened once what is not saved is asked about.
+    fn open_recent(&mut self, path: PathBuf) {
+        if still_there(&mut self.recent, &path, path.exists(), "recent files") && self.may_leave() {
+            self.open(path);
+        }
     }
 
-    /// A recent model chosen: opened once what is not saved is asked about; one no longer there
-    /// leaves the list, saying so.
-    fn open_recent(&mut self, ui: &egui::Ui, path: PathBuf) {
-        if !path.exists() {
-            self.recent.retain(|p| *p != path);
-            rfd::MessageDialog::new()
-                .set_title("Datum")
-                .set_description(format!("{} is no longer there: it leaves the recent files.", path.display()))
-                .show();
-        } else if self.may_leave(ui) {
-            self.open_titled(ui, path);
+    /// A project chosen in the dialog: a new one in any folder (an empty one, made there), or
+    /// one to open; a folder that is not a project yet is asked about.
+    fn project_by_dialog(&mut self, new: bool) {
+        let what = if new { "New project: a folder for it" } else { "Open project" };
+        let start = self.project.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf);
+        let dialog = rfd::FileDialog::new().set_title(what);
+        let dialog = match start {
+            Some(d) => dialog.set_directory(d),
+            None => dialog,
+        };
+        if let Some(folder) = dialog.pick_folder() {
+            self.open_project(folder, !new);
+        }
+    }
+
+    /// Opens project `folder`; one without a project file becomes a project, asked first if `ask`.
+    fn open_project(&mut self, folder: PathBuf, ask: bool) {
+        if !is_project(&folder) {
+            let question = format!("{} is not a Datum project yet. Make it one?", folder.display());
+            if ask
+                && rfd::MessageDialog::new().set_title("Datum").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show()
+                    != rfd::MessageDialogResult::Yes
+            {
+                return;
+            }
+            if let Err(e) = std::fs::write(folder.join(datum_model::workspace::PROJECT_FILE), "{}\n") {
+                rfd::MessageDialog::new().set_title("Datum").set_description(format!("{}: {e}", folder.display())).show();
+                return;
+            }
+        }
+        self.set_project(Some(folder));
+    }
+
+    /// A recent project chosen: one that is no longer a project leaves the list, saying so.
+    fn open_recent_project(&mut self, folder: PathBuf) {
+        if still_there(&mut self.recent_projects, &folder, is_project(&folder), "recent projects") {
+            self.set_project(Some(folder));
         }
     }
 
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
-    fn save(&mut self, ui: &egui::Ui, ask: bool) -> bool {
+    fn save(&mut self, ask: bool) -> bool {
         let path = match (&self.path, ask) {
             (Some(p), false) => Some(p.clone()),
             (Some(p), true) => {
@@ -462,7 +555,6 @@ impl Viewer {
             (None, _) => self.parts().set_file_name("model.json").save_file(),
         };
         let Some(p) = path else { return false };
-        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(Some(&p))));
         self.send(Request::Command("save", json!({"path": p.display().to_string()})));
         self.set_path(Some(p));
         true
@@ -475,13 +567,13 @@ impl Viewer {
 
     /// Whether the model may be left (closed, replaced): asked first if it has changes not saved
     /// — saved, dropped, or kept open.
-    fn may_leave(&mut self, ui: &egui::Ui) -> bool {
-        !self.modified() || self.ask_to_save(ui).is_some()
+    fn may_leave(&mut self) -> bool {
+        !self.modified() || self.ask_to_save().is_some()
     }
 
     /// Asks whether to save the changes: `Some(true)` saved (sent to be written), `Some(false)`
     /// dropped, `None` kept open.
-    fn ask_to_save(&mut self, ui: &egui::Ui) -> Option<bool> {
+    fn ask_to_save(&mut self) -> Option<bool> {
         let file = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new model".to_string(), |f| f.to_string_lossy().to_string());
         let answer = rfd::MessageDialog::new()
             .set_title("Datum")
@@ -489,31 +581,29 @@ impl Viewer {
             .set_buttons(rfd::MessageButtons::YesNoCancel)
             .show();
         match answer {
-            rfd::MessageDialogResult::Yes => self.save(ui, false).then_some(true),
+            rfd::MessageDialogResult::Yes => self.save(false).then_some(true),
             rfd::MessageDialogResult::No => Some(false),
             _ => None,
         }
     }
 
     /// An empty model (New, Ctrl+N), once what is not saved is asked about.
-    fn new_model(&mut self, ui: &egui::Ui) {
-        if !self.may_leave(ui) {
+    fn new_model(&mut self) {
+        if !self.may_leave() {
             return;
         }
         self.leave();
         self.set_path(None);
-        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
         self.send(Request::Command("new", json!({})));
     }
 
     /// Closes the model (Close, Ctrl+W): the window shows none.
-    fn close(&mut self, ui: &egui::Ui) {
-        if self.model.is_none() || !self.may_leave(ui) {
+    fn close(&mut self) {
+        if self.model.is_none() || !self.may_leave() {
             return;
         }
         self.leave();
         self.set_path(None);
-        ui.send_viewport_cmd(egui::ViewportCommand::Title(title(None)));
         self.send(Request::Close);
     }
 
@@ -588,6 +678,10 @@ impl Viewer {
     /// The dialog keeping a selection in the library: its name, description and the order its
     /// parameters are asked in; saved where the engineer chooses, the library's folder first.
     fn keep(&mut self, ctx: &egui::Context) {
+        if self.keeping.is_none() {
+            return;
+        }
+        let project = self.current_project();
         let Some(k) = &mut self.keeping else { return };
         let (mut save, mut close) = (false, false);
         egui::Window::new("To library").collapsible(false).resizable(false).show(ctx, |ui| {
@@ -759,9 +853,9 @@ impl Viewer {
                 }
             }
             let name = element["name"].as_str().unwrap_or_default().to_string();
-            let folder = datum_model::library::folder("sketch", self.path.as_deref());
+            let folder = kept_in(project.as_deref(), "library").map(|l| l.join("sketch"));
             let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(datum_model::library::file_name(&name));
-            if let Some(f) = made(folder) {
+            if let Some(f) = folder.filter(|f| std::fs::create_dir_all(f).is_ok()) {
                 dialog = dialog.set_directory(f);
             }
             let written = datum_model::library::check("sketch", &element).and_then(|()| match dialog.save_file() {
@@ -782,7 +876,7 @@ impl Viewer {
             match written {
                 Ok(true) => {
                     close = true;
-                    self.library = crate::templates::library(self.path.as_deref());
+                    self.reload_library();
                 }
                 Ok(false) => {}
                 Err(e) => k.error = Some(e),
@@ -897,7 +991,7 @@ impl Viewer {
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
-            self.open_titled(ui, p);
+            self.open(p);
         }
     }
 
@@ -1120,7 +1214,7 @@ impl Viewer {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
                             if ui.button("DXF…").clicked()
-                                && let Some(p) = exported(self.path.as_deref(), "dxf", name).save_file()
+                                && let Some(p) = self.exported("dxf", name).save_file()
                             {
                                 export = Some((name.to_string(), p));
                             }
@@ -1768,10 +1862,21 @@ fn paint_outline(painter: &egui::Painter, rect: egui::Rect, outline: &[Vec<[f64;
 
 /// `dialog` opened in the folder of the model's file, if it has one: what is made from a part
 /// goes beside it.
-/// The folder for files of `kind` in the workspace of the model at `model`, made if it is not
-/// there yet (D141); why not, to the log.
-fn kept_in(kind: &str, model: Option<&std::path::Path>) -> Option<PathBuf> {
-    made(datum_model::workspace::folder(kind, model))
+/// Whether `path`, chosen from `list` (named `what` in the message), is still `there`: one that
+/// is not leaves the list, saying so.
+fn still_there(list: &mut Vec<PathBuf>, path: &std::path::Path, there: bool, what: &str) -> bool {
+    if !there {
+        list.retain(|p| p != path);
+        rfd::MessageDialog::new().set_title("Datum").set_description(format!("{} is no longer there: it leaves the {what}.", path.display())).show();
+    }
+    there
+}
+
+/// The folder for files of `kind` in `project`, or without one beside the program, made if it
+/// is not there yet (D141).
+fn kept_in(project: Option<&std::path::Path>, kind: &str) -> Option<PathBuf> {
+    let root = project.map(std::path::Path::to_path_buf).or_else(|| datum_model::workspace::root(None));
+    made(root.ok_or_else(|| "no folder to work in".to_string()).and_then(|r| datum_model::workspace::folder_in(&r, kind)))
 }
 
 /// `folder`, made if it is not there yet; why not, to the log.
@@ -1782,17 +1887,6 @@ fn made(folder: Result<PathBuf, String>) -> Option<PathBuf> {
             crate::log::write(&why);
             None
         }
-    }
-}
-
-/// The dialog to export as `kind` (`dxf`, …): in that folder of the workspace, named after the
-/// model, or after `feature` while the model has no file (D133).
-fn exported(model: Option<&std::path::Path>, kind: &str, feature: &str) -> rfd::FileDialog {
-    let stem = model.and_then(std::path::Path::file_stem).map_or_else(|| feature.to_string(), |s| s.to_string_lossy().to_string());
-    let dialog = rfd::FileDialog::new().add_filter(kind.to_uppercase(), &[kind]).set_file_name(format!("{stem}.{kind}"));
-    match kept_in(kind, model) {
-        Some(d) => dialog.set_directory(d),
-        None => dialog,
     }
 }
 
@@ -1853,6 +1947,7 @@ impl Viewer {
         };
         here && match a.act {
             Act::Save | Act::SaveAs | Act::Close => self.model.is_some(),
+            Act::CloseProject => self.project.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
             _ => true,
@@ -1873,16 +1968,19 @@ impl Viewer {
 
     fn run(&mut self, ui: &egui::Ui, act: Act) {
         match act {
-            Act::New => self.new_model(ui),
-            Act::Open => self.open_by_dialog(ui),
+            Act::New => self.new_model(),
+            Act::Open => self.open_by_dialog(),
             Act::Save => {
-                self.save(ui, false);
+                self.save(false);
             }
             Act::SaveAs => {
-                self.save(ui, true);
+                self.save(true);
             }
-            Act::Close => self.close(ui),
+            Act::Close => self.close(),
             Act::Exit => ui.send_viewport_cmd(egui::ViewportCommand::Close),
+            Act::NewProject => self.project_by_dialog(true),
+            Act::OpenProject => self.project_by_dialog(false),
+            Act::CloseProject => self.set_project(None),
             Act::Undo => self.send(Request::Command("undo", json!({}))),
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
@@ -1928,8 +2026,23 @@ impl Viewer {
             self.item(ui, Act::New, true);
             self.item(ui, Act::Open, true);
             ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
-                ui.menu_button("Open recent", |ui| self.recent_menu(ui));
+                ui.menu_button("Open recent", |ui| {
+                    if let Some(p) = recent_menu(ui, &self.recent, std::path::Path::exists) {
+                        self.open_recent(p);
+                    }
+                });
             });
+            ui.separator();
+            self.item(ui, Act::NewProject, true);
+            self.item(ui, Act::OpenProject, true);
+            ui.add_enabled_ui(!self.recent_projects.is_empty(), |ui| {
+                ui.menu_button("Recent projects", |ui| {
+                    if let Some(p) = recent_menu(ui, &self.recent_projects, is_project) {
+                        self.open_recent_project(p);
+                    }
+                });
+            });
+            self.item(ui, Act::CloseProject, true);
             ui.separator();
             for act in [Act::Save, Act::SaveAs, Act::Close] {
                 self.item(ui, act, true);
@@ -1979,21 +2092,20 @@ impl Viewer {
             self.settings_problems.clear();
         }
     }
+}
 
-    /// The recent models: a file no longer there shows grey.
-    fn recent_menu(&mut self, ui: &mut egui::Ui) {
-        let mut chosen = None;
-        for p in &self.recent {
-            let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_string());
-            let text = if p.exists() { egui::RichText::new(name) } else { egui::RichText::new(name).weak() };
-            if ui.button(text).on_hover_text(p.display().to_string()).clicked() {
-                chosen = Some(p.clone());
-            }
-        }
-        if let Some(p) = chosen {
-            self.open_recent(ui, p);
+/// A list of recent files or folders by name, the whole path on hover; one no longer `there`
+/// shows grey. Returns the one clicked.
+fn recent_menu(ui: &mut egui::Ui, list: &[PathBuf], there: impl Fn(&std::path::Path) -> bool) -> Option<PathBuf> {
+    let mut chosen = None;
+    for p in list {
+        let name = p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().to_string());
+        let text = if there(p) { egui::RichText::new(name) } else { egui::RichText::new(name).weak() };
+        if ui.button(text).on_hover_text(p.display().to_string()).clicked() {
+            chosen = Some(p.clone());
         }
     }
+    chosen
 }
 
 impl eframe::App for Viewer {
@@ -2010,11 +2122,16 @@ impl eframe::App for Viewer {
             self.maximized = ui.input(|i| i.viewport().maximized.unwrap_or(self.maximized));
         }
         self.receive();
+        let t = title(self.project.as_deref(), self.path.as_deref());
+        if t != self.titled {
+            ui.send_viewport_cmd(egui::ViewportCommand::Title(t.clone()));
+            self.titled = t;
+        }
         // The window closed with changes not saved: asked first; saved, it closes once the
         // background thread has written the file.
         if ui.input(|i| i.viewport().close_requested()) && self.quitting.is_none() && self.modified() {
             ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.quitting = self.ask_to_save(ui);
+            self.quitting = self.ask_to_save();
         }
         if let Some(saving) = self.quitting
             && (!saving || (!self.busy && !self.modified()))
@@ -2041,6 +2158,8 @@ impl eframe::App for Viewer {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
         storage.set_string(RECENT, json!(self.recent).to_string());
+        storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
+        storage.set_string(PROJECT, json!(self.project).to_string());
     }
 }
 
@@ -2102,6 +2221,9 @@ mod tests {
             quitting: None,
             worked_in: None,
             recent: Vec::new(),
+            project: None,
+            recent_projects: Vec::new(),
+            titled: String::new(),
             keys: Keys::default(),
             settings: None,
             settings_problems: Vec::new(),
@@ -2422,6 +2544,42 @@ mod tests {
         h.run();
         drop(h);
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("undo", _))), "F2 undoes");
+    }
+
+    /// A folder `name` in the temporary folder, emptied; a project if `project`.
+    fn folder(name: &str, project: bool) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("datum-view-{name}"));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        if project {
+            std::fs::write(d.join(datum_model::workspace::PROJECT_FILE), "{}").unwrap();
+        }
+        d
+    }
+
+    /// A project opened (D142): a folder becomes one; a new model works in it, its library in
+    /// the palette; a model of another project keeps its own, and the project open stays.
+    #[test]
+    fn a_project_open() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let a = folder("project-a", false);
+        std::fs::create_dir_all(a.join("library/sketch")).unwrap();
+        let own = json!({"name": "A's slot", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+        std::fs::write(a.join("library/sketch/slot.json"), own.to_string()).unwrap();
+        v.open_project(a.clone(), false);
+        assert!(is_project(&a), "made a project");
+        assert_eq!((v.current_project(), v.recent_projects.first()), (Some(a.clone()), Some(&std::path::absolute(&a).unwrap())));
+        assert!(v.library.iter().any(|t| t.entry.name() == "A's slot"), "A's library in the palette");
+        assert_eq!(kept_in(v.current_project().as_deref(), "part"), Some(a.join("part")), "a new model goes to A's part");
+        let b = folder("project-b", true);
+        v.set_path(Some(b.join("part/plate.json")));
+        assert_eq!((v.current_project(), v.project.clone()), (Some(b.clone()), Some(a.clone())), "B's model, A open");
+        assert!(!v.library.iter().any(|t| t.entry.name() == "A's slot"), "B's model, B's library");
+        v.set_path(None);
+        v.set_project(None);
+        assert_eq!(v.current_project(), None);
+        let name = a.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(title(Some(&a), Some(std::path::Path::new("m.json"))), format!("Datum — [{name}] — m.json"));
     }
 
     /// The recent models: the latest first, each once, ten kept.

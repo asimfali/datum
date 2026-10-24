@@ -172,7 +172,7 @@ const COMMANDS: &[Command] = &[
         params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
             let level = p.get("level").and_then(Value::as_str).unwrap_or("sketch");
-            let lib = library::load(level, s.path.as_deref());
+            let lib = library::load(level, s.project().as_deref());
             let list: Vec<Value> = lib
                 .entries
                 .iter()
@@ -293,7 +293,7 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             let name = text(p, "name")?;
             let element = match &p["element"] {
-                Value::String(n) => library::load("sketch", s.path.as_deref())
+                Value::String(n) => library::load("sketch", s.project().as_deref())
                     .get(n)
                     .map(|e| e.element.clone())
                     .ok_or_else(|| format!("no element `{n}` in the library"))?,
@@ -508,6 +508,11 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
 }
 
 impl Session {
+    /// The project of the model's file (its root), if it has one.
+    fn project(&self) -> Option<PathBuf> {
+        self.path.as_deref().and_then(crate::workspace::project_root)
+    }
+
     /// Applies `edit_sketch` patch `p` to sketch feature `name`.
     fn edit_sketch(&mut self, name: &str, p: &Map<String, Value>) -> Result<Value, String> {
         let ix = self.find(name)?;
