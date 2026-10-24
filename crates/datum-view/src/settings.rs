@@ -60,7 +60,7 @@ fn parse(text: &str) -> (Keys, Vec<String>) {
     };
     for (k, entry) in entries.iter().enumerate() {
         if let Err(why) = apply(&mut keys, entry, &mut problems) {
-            problems.push(format!("keys[{k}] {entry}: {why}"));
+            problems.push(format!("keys[{k}]: {why} (in {entry})"));
         }
     }
     (keys, problems)

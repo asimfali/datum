@@ -1965,7 +1965,9 @@ impl Viewer {
             return;
         }
         let mut open = true;
-        egui::Window::new("settings.json").open(&mut open).collapsible(false).show(ctx, |ui| {
+        // Under the menu, in the middle: the menu stays in reach, the lines do not wrap narrow.
+        let window = egui::Window::new("settings.json").open(&mut open).collapsible(false).resizable(false);
+        window.anchor(egui::Align2::CENTER_TOP, [0.0, 36.0]).min_width(460.0).show(ctx, |ui| {
             if let Some(p) = &self.settings {
                 ui.weak(p.display().to_string());
             }
