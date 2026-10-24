@@ -709,8 +709,11 @@ pub fn dashed(painter: &egui::Painter, pts: &[egui::Pos2], stroke: egui::Stroke,
 }
 
 /// The part of segment `a`–`b` inside `r` (Liang–Barsky), its ends exactly `a` or `b` where they
-/// are inside.
+/// are inside; none of one with an end beyond the screen's numbers (infinite, NaN).
 fn clip(a: egui::Pos2, b: egui::Pos2, r: egui::Rect) -> Option<(egui::Pos2, egui::Pos2)> {
+    if !(a.is_finite() && b.is_finite()) {
+        return None;
+    }
     let d = b - a;
     let (mut t0, mut t1) = (0.0f32, 1.0f32);
     for (p, q) in [(-d.x, a.x - r.min.x), (d.x, r.max.x - a.x), (-d.y, a.y - r.min.y), (d.y, r.max.y - a.y)] {
@@ -1213,6 +1216,8 @@ mod tests {
         assert_eq!(clip(egui::pos2(10.0, 10.0), egui::pos2(20.0, 30.0), r), Some((egui::pos2(10.0, 10.0), egui::pos2(20.0, 30.0))));
         assert_eq!(clip(egui::pos2(-50.0, 50.0), egui::pos2(150.0, 50.0), r), Some((egui::pos2(0.0, 50.0), egui::pos2(100.0, 50.0))));
         assert_eq!(clip(egui::pos2(-50.0, -1.0), egui::pos2(150.0, -1.0), r), None);
+        assert_eq!(clip(egui::pos2(f32::NAN, 5.0), egui::pos2(50.0, 50.0), r), None, "NaN: not drawn, not a panic");
+        assert_eq!(clip(egui::pos2(f32::INFINITY, 5.0), egui::pos2(50.0, 50.0), r), None);
         let ctx = egui::Context::default();
         let start = std::time::Instant::now();
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
