@@ -24,10 +24,7 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 
 use crate::patch::SketchPatch;
-
-/// The file that makes a folder a project (VISION §6): its `library` holds the project's
-/// elements, beside `part`, `assembly` and `drawing`.
-pub const PROJECT_FILE: &str = "datum-project.json";
+use crate::workspace;
 
 /// The levels with elements so far: a library folder's subfolders by the same names.
 pub const LEVELS: [&str; 1] = ["sketch"];
@@ -73,12 +70,6 @@ impl Library {
     }
 }
 
-/// The project the model file `model` belongs to: the nearest folder above it with
-/// [`PROJECT_FILE`].
-pub fn project_root(model: &Path) -> Option<PathBuf> {
-    model.ancestors().skip(1).find(|d| d.join(PROJECT_FILE).is_file()).map(Path::to_path_buf)
-}
-
 /// The elements of `level`: built in, then beside the program, then in the project of the
 /// model at `model`, each folder by file name. One of a name already listed from a less specific
 /// place takes its place; two of a name in one folder are both listed.
@@ -102,9 +93,23 @@ pub fn load(level: &str, model: Option<&Path>) -> Library {
         }
     }
     let program = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
-    let project = model.and_then(project_root);
-    for (source, dir) in [(Source::Program, program), (Source::Project, project)] {
-        let Some(dir) = dir.map(|d| d.join("library").join(level)) else { continue };
+    let project = model.and_then(workspace::project_root);
+    for (source, root) in [(Source::Program, program), (Source::Project, project)] {
+        let Some(root) = root else { continue };
+        let dir = match workspace::folder_in(&root, "library") {
+            Ok(d) => d,
+            Err(why) => {
+                lib.skipped.push(why);
+                continue;
+            }
+        };
+        // Renamed in the project with elements left in the old folder: they are not read, and
+        // that is said.
+        let old = root.join("library").join(level);
+        if dir != root.join("library") && old.is_dir() {
+            lib.skipped.push(format!("{}: not read, the project keeps its library in {}", old.display(), dir.display()));
+        }
+        let dir = dir.join(level);
         let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
             .into_iter()
             .flatten()
@@ -799,17 +804,10 @@ pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The folder work is kept in: the project of the model at `model`, or else the folder beside
-/// the program. Its subfolders: `part`, `assembly`, `drawing` for documents, `library` for
-/// elements (D115).
-pub fn workspace(model: Option<&Path>) -> Option<PathBuf> {
-    model.and_then(project_root).or_else(|| std::env::current_exe().ok()?.parent().map(Path::to_path_buf))
-}
-
-/// Where new elements of `level` are saved unless put elsewhere: `library/<level>` of the
-/// [`workspace`].
-pub fn folder(level: &str, model: Option<&Path>) -> Option<PathBuf> {
-    Some(workspace(model)?.join("library").join(level))
+/// Where new elements of `level` are saved unless put elsewhere: `<level>` in the library
+/// folder of the workspace.
+pub fn folder(level: &str, model: Option<&Path>) -> Result<PathBuf, String> {
+    Ok(workspace::folder("library", model)?.join(level))
 }
 
 /// A file name for element `name`: what a file system would refuse, replaced.

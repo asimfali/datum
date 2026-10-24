@@ -404,8 +404,7 @@ impl Viewer {
     /// Where a new model is saved by dialog: `part` of the workspace (the project, or the folder
     /// beside the program), made if it is not there yet (D115).
     fn parts(&self) -> rfd::FileDialog {
-        let part = datum_model::library::workspace(self.path.as_deref()).map(|w| w.join("part")).filter(|d| std::fs::create_dir_all(d).is_ok());
-        Self::models_in(part)
+        Self::models_in(kept_in("part", self.path.as_deref()))
     }
 
     /// Where a model is opened, or saved again elsewhere, by dialog: where the engineer works —
@@ -762,7 +761,7 @@ impl Viewer {
             let name = element["name"].as_str().unwrap_or_default().to_string();
             let folder = datum_model::library::folder("sketch", self.path.as_deref());
             let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(datum_model::library::file_name(&name));
-            if let Some(f) = folder.filter(|f| std::fs::create_dir_all(f).is_ok()) {
+            if let Some(f) = made(folder) {
                 dialog = dialog.set_directory(f);
             }
             let written = datum_model::library::check("sketch", &element).and_then(|()| match dialog.save_file() {
@@ -1121,11 +1120,7 @@ impl Viewer {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
                             if ui.button("DXF…").clicked()
-                                && let Some(p) = beside(
-                                    self.path.as_deref(),
-                                    rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name(format!("{name}.dxf")),
-                                )
-                                .save_file()
+                                && let Some(p) = exported(self.path.as_deref(), "dxf", name).save_file()
                             {
                                 export = Some((name.to_string(), p));
                             }
@@ -1773,8 +1768,29 @@ fn paint_outline(painter: &egui::Painter, rect: egui::Rect, outline: &[Vec<[f64;
 
 /// `dialog` opened in the folder of the model's file, if it has one: what is made from a part
 /// goes beside it.
-fn beside(model: Option<&std::path::Path>, dialog: rfd::FileDialog) -> rfd::FileDialog {
-    match model.and_then(std::path::Path::parent) {
+/// The folder for files of `kind` in the workspace of the model at `model`, made if it is not
+/// there yet (D141); why not, to the log.
+fn kept_in(kind: &str, model: Option<&std::path::Path>) -> Option<PathBuf> {
+    made(datum_model::workspace::folder(kind, model))
+}
+
+/// `folder`, made if it is not there yet; why not, to the log.
+fn made(folder: Result<PathBuf, String>) -> Option<PathBuf> {
+    match folder.and_then(|f| std::fs::create_dir_all(&f).map(|()| f).map_err(|e| e.to_string())) {
+        Ok(f) => Some(f),
+        Err(why) => {
+            crate::log::write(&why);
+            None
+        }
+    }
+}
+
+/// The dialog to export as `kind` (`dxf`, …): in that folder of the workspace, named after the
+/// model, or after `feature` while the model has no file (D133).
+fn exported(model: Option<&std::path::Path>, kind: &str, feature: &str) -> rfd::FileDialog {
+    let stem = model.and_then(std::path::Path::file_stem).map_or_else(|| feature.to_string(), |s| s.to_string_lossy().to_string());
+    let dialog = rfd::FileDialog::new().add_filter(kind.to_uppercase(), &[kind]).set_file_name(format!("{stem}.{kind}"));
+    match kept_in(kind, model) {
         Some(d) => dialog.set_directory(d),
         None => dialog,
     }
