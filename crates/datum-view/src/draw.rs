@@ -189,6 +189,16 @@ impl Draft {
         self.tool = tool;
     }
 
+    /// A tool's button clicked: the tool taken up, or, clicked again, the command ended as Esc
+    /// ends it: by the mouse alone, as in Inventor.
+    pub fn press(&mut self, tool: Tool) {
+        if self.tool == tool {
+            self.escape();
+        } else {
+            self.take_up(tool);
+        }
+    }
+
     /// Starts placing library element `t`: no preset, nothing typed yet.
     pub fn choose(&mut self, t: Json) {
         self.cancel();
@@ -919,6 +929,18 @@ mod tests {
         assert!(e.draft.chain.is_some());
         e.draft.escape();
         assert!(e.draft.chain.is_none() && e.draft.tool == Tool::Select && e.draft.cursor.is_none());
+    }
+
+    /// A tool's button again ends the command, as Esc does; another button changes the tool.
+    #[test]
+    fn a_button_again_ends_the_command() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.press(Tool::Line);
+        click_at(&mut e, [0.0, 0.0], false);
+        e.draft.press(Tool::Arc);
+        assert!(e.draft.tool == Tool::Arc && e.draft.chain.is_none(), "another tool, the chain dropped");
+        e.draft.press(Tool::Arc);
+        assert!(e.draft.tool == Tool::Select && e.draft.cursor.is_none(), "the same again: ended");
     }
 
     /// A tangent arc ending level with its centre turns a half: the end is put there exactly and

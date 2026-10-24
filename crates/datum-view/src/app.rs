@@ -1055,7 +1055,7 @@ impl Viewer {
                 for act in TOOLS {
                     let (a, tool) = (act.action(), tool(act));
                     if ui.selectable_label(sk.draft.tool == tool, a.label).on_hover_text(self.keys.hint(ui.ctx(), act)).clicked() {
-                        sk.draft.take_up(tool);
+                        sk.draft.press(tool);
                     }
                 }
             });
@@ -1068,7 +1068,7 @@ impl Viewer {
                         crate::sketch::paint_glyph(p, c, glyph, colour)
                     });
                     if r.clicked() {
-                        sk.draft.take_up(Tool::Constrain(kind));
+                        sk.draft.press(Tool::Constrain(kind));
                     }
                 }
             });
@@ -1121,12 +1121,12 @@ impl Viewer {
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
-                Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc ends",
+                Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
-                     parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · Enter puts it at the cursor · Esc ends"
+                     parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · Enter puts it at the cursor · Esc or a right click ends"
                 }
-                _ => "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc ends the command",
+                _ => "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command",
             });
             done = ui.button("Done").clicked();
             ui.separator();
@@ -1711,7 +1711,8 @@ impl Viewer {
                 let d = r.drag_delta();
                 sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
             }
-            if !typing && !typing_field && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // Esc, or a right click (a right drag pans): the mouse alone ends the command too.
+            if (!typing && !typing_field && ui.input(|i| i.key_pressed(egui::Key::Escape))) || r.secondary_clicked() {
                 draft.escape();
             }
             sk.draft = draft;
@@ -2291,6 +2292,43 @@ mod tests {
         v.sync_sketch();
         assert!(v.sketch.is_none());
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
+    }
+
+    /// A right click ends the command, as Esc does, for those who draw with the mouse alone; a
+    /// right drag still pans and leaves the command on.
+    #[test]
+    fn a_right_click_ends_the_command() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        v.sketch.as_mut().unwrap().draft.take_up(Tool::Line);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        let tool = |h: &egui_kittest::Harness<Viewer>| h.state().sketch.as_ref().unwrap().draft.tool;
+        let button = |h: &mut egui_kittest::Harness<Viewer>, pressed, at: egui::Pos2| {
+            h.hover_at(at);
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
+            h.step();
+        };
+        h.run();
+        button(&mut h, true, egui::pos2(300.0, 200.0));
+        button(&mut h, false, egui::pos2(400.0, 250.0));
+        assert_eq!(tool(&h), Tool::Line, "a right drag pans");
+        button(&mut h, true, egui::pos2(300.0, 200.0));
+        button(&mut h, false, egui::pos2(300.0, 200.0));
+        assert_eq!(tool(&h), Tool::Select, "a right click ends");
     }
 
     /// Placing a library element with parameters in one stream of input: the field by the
