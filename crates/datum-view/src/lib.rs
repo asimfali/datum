@@ -12,6 +12,7 @@ mod icons;
 pub mod log;
 pub mod render;
 pub mod scene;
+mod settings;
 mod sketch;
 mod templates;
 mod update;

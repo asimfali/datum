@@ -12,7 +12,7 @@ use datum_model::Session;
 use egui_wgpu::wgpu;
 use serde_json::{Value as Json, json};
 
-use crate::actions::{ACTIONS, Act, Action};
+use crate::actions::{ACTIONS, Act, Action, Keys};
 use crate::camera::Camera;
 use crate::dims::{Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
@@ -296,6 +296,11 @@ struct Viewer {
     /// The folder of the model last opened or saved: where the next one is opened from.
     worked_in: Option<PathBuf>,
     recent: Vec<PathBuf>,
+    /// The keys in force, the settings file they come from, and what in it could not be
+    /// applied, shown until dismissed.
+    keys: Keys,
+    settings: Option<PathBuf>,
+    settings_problems: Vec<String>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -313,6 +318,11 @@ impl Viewer {
         let repaint = ctx.clone();
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
+        let settings = crate::settings::path();
+        let (keys, settings_problems) = crate::settings::load(settings.as_deref());
+        for p in &settings_problems {
+            crate::log::write(&format!("settings: {p}"));
+        }
         let (found, update) = channel();
         std::thread::spawn(move || {
             if let Some(n) = crate::update::newer() {
@@ -350,6 +360,9 @@ impl Viewer {
             quitting: None,
             worked_in: None,
             recent: Vec::new(),
+            keys,
+            settings,
+            settings_problems,
             shown: 0,
             maximized: false,
             picking: false,
@@ -864,7 +877,7 @@ impl Viewer {
             use crate::icons::{Icon, button};
             for (act, icon) in [(Act::Undo, Icon::Undo), (Act::Redo, Icon::Redo)] {
                 let a = act.action();
-                if button(ui, icon, a.label, &a.hint(ui.ctx()), self.available(a)).clicked() {
+                if button(ui, icon, a.label, &self.keys.hint(ui.ctx(), act), self.available(a)).clicked() {
                     self.run(ui, act);
                 }
             }
@@ -938,7 +951,7 @@ impl Viewer {
             ui.horizontal_wrapped(|ui| {
                 for act in TOOLS {
                     let (a, tool) = (act.action(), tool(act));
-                    if ui.selectable_label(sk.draft.tool == tool, a.label).on_hover_text(a.hint(ui.ctx())).clicked() {
+                    if ui.selectable_label(sk.draft.tool == tool, a.label).on_hover_text(self.keys.hint(ui.ctx(), act)).clicked() {
                         sk.draft.take_up(tool);
                     }
                 }
@@ -984,7 +997,7 @@ impl Viewer {
                 ui.checkbox(&mut sk.constraints, "Constraints")
                     .on_hover_text("Badges of the geometric constraints: click one to select it, Del removes it");
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
-                    ui.checkbox(&mut sk.draft.tangent, Act::Tangent.action().labelled(ui.ctx()));
+                    ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), Act::Tangent));
                 }
             });
             // A dimension that would over-constrain the sketch: as a reference one, or not at all.
@@ -1795,9 +1808,9 @@ impl Viewer {
             return;
         }
         for a in &ACTIONS {
-            if let Some(key) = &a.key
+            if let Some(key) = self.keys.get(a.act).copied()
                 && self.available(a)
-                && ui.input_mut(|i| crate::actions::pressed(i, key))
+                && ui.input_mut(|i| crate::actions::pressed(i, &key))
             {
                 self.run(ui, a.act);
             }
@@ -1875,10 +1888,10 @@ impl Viewer {
     fn item(&mut self, ui: &mut egui::Ui, act: Act, menu: bool) {
         let a = act.action();
         let mut button = egui::Button::new(a.label).selected(self.checked(act));
-        if menu && let Some(k) = &a.key {
+        if menu && let Some(k) = self.keys.get(act) {
             button = button.shortcut_text(ui.ctx().format_shortcut(k));
         }
-        if ui.add_enabled(self.available(a), button).on_hover_text(a.hint(ui.ctx())).clicked() {
+        if ui.add_enabled(self.available(a), button).on_hover_text(self.keys.hint(ui.ctx(), act)).clicked() {
             self.run(ui, act);
         }
     }
@@ -1915,8 +1928,30 @@ impl Viewer {
             ui.menu_button("Help", |ui| {
                 ui.hyperlink_to(format!("Datum {}", env!("CARGO_PKG_VERSION")), env!("CARGO_PKG_REPOSITORY"));
                 ui.weak(format!("Problems are logged to {}", crate::log::path().display()));
+                if let Some(p) = &self.settings {
+                    ui.weak(format!("Keys and other settings: {}", p.display()));
+                }
             });
         });
+    }
+
+    /// What in the settings file could not be applied, until dismissed.
+    fn settings_said(&mut self, ctx: &egui::Context) {
+        if self.settings_problems.is_empty() {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("settings.json").open(&mut open).collapsible(false).show(ctx, |ui| {
+            if let Some(p) = &self.settings {
+                ui.weak(p.display().to_string());
+            }
+            for p in &self.settings_problems {
+                ui.label(p);
+            }
+        });
+        if !open {
+            self.settings_problems.clear();
+        }
     }
 
     /// The recent models: a file no longer there shows grey.
@@ -1968,6 +2003,7 @@ impl eframe::App for Viewer {
             egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
         }
         self.keep(ui.ctx());
+        self.settings_said(ui.ctx());
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
             if let Some(rs) = frame.wgpu_render_state() {
@@ -2041,6 +2077,9 @@ mod tests {
             quitting: None,
             worked_in: None,
             recent: Vec::new(),
+            keys: Keys::default(),
+            settings: None,
+            settings_problems: Vec::new(),
             shown: 0,
             maximized: false,
             picking: false,
@@ -2340,6 +2379,24 @@ mod tests {
         h.run();
         drop(h);
         assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+    }
+
+    /// A key moved in the settings: the action runs by the new one, no longer by its default.
+    #[test]
+    fn a_key_moved() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.keys.set(Act::Undo, Some(egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::F2)));
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        let press = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
+        h.event(press(egui::Key::Z, egui::Modifiers::COMMAND));
+        h.run();
+        drop(h);
+        assert!(inbox.try_iter().next().is_none(), "Ctrl+Z no more");
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(press(egui::Key::F2, egui::Modifiers::NONE));
+        h.run();
+        drop(h);
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("undo", _))), "F2 undoes");
     }
 
     /// The recent models: the latest first, each once, ten kept.
