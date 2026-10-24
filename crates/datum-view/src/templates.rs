@@ -19,10 +19,10 @@ pub struct Item {
     pub outline: Vec<Vec<[f64; 2]>>,
 }
 
-/// The sketch elements for the model at `model`: built in, beside the program, in its project.
-/// Files that are not elements go to the log.
-pub fn library(model: Option<&std::path::Path>) -> Vec<Item> {
-    let lib = library::load("sketch", model);
+/// The sketch elements: built in, beside the program, in `project` (its root). Files that are
+/// not elements go to the log.
+pub fn library(project: Option<&std::path::Path>) -> Vec<Item> {
+    let lib = library::load("sketch", project);
     for why in &lib.skipped {
         crate::log::write(&format!("{why}: not a sketch element"));
     }
