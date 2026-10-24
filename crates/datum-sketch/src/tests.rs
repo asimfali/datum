@@ -416,3 +416,27 @@ fn points_level_and_plumb() {
     let bad = r#"{"points": {"o": [0, 0]}, "constraints": [{"type": "horizontal"}]}"#;
     assert!(matches!(solve(&sketch(bad)), Err(SketchError::Invalid(m)) if m.contains("a line or two points")));
 }
+
+/// An arc's length from its start to its end, counterclockwise: a quarter, three quarters of a
+/// turn; measured too.
+#[test]
+fn arc_length() {
+    let quarter = std::f64::consts::FRAC_PI_2 * 5.0;
+    for (turns, drawn, end) in [(1.0, [0.6, 4.7], [0.0, 5.0]), (3.0, [-0.8, -4.6], [0.0, -5.0])] {
+        let s = sketch(&format!(
+            r#"{{
+            "points": {{"o": [0, 0], "a": [5, 0], "b": [{}, {}]}},
+            "arcs": {{"bend": {{"center": "o", "from": "a", "to": "b"}}}},
+            "constraints": [{{"type": "fix", "point": "o"}}, {{"type": "fix", "point": "a"}}, {{"type": "arc_length", "arc": "bend", "value": {}}}],
+            "measures": {{"along": {{"type": "arc_length", "arc": "bend"}}}}
+            }}"#,
+            drawn[0],
+            drawn[1],
+            turns * quarter
+        ));
+        let r = solve(&s).unwrap();
+        assert_eq!(r.dof, 0, "{:?}", r.free);
+        close(r.points["b"], end, 1e-12);
+        assert!((r.measures["along"] - turns * quarter).abs() < 1e-12, "{:?}", r.measures);
+    }
+}

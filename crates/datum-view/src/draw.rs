@@ -102,8 +102,12 @@ pub struct Draft {
     /// A value typed while drawing (the field by the cursor), and what it comes to: the length
     /// of the line, the circle's diameter, the arc's radius.
     pub typed: Option<(Json, f64)>,
-    /// Dimension tool: what is picked so far.
+    /// Dimension tool: what is picked so far; H or V (its sub-mode); and the value the field
+    /// opened with while it shows the picks' dimension (a pick then changes it, H or V too
+    /// until a value is typed).
     pub picks: Vec<crate::dims::Pick2>,
+    pub axis: Option<crate::dims::Axis>,
+    pub asked: Option<String>,
     /// Template tool: the library element placed, the preset chosen, the parameter values
     /// typed (by name), and the parameter the field by the cursor asks.
     pub template: Option<Json>,
@@ -134,6 +138,8 @@ impl Default for Draft {
             start_radius: None,
             typed: None,
             picks: Vec::new(),
+            axis: None,
+            asked: None,
             template: None,
             preset: None,
             answers: Map::new(),
@@ -185,6 +191,8 @@ impl Draft {
         self.chain = None;
         self.clicks.clear();
         self.picks.clear();
+        self.axis = None;
+        self.asked = None;
         self.tangent = false;
         self.typed = None;
         busy
@@ -632,13 +640,14 @@ impl Draft {
             _ => {}
         }
         // The dimension the picks would make, by the cursor.
-        if self.tool == Tool::Dimension && !self.picks.is_empty() {
-            let text = match edit.dimension(&self.picks, spot.at) {
+        if self.tool == Tool::Dimension && !self.picks.is_empty() && edit.field.is_none() {
+            let text = match edit.dimension(&self.picks, spot.at, self.axis) {
                 Some((c, _, now)) => {
                     let kind = match c["type"].as_str() {
                         Some("horizontal_distance") => "H ",
                         Some("vertical_distance") => "V ",
                         Some("radius") => "R",
+                        Some("arc_length") => "arc ",
                         _ => "",
                     };
                     format!("{kind}{}{}", short(now), if c["type"] == "angle" { "°" } else { "" })
@@ -755,6 +764,13 @@ const AXES: [([f64; 2], Lean); 4] =
     [([1.0, 0.0], Lean::Horizontal), ([-1.0, 0.0], Lean::Horizontal), ([0.0, 1.0], Lean::Vertical), ([0.0, -1.0], Lean::Vertical)];
 
 /// Degrees between two directions.
+/// Whether lines along `a` and `b` are parallel, within a line's lean: two lines that look so
+/// are dimensioned by their distance, not by an angle of nearly nothing.
+pub(crate) fn parallel(a: [f64; 2], b: [f64; 2]) -> bool {
+    let d = degrees(a, b);
+    d <= LEAN_DEG || d >= 180.0 - LEAN_DEG
+}
+
 fn degrees(a: [f64; 2], b: [f64; 2]) -> f64 {
     libm::atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]).abs().to_degrees()
 }

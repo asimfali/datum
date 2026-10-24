@@ -641,7 +641,7 @@ impl SketchEdit {
                     Some(mid(q, [a[0] + d[0] * t, a[1] + d[1] * t]))
                 }
                 "angle" => Some(angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?)),
-                "radius" => c["arc"].as_str().and_then(|n| Self::middle(p, n)),
+                "radius" | "arc_length" => c["arc"].as_str().and_then(|n| Self::middle(p, n)),
                 _ => None,
             }
         };
