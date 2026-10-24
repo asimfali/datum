@@ -55,6 +55,40 @@ pub struct Sketch {
     /// groups. A group's name is no element's.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub groups: BTreeMap<String, Vec<String>>,
+    /// Patterns by name: copies of a group's profiles (or of one curve's).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub patterns: BTreeMap<String, Pattern>,
+}
+
+/// Copies of the closed profiles of `of` (a group or a curve), on the grid of `step`: copy
+/// `(i, j)` moved by `i·step[0] + j·step[1]`. Either `count` copies along each step, the group
+/// itself copy `(0, 0)`; or as many as `fill` (a group bounding a region, or a circle) holds,
+/// centred in it, `clearance` from its edge and from every other profile of the sketch, the
+/// group a sample only. `skip` leaves copies out, `shift` moves one copy by its own vector.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Pattern {
+    pub of: String,
+    pub step: [[Num; 2]; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<[Num; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<String>,
+    #[serde(default = "zero", skip_serializing_if = "is_zero")]
+    pub clearance: Num,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skip: Vec<[i64; 2]>,
+    /// By copy, `"i,j"`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub shift: BTreeMap<String, [Num; 2]>,
+}
+
+fn zero() -> Num {
+    Num::Value(0.0)
+}
+
+fn is_zero(n: &Num) -> bool {
+    *n == Num::Value(0.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -219,6 +253,21 @@ impl Sketch {
         let mut s = self.clone();
         for (name, c) in &mut s.circles {
             c.diameter = Num::Value(c.diameter.resolve(lookup).map_err(|e| format!("circle `{name}`: {e}"))?);
+        }
+        for (name, p) in &mut s.patterns {
+            let num = |n: &mut Num, what: &str| -> Result<(), String> {
+                *n = Num::Value(n.resolve(lookup).map_err(|e| format!("pattern `{name}`: {what}: {e}"))?);
+                Ok(())
+            };
+            for n in p.step.iter_mut().flatten().chain(p.count.iter_mut().flatten()) {
+                num(n, "step or count")?;
+            }
+            num(&mut p.clearance, "clearance")?;
+            for (k, v) in &mut p.shift {
+                for n in v {
+                    num(n, &format!("shift {k}"))?;
+                }
+            }
         }
         for (circle, leader) in self.followed_circles()? {
             let d = s.circles[&leader].diameter.clone();

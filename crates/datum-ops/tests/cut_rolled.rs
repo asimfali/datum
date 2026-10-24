@@ -46,12 +46,9 @@ fn side(b: &Body, convex: bool) -> String {
 /// `sketch` on face `on` of `b` with K-factor `k`, cut through by the feature `name`.
 fn cut_by(name: &str, b: &Body, on: &str, k: f64, sketch: serde_json::Value, pattern: serde_json::Value) -> Result<Body, BrepError> {
     let target = Value::Body(b.clone());
-    let placed =
-        op(serde_json::json!({"op": "sketch", "face": on, "k_factor": k, "sketch": sketch})).eval(id(&format!("{name}.sketch")), &[&target])?;
-    let mut c = serde_json::json!({"op": "cut"});
-    if !pattern.is_null() {
-        c["pattern"] = pattern;
-    }
+    let placed = op(serde_json::json!({"op": "sketch", "face": on, "k_factor": k, "sketch": patterned(sketch, pattern)}))
+        .eval(id(&format!("{name}.sketch")), &[&target])?;
+    let c = serde_json::json!({"op": "cut"});
     let r = op(c).eval(id(name), &[&target, &placed])?.body().unwrap().clone();
     r.validate().unwrap();
     Ok(r)
@@ -279,4 +276,16 @@ fn hole_and_slot_below() -> serde_json::Value {
         "arcs": {"right": {"center": "r", "from": "b", "to": "c"}, "left": {"center": "l", "from": "d", "to": "a"}},
         "circles": {"hole": {"center": "h", "diameter": 10}}
     })
+}
+
+/// `sketch` with `pattern` (JSON or null): `count` and `step` of the copies of all its curves.
+fn patterned(mut sketch: serde_json::Value, pattern: serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::Object(mut p) = pattern {
+        let curves: Vec<String> =
+            ["lines", "arcs", "circles"].iter().filter_map(|k| sketch[*k].as_object()).flat_map(|m| m.keys().cloned()).collect();
+        p.insert("of".into(), serde_json::json!("cell"));
+        sketch["groups"] = serde_json::json!({"cell": curves});
+        sketch["patterns"] = serde_json::json!({"copies": p});
+    }
+    sketch
 }

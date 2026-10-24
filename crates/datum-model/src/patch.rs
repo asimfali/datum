@@ -13,7 +13,7 @@ impl SketchPatch {
     /// A patch to sketch feature `feature` (its JSON: `sketch` and `project`).
     pub fn new(feature: &Value) -> Self {
         let sketch = &feature["sketch"];
-        let mut taken: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups"]
+        let mut taken: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups", "patterns"]
             .iter()
             .filter_map(|k| sketch[k].as_object())
             .flat_map(|m| m.keys().cloned())

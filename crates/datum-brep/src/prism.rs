@@ -3,7 +3,9 @@
 
 use datum_math::{Sign, Vec2, Vec3, orient2d};
 
-use crate::profile::touch;
+use rayon::prelude::*;
+
+use crate::profile::overlapping;
 use crate::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Plane, ProfileLoop, Surface, TopoId, Vertex, build_with_curves};
 
 /// A region: an outer loop, the holes in it, and the IDs of its start and end caps.
@@ -37,16 +39,11 @@ pub fn extrude(regions: &[Region], z0: f64, z1: f64) -> Result<Body, BrepError> 
             return degenerate("an arc of zero radius".into());
         }
     }
-    let edges: Vec<_> = loops.iter().enumerate().flat_map(|(li, l)| (0..l.points.len()).map(move |k| (l.piece(k), li, k))).collect();
-    // Edges touch only their neighbours in the same loop, at the shared point.
-    for (i, a) in edges.iter().enumerate() {
-        for b in &edges[i + 1..] {
-            let n = loops[a.1].points.len();
-            let adjacent = a.1 == b.1 && ((a.2 + 1) % n == b.2 || (b.2 + 1) % n == a.2);
-            if !adjacent && touch(&a.0, &b.0) {
-                return degenerate("profile loops touch or cross".into());
-            }
-        }
+    // Edges touch only their neighbours in the same loop, at the shared point; loops whose boxes
+    // are apart cannot touch.
+    let boxes: Vec<_> = loops.iter().map(|l| l.bounds()).collect();
+    if loops.par_iter().any(|l| l.edges_touch(None)) || overlapping(&boxes).into_par_iter().any(|(a, b)| loops[a].edges_touch(Some(loops[b]))) {
+        return degenerate("profile loops touch or cross".into());
     }
 
     let mut vertices = Vec::new();

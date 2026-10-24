@@ -177,7 +177,31 @@
             "line": "up",
             "value": "margin"
           }
-        ]
+        ],
+        "groups": {
+          "perforated_cell": [
+            "hole"
+          ]
+        },
+        "patterns": {
+          "perforated": {
+            "of": "perforated_cell",
+            "count": [
+              "nx",
+              "ny"
+            ],
+            "step": [
+              [
+                "pitch",
+                0
+              ],
+              [
+                0,
+                "pitch"
+              ]
+            ]
+          }
+        }
       }
     },
     {
@@ -186,23 +210,7 @@
       "inputs": [
         "sheet",
         "holes"
-      ],
-      "pattern": {
-        "count": [
-          "nx",
-          "ny"
-        ],
-        "step": [
-          [
-            "pitch",
-            0
-          ],
-          [
-            0,
-            "pitch"
-          ]
-        ]
-      }
+      ]
     },
     {
       "name": "slots",
@@ -302,6 +310,37 @@
             "from": "qd",
             "to": "qa"
           }
+        },
+        "groups": {
+          "slotted_cell": [
+            "plow",
+            "phigh",
+            "qlow",
+            "qhigh",
+            "pright",
+            "pleft",
+            "qright",
+            "qleft"
+          ]
+        },
+        "patterns": {
+          "slotted": {
+            "of": "slotted_cell",
+            "count": [
+              6,
+              1
+            ],
+            "step": [
+              [
+                100,
+                0
+              ],
+              [
+                0,
+                50
+              ]
+            ]
+          }
         }
       }
     },
@@ -311,23 +350,7 @@
       "inputs": [
         "perforated",
         "slots"
-      ],
-      "pattern": {
-        "count": [
-          6,
-          1
-        ],
-        "step": [
-          [
-            100,
-            0
-          ],
-          [
-            0,
-            50
-          ]
-        ]
-      }
+      ]
     },
     {
       "name": "blank",

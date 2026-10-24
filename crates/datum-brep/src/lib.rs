@@ -20,7 +20,7 @@ pub use build::{CurveSpec, FaceSpec, build, build_with_curves};
 pub use curve::{Arc, Curve, Cylinder, Development, Rolled, Surface};
 pub use id::{Origin, TopoId};
 pub use prism::{Region, cuboid, extrude, prism};
-pub use profile::{ProfileArc, ProfileLoop};
+pub use profile::{Box2, ProfileArc, ProfileLoop, overlap, overlapping};
 pub use terrain::{Grid, terrain};
 pub use tess::{FaceMesh, Mesh, Triangles, edge_points, face_mesh, tessellate, triangulate_face};
 
