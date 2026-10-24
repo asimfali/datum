@@ -61,13 +61,20 @@ pub enum Lean {
     Tangent(String),
 }
 
-/// The end of the line chain being drawn: its point, and the curve that ends there with the
-/// direction it was travelling (a tangent arc continues it).
+/// The end of the line chain being drawn: its point, and how the curve that ends there leaves
+/// it (a tangent arc continues it).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Chain {
     pub point: String,
     pub at: [f64; 2],
-    pub last: Option<(String, [f64; 2])>,
+    pub last: Option<Heading>,
+}
+
+/// The curve that ends a chain and the direction it was travelling.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Heading {
+    pub curve: String,
+    pub dir: [f64; 2],
 }
 
 /// An edge of the face the sketch lies on, in sketch coordinates: its ID, its ends (vertex ID
@@ -318,7 +325,7 @@ impl Draft {
     /// then horizontal or vertical, then parallel or perpendicular to the nearest line by
     /// angle, the line the chain ends in first: of parallel lines, the one drawn from. None
     /// beyond a few degrees.
-    pub fn lean(&self, edit: &SketchEdit, from: [f64; 2], to: [f64; 2], last: Option<&(String, [f64; 2])>) -> Option<(Lean, [f64; 2])> {
+    pub fn lean(&self, edit: &SketchEdit, from: [f64; 2], to: [f64; 2], last: Option<&Heading>) -> Option<(Lean, [f64; 2])> {
         let d = [to[0] - from[0], to[1] - from[1]];
         let len = libm::hypot(d[0], d[1]);
         if len == 0.0 {
@@ -334,11 +341,11 @@ impl Draft {
             let t = d[0] * u[0] + d[1] * u[1];
             [from[0] + u[0] * t, from[1] + u[1] * t]
         };
-        let arc_end = last.filter(|(c, _)| edit.placed.as_ref().is_ok_and(|p| p.arcs.contains_key(c)));
-        if let Some((arc, dir)) = arc_end
-            && degrees(d, *dir) <= LEAN_DEG
+        let arc_end = last.filter(|h| edit.placed.as_ref().is_ok_and(|p| p.arcs.contains_key(&h.curve)));
+        if let Some(h) = arc_end
+            && degrees(d, h.dir) <= LEAN_DEG
         {
-            return Some((Lean::Tangent(arc.clone()), along(*dir)));
+            return Some((Lean::Tangent(h.curve.clone()), along(h.dir)));
         }
         if off(angle, 0.0) <= LEAN_DEG {
             return Some((Lean::Horizontal, [to[0], from[1]]));
@@ -349,7 +356,7 @@ impl Draft {
         let p = edit.placed.as_ref().ok()?;
         let mut best: Option<(f64, Lean, [f64; 2])> = None;
         // The chain's own line first: a tie stays with it.
-        let own = last.map(|(n, _)| n).filter(|n| p.lines.contains_key(*n));
+        let own = last.map(|h| &h.curve).filter(|n| p.lines.contains_key(*n));
         let lines = own.into_iter().chain(p.lines.keys().filter(|n| Some(*n) != own));
         for (n, pts) in lines.filter_map(|n| Some((n, SketchEdit::curve_points(p, n)?))) {
             let (a, b) = (pts[0], pts[1]);
@@ -379,7 +386,11 @@ impl Draft {
         let found = match (self.tool, &self.chain, &self.clicks[..]) {
             _ if !leaning => None,
             (Tool::Line, Some(c), _) if !self.tangent => self.lean(edit, c.at, spot.at, c.last.as_ref()),
-            (Tool::Line, Some(Chain { at, last: Some((_, dir)), .. }), _) => tangent_lean(*at, *dir, spot.at),
+            (Tool::Line, Some(c @ Chain { last: Some(h), .. }), _) => match tangent_arc(c.at, h, spot.at) {
+                Some(_) => tangent_lean(c.at, h, spot.at),
+                // Straight on: a line, leaning as one does.
+                None => self.lean(edit, c.at, spot.at, c.last.as_ref()),
+            },
             (Tool::Arc, _, [c] | [c, _]) => axis_lean(c.at, spot.at),
             _ => None,
         };
@@ -488,7 +499,11 @@ impl Draft {
                 let end = patch.point(&spot);
                 let from = chain.point.clone();
                 let arc = match (&chain.last, self.tangent) {
-                    (Some((curve, dir)), true) => tangent_arc(chain.at, *dir, spot.at).map(|(c, ccw)| (curve.clone(), c, ccw)),
+                    (Some(h), true) => match tangent_arc(chain.at, h, spot.at) {
+                        Some((c, ccw)) => Some((h.curve.clone(), c, ccw)),
+                        None if behind(chain.at, h, spot.at) => return None,
+                        None => None,
+                    },
                     _ => None,
                 };
                 let next_dir = if let Some((curve, c, ccw)) = arc {
@@ -502,7 +517,7 @@ impl Draft {
                     let w = [spot.at[0] - c[0], spot.at[1] - c[1]];
                     let l = libm::hypot(w[0], w[1]);
                     let dir = if ccw { [-w[1] / l, w[0] / l] } else { [w[1] / l, -w[0] / l] };
-                    (name, dir)
+                    Heading { curve: name, dir }
                 } else {
                     let l = libm::hypot(spot.at[0] - chain.at[0], spot.at[1] - chain.at[1]);
                     if l == 0.0 {
@@ -522,7 +537,7 @@ impl Draft {
                         None => {}
                     }
                     let dir = [(spot.at[0] - chain.at[0]) / l, (spot.at[1] - chain.at[1]) / l];
-                    (name, dir)
+                    Heading { curve: name, dir }
                 };
                 self.tangent = false;
                 // Closing on a point of the sketch ends the chain, as Inventor does.
@@ -544,8 +559,7 @@ impl Draft {
             rect.center() + egui::vec2(x as f32, y as f32)
         };
         let stroke = egui::Stroke::new(1.6, DRAFT);
-        let polyline =
-            |pts: Vec<[f64; 2]>| painter.extend(egui::Shape::dashed_line(&pts.into_iter().map(screen).collect::<Vec<_>>(), stroke, 6.0, 3.0));
+        let polyline = |pts: Vec<[f64; 2]>| dashed(painter, &pts.into_iter().map(screen).collect::<Vec<_>>(), stroke, 6.0, 3.0);
         let arc = |c: [f64; 2], r: f64, start: f64, sweep: f64| {
             let n = ((sweep.abs() / std::f64::consts::TAU) * 64.0).ceil().max(2.0) as usize;
             (0..=n)
@@ -575,14 +589,14 @@ impl Draft {
         }
         match (self.tool, &self.chain, &self.clicks[..]) {
             (Tool::Line, Some(c), _) => match (&c.last, self.tangent) {
-                (Some((_, dir)), true) => {
-                    if let Some((centre, ccw)) = tangent_arc(c.at, *dir, spot.at) {
+                (Some(h), true) => {
+                    if let Some((centre, ccw)) = tangent_arc(c.at, h, spot.at) {
                         let r = libm::hypot(c.at[0] - centre[0], c.at[1] - centre[1]);
                         let a0 = libm::atan2(c.at[1] - centre[1], c.at[0] - centre[0]);
                         let a1 = libm::atan2(spot.at[1] - centre[1], spot.at[0] - centre[0]);
                         let sweep = if ccw { (a1 - a0).rem_euclid(std::f64::consts::TAU) } else { -(a0 - a1).rem_euclid(std::f64::consts::TAU) };
                         polyline(arc(centre, r, a0, sweep));
-                    } else {
+                    } else if !behind(c.at, h, spot.at) {
                         polyline(vec![c.at, spot.at]);
                     }
                 }
@@ -645,18 +659,84 @@ impl Draft {
     }
 }
 
-/// The centre of the arc leaving `from` along unit `dir` and passing through `to`, and whether it
-/// turns counterclockwise; None if `to` lies straight ahead (or behind): no arc, a line.
-pub fn tangent_arc(from: [f64; 2], dir: [f64; 2], to: [f64; 2]) -> Option<([f64; 2], bool)> {
+/// The centre of the arc leaving `from` as `heading` does and passing through `to`, and whether
+/// it turns counterclockwise; None if `to` lies straight ahead or behind, within a line's lean:
+/// no arc. Nearer than that the arc only grows, to 10¹⁸ from rounding alone (the cursor, a
+/// line's middle are on it only as near as rounding goes), too large to draw or to hold.
+pub fn tangent_arc(from: [f64; 2], heading: &Heading, to: [f64; 2]) -> Option<([f64; 2], bool)> {
+    let dir = heading.dir;
     let v = [to[0] - from[0], to[1] - from[1]];
-    let n = [-dir[1], dir[0]];
-    let across = v[0] * n[0] + v[1] * n[1];
-    if across == 0.0 {
+    if v == [0.0, 0.0] || !(LEAN_DEG..=180.0 - LEAN_DEG).contains(&degrees(v, dir)) {
         return None;
     }
+    let n = [-dir[1], dir[0]];
+    let across = v[0] * n[0] + v[1] * n[1];
     // The centre on the normal at `from`, as far from `to` as from `from`.
     let r = (v[0] * v[0] + v[1] * v[1]) / (2.0 * across);
     Some(([from[0] + n[0] * r, from[1] + n[1] * r], r > 0.0))
+}
+
+/// Whether `to` lies behind `from` as `heading` goes: no tangent arc goes there, and a line
+/// back over the last segment is no tangent continuation either, so it is not drawn.
+fn behind(from: [f64; 2], heading: &Heading, to: [f64; 2]) -> bool {
+    (to[0] - from[0]) * heading.dir[0] + (to[1] - from[1]) * heading.dir[1] < 0.0
+}
+
+/// `pts` (on screen) dashed, only where the painter shows them: a curve far larger than the view
+/// (a tangent arc of a huge radius) would be cut into countless dashes and hang the window.
+pub fn dashed(painter: &egui::Painter, pts: &[egui::Pos2], stroke: egui::Stroke, dash: f32, gap: f32) {
+    let view = painter.clip_rect().expand(stroke.width + dash);
+    let mut run: Vec<egui::Pos2> = Vec::new();
+    let flush = |run: &mut Vec<egui::Pos2>| {
+        if run.len() > 1 {
+            painter.extend(egui::Shape::dashed_line(run, stroke, dash, gap));
+        }
+        run.clear();
+    };
+    for w in pts.windows(2) {
+        match clip(w[0], w[1], view) {
+            Some((a, b)) => {
+                if run.last() != Some(&a) {
+                    flush(&mut run);
+                    run.push(a);
+                }
+                run.push(b);
+            }
+            None => flush(&mut run),
+        }
+    }
+    flush(&mut run);
+}
+
+/// The part of segment `a`–`b` inside `r` (Liang–Barsky), its ends exactly `a` or `b` where they
+/// are inside; none of one with an end beyond the screen's numbers (infinite, NaN).
+fn clip(a: egui::Pos2, b: egui::Pos2, r: egui::Rect) -> Option<(egui::Pos2, egui::Pos2)> {
+    if !(a.is_finite() && b.is_finite()) {
+        return None;
+    }
+    let d = b - a;
+    let (mut t0, mut t1) = (0.0f32, 1.0f32);
+    for (p, q) in [(-d.x, a.x - r.min.x), (d.x, r.max.x - a.x), (-d.y, a.y - r.min.y), (d.y, r.max.y - a.y)] {
+        if p == 0.0 {
+            if q < 0.0 {
+                return None;
+            }
+        } else if p < 0.0 {
+            t0 = t0.max(q / p);
+        } else {
+            t1 = t1.min(q / p);
+        }
+    }
+    let at = |t: f32| {
+        if t == 0.0 {
+            a
+        } else if t == 1.0 {
+            b
+        } else {
+            a + d * t
+        }
+    };
+    (t0 <= t1).then(|| (at(t0), at(t1)))
 }
 
 /// The four directions along the sketch's axes, each with its lean: from a centre, a point
@@ -682,9 +762,9 @@ fn axis_lean(c: [f64; 2], q: [f64; 2]) -> Option<(Lean, [f64; 2])> {
 /// moved to where it is exactly, so the arc turns a quarter, a half or three quarters. The centre
 /// is `from + n·r`; an end along axis `u` from it is `from + r·(n + u)` for `r > 0`, `from +
 /// r·(n − u)` for `r < 0`: the cursor is projected onto that line.
-fn tangent_lean(from: [f64; 2], dir: [f64; 2], to: [f64; 2]) -> Option<(Lean, [f64; 2])> {
-    let (c, ccw) = tangent_arc(from, dir, to)?;
-    let n = [-dir[1], dir[0]];
+fn tangent_lean(from: [f64; 2], heading: &Heading, to: [f64; 2]) -> Option<(Lean, [f64; 2])> {
+    let (c, ccw) = tangent_arc(from, heading, to)?;
+    let n = [-heading.dir[1], heading.dir[0]];
     let w = [to[0] - c[0], to[1] - c[1]];
     let (u, lean) = AXES.into_iter().find(|(u, _)| degrees(w, *u) <= LEAN_DEG)?;
     let s = if ccw { 1.0 } else { -1.0 };
@@ -969,7 +1049,7 @@ mod tests {
         e.draft.tangent = true;
         // A quarter turn would snap; an eighth goes free: the arc ends heading up and right.
         click_at(&mut e, [12.93, 0.0 + 7.07], true);
-        let dir = e.draft.chain.as_ref().unwrap().last.as_ref().unwrap().1;
+        let dir = e.draft.chain.as_ref().unwrap().last.as_ref().unwrap().dir;
         let p = click_at(&mut e, [12.93 + dir[0] * 10.0 + 0.2, 7.07 + dir[1] * 10.0], false).unwrap();
         assert_eq!(p["add_constraints"], json!([{"type": "tangent", "curves": ["a1", "l2"]}]), "{p}");
         assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
@@ -1074,10 +1154,77 @@ mod tests {
     #[test]
     fn a_tangent_arc_turns_the_way_the_cursor_is() {
         // Along +X from the origin, to (5, 5): a quarter turn left around (0, 5).
-        let (c, ccw) = tangent_arc([0.0, 0.0], [1.0, 0.0], [5.0, 5.0]).unwrap();
+        let east = Heading { curve: "l".into(), dir: [1.0, 0.0] };
+        let (c, ccw) = tangent_arc([0.0, 0.0], &east, [5.0, 5.0]).unwrap();
         assert_eq!((c, ccw), ([0.0, 5.0], true));
-        let (c, ccw) = tangent_arc([0.0, 0.0], [1.0, 0.0], [5.0, -5.0]).unwrap();
+        let (c, ccw) = tangent_arc([0.0, 0.0], &east, [5.0, -5.0]).unwrap();
         assert_eq!((c, ccw), ([0.0, -5.0], false));
-        assert!(tangent_arc([0.0, 0.0], [1.0, 0.0], [7.0, 0.0]).is_none());
+        assert!(tangent_arc([0.0, 0.0], &east, [7.0, 0.0]).is_none());
+    }
+
+    /// Back to the start of the line it continues: no arc, whatever the line's direction.
+    /// Rounding alone put the centre up to 3.6·10¹⁸ away, and the window hung drawing it.
+    #[test]
+    fn no_tangent_arc_straight_along_a_line() {
+        for k in 1..400 {
+            let a = [0.37 * f64::from(k), -1.3 + 0.11 * f64::from(k)];
+            let b = [a[0] + 10.0 * libm::cos(f64::from(k)), a[1] + 7.0 * libm::sin(f64::from(k) * 1.7)];
+            let l = libm::hypot(b[0] - a[0], b[1] - a[1]);
+            let h = Heading { curve: "l".into(), dir: [(b[0] - a[0]) / l, (b[1] - a[1]) / l] };
+            assert!(tangent_arc(b, &h, a).is_none(), "back to the start of line {k}");
+        }
+    }
+
+    /// A tangent continuation straight back (to the line's start, its middle) is refused, and
+    /// straight on is a line, in any direction: the cursor and a middle lie on the line only as
+    /// near as rounding goes, and an arc through them was some 10¹⁶ large, the sketch unsolvable.
+    #[test]
+    fn no_tangent_arc_straight_back_or_on() {
+        for k in 1..60 {
+            let f = f64::from(k);
+            let a = [0.37 * f - 20.0, 0.11 * f - 13.3];
+            let b = [a[0] + 10.0 * libm::cos(f), a[1] + 7.0 * libm::sin(1.7 * f)];
+            for to in 0..3 {
+                let mut e = editor(json!({"points": {}}), false);
+                e.draft.tool = Tool::Line;
+                click_at(&mut e, a, false);
+                click_at(&mut e, b, false);
+                // Where the line ended up, leaning or not.
+                let Some(Chain { at: b, last: Some(Heading { dir, .. }), .. }) = e.draft.chain.clone() else { panic!("{k}: a chain") };
+                let (to, back) = match to {
+                    0 => (a, true),
+                    1 => ([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0], true),
+                    _ => ([b[0] + 10.0 * dir[0], b[1] + 10.0 * dir[1]], false),
+                };
+                e.draft.tangent = true;
+                let p = click_at(&mut e, to, false);
+                assert!(e.placed.is_ok(), "{k} {to:?}: {:?}", e.placed.as_ref().err());
+                if back {
+                    assert!(p.is_none() && e.draft.tangent && e.draft.chain.is_some(), "{k} back to {to:?}: refused, still tangent");
+                } else {
+                    let p = p.unwrap();
+                    assert!(p["lines"]["l2"].is_object() && p.get("arcs").is_none(), "{k} straight on: a line, {p}");
+                }
+            }
+        }
+    }
+
+    /// Dashes only where the view shows them: a curve 10¹⁸ long is drawn at once.
+    #[test]
+    fn dashes_only_in_view() {
+        let r = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(100.0, 100.0));
+        assert_eq!(clip(egui::pos2(10.0, 10.0), egui::pos2(20.0, 30.0), r), Some((egui::pos2(10.0, 10.0), egui::pos2(20.0, 30.0))));
+        assert_eq!(clip(egui::pos2(-50.0, 50.0), egui::pos2(150.0, 50.0), r), Some((egui::pos2(0.0, 50.0), egui::pos2(100.0, 50.0))));
+        assert_eq!(clip(egui::pos2(-50.0, -1.0), egui::pos2(150.0, -1.0), r), None);
+        assert_eq!(clip(egui::pos2(f32::NAN, 5.0), egui::pos2(50.0, 50.0), r), None, "NaN: not drawn, not a panic");
+        assert_eq!(clip(egui::pos2(f32::INFINITY, 5.0), egui::pos2(50.0, 50.0), r), None);
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let huge = [egui::pos2(-1e18, 50.0), egui::pos2(1e18, 60.0), egui::pos2(1e18, -1e18)];
+            dashed(ui.painter(), &huge, egui::Stroke::new(1.6, egui::Color32::WHITE), 6.0, 3.0);
+        });
+        out.textures_delta.clear();
+        assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
     }
 }
