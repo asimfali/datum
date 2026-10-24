@@ -945,7 +945,7 @@ impl SketchEdit {
             let stroke = egui::Stroke::new(width, colour(&pick, &Self::curve_ends(p, n)));
             let pts: Vec<egui::Pos2> = pts.into_iter().map(screen).collect();
             if construction(n) {
-                painter.extend(egui::Shape::dashed_line(&pts, stroke, 6.0, 4.0));
+                crate::draw::dashed(painter, &pts, stroke, 6.0, 4.0);
             } else {
                 painter.add(egui::Shape::line(pts, stroke));
             }
