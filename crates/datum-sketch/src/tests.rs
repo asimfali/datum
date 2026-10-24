@@ -440,3 +440,29 @@ fn arc_length() {
         assert!((r.measures["along"] - turns * quarter).abs() < 1e-12, "{:?}", r.measures);
     }
 }
+
+/// The angle an arc turns, from its start to its end counterclockwise: a quarter, three
+/// quarters; measured in degrees too. Beyond (0°, 360°] it is refused.
+#[test]
+fn arc_angle() {
+    for (degrees, drawn, end) in [(90.0, [0.6, 4.7], [0.0, 5.0]), (270.0, [-0.8, -4.6], [0.0, -5.0])] {
+        let s = sketch(&format!(
+            r#"{{
+            "points": {{"o": [0, 0], "a": [5, 0], "b": [{}, {}]}},
+            "arcs": {{"bend": {{"center": "o", "from": "a", "to": "b"}}}},
+            "constraints": [{{"type": "fix", "point": "o"}}, {{"type": "fix", "point": "a"}}, {{"type": "radius", "arc": "bend", "value": 5}},
+                            {{"type": "arc_angle", "arc": "bend", "degrees": {degrees}}}],
+            "measures": {{"turn": {{"type": "arc_angle", "arc": "bend"}}}}
+            }}"#,
+            drawn[0], drawn[1]
+        ));
+        let r = solve(&s).unwrap();
+        close(r.points["b"], end, 1e-12);
+        assert!((r.measures["turn"] - degrees).abs() < 1e-9, "{:?}", r.measures);
+    }
+    let s = sketch(
+        r#"{"points": {"o": [0, 0], "a": [5, 0], "b": [0, 5]}, "arcs": {"bend": {"center": "o", "from": "a", "to": "b"}},
+            "constraints": [{"type": "arc_angle", "arc": "bend", "degrees": 400}]}"#,
+    );
+    assert!(matches!(solve(&s), Err(SketchError::Invalid(m)) if m.contains("up to 360")));
+}

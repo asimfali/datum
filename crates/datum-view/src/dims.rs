@@ -81,7 +81,7 @@ impl SketchEdit {
     /// line: its length, or with `axis` (H, V) the horizontal or vertical distance of its ends.
     /// A point and a line: the distance between them. Two lines: the distance between them if
     /// they are parallel (within a line's lean), else the angle. The ends of one arc: the length
-    /// along it. Two points: with `axis` as it says, else as the cursor at `at` (sketch
+    /// along it. An arc picked twice: the angle it turns. Two points: with `axis` as it says, else as the cursor at `at` (sketch
     /// coordinates) where it goes says: horizontal when above or below them, vertical when to a
     /// side, along them when straight off their middle (within 15°). An arc: its radius.
     pub fn dimension(&self, picks: &[Pick2], at: [f64; 2], axis: Option<Axis>) -> Option<(Json, &'static str, f64)> {
@@ -95,6 +95,7 @@ impl SketchEdit {
         };
         let (c, key) = match picks {
             [Pick2::Curve(a)] if p.arcs.contains_key(a) => (json!({"type": "radius", "arc": a}), "value"),
+            [Pick2::Curve(a), Pick2::Curve(b)] if a == b && p.arcs.contains_key(a) => (json!({"type": "arc_angle", "arc": a}), "degrees"),
             [Pick2::Curve(l)] => {
                 let (a, b) = ends(l)?;
                 (on_axis(&a, &b).unwrap_or_else(|| json!({"type": "length", "line": l})), "value")
@@ -475,6 +476,9 @@ mod tests {
         assert_eq!(c, json!({"type": "arc_length", "arc": "bend"}));
         assert!((now - 2.5 * std::f64::consts::PI).abs() < 1e-9, "{now}");
         assert!(e.dimension_now(&[point("s"), point("t")], [0.0, 0.0], None));
+        let (c, now) = made(&e, &[curve("bend"), curve("bend")], None);
+        assert_eq!(c, json!({"type": "arc_angle", "arc": "bend"}), "the arc twice: its angle");
+        assert!((now - 90.0).abs() < 1e-9, "{now}");
         e.field = None;
         assert!(!e.dimension_now(&[point("a"), point("c")], [0.0, 0.0], None), "two points wait");
         assert!(e.dimension_now(&[point("a"), point("c")], [0.0, 0.0], Some(Axis::Vertical)), "unless V says");

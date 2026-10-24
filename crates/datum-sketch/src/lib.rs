@@ -206,6 +206,11 @@ pub enum Constraint {
         arc: String,
         value: Num,
     },
+    /// The angle an arc turns, from its start to its end counterclockwise: over 0, up to 360.
+    ArcAngle {
+        arc: String,
+        degrees: Num,
+    },
     /// A line, arc or circle touching an arc or circle, on the side it was drawn: a line's
     /// distance from the centre is the radius; two circles touch outside or inside each other.
     Tangent {
@@ -250,6 +255,7 @@ pub enum Measure {
     Angle { lines: [String; 2] },
     Radius { arc: String },
     ArcLength { arc: String },
+    ArcAngle { arc: String },
 }
 
 impl Sketch {
@@ -290,7 +296,8 @@ impl Sketch {
             | Constraint::PointLine { value, .. }
             | Constraint::Radius { value, .. }
             | Constraint::ArcLength { value, .. }
-            | Constraint::Angle { degrees: value, .. } = c
+            | Constraint::Angle { degrees: value, .. }
+            | Constraint::ArcAngle { degrees: value, .. } = c
             {
                 *value = Num::Value(value.resolve(lookup).map_err(|e| format!("{describe}: {e}"))?);
             }
@@ -347,6 +354,7 @@ impl Constraint {
             Self::Angle { lines, degrees } => ("angle", format!("{} = {degrees}°", lines.join(", "))),
             Self::Radius { arc, value } => ("radius", format!("{arc} = {value}")),
             Self::ArcLength { arc, value } => ("arc_length", format!("{arc} = {value}")),
+            Self::ArcAngle { arc, degrees } => ("arc_angle", format!("{arc} = {degrees}°")),
             Self::Tangent { curves } => ("tangent", curves.join(", ")),
             Self::On { point, curve } => ("on", format!("{point}, {curve}")),
             Self::Midpoint { point, line } => ("midpoint", format!("{point}, {line}")),

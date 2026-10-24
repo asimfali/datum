@@ -1131,7 +1131,7 @@ impl Viewer {
             }
             ui.weak(match sk.draft.tool {
                 Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
-                Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length · H, V: horizontal, vertical · two points: then click where it goes",
+                Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
@@ -1654,8 +1654,10 @@ impl Viewer {
                     // An element picked, or the place where the dimension goes.
                     let pick = sk.point_at(x, y, h).map(Pick2::Point).or_else(|| sk.curve_at(x, y, h).map(Pick2::Curve));
                     let at = sk.camera.at(x, y, h);
+                    // An arc again: its angle, after its radius.
+                    let again = |p: &Pick2| matches!((p, &draft.picks[..]), (Pick2::Curve(n), [q]) if q == p && sk.placed.as_ref().is_ok_and(|s| s.arcs.contains_key(n)));
                     match pick {
-                        Some(p) if !draft.picks.contains(&p) => {
+                        Some(p) if !draft.picks.contains(&p) || again(&p) => {
                             // A third pick starts a dimension anew; a second changes the one
                             // open (a line's length into its distance to a point or a parallel).
                             if draft.picks.len() == 2 {

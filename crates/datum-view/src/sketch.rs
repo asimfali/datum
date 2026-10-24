@@ -247,12 +247,71 @@ pub struct Label {
     pub pick: Pick,
     pub at: [f64; 2],
     pub text: String,
-    /// An arc's length: the arc sign before the text (the window's font has no ⌒).
-    pub arc: bool,
+    /// What kind of dimension it is, by a sign before the text: the window's font has no ⌒,
+    /// ↔, ↕ or ∠.
+    pub sign: Option<Sign>,
 }
 
-/// The width of the arc sign before an arc length's text, in pixels.
-const ARC_SIGN: f64 = 12.0;
+/// A dimension's sign: an arc's length, a horizontal or vertical distance, an angle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Sign {
+    Arc,
+    Horizontal,
+    Vertical,
+    Angle,
+}
+
+impl Sign {
+    /// The sign of a dimension of type `kind`, if it has one.
+    fn of(kind: &Json) -> Option<Sign> {
+        match kind.as_str()? {
+            "arc_length" => Some(Sign::Arc),
+            "horizontal_distance" => Some(Sign::Horizontal),
+            "vertical_distance" => Some(Sign::Vertical),
+            "angle" | "arc_angle" => Some(Sign::Angle),
+            _ => None,
+        }
+    }
+
+    /// Draws the sign in the room `r` before a label's text, in `colour`.
+    fn paint(self, painter: &egui::Painter, r: egui::Rect, colour: egui::Color32) {
+        let stroke = egui::Stroke::new(1.2, colour);
+        let (c, s) = (r.center(), r.width().min(r.height()) * 0.4);
+        let line = |a: egui::Pos2, b: egui::Pos2| {
+            painter.line_segment([a, b], stroke);
+        };
+        // A double arrow from `a` to `b`.
+        let arrow = |a: egui::Pos2, b: egui::Pos2| {
+            line(a, b);
+            let u = (b - a).normalized() * (s * 0.6);
+            let n = egui::vec2(-u.y, u.x) * 0.6;
+            for (tip, back) in [(a, u), (b, -u)] {
+                line(tip, tip + back + n);
+                line(tip, tip + back - n);
+            }
+        };
+        match self {
+            Sign::Arc => {
+                let centre = c + egui::vec2(0.0, s * 0.6);
+                let pts = (0..=8).map(|k| {
+                    let (sn, co) = libm::sincosf(std::f32::consts::PI * (0.15 + 0.7 * k as f32 / 8.0));
+                    centre + egui::vec2(s * co, -s * sn)
+                });
+                painter.add(egui::Shape::line(pts.collect(), stroke));
+            }
+            Sign::Horizontal => arrow(c - egui::vec2(s, 0.0), c + egui::vec2(s, 0.0)),
+            Sign::Vertical => arrow(c - egui::vec2(0.0, s), c + egui::vec2(0.0, s)),
+            Sign::Angle => {
+                let corner = c + egui::vec2(-s, s);
+                line(corner, c + egui::vec2(s, s));
+                line(corner, c + egui::vec2(s * 0.6, -s));
+            }
+        }
+    }
+}
+
+/// The room for a dimension's sign before its text, in pixels.
+const SIGN: f64 = 12.0;
 
 impl SketchEdit {
     /// Starts editing feature `feature`, listed as `json`, viewed whole in a picture of width /
@@ -675,7 +734,7 @@ impl SketchEdit {
                     Some(mid(q, [a[0] + d[0] * t, a[1] + d[1] * t]))
                 }
                 "angle" => Some(angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?)),
-                "radius" | "arc_length" => c["arc"].as_str().and_then(|n| Self::middle(p, n)),
+                "radius" | "arc_length" | "arc_angle" => c["arc"].as_str().and_then(|n| Self::middle(p, n)),
                 _ => None,
             }
         };
@@ -688,14 +747,14 @@ impl SketchEdit {
                 out.push(Label {
                     pick: Pick::Constraint(k),
                     at,
-                    text: format!("{}{}{}", prefix(c), shown(v), if c["type"] == "angle" { "°" } else { "" }),
-                    arc: c["type"] == "arc_length",
+                    text: format!("{}{}{}", prefix(c), shown(v), if matches!(c["type"].as_str(), Some("angle" | "arc_angle")) { "°" } else { "" }),
+                    sign: Sign::of(&c["type"]),
                 });
             }
         }
         for (n, c) in self.json["sketch"]["measures"].as_object().into_iter().flatten() {
             if let (Some(at), Some(v)) = (place(c), p.solved.measures.get(n)) {
-                out.push(Label { pick: Pick::Measure(n.clone()), at, text: format!("({}{})", prefix(c), short(*v)), arc: c["type"] == "arc_length" });
+                out.push(Label { pick: Pick::Measure(n.clone()), at, text: format!("({}{})", prefix(c), short(*v)), sign: Sign::of(&c["type"]) });
             }
         }
         let followed = self.followed_circles();
@@ -704,7 +763,7 @@ impl SketchEdit {
                 let d = self.json["sketch"]["circles"][n]["diameter"].clone();
                 let text = if d.is_null() { short(c.diameter.value().unwrap_or(0.0)) } else { shown(&d) };
                 // Ø: the window's font has no ⌀.
-                out.push(Label { pick: Pick::Curve(n.clone()), at: v[v.len() / 4], text: format!("Ø{text}"), arc: false });
+                out.push(Label { pick: Pick::Curve(n.clone()), at: v[v.len() / 4], text: format!("Ø{text}"), sign: None });
             }
         }
         out
@@ -723,7 +782,7 @@ impl SketchEdit {
         let mut placed: Vec<Laid> = Vec::new();
         for l in self.labels() {
             let (w, h) = size(&l.text);
-            let w = if l.arc { w + ARC_SIGN } else { w };
+            let w = if l.sign.is_some() { w + SIGN } else { w };
             let (x, mut y) = self.camera.offset(l.at, height);
             while placed.iter().any(|(_, (px, py), (pw, ph))| (x - px).abs() * 2.0 < w + pw && (y - py).abs() * 2.0 < h + ph) {
                 y += h + 1.0;
@@ -1052,17 +1111,11 @@ impl SketchEdit {
             if marked(&l.pick) {
                 painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
             }
-            let sign = if l.arc { ARC_SIGN as f32 } else { 0.0 };
-            if l.arc {
-                // ⌒: a flat arc over the middle of its room.
-                let (centre, radius) = (egui::pos2(r.left() + 2.0 + sign * 0.5, r.center().y + 3.0), sign * 0.4);
-                let pts = (0..=8).map(|k| {
-                    let (s, co) = libm::sincosf(std::f32::consts::PI * (0.15 + 0.7 * k as f32 / 8.0));
-                    centre + egui::vec2(radius * co, -radius * s)
-                });
-                painter.add(egui::Shape::line(pts.collect(), egui::Stroke::new(1.2, c)));
+            let room = if l.sign.is_some() { SIGN as f32 } else { 0.0 };
+            if let Some(s) = l.sign {
+                s.paint(painter, egui::Rect::from_min_size(r.min + egui::vec2(2.0, 0.0), egui::vec2(room, r.height())), c);
             }
-            painter.galley(r.min + egui::vec2(2.0 + sign, 1.0), painter.layout_no_wrap(l.text, LABEL, c), c);
+            painter.galley(r.min + egui::vec2(2.0 + room, 1.0), painter.layout_no_wrap(l.text, LABEL, c), c);
         }
     }
 }
@@ -1333,15 +1386,20 @@ mod tests {
         e.json["sketch"]["constraints"].as_array_mut().unwrap().extend([
             json!({"type": "point_line", "point": "c", "line": "bottom", "value": 4}),
             json!({"type": "arc_length", "arc": "bend", "value": 7.85}),
+            json!({"type": "arc_angle", "arc": "bend", "degrees": 90}),
+            json!({"type": "angle", "lines": ["bottom", "left"], "degrees": 270}),
+            json!({"type": "vertical_distance", "points": ["b", "t"], "value": 5}),
         ]);
         e.solve();
         assert_eq!(e.referred(&Pick::Constraint(6)), [Pick::Point("c".into()), Pick::Curve("bottom".into())]);
         assert_eq!(e.referred(&Pick::Constraint(7)), [Pick::Curve("bend".into())]);
+        let signs: Vec<Option<Sign>> = e.labels().iter().map(|l| l.sign).collect();
+        assert_eq!(signs, [None, None, Some(Sign::Arc), Some(Sign::Angle), Some(Sign::Angle), Some(Sign::Vertical), None]);
         assert_eq!(e.referred(&Pick::Measure("height".into())), [Pick::Curve("left".into())]);
         assert!(e.referred(&Pick::Curve("top".into())).is_empty());
         let laid = e.laid_out(600.0, |_| (40.0, 14.0));
-        let width = |arc: bool| laid.iter().find(|(l, ..)| l.arc == arc).map(|(.., (w, _))| *w);
-        assert_eq!((width(true), width(false)), (Some(40.0 + ARC_SIGN), Some(40.0)));
+        let width = |sign| laid.iter().find(|(l, ..)| l.sign == sign).map(|(.., (w, _))| *w);
+        assert_eq!((width(Some(Sign::Arc)), width(None)), (Some(40.0 + SIGN), Some(40.0)));
         // `DATUM_TIE_SHOT=file.png` saves a picture: the arc's length selected, the point's
         // distance under the cursor.
         if let Some(path) = std::env::var_os("DATUM_TIE_SHOT") {
