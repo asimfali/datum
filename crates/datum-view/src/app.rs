@@ -864,7 +864,17 @@ impl Viewer {
         }
     }
 
-    /// The toolbar under the menu; a `.json` dropped on the window opens.
+    /// The menu and the toolbar in one row (the bar takes the whole width): the menu is narrow,
+    /// the model gets the height.
+    fn top_row(&mut self, ui: &mut egui::Ui) {
+        egui::MenuBar::new().ui(ui, |ui| {
+            self.menu(ui);
+            ui.separator();
+            self.toolbar(ui);
+        });
+    }
+
+    /// The toolbar beside the menu; a `.json` dropped on the window opens.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             if let Ok(n) = self.update.try_recv() {
@@ -1898,40 +1908,38 @@ impl Viewer {
 
     /// The menu (D131): every action, grouped as in other programs.
     fn menu(&mut self, ui: &mut egui::Ui) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                self.item(ui, Act::New, true);
-                self.item(ui, Act::Open, true);
-                ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
-                    ui.menu_button("Open recent", |ui| self.recent_menu(ui));
-                });
-                ui.separator();
-                for act in [Act::Save, Act::SaveAs, Act::Close] {
-                    self.item(ui, act, true);
-                }
-                ui.separator();
-                self.item(ui, Act::Exit, true);
+        ui.menu_button("File", |ui| {
+            self.item(ui, Act::New, true);
+            self.item(ui, Act::Open, true);
+            ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
+                ui.menu_button("Open recent", |ui| self.recent_menu(ui));
             });
-            ui.menu_button("Edit", |ui| {
-                self.item(ui, Act::Undo, true);
-                self.item(ui, Act::Redo, true);
-            });
-            ui.menu_button("View", |ui| self.item(ui, Act::SmoothEdges, true));
-            ui.menu_button("Sketch", |ui| {
-                self.item(ui, Act::NewSketch, true);
-                self.item(ui, Act::SketchOnFace, true);
-                ui.separator();
-                for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent]) {
-                    self.item(ui, act, true);
-                }
-            });
-            ui.menu_button("Help", |ui| {
-                ui.hyperlink_to(format!("Datum {}", env!("CARGO_PKG_VERSION")), env!("CARGO_PKG_REPOSITORY"));
-                ui.weak(format!("Problems are logged to {}", crate::log::path().display()));
-                if let Some(p) = &self.settings {
-                    ui.weak(format!("Keys and other settings: {}", p.display()));
-                }
-            });
+            ui.separator();
+            for act in [Act::Save, Act::SaveAs, Act::Close] {
+                self.item(ui, act, true);
+            }
+            ui.separator();
+            self.item(ui, Act::Exit, true);
+        });
+        ui.menu_button("Edit", |ui| {
+            self.item(ui, Act::Undo, true);
+            self.item(ui, Act::Redo, true);
+        });
+        ui.menu_button("View", |ui| self.item(ui, Act::SmoothEdges, true));
+        ui.menu_button("Sketch", |ui| {
+            self.item(ui, Act::NewSketch, true);
+            self.item(ui, Act::SketchOnFace, true);
+            ui.separator();
+            for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent]) {
+                self.item(ui, act, true);
+            }
+        });
+        ui.menu_button("Help", |ui| {
+            ui.hyperlink_to(format!("Datum {}", env!("CARGO_PKG_VERSION")), env!("CARGO_PKG_REPOSITORY"));
+            ui.weak(format!("Problems are logged to {}", crate::log::path().display()));
+            if let Some(p) = &self.settings {
+                ui.weak(format!("Keys and other settings: {}", p.display()));
+            }
         });
     }
 
@@ -1996,8 +2004,7 @@ impl eframe::App for Viewer {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.shortcuts(ui);
-        egui::Panel::top("datum_menu").show(ui, |ui| self.menu(ui));
-        egui::Panel::top("datum_toolbar").show(ui, |ui| self.toolbar(ui));
+        egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
         egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
         if self.sketch.is_some() {
             egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
@@ -2503,7 +2510,7 @@ mod tests {
             let shot = std::env::var_os("DATUM_MENU_SHOT");
             let builder = egui_kittest::Harness::builder().with_size([800.0, 300.0]);
             let builder = if shot.is_some() { builder.wgpu() } else { builder };
-            let mut h = builder.build_ui(|ui| v.menu(ui));
+            let mut h = builder.build_ui(|ui| v.top_row(ui));
             h.run();
             h.get_by_label("File").click();
             h.run();
