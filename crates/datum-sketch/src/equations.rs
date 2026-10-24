@@ -38,6 +38,10 @@ enum Eq {
     ArcEnds(usize, usize, usize),
     /// Centre, a point on the circle, radius.
     Radius(usize, usize, f64),
+    /// An arc's centre, start and end (counterclockwise), and its length.
+    ArcLength(usize, usize, usize, f64),
+    /// An arc's centre, start and end, and the angle it turns (radians).
+    ArcAngle(usize, usize, usize, f64),
     /// Line, centre, radius, and the side of the line the centre was drawn on.
     LineCircle(usize, usize, Rad, f64),
     /// Two circles by centre and radius; touching outside, or inside with the sign of `r1 − r2`
@@ -194,7 +198,8 @@ impl Equations {
             | Constraint::VerticalDistance { value, .. }
             | Constraint::Length { value, .. }
             | Constraint::PointLine { value, .. }
-            | Constraint::Radius { value, .. } => m.max(value.value().unwrap_or(0.0).abs()),
+            | Constraint::Radius { value, .. }
+            | Constraint::ArcLength { value, .. } => m.max(value.value().unwrap_or(0.0).abs()),
             _ => m,
         });
         let largest = circles.iter().fold(largest, |m, c| m.max(c.1));
@@ -303,6 +308,18 @@ impl Equations {
                     let k = find(&arc_names, arc).ok_or_else(|| SketchError::Invalid(format!("unknown arc `{arc}`")))?;
                     Eq::Radius(arcs[k].0, arcs[k].1, positive(value)?)
                 }
+                Constraint::ArcLength { arc, value } => {
+                    let k = find(&arc_names, arc).ok_or_else(|| SketchError::Invalid(format!("unknown arc `{arc}`")))?;
+                    Eq::ArcLength(arcs[k].0, arcs[k].1, arcs[k].2, positive(value)?)
+                }
+                Constraint::ArcAngle { arc, degrees } => {
+                    let degrees = number(degrees)?;
+                    if !(degrees > 0.0 && degrees <= 360.0) {
+                        return invalid(format!("{}: an arc turns over 0° and up to 360°", c.describe(k)));
+                    }
+                    let k = find(&arc_names, arc).ok_or_else(|| SketchError::Invalid(format!("unknown arc `{arc}`")))?;
+                    Eq::ArcAngle(arcs[k].0, arcs[k].1, arcs[k].2, degrees.to_radians())
+                }
                 Constraint::On { point: p, curve: n } => match (point(p)?, curve(&c.describe(k), n)?) {
                     (p, Curve::Line(l)) => Eq::PointLine(p, l, 0.0, 1.0),
                     (p, Curve::Circle(centre, Rad::Point(f), _)) => Eq::ArcEnds(centre, f, p),
@@ -383,6 +400,14 @@ impl Equations {
                     let (c, f, _) = arc(a)?;
                     Eq::Radius(c, f, 0.0)
                 }
+                Measure::ArcLength { arc: a } => {
+                    let (c, f, t) = arc(a)?;
+                    Eq::ArcLength(c, f, t, 0.0)
+                }
+                Measure::ArcAngle { arc: a } => {
+                    let (c, f, t) = arc(a)?;
+                    Eq::ArcAngle(c, f, t, 0.0)
+                }
             });
             measure_names.push(n.clone());
         }
@@ -406,7 +431,7 @@ impl Equations {
                 l(i).into_iter().chain(l(j)).collect()
             }
             Eq::PointLine(p, i, _, _) => [p].into_iter().chain(l(i)).collect(),
-            Eq::ArcEnds(c, f, t) => vec![c, f, t],
+            Eq::ArcEnds(c, f, t) | Eq::ArcLength(c, f, t, _) | Eq::ArcAngle(c, f, t, _) => vec![c, f, t],
             Eq::LineCircle(i, c, rad, _) => l(i).into_iter().chain(r(c, rad)).collect(),
             Eq::CircleCircle(c1, r1, c2, r2, _) => r(c1, r1).into_iter().chain(r(c2, r2)).collect(),
             Eq::LineArcAt(i, c, p) => l(i).into_iter().chain([c, p]).collect(),
@@ -576,7 +601,7 @@ impl Equations {
                 // Each measure is its dimension's equation with the value 0.
                 self.residuals(&all, &[k], &x, &mut r, None);
                 let v = match self.eqs[k] {
-                    Eq::Angle(..) => {
+                    Eq::Angle(..) | Eq::ArcAngle(..) => {
                         let deg = r[0].to_degrees();
                         if deg < 0.0 { deg + 360.0 } else { deg }
                     }
@@ -709,6 +734,25 @@ impl Equations {
                 Eq::Radius(c, f, value) => {
                     let (u, d) = unit_from(at(c), at(f));
                     emit(d - value, &[(f, u), (c, neg(u))]);
+                }
+                Eq::ArcLength(c, f, t, value) => {
+                    // r·θ, θ the turn from the start to the end counterclockwise, in (0, 2π]: a
+                    // closed arc is a whole turn. ∂θ/∂(end) = (−w_y, w_x)/|w| per unit radius.
+                    let ((uf, r), (ut, rt)) = (unit_from(at(c), at(f)), unit_from(at(c), at(t)));
+                    let turn = libm::atan2(cross(uf, ut), dot(uf, ut));
+                    let theta = if turn <= 0.0 { turn + std::f64::consts::TAU } else { turn };
+                    let gf = [theta * uf[0] + uf[1], theta * uf[1] - uf[0]];
+                    let gt = [-r / rt * ut[1], r / rt * ut[0]];
+                    emit(r * theta - value, &[(f, gf), (t, gt), (c, neg([gf[0] + gt[0], gf[1] + gt[1]]))]);
+                }
+                Eq::ArcAngle(c, f, t, target) => {
+                    // θ as for the length; ∂θ/∂(end) = (−w_y, w_x)/|w|, the start's the opposite.
+                    let ((uf, r), (ut, rt)) = (unit_from(at(c), at(f)), unit_from(at(c), at(t)));
+                    let turn = libm::atan2(cross(uf, ut), dot(uf, ut));
+                    let theta = if turn <= 0.0 { turn + std::f64::consts::TAU } else { turn };
+                    let gf = [uf[1] / r, -uf[0] / r];
+                    let gt = [-ut[1] / rt, ut[0] / rt];
+                    emit(theta - target, &[(f, gf), (t, gt), (c, neg([gf[0] + gt[0], gf[1] + gt[1]]))]);
                 }
                 Eq::LineCircle(l, c, rad, side) => {
                     let (a, _) = self.lines[l];

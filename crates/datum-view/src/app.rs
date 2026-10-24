@@ -14,7 +14,7 @@ use serde_json::{Value as Json, json};
 
 use crate::actions::{ACTIONS, Act, Action, Keys};
 use crate::camera::Camera;
-use crate::dims::{Entry, Field, Pick2, value_of};
+use crate::dims::{Axis, Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
@@ -1102,6 +1102,17 @@ impl Viewer {
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                     ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), Act::Tangent));
                 }
+                // The dimension tool's sub-mode, by the mouse too.
+                if sk.draft.tool == Tool::Dimension {
+                    for (axis, label, hint) in [
+                        (Axis::Horizontal, "Horizontal (H)", "A line's ends or two points: their horizontal distance"),
+                        (Axis::Vertical, "Vertical (V)", "A line's ends or two points: their vertical distance"),
+                    ] {
+                        if ui.selectable_label(sk.draft.axis == Some(axis), label).on_hover_text(hint).clicked() {
+                            sk.toggle_axis(axis);
+                        }
+                    }
+                }
             });
             // A dimension that would over-constrain the sketch: as a reference one, or not at all.
             let (mut reference, mut dismiss) = (false, false);
@@ -1119,8 +1130,8 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
-                Tool::Dimension => "Click a line, arc or circle and type the value, Enter · two points: then click where it goes · angle: frame two lines",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter: the last command again",
+                Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
@@ -1443,6 +1454,23 @@ impl Viewer {
             sk.draft = draft;
         }
         let typing = ui.ctx().text_edit_focused();
+        // H, V in the dimension tool, its sub-mode: horizontal or vertical, for what is picked
+        // next, or for the dimension open while its value is not typed yet (then letters go to
+        // the field: a formula).
+        if sk.draft.tool == Tool::Dimension {
+            let untouched = match (&sk.field, &sk.draft.asked) {
+                (None, _) => !typing,
+                (Some(f), Some(t)) => f.text == *t,
+                (Some(_), None) => false,
+            };
+            for (key, axis) in [(egui::Key::H, Axis::Horizontal), (egui::Key::V, Axis::Vertical)] {
+                if untouched && ui.input_mut(|i| crate::actions::pressed(i, &egui::KeyboardShortcut::new(egui::Modifiers::NONE, key))) {
+                    let letter = format!("{key:?}");
+                    ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Text(t) if t.eq_ignore_ascii_case(&letter))));
+                    sk.toggle_axis(axis);
+                }
+            }
+        }
         if !typing {
             // Copy: the selection as an element, on the clipboard as JSON. Paste: an element
             // from the clipboard (a copy, or one written by hand or by an agent), placed by clicks.
@@ -1618,7 +1646,7 @@ impl Viewer {
                     }
                 }
                 if let Some(framed) = sk.frame_to(offset, r.drag_stopped(), h, |t| crate::sketch::label_size(ui.painter(), t)) {
-                    draft.picks = sk.dimension_framed(&framed);
+                    draft.picks = sk.dimension_framed(&framed, draft.axis);
                 }
                 if r.clicked()
                     && let Some((x, y)) = offset
@@ -1626,21 +1654,31 @@ impl Viewer {
                     // An element picked, or the place where the dimension goes.
                     let pick = sk.point_at(x, y, h).map(Pick2::Point).or_else(|| sk.curve_at(x, y, h).map(Pick2::Curve));
                     let at = sk.camera.at(x, y, h);
+                    // An arc again: its angle, after its radius.
+                    let again = |p: &Pick2| matches!((p, &draft.picks[..]), (Pick2::Curve(n), [q]) if q == p && sk.placed.as_ref().is_ok_and(|s| s.arcs.contains_key(n)));
                     match pick {
-                        Some(p) if draft.picks.len() < 2 && !draft.picks.contains(&p) => {
-                            draft.picks.push(p);
-                            // A curve, or a point and a line: dimensioned at once.
-                            if sk.dimension_now(&draft.picks, at) {
+                        Some(p) if !draft.picks.contains(&p) || again(&p) => {
+                            // A third pick starts a dimension anew; a second changes the one
+                            // open (a line's length into its distance to a point or a parallel).
+                            if draft.picks.len() == 2 {
                                 draft.picks.clear();
                             }
+                            draft.picks.push(p);
+                            // A curve, a point and a line, an arc's ends: dimensioned at once.
+                            draft.asked =
+                                if sk.dimension_now(&draft.picks, at, draft.axis) { sk.field.as_ref().map(|f| f.text.clone()) } else { None };
                         }
                         Some(_) => {}
                         // Where the dimension between two points goes.
                         None => {
-                            if let Some((c, key, now)) = sk.dimension(&draft.picks, at) {
+                            if draft.asked.is_none()
+                                && let Some((c, key, now)) = sk.dimension(&draft.picks, at, draft.axis)
+                            {
                                 sk.ask(c, key, now, at);
                             }
                             draft.picks.clear();
+                            draft.axis = None;
+                            draft.asked = None;
                         }
                     }
                 }
@@ -1706,6 +1744,12 @@ impl Viewer {
                 && let Some(p) = sk.commit_field()
             {
                 sent.push(Request::Command("edit_sketch", p));
+            }
+            // The dimension the picks made is in (or its field gone): the next pick starts anew.
+            if draft.asked.is_some() && sk.field.is_none() {
+                draft.picks.clear();
+                draft.axis = None;
+                draft.asked = None;
             }
             if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
                 let d = r.drag_delta();
@@ -1816,6 +1860,10 @@ impl Viewer {
             sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
         }
         if !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
+            // Enter: the last command again (an Enter that put a value in is not one).
+            if !field_done.0 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                sk.draft.again();
+            }
             if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
                 && let Some(p) = sk.delete()
             {
@@ -2329,6 +2377,65 @@ mod tests {
         button(&mut h, true, egui::pos2(300.0, 200.0));
         button(&mut h, false, egui::pos2(300.0, 200.0));
         assert_eq!(tool(&h), Tool::Select, "a right click ends");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(tool(&h), Tool::Line, "Enter: the last command again");
+    }
+
+    /// In the dimension tool a click on a line opens its length at once; a click on a line
+    /// parallel to it then makes it their distance, and Enter puts that in (here, the width
+    /// given already: offered as a reference dimension).
+    #[test]
+    fn a_line_then_a_parallel_one_dimensions_their_distance() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        v.sketch.as_mut().unwrap().draft.take_up(Tool::Dimension);
+        let screen = |v: &Viewer, q: [f64; 2]| {
+            let (x, y) = v.sketch.as_ref().unwrap().camera.offset(q, 400.0);
+            egui::pos2(300.0 + x as f32, 200.0 + y as f32)
+        };
+        let (right, left) = (screen(&v, [80.0, 12.0]), screen(&v, [0.0, 12.0]));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        let click = |h: &mut egui_kittest::Harness<Viewer>, at: egui::Pos2| {
+            h.hover_at(at);
+            h.step();
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                h.step();
+            }
+        };
+        let field = |h: &egui_kittest::Harness<Viewer>| match h.state().sketch.as_ref().unwrap().field.as_ref().map(|f| &f.entry) {
+            Some(Entry::New { constraint, .. }) => constraint.clone(),
+            _ => Json::Null,
+        };
+        h.run();
+        click(&mut h, right);
+        assert_eq!(field(&h), json!({"type": "length", "line": "right"}), "a line: its length at once");
+        click(&mut h, left);
+        assert_eq!(field(&h)["type"], "point_line", "then a parallel line: their distance");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        // The plate's width is `w` already: the distance would repeat it, so it is offered as a
+        // reference dimension.
+        let sk = h.state().sketch.as_ref().unwrap();
+        assert_eq!(sk.conflict.as_ref().map(|c| c.constraint["type"].clone()), Some(json!("point_line")));
+        assert!(sk.draft.picks.is_empty() && sk.draft.asked.is_none(), "the next pick starts anew");
+        drop(h);
+        assert!(!inbox.try_iter().any(|r| matches!(r, Request::Command("edit_sketch", _))));
     }
 
     /// Placing a library element with parameters in one stream of input: the field by the

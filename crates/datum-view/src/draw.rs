@@ -18,8 +18,8 @@ pub enum Tool {
     Arc,
     Circle,
     Point,
-    /// Pick a line, an arc, a circle, two points, a point and a line or two lines; then click
-    /// where the dimension goes.
+    /// Pick a line, an arc, a circle, two points, a point and a line or two lines: dimensioned
+    /// at once (two other points: then click where the dimension goes).
     Dimension,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
@@ -102,8 +102,12 @@ pub struct Draft {
     /// A value typed while drawing (the field by the cursor), and what it comes to: the length
     /// of the line, the circle's diameter, the arc's radius.
     pub typed: Option<(Json, f64)>,
-    /// Dimension tool: what is picked so far.
+    /// Dimension tool: what is picked so far; H or V (its sub-mode); and the value the field
+    /// opened with while it shows the picks' dimension (a pick then changes it, H or V too
+    /// until a value is typed).
     pub picks: Vec<crate::dims::Pick2>,
+    pub axis: Option<crate::dims::Axis>,
+    pub asked: Option<String>,
     /// Template tool: the library element placed, the preset chosen, the parameter values
     /// typed (by name), and the parameter the field by the cursor asks.
     pub template: Option<Json>,
@@ -115,6 +119,8 @@ pub struct Draft {
     pub linking: Vec<datum_model::library::Link>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
+    /// The command ended last: Enter takes it up again.
+    pub last: Option<Tool>,
     /// Where the cursor would click, and the inferred constraint of a line.
     pub cursor: Option<Spot>,
     pub lean: Option<Lean>,
@@ -134,12 +140,15 @@ impl Default for Draft {
             start_radius: None,
             typed: None,
             picks: Vec::new(),
+            axis: None,
+            asked: None,
             template: None,
             preset: None,
             answers: Map::new(),
             asking: 0,
             linking: Vec::new(),
             tangent: false,
+            last: None,
             cursor: None,
             lean: None,
             face: Vec::new(),
@@ -185,6 +194,8 @@ impl Draft {
         self.chain = None;
         self.clicks.clear();
         self.picks.clear();
+        self.axis = None;
+        self.asked = None;
         self.tangent = false;
         self.typed = None;
         busy
@@ -193,7 +204,18 @@ impl Draft {
     /// Takes up `tool`, what is half drawn dropped.
     pub fn take_up(&mut self, tool: Tool) {
         self.cancel();
+        if self.tool != Tool::Select {
+            self.last = Some(self.tool);
+        }
         self.tool = tool;
+    }
+
+    /// Enter with no command on: the last one taken up again, as in other CADs. A library
+    /// element only while it is still chosen.
+    pub fn again(&mut self) {
+        if let Some(t) = self.last.filter(|t| *t != Tool::Template || self.template.is_some()) {
+            self.take_up(t);
+        }
     }
 
     /// A tool's button clicked: the tool taken up, or, clicked again, the command ended as Esc
@@ -269,6 +291,9 @@ impl Draft {
     /// Esc: ends the command, as in Inventor: what is half drawn goes, the tool is Select.
     pub fn escape(&mut self) {
         self.cancel();
+        if self.tool != Tool::Select {
+            self.last = Some(self.tool);
+        }
         self.tool = Tool::Select;
         self.cursor = None;
         self.lean = None;
@@ -632,13 +657,14 @@ impl Draft {
             _ => {}
         }
         // The dimension the picks would make, by the cursor.
-        if self.tool == Tool::Dimension && !self.picks.is_empty() {
-            let text = match edit.dimension(&self.picks, spot.at) {
+        if self.tool == Tool::Dimension && !self.picks.is_empty() && edit.field.is_none() {
+            let text = match edit.dimension(&self.picks, spot.at, self.axis) {
                 Some((c, _, now)) => {
                     let kind = match c["type"].as_str() {
                         Some("horizontal_distance") => "H ",
                         Some("vertical_distance") => "V ",
                         Some("radius") => "R",
+                        Some("arc_length") => "arc ",
                         _ => "",
                     };
                     format!("{kind}{}{}", short(now), if c["type"] == "angle" { "°" } else { "" })
@@ -755,6 +781,13 @@ const AXES: [([f64; 2], Lean); 4] =
     [([1.0, 0.0], Lean::Horizontal), ([-1.0, 0.0], Lean::Horizontal), ([0.0, 1.0], Lean::Vertical), ([0.0, -1.0], Lean::Vertical)];
 
 /// Degrees between two directions.
+/// Whether lines along `a` and `b` are parallel, within a line's lean: two lines that look so
+/// are dimensioned by their distance, not by an angle of nearly nothing.
+pub(crate) fn parallel(a: [f64; 2], b: [f64; 2]) -> bool {
+    let d = degrees(a, b);
+    d <= LEAN_DEG || d >= 180.0 - LEAN_DEG
+}
+
 fn degrees(a: [f64; 2], b: [f64; 2]) -> f64 {
     libm::atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]).abs().to_degrees()
 }
@@ -1009,6 +1042,12 @@ mod tests {
         assert!(e.draft.chain.is_some());
         e.draft.escape();
         assert!(e.draft.chain.is_none() && e.draft.tool == Tool::Select && e.draft.cursor.is_none());
+        e.draft.again();
+        assert_eq!(e.draft.tool, Tool::Line, "Enter takes it up again");
+        e.draft.press(Tool::Arc);
+        e.draft.escape();
+        e.draft.again();
+        assert_eq!(e.draft.tool, Tool::Arc, "the last one");
     }
 
     /// A tool's button again ends the command, as Esc does; another button changes the tool.
