@@ -1130,7 +1130,7 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter: the last command again",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
@@ -1860,6 +1860,10 @@ impl Viewer {
             sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
         }
         if !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
+            // Enter: the last command again (an Enter that put a value in is not one).
+            if !field_done.0 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                sk.draft.again();
+            }
             if ui.input(|i| i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace))
                 && let Some(p) = sk.delete()
             {
@@ -2373,6 +2377,9 @@ mod tests {
         button(&mut h, true, egui::pos2(300.0, 200.0));
         button(&mut h, false, egui::pos2(300.0, 200.0));
         assert_eq!(tool(&h), Tool::Select, "a right click ends");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert_eq!(tool(&h), Tool::Line, "Enter: the last command again");
     }
 
     /// In the dimension tool a click on a line opens its length at once; a click on a line

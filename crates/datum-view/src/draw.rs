@@ -18,8 +18,8 @@ pub enum Tool {
     Arc,
     Circle,
     Point,
-    /// Pick a line, an arc, a circle, two points, a point and a line or two lines; then click
-    /// where the dimension goes.
+    /// Pick a line, an arc, a circle, two points, a point and a line or two lines: dimensioned
+    /// at once (two other points: then click where the dimension goes).
     Dimension,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
@@ -119,6 +119,8 @@ pub struct Draft {
     pub linking: Vec<datum_model::library::Link>,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
+    /// The command ended last: Enter takes it up again.
+    pub last: Option<Tool>,
     /// Where the cursor would click, and the inferred constraint of a line.
     pub cursor: Option<Spot>,
     pub lean: Option<Lean>,
@@ -146,6 +148,7 @@ impl Default for Draft {
             asking: 0,
             linking: Vec::new(),
             tangent: false,
+            last: None,
             cursor: None,
             lean: None,
             face: Vec::new(),
@@ -201,7 +204,18 @@ impl Draft {
     /// Takes up `tool`, what is half drawn dropped.
     pub fn take_up(&mut self, tool: Tool) {
         self.cancel();
+        if self.tool != Tool::Select {
+            self.last = Some(self.tool);
+        }
         self.tool = tool;
+    }
+
+    /// Enter with no command on: the last one taken up again, as in other CADs. A library
+    /// element only while it is still chosen.
+    pub fn again(&mut self) {
+        if let Some(t) = self.last.filter(|t| *t != Tool::Template || self.template.is_some()) {
+            self.take_up(t);
+        }
     }
 
     /// A tool's button clicked: the tool taken up, or, clicked again, the command ended as Esc
@@ -277,6 +291,9 @@ impl Draft {
     /// Esc: ends the command, as in Inventor: what is half drawn goes, the tool is Select.
     pub fn escape(&mut self) {
         self.cancel();
+        if self.tool != Tool::Select {
+            self.last = Some(self.tool);
+        }
         self.tool = Tool::Select;
         self.cursor = None;
         self.lean = None;
@@ -1025,6 +1042,12 @@ mod tests {
         assert!(e.draft.chain.is_some());
         e.draft.escape();
         assert!(e.draft.chain.is_none() && e.draft.tool == Tool::Select && e.draft.cursor.is_none());
+        e.draft.again();
+        assert_eq!(e.draft.tool, Tool::Line, "Enter takes it up again");
+        e.draft.press(Tool::Arc);
+        e.draft.escape();
+        e.draft.again();
+        assert_eq!(e.draft.tool, Tool::Arc, "the last one");
     }
 
     /// A tool's button again ends the command, as Esc does; another button changes the tool.
