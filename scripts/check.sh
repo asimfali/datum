@@ -33,7 +33,7 @@ if [[ -d apps/datum-cli && -d tests/models ]] && "$python" -c "import OCP" 2>/de
         # B-splines where STEP has no exact type (D147): OCCT checks them too.
         target/debug/datum build "$m" --out "$out/$(basename "$m" .json).step" --approximate >/dev/null
     done
-    find "$out" -name '*.step' -size -1024k | sort | xargs "$python" -I scripts/step_check.py
+    find "$out" -name '*.step' -size -1024k | sort | xargs "$python" scripts/step_check.py
 elif [[ ${CI:-} == true && $(uname) == Linux ]]; then
     echo "check: CI on Linux needs OCP for the STEP read-back" >&2
     exit 1

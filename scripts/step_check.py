@@ -1,7 +1,7 @@
 """STEP files read back by OpenCASCADE (D130): each gives valid solids whose volume, surface area
 and centroid match the validation properties written in the file.
 
-Usage: python -I scripts/step_check.py file.step...   (needs OCP: pip install cadquery-ocp)
+Usage: python scripts/step_check.py file.step...   (needs OCP: pip install cadquery-ocp)
 """
 import re
 import sys
