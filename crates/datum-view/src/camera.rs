@@ -122,21 +122,30 @@ impl Camera {
         self.right.cross(self.up)
     }
 
-    /// The right and up of a view from direction `d` (towards the eye): Z up, as an engineer
-    /// stands; straight down or up, the axis nearest the up the shortest turn there would leave,
-    /// so the picture turns least (from the default view, the front at the bottom).
+    /// The right and up of a view from direction `d` (towards the eye): the shortest turn from
+    /// this view, its up then lined up with the nearest of the axes' directions across the line
+    /// of sight. The turn goes on the way the view faces, over the top from the front's top edge
+    /// to the back's rather than spinning about the vertical, and the view it ends in is square:
+    /// a face's along its edges, an edge's or a corner's along the cube.
     pub fn toward(&self, d: Vec3) -> [Vec3; 2] {
-        if d.x != 0.0 || d.y != 0.0 {
-            return frame(d, Z);
-        }
         let (from, to) = (self.back(), unit(d));
         let axis = from.cross(to);
         let sin = axis.dot(axis).sqrt();
+        // Exactly opposite, any turn is as short: about the view's up, which it leaves as it is.
         let up = if sin > 0.0 { rotate(self.up, axis * (1.0 / sin), libm::atan2(sin, from.dot(to))) } else { self.up };
-        // A tie (seen from a diagonal) goes to the first: the front at the bottom.
-        let axes = [Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0), Vec3::new(-1.0, 0.0, 0.0)];
-        let best = axes.iter().map(|a| a.dot(up)).fold(f64::NEG_INFINITY, f64::max);
-        let near = axes.iter().find(|a| a.dot(up) >= best - 1e-9).copied().unwrap_or(axes[0]);
+        // The axes' directions across the line of sight; a tie (from a diagonal) goes to the
+        // first: from the default view to the top, the front at the bottom.
+        let across: Vec<Vec3> = [[0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]]
+            .into_iter()
+            .map(|a| {
+                let a = Vec3::from(a);
+                a - to * a.dot(to)
+            })
+            .filter(|a| a.dot(*a) > 1e-12)
+            .map(unit)
+            .collect();
+        let best = across.iter().map(|a| a.dot(up)).fold(f64::NEG_INFINITY, f64::max);
+        let near = across.iter().find(|a| a.dot(up) >= best - 1e-9).copied().unwrap_or(Z);
         frame(d, near)
     }
 
@@ -321,6 +330,23 @@ impl SketchCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// From the front's top edge to the back's, the turn goes over the top, about X, and ends
+    /// upside down as the way there leaves it, not spun about the vertical; then on to the top,
+    /// the front at the bottom.
+    #[test]
+    fn edge_to_edge_goes_over_the_top() {
+        let c = Camera::view("front").unwrap();
+        let [right, up] = c.toward(Vec3::new(0.0, -1.0, 1.0));
+        assert_eq!(right, Vec3::new(1.0, 0.0, 0.0));
+        let c = Camera { right, up, ..c };
+        let [right, up] = c.toward(Vec3::new(0.0, 1.0, 1.0));
+        assert_eq!(right, Vec3::new(1.0, 0.0, 0.0), "the same right: a turn about X");
+        assert!(up.z < 0.0 && up.y > 0.0, "{up:?}");
+        let c = Camera { right, up, ..c };
+        let [right, up] = c.toward(Z);
+        assert_eq!((right, up), (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)));
+    }
 
     /// Dragged up and on, the view goes over the top and down the back, no ceiling at the pole;
     /// right and up stay unit and square.
