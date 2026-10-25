@@ -47,6 +47,21 @@ fn rectangle_is_fully_defined() {
     close(r.points["d"], [0.0, 5.0], 1e-12);
 }
 
+/// Points held level are exactly level, not to rounding (D145): an edge along the axis of a
+/// rolled sheet is then a straight line in 3D, and a STEP line.
+#[test]
+fn level_points_are_exactly_level() {
+    for scale in [1e-3, 1.0, 1e6] {
+        let mut s = rectangle(100.0 / 3.0, 40.7, scale);
+        // The fixed corner is not the first point of its runs: the run takes its coordinates.
+        s.constraints[0] = Constraint::Fix { point: "c".into(), at: None };
+        let r = solve(&s).unwrap();
+        let [a, b, c, d] = ["a", "b", "c", "d"].map(|n| r.points[n]);
+        assert_eq!(c, Vec2::new(10.3 * scale, 5.2 * scale), "a fixed point never moves");
+        assert!(a.y == b.y && c.y == d.y && a.x == d.x && b.x == c.x, "scale {scale}: {a:?} {b:?} {c:?} {d:?}");
+    }
+}
+
 /// Principle 8: a bolt-sized and a site-sized sketch solve alike.
 #[test]
 fn scale_does_not_matter() {

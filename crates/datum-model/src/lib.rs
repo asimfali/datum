@@ -151,6 +151,76 @@ pub fn feature_json(g: &Graph, ix: NodeIx) -> Map<String, Value> {
     fields
 }
 
+/// The features that bring geometry STEP has no exact type for into the final bodies (D147):
+/// those on the way to them whose body has more such faces than any of their inputs'.
+pub fn inexact_features(g: &Graph, e: &datum_graph::Evaluation) -> Vec<String> {
+    let inexact = |i: NodeIx| e.results[i as usize].as_ref().ok().and_then(|v| v.body()).map_or(0, datum_brep::inexact_faces);
+    let mut used = vec![false; g.nodes().len()];
+    let mut todo = e.finals(g);
+    while let Some(i) = todo.pop() {
+        if !std::mem::replace(&mut used[i as usize], true) {
+            todo.extend(&g.nodes()[i as usize].inputs);
+        }
+    }
+    (0..g.nodes().len() as NodeIx)
+        .filter(|&i| used[i as usize] && inexact(i) > g.nodes()[i as usize].inputs.iter().map(|&k| inexact(k)).max().unwrap_or(0))
+        .map(|i| g.nodes()[i as usize].name.clone())
+        .collect()
+}
+
+/// The first line of the note beside a STEP file with approximated geometry.
+const NOTE: &str = "Datum STEP note";
+
+/// Writes the final bodies of an evaluated model to `path` as a STEP part named after the file
+/// (D130). Geometry STEP has no exact type for is refused with the features that bring it in,
+/// or, when `approximate`, written as B-splines and told of in `<path>.txt` (D147); a note left
+/// by an earlier export goes. Returns the faces approximated.
+pub fn write_step(g: &Graph, e: &datum_graph::Evaluation, path: &std::path::Path, approximate: bool) -> Result<usize, String> {
+    let bodies: Vec<&datum_brep::Body> = e.final_values(g).into_iter().filter_map(datum_graph::Value::body).collect();
+    if bodies.is_empty() {
+        return Err("the model has no body to export".into());
+    }
+    let features = inexact_features(g, e);
+    if !features.is_empty() && !approximate {
+        return Err(format!(
+            "{}: geometry STEP has no exact type for (cuts through a rolled sheet along circles or oblique lines of its development); \
+             agreed to, it is written as B-splines within {:e} mm",
+            features.iter().map(|f| format!("`{f}`")).collect::<Vec<_>>().join(", "),
+            datum_brep::DEVIATION
+        ));
+    }
+    let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let name = path.file_stem().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    let step = datum_brep::step(&bodies, &name, approximate).map_err(|err| err.to_string())?;
+    let mut note = path.as_os_str().to_owned();
+    note.push(".txt");
+    let note = std::path::PathBuf::from(note);
+    let write = |p: &std::path::Path, text: &str| std::fs::write(p, text).map_err(|err| format!("{}: {err}", p.display()));
+    write(path, &step.text)?;
+    if step.approximated > 0 {
+        let (list, n, d, bound) = (features.join(", "), step.approximated, step.deviation, datum_brep::DEVIATION);
+        write(
+            &note,
+            &format!(
+                "{NOTE}: {file}\n\
+                 Geometry STEP has no exact type for is approximated by B-splines of degree 5.\n\
+                 Features: {list}.\n\
+                 Faces approximated: {n}; largest deviation from the model {d:.1e} mm (bound {bound:e} mm).\n\
+                 Volume, surface area and centre of mass in the file are those of the exact model: the receiving CAD checks the splines against them.\n\
+                 \n\
+                 Заметка Datum к STEP: {file}\n\
+                 Геометрия, у которой в STEP нет точного типа, записана B-сплайнами 5-й степени.\n\
+                 Операции: {list}.\n\
+                 Приближённых граней: {n}; наибольшее отклонение от модели {d:.1e} мм (не больше {bound:e} мм).\n\
+                 Объём, площадь и центр масс в файле — точной модели: принимающая CAD сверяет с ними сплайны.\n"
+            ),
+        )?;
+    } else if std::fs::read_to_string(&note).is_ok_and(|t| t.starts_with(NOTE)) {
+        std::fs::remove_file(&note).map_err(|err| format!("{}: {err}", note.display()))?;
+    }
+    Ok(step.approximated)
+}
+
 /// Canonical JSON: sorted keys, two-space indent, trailing newline.
 pub fn to_json(g: &Graph) -> String {
     let features = (0..g.nodes().len() as NodeIx).map(|i| feature_json(g, i)).collect();

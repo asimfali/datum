@@ -101,6 +101,7 @@ From source:
 ```bash
 cargo run --release -p datum-cli -- examples/rolled_perforation.json   # the viewer on a model
 cargo run --release -p datum-cli -- dxf examples/rolled_perforation.json --out blank.dxf
+cargo run --release -p datum-cli -- build tests/models/drilled_plate.json --out part.step
 ```
 
 The viewer opens any model dropped on its window; parameters are edited on the side and the model rebuilds live. [`examples/`](examples) and [`tests/models/`](tests/models) hold models to start from; the format is a JSON feature graph (see `ARCHITECTURE.md` §6).

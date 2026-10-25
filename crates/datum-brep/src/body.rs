@@ -168,7 +168,7 @@ impl Body {
         }
     }
 
-    fn reference(&self) -> Vec3 {
+    pub(crate) fn reference(&self) -> Vec3 {
         self.vertices.first().map_or(Vec3::ZERO, |v| v.point)
     }
 
@@ -190,7 +190,7 @@ impl Body {
     }
 
     /// The radii of the curves of face `f` that are pieces of a development.
-    fn rolled_radii(&self, f: Ix) -> impl Iterator<Item = f64> + '_ {
+    pub(crate) fn rolled_radii(&self, f: Ix) -> impl Iterator<Item = f64> + '_ {
         self.face_loops(f).flat_map(move |l| self.loop_half_edges(l)).filter_map(move |h| {
             match self.edge_curve(&self.edges[self.half_edges[h as usize].edge as usize])? {
                 Curve::Rolled { radius, .. } => Some(radius),
@@ -203,7 +203,7 @@ impl Body {
     /// and area vector. A plane face is its fans, corrected by circular segments along its arcs;
     /// a cylinder face is integrated along its curves, a wall over itself between the radii of
     /// its edges.
-    fn integrate_face(&self, f: Ix, o: Vec3, acc: &mut Integrals) -> (f64, Vec3) {
+    pub(crate) fn integrate_face(&self, f: Ix, o: Vec3, acc: &mut Integrals) -> (f64, Vec3) {
         match &self.faces[f as usize].surface {
             Surface::Plane(plane) => {
                 let mut area_vector = Vec3::ZERO;

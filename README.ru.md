@@ -86,6 +86,7 @@ Datum развивается открыто, и пригодится любая 
 ```bash
 cargo run --release -p datum-cli -- examples/rolled_perforation.json   # вьюер с моделью
 cargo run --release -p datum-cli -- dxf examples/rolled_perforation.json --out blank.dxf
+cargo run --release -p datum-cli -- build tests/models/drilled_plate.json --out part.step
 ```
 
 Вьюер открывает любую модель, перетащенную на окно; параметры правятся сбоку, модель перестраивается на лету. Модели для начала — в [`examples/`](examples) и [`tests/models/`](tests/models); формат — JSON-граф операций (`ARCHITECTURE.md`, §6).

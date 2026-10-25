@@ -473,6 +473,31 @@ impl Viewer {
         }
     }
 
+    /// Exports the model as STEP by dialog. Geometry STEP has no exact type for is written as
+    /// B-splines only if the engineer says yes (D147); no, and nothing is written.
+    fn export_step(&mut self) {
+        let inexact: Vec<String> = self.model.as_ref().map_or_else(Vec::new, |m| {
+            m.inspect["step_inexact"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(|f| format!("`{f}`"))).collect()
+        });
+        let approximate = !inexact.is_empty();
+        if approximate {
+            let question = format!(
+                "{} cut(s) through a rolled sheet along circles or oblique lines of its development: STEP has no exact type for them.\n\n\
+                 Write them as B-splines within {:e} mm? The receiving CAD cannot tell them from exact, and a note beside the file \
+                 (.step.txt) says what was approximated.\n\nNo: nothing is written.",
+                inexact.join(", "),
+                datum_brep::DEVIATION
+            );
+            let answer = rfd::MessageDialog::new().set_title("Datum").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show();
+            if answer != rfd::MessageDialogResult::Yes {
+                return;
+            }
+        }
+        if let Some(p) = self.exported("step", "part").save_file() {
+            self.send(Request::Command("export_step", json!({"path": p.display().to_string(), "approximate": approximate})));
+        }
+    }
+
     /// Where a model is opened, or saved again elsewhere, by dialog: where the engineer works —
     /// the folder of the model open, or of the last one opened or saved; else `part` (D121).
     fn where_working(&self) -> rfd::FileDialog {
@@ -1999,7 +2024,7 @@ impl Viewer {
             Context::Sketch => self.sketch.is_some(),
         };
         here && match a.act {
-            Act::Save | Act::SaveAs | Act::Close => self.model.is_some(),
+            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
@@ -2030,6 +2055,7 @@ impl Viewer {
                 self.save(true);
             }
             Act::Close => self.close(),
+            Act::ExportStep => self.export_step(),
             Act::Exit => ui.send_viewport_cmd(egui::ViewportCommand::Close),
             Act::NewProject => self.project_by_dialog(true),
             Act::OpenProject => self.project_by_dialog(false),
@@ -2100,6 +2126,8 @@ impl Viewer {
             for act in [Act::Save, Act::SaveAs, Act::Close] {
                 self.item(ui, act, true);
             }
+            ui.separator();
+            self.item(ui, Act::ExportStep, true);
             ui.separator();
             self.item(ui, Act::Exit, true);
         });

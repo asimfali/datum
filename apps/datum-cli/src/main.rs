@@ -16,7 +16,10 @@ use datum_math::expr::Num;
 mod export;
 
 const USAGE: &str = "usage:
-  datum build <model.json> [--out <file.stl|file.obj>]   evaluate a model, export its final bodies
+  datum build <model.json> [--out <file.step|file.stl|file.obj> [--approximate]]
+                                                        evaluate a model, export its final bodies;
+                                                        --approximate: STEP writes what it has no
+                                                        exact type for as B-splines (D147)
   datum dxf <model.json> --out <file.dxf> [--feature <name>]
                                                         flat blank of an unfold feature as DXF (R12)
   datum determinism-check <model.json|dir>...           same result on 1, 4 and 16 threads (C4)
@@ -99,9 +102,10 @@ fn hex8(h: [u8; 32]) -> String {
 }
 
 fn cmd_build(args: &[String]) -> Result<(), String> {
-    let (model, out) = match args {
-        [m] => (m, None),
-        [m, flag, o] if flag == "--out" => (m, Some(Path::new(o))),
+    let (model, out, approximate) = match args {
+        [m] => (m, None, false),
+        [m, flag, o] if flag == "--out" => (m, Some(Path::new(o)), false),
+        [m, flag, o, a] if flag == "--out" && a == "--approximate" => (m, Some(Path::new(o)), true),
         _ => return Err(USAGE.into()),
     };
     let g = load(Path::new(model))?;
@@ -122,8 +126,15 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
     }
     println!("computed {}, reused {}, {:.2} ms", e.computed, e.reused, elapsed.as_secs_f64() * 1e3);
     if let Some(path) = out {
-        let bodies: Vec<&Body> = e.final_values(&g).into_iter().filter_map(Value::body).collect();
-        write_mesh(&bodies, path)?;
+        if path.extension().is_some_and(|x| x.eq_ignore_ascii_case("step") || x.eq_ignore_ascii_case("stp")) {
+            match datum_model::write_step(&g, &e, path, approximate)? {
+                0 => println!("written {}", path.display()),
+                n => println!("written {} ({n} faces approximated by B-splines: see {}.txt)", path.display(), path.display()),
+            }
+        } else {
+            let bodies: Vec<&Body> = e.final_values(&g).into_iter().filter_map(Value::body).collect();
+            write_mesh(&bodies, path)?;
+        }
     }
     match e.results.iter().filter(|r| r.is_err()).count() {
         0 => Ok(()),
@@ -244,7 +255,7 @@ fn write_mesh(bodies: &[&Body], path: &Path) -> Result<(), String> {
     let res = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
         Some("stl") => export::write_stl(&mesh, &mut w),
         Some("obj") => export::write_obj(&mesh, &mut w),
-        _ => return Err(format!("{}: use .stl or .obj", path.display())),
+        _ => return Err(format!("{}: use .step, .stl or .obj", path.display())),
     };
     res.map_err(|e| format!("{}: {e}", path.display()))?;
     println!("written {} ({} bodies, {} triangles)", path.display(), bodies.len(), mesh.triangles.len());
