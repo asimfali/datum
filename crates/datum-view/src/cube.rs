@@ -4,7 +4,7 @@
 //! turns there smoothly rather than jumping, so the engineer keeps their bearings.
 
 use datum_math::Vec3;
-use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use crate::camera::Camera;
 
@@ -14,6 +14,13 @@ const MARGIN: f32 = 10.0;
 /// Where a face's middle ends and its edge band begins, from its centre (half side 1): the
 /// corners and edges are narrow, the face itself the largest target.
 const BAND: f64 = 0.6;
+/// A label's height and its widest on a face, in the face's units (half side 1), and the points
+/// its glyphs are made at before they are laid on it.
+const LABEL_HEIGHT: f32 = 0.34;
+const LABEL_WIDTH: f32 = 1.3;
+const LABEL_POINTS: f32 = 14.0;
+/// A face turned from the eye further than this (the cosine) is too slanted to read: no label.
+const EDGE_ON: f64 = 0.2;
 /// How long a turn to a view takes, in seconds.
 const TURN: f64 = 0.35;
 
@@ -120,6 +127,41 @@ fn projector(camera: &Camera, area: Rect) -> impl Fn(Vec3) -> Pos2 {
     move |p: Vec3| c + vec2((p.dot(right) * scale) as f32, (-p.dot(up) * scale) as f32)
 }
 
+/// Paints `label` on the face of normal `n` as if printed on it: its glyphs laid on the face, so
+/// that they slant and shorten with it. Of the four ways it can lie there (along either of the
+/// face's `axes` or against it), the one that reads most nearly left to right and upright: never
+/// upside down.
+fn label_face(painter: &egui::Painter, screen: &impl Fn(Vec3) -> Pos2, n: Vec3, axes: [Vec3; 2], label: &str, colour: Color32) {
+    let centre = screen(n);
+    let on_screen = |d: Vec3| screen(n + d) - centre;
+    // How well text with this right direction reads: rightwards, and its up upwards.
+    let reads = |right: Vec3| {
+        let (r, up) = (on_screen(right), on_screen(n.cross(right)));
+        r.x / r.length().max(1e-6) - up.y / up.length().max(1e-6)
+    };
+    let [a, b] = axes;
+    let right = [a, b, -a, -b].into_iter().max_by(|p, q| reads(*p).total_cmp(&reads(*q))).unwrap_or(a);
+    let galley = painter.layout_no_wrap(label.into(), FontId::proportional(LABEL_POINTS), colour);
+    let size = galley.size();
+    // Face units per point of text: as high as asked, unless that is too wide.
+    let k = (LABEL_HEIGHT / size.y).min(LABEL_WIDTH / size.x);
+    let (r, down) = (on_screen(right) * k, on_screen(n.cross(right)) * -k);
+    let middle = galley.rect.center();
+    // A row's texture coordinates are in pixels of the font atlas, as the tessellator takes them.
+    let atlas = painter.ctx().fonts(|f| f.font_image_size()).map(|n| 1.0 / n as f32);
+    let mut mesh = egui::Mesh::default();
+    for row in &galley.rows {
+        let base = mesh.vertices.len() as u32;
+        for v in &row.visuals.mesh.vertices {
+            let p = v.pos + row.pos.to_vec2() - middle;
+            let color = if v.color == Color32::PLACEHOLDER { colour } else { v.color };
+            mesh.vertices.push(egui::epaint::Vertex { pos: centre + r * p.x + down * p.y, uv: pos2(v.uv.x * atlas[0], v.uv.y * atlas[1]), color });
+        }
+        mesh.indices.extend(row.visuals.mesh.indices.iter().map(|i| i + base));
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
 /// Draws the cube in the top right corner of `view` as `camera` sees the model, and says what a
 /// click or a drag on it asks.
 pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
@@ -151,13 +193,8 @@ pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
         let a = b.cross(n);
         let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(x, y)| screen(n + a * x + b * y));
         painter.add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.0, line)));
-        if facing > 0.35 {
-            let along = screen(n + a) - screen(n);
-            let galley = painter.layout_no_wrap(label.into(), FontId::proportional(10.0), text);
-            // The text's top left corner, then turned about its middle.
-            let corner = screen(n) - galley.size() * 0.5;
-            let shape = egui::epaint::TextShape::new(corner, galley, text).with_angle_and_anchor(along.y.atan2(along.x), Align2::CENTER_CENTER);
-            painter.add(shape);
+        if facing > EDGE_ON {
+            label_face(&painter, &screen, n, [a, b], label, text);
         }
     }
     let home_colour = if h.hovered() { visuals.selection.bg_fill } else { text };
