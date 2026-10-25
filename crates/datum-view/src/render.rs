@@ -424,7 +424,7 @@ mod tests {
         let middle = Camera { target: Vec3::new(10.5, 0.5, 0.5), distance: 3.0, ..Camera::view("top").unwrap() };
         assert_eq!(ranges(&middle), [30..60]);
         // From x = 13.5 along −X: the first two ahead, the last behind the eye.
-        let along = Camera { target: Vec3::new(10.5, 0.5, 0.5), distance: 3.0, yaw: 0.0, pitch: 0.0, ..Camera::default() };
+        let along = Camera { target: Vec3::new(10.5, 0.5, 0.5), distance: 3.0, ..Camera::view("right").unwrap() };
         assert_eq!(ranges(&along), [0..60]);
     }
 }

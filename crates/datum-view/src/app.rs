@@ -1313,29 +1313,7 @@ impl Viewer {
         if self.sketch.is_some() {
             self.sketch_input(ui, rect, &r, offset);
         } else {
-            if let Some(turn) = self.turn {
-                let ([yaw, pitch], done) = turn.at(ui.input(|i| i.time));
-                (self.camera.yaw, self.camera.pitch) = (yaw, pitch);
-                if done {
-                    self.turn = None;
-                    self.fitted &= !turn.fit;
-                } else {
-                    ui.ctx().request_repaint();
-                }
-            }
-            let d = r.drag_delta();
-            if r.dragged_by(egui::PointerButton::Primary) {
-                self.turn = None;
-                self.camera.orbit(f64::from(d.x), f64::from(d.y));
-            } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
-                self.camera.pan(f64::from(d.x), f64::from(d.y), f64::from(rect.height()));
-            }
-            if r.hovered() {
-                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                if scroll != 0.0 {
-                    self.camera.zoom(libm::exp(-f64::from(scroll) * 0.002));
-                }
-            }
+            self.view_input(ui, rect, &r);
         }
         // Picking a face to sketch on: the one under the cursor, and a click starts the sketch.
         let mut on_face = None;
@@ -1463,6 +1441,33 @@ impl Viewer {
         self.view_cube(ui, rect);
     }
 
+    /// The mouse in the model's view: a turn to a view under way, orbit, pan, zoom.
+    fn view_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response) {
+        if let Some(turn) = self.turn {
+            let ([right, up], done) = turn.at(ui.input(|i| i.time));
+            self.camera.set(right, up);
+            if done {
+                self.turn = None;
+                self.fitted &= !turn.fit;
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
+        let d = r.drag_delta();
+        if r.dragged_by(egui::PointerButton::Primary) {
+            self.turn = None;
+            self.camera.orbit(f64::from(d.x), f64::from(d.y));
+        } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
+            self.camera.pan(f64::from(d.x), f64::from(d.y), f64::from(rect.height()));
+        }
+        if r.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                self.camera.zoom(libm::exp(-f64::from(scroll) * 0.002));
+            }
+        }
+    }
+
     /// The navigation cube over the model's view; not while a sketch is edited, whose view
     /// looks straight at it.
     fn view_cube(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
@@ -1474,8 +1479,14 @@ impl Viewer {
             Some(crate::cube::Ask::Look(d)) => {
                 let d = datum_math::Vec3::new(d[0].into(), d[1].into(), d[2].into());
                 self.turn = Some(crate::cube::Turn::toward(&self.camera, d, now, false));
+                // The turn goes on in the frames to come: a click asks for none by itself.
+                ui.ctx().request_repaint();
             }
-            Some(crate::cube::Ask::Home) => self.home(now),
+            Some(crate::cube::Ask::Roll(quarter)) => {
+                self.turn = Some(crate::cube::Turn::to(&self.camera, self.camera.rolled(quarter), now, false));
+                ui.ctx().request_repaint();
+            }
+            Some(crate::cube::Ask::Home) => self.home(ui),
             Some(crate::cube::Ask::Orbit(dx, dy)) => {
                 self.turn = None;
                 self.camera.orbit(dx, dy);
@@ -1485,9 +1496,10 @@ impl Viewer {
     }
 
     /// Turns to the home view, the default direction, and fits the model there.
-    fn home(&mut self, now: f64) {
+    fn home(&mut self, ui: &egui::Ui) {
         let c = Camera::default();
-        self.turn = Some(crate::cube::Turn::toward(&self.camera, c.eye() - c.target, now, true));
+        self.turn = Some(crate::cube::Turn::to(&self.camera, [c.right, c.up], ui.input(|i| i.time), true));
+        ui.ctx().request_repaint();
     }
 }
 
@@ -2105,7 +2117,7 @@ impl Viewer {
             Act::Undo => self.send(Request::Command("undo", json!({}))),
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
-            Act::Home => self.home(ui.input(|i| i.time)),
+            Act::Home => self.home(ui),
             Act::NewSketch => self.new_sketch(json!({})),
             Act::SketchOnFace => {
                 self.leave();
@@ -2419,6 +2431,41 @@ mod tests {
         v.sync_sketch();
         assert!(v.sketch.is_none());
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
+    }
+
+    /// The navigation cube in the model's view, as the window has it: a click on the top's
+    /// middle turns the camera to look from above, frames coming only as long as the window
+    /// asks for them (a turn that asked for none waited for the mouse to move).
+    #[test]
+    fn a_click_on_the_cube_turns_the_view() {
+        let (v, _inbox) = viewer("symmetric_plate.json");
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).with_max_steps(100).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                v.view_input(ui, rect, &r);
+                v.view_cube(ui, rect);
+            },
+            v,
+        );
+        h.run();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let top = crate::cube::face_middle(&h.state().camera, rect, datum_math::Vec3::new(0.0, 0.0, 1.0));
+        h.hover_at(top);
+        h.run();
+        // As a hand clicks: the button held for a tenth of a second, the mouse a pixel off.
+        h.event(egui::Event::PointerButton { pos: top, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        for k in 0..6 {
+            if k == 3 {
+                h.hover_at(top + egui::vec2(1.0, 1.0));
+            }
+            h.step();
+        }
+        let at = top + egui::vec2(1.0, 1.0);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.run();
+        let c = h.state().camera;
+        assert_eq!((c.right, c.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)));
     }
 
     /// A right click ends the command, as Esc does, for those who draw with the mouse alone, and

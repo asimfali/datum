@@ -7,6 +7,7 @@ use datum_math::Vec3;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use crate::camera::Camera;
+use crate::icons::Icon;
 
 /// Side of the square the cube is drawn in, and its margin from the corner of the view.
 const SIZE: f32 = 120.0;
@@ -21,6 +22,9 @@ const LABEL_WIDTH: f32 = 1.5;
 const EDGE_ON: f64 = 0.2;
 /// How long a turn to a view takes, in seconds.
 const TURN: f64 = 0.35;
+
+/// The directions along the axes.
+const AXES: [[f64; 3]; 6] = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
 
 /// The faces: outward normal, the direction their label reads up and its text.
 const FACES: [([f64; 3], [f64; 3], &str); 6] = [
@@ -41,13 +45,15 @@ pub enum Ask {
     Home,
     /// Turn by a drag of so many pixels.
     Orbit(f64, f64),
+    /// Turn the picture a quarter about the line of sight: 1 counterclockwise, −1 clockwise.
+    Roll(i8),
 }
 
-/// A turn of the camera under way: from and to yaw and pitch, and when it began.
+/// A turn of the camera under way: from and to its right and up, and when it began.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Turn {
-    from: [f64; 2],
-    to: [f64; 2],
+    from: [Vec3; 2],
+    to: [Vec3; 2],
     start: f64,
     /// Fit the model once there (the home view).
     pub fit: bool,
@@ -56,21 +62,24 @@ pub struct Turn {
 impl Turn {
     /// A turn of `camera` to look from `d`, beginning at `now` (seconds).
     pub fn toward(camera: &Camera, d: Vec3, now: f64, fit: bool) -> Self {
-        let mut to = camera.toward(d);
-        // The shorter way round.
-        let tau = std::f64::consts::TAU;
-        to[0] = camera.yaw + (to[0] - camera.yaw) - tau * libm::round((to[0] - camera.yaw) / tau);
-        Self { from: [camera.yaw, camera.pitch], to, start: now, fit }
+        Self::to(camera, camera.toward(d), now, fit)
     }
 
-    /// Yaw and pitch at `now`, and whether the turn is over: eased in and out.
-    pub fn at(&self, now: f64) -> ([f64; 2], bool) {
+    /// A turn of `camera` to right and up `to`.
+    pub fn to(camera: &Camera, to: [Vec3; 2], now: f64, fit: bool) -> Self {
+        Self { from: [camera.right, camera.up], to, start: now, fit }
+    }
+
+    /// Right and up at `now`, and whether the turn is over: the shortest way, eased in and out.
+    pub fn at(&self, now: f64) -> ([Vec3; 2], bool) {
         let t = ((now - self.start) / TURN).clamp(0.0, 1.0);
         if t >= 1.0 {
             return (self.to, true);
         }
-        let e = t * t * (3.0 - 2.0 * t);
-        ([0, 1].map(|k| self.from[k] + (self.to[k] - self.from[k]) * e), false)
+        if t <= 0.0 {
+            return (self.from, false);
+        }
+        (crate::camera::between(self.from, self.to, t * t * (3.0 - 2.0 * t)), false)
     }
 }
 
@@ -130,6 +139,12 @@ fn unit() -> f32 {
     SIZE * 0.5 / 3f32.sqrt() * 0.95
 }
 
+/// Where the middle of the face of normal `n` shows in `view` as `camera` turns the cube.
+#[cfg(test)]
+pub fn face_middle(camera: &Camera, view: Rect, n: Vec3) -> Pos2 {
+    projector(camera, place(view).0)(n)
+}
+
 /// Paints `label` on the face of normal `n` as if printed on it: its glyphs laid on the face, so
 /// that they slant and shorten with it. Of the four ways it can lie there (along either of the
 /// face's `axes` or against it), the one that reads most nearly left to right and upright: never
@@ -175,7 +190,31 @@ pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
     let forward = camera.axes().2;
     let screen = projector(camera, area);
     let cells = cells(-forward);
-    let hover = r.hover_pos().and_then(|p| cells.iter().find(|cell| inside(p, &cell.corners.map(&screen))));
+    // Looking straight at a face, as in Inventor: a triangle beyond each of its edges looks from
+    // the face across it, and two arrows above turn the picture a quarter.
+    let face_on = FACES.iter().map(|f| Vec3::from(f.0)).find(|n| n.dot(-forward) > 1.0 - 1e-9);
+    let arrows: Vec<([i8; 3], [Pos2; 3])> = face_on.map_or_else(Vec::new, |n| {
+        let c = screen(Vec3::ZERO);
+        AXES.iter()
+            .map(|&d| Vec3::from(d))
+            .filter(|d| d.dot(n) == 0.0)
+            .map(|d| {
+                let along = (screen(d) - c).normalized();
+                let across = egui::vec2(-along.y, along.x) * 7.0;
+                let base = c + along * (unit() + 6.0);
+                ([d.x, d.y, d.z].map(|v| v as i8), [c + along * (unit() + 17.0), base + across, base - across])
+            })
+            .collect()
+    });
+    let rolls = face_on.map(|_| {
+        [(1, Icon::Undo, "Turn a quarter left"), (-1, Icon::Redo, "Turn a quarter right")].map(|(dir, icon, hint)| {
+            let at = Rect::from_center_size(pos2(area.right() - 30.0 + 18.0 * f32::from(u8::from(dir < 0)), area.top() + 8.0), vec2(16.0, 16.0));
+            (dir, icon, ui.interact(at, ui.id().with(("view cube roll", dir)), Sense::click()).on_hover_text(hint))
+        })
+    });
+    let pointer = r.hover_pos();
+    let arrow = pointer.and_then(|p| arrows.iter().find(|(_, t)| inside(p, t)));
+    let hover = pointer.filter(|_| arrow.is_none()).and_then(|p| cells.iter().find(|cell| inside(p, &cell.corners.map(&screen))));
 
     let painter = ui.painter().with_clip_rect(view);
     let visuals = ui.visuals();
@@ -201,20 +240,29 @@ pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
             label_face(&painter, &screen, n, [a, b], label, text);
         }
     }
-    let home_colour = if h.hovered() { visuals.selection.bg_fill } else { text };
-    crate::icons::paint(&painter, home.center(), crate::icons::Icon::Home, home_colour);
+    for (look, t) in &arrows {
+        let lit = arrow.is_some_and(|a| a.0 == *look);
+        painter.add(egui::Shape::convex_polygon(t.to_vec(), if lit { visuals.selection.bg_fill } else { fill }, Stroke::new(1.0, line)));
+    }
+    let lit = |r: &egui::Response| if r.hovered() { visuals.selection.bg_fill } else { text };
+    for (_, icon, roll) in rolls.iter().flatten() {
+        crate::icons::paint(&painter, roll.rect.center(), *icon, lit(roll));
+    }
+    crate::icons::paint(&painter, home.center(), Icon::Home, lit(&h));
 
     if h.clicked() {
         return Some(Ask::Home);
     }
-    if r.dragged() {
-        let d = r.drag_delta();
-        return Some(Ask::Orbit(f64::from(d.x), f64::from(d.y)));
+    if let Some((dir, ..)) = rolls.iter().flatten().find(|(_, _, roll)| roll.clicked()) {
+        return Some(Ask::Roll(*dir));
     }
+    // A click first: while the button is down egui calls the cube dragged already, and a drag
+    // that has not moved is no turn of the view.
     if r.clicked() {
-        return hover.map(|cell| Ask::Look(cell.look));
+        return arrow.map(|a| Ask::Look(a.0)).or(hover.map(|cell| Ask::Look(cell.look)));
     }
-    None
+    let d = r.drag_delta();
+    (r.dragged() && d != egui::Vec2::ZERO).then(|| Ask::Orbit(f64::from(d.x), f64::from(d.y)))
 }
 
 #[cfg(test)]
@@ -277,21 +325,48 @@ mod tests {
         assert_eq!(h.state(), &vec![Ask::Look([0, 0, 1]), Ask::Look([0, -1, 1]), Ask::Home]);
     }
 
-    /// A turn from the default view to the top goes the short way and ends there exactly.
+    /// Facing the front, as in Inventor: the triangle above the cube looks from the top, the
+    /// left arrow turns the picture a quarter counterclockwise.
+    #[test]
+    fn facing_a_face_its_neighbours_are_a_click_away() {
+        let camera = Camera::view("front").unwrap();
+        let view = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
+        let mut h = egui_kittest::Harness::builder().with_size([400.0, 300.0]).build_ui_state(
+            move |ui, asked: &mut Vec<Ask>| {
+                if let Some(a) = show(ui, view, &camera) {
+                    asked.push(a);
+                }
+            },
+            Vec::new(),
+        );
+        let area = place(view).0;
+        let click = |h: &mut egui_kittest::Harness<Vec<Ask>>, at: Pos2| {
+            h.hover_at(at);
+            h.step();
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                h.step();
+            }
+        };
+        h.run();
+        click(&mut h, area.center() - vec2(0.0, unit() + 11.0));
+        click(&mut h, pos2(area.right() - 30.0, area.top() + 8.0));
+        assert_eq!(h.state(), &vec![Ask::Look([0, 0, 1]), Ask::Roll(1)]);
+    }
+
+    /// A turn from the default view to the top ends there exactly, the front at the bottom; one
+    /// from the front's top edge to the back's goes the short way, about the vertical.
     #[test]
     fn a_turn_ends_where_it_was_asked() {
         let camera = Camera::default();
         let turn = Turn::toward(&camera, Vec3::new(0.0, 0.0, 1.0), 10.0, false);
-        let (start, _) = turn.at(10.0);
-        assert_eq!(start, [camera.yaw, camera.pitch]);
+        assert_eq!(turn.at(10.0).0, [camera.right, camera.up]);
         let (end, done) = turn.at(10.0 + 2.0 * TURN);
         assert!(done);
-        assert_eq!(end, [-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2]);
-        // From yaw 3 to the direction at yaw −3: across ±π, a little over 0.28 rad, not 6 back.
-        let behind = Camera { yaw: 3.0, ..camera };
-        let (s, c) = libm::sincos(-3.0);
-        let turn = Turn::toward(&behind, Vec3::new(c, s, 0.0), 0.0, false);
-        let turned = turn.at(TURN).0[0] - 3.0;
-        assert!((turned - (std::f64::consts::TAU - 6.0)).abs() < 1e-12, "{turned}");
+        assert_eq!(end, [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)]);
+        // Halfway, the eye is between: above the iso direction's way to the top.
+        let ([right, up], _) = turn.at(10.0 + TURN * 0.5);
+        let back = right.cross(up);
+        assert!(back.z > camera.back().z && back.z < 1.0, "{back:?}");
     }
 }
