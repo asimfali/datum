@@ -106,6 +106,21 @@ enum Request {
     Editing(Option<String>),
 }
 
+/// What a plane or a face is picked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Purpose {
+    Sketch,
+    Look,
+}
+
+/// What is under the cursor while picking.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Under {
+    /// Origin plane `k` of [`crate::origin::PLANES`].
+    Origin(usize),
+    Face(crate::scene::Hit),
+}
+
 /// A selection being kept in the library (D98): the element it makes, why the last change or
 /// save failed, and which of its insertion points (0, 1) a click in the sketch picks now.
 struct Keep {
@@ -337,8 +352,10 @@ struct Viewer {
     shown: u8,
     maximized: bool,
     /// Picking a face to sketch on, and the body and face under the cursor.
-    picking: bool,
-    face: Option<(usize, datum_brep::TopoId)>,
+    /// A plane or a face to be clicked, and what for.
+    picking: Option<Purpose>,
+    /// What a click would take while picking: an origin plane or a face.
+    under: Option<Under>,
 }
 
 impl Viewer {
@@ -399,8 +416,8 @@ impl Viewer {
             settings_problems,
             shown: 0,
             maximized: false,
-            picking: false,
-            face: None,
+            picking: None,
+            under: None,
         };
         if let Some(p) = path {
             v.open(p);
@@ -922,7 +939,7 @@ impl Viewer {
 
     /// Starts editing sketch feature `name`, once the model brings its context.
     fn enter(&mut self, name: String) {
-        self.picking = false;
+        self.picking = None;
         self.sketch = None;
         self.send(Request::Editing(Some(name.clone())));
         self.entering = Some(name);
@@ -937,13 +954,21 @@ impl Viewer {
     }
 
     /// A new sketch feature from `fields` (its plane or face), edited at once.
-    /// S, as in Inventor: a sketch on a face to be clicked; with no model to click, on XY.
+    /// S, as in Inventor: a sketch on an origin plane or a plane face, to be clicked; XY is
+    /// picked from the start, Enter or a right click takes it.
     fn start_sketch(&mut self) {
-        if self.model.as_ref().is_some_and(|m| !m.bodies.is_empty()) {
-            self.picking = !self.picking;
-        } else {
+        if self.model.is_none() {
+            // No view to pick in yet: XY at once.
             self.new_sketch(json!({}));
+        } else {
+            self.pick(Purpose::Sketch);
         }
+    }
+
+    /// Starts picking a plane or a face for `purpose`, or stops if already picking for it.
+    fn pick(&mut self, purpose: Purpose) {
+        self.picking = if self.picking == Some(purpose) { None } else { Some(purpose) };
+        self.under = None;
     }
 
     fn new_sketch(&mut self, mut fields: Json) {
@@ -1013,7 +1038,7 @@ impl Viewer {
                 }
             }
             ui.separator();
-            for act in [Act::NewSketch, Act::SketchOnFace] {
+            for act in [Act::NewSketch, Act::LookAt] {
                 self.item(ui, act, false);
             }
         });
@@ -1315,25 +1340,7 @@ impl Viewer {
         } else {
             self.view_input(ui, rect, &r);
         }
-        // Picking a face to sketch on: the one under the cursor, and a click starts the sketch.
-        let mut on_face = None;
-        if self.picking
-            && let Some(m) = &self.model
-        {
-            let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
-            self.face = offset.and_then(|(x, y)| {
-                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
-                m.scene.pick(origin, dir)
-            });
-            if r.clicked()
-                && let Some((b, id)) = self.face
-            {
-                on_face = Some(json!({"inputs": [m.bodies[b]], "face": format!("{id:?}")}));
-            }
-        }
-        if let Some(fields) = on_face {
-            self.new_sketch(fields);
-        }
+        self.pick_input(ui, rect, &r, offset);
         let Some(m) = &self.model else { return };
         let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
         // A model just opened is fitted once, where the view's shape is known.
@@ -1402,21 +1409,40 @@ impl Viewer {
                 sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
             }
         }
-        // The face a click would sketch on, tinted.
-        if let (true, Some((b, id))) = (self.picking, self.face) {
-            let mesh = &m.scene.bodies[b];
-            let mut tint = egui::Mesh::default();
-            for t in mesh.triangles.iter().zip(&mesh.faces).filter(|(_, f)| **f == id).map(|(t, _)| t) {
-                let corners: Option<Vec<egui::Pos2>> = t.iter().map(|&q| on_screen(&view_projection, q - anchor, rect)).collect();
-                if let Some(c) = corners {
-                    let base = tint.vertices.len() as u32;
-                    for p in c {
-                        tint.colored_vertex(p, egui::Color32::from_rgba_unmultiplied(235, 110, 20, 90));
+        // While picking: the origin planes, and what a click would take lit (a face tinted).
+        if let Some(purpose) = self.picking {
+            let lit = match self.under {
+                Some(Under::Origin(k)) => Some(k),
+                Some(Under::Face(_)) => None,
+                None => (purpose == Purpose::Sketch).then_some(crate::origin::FIRST),
+            };
+            crate::origin::paint(&painter, |q| on_screen(&view_projection, q - anchor, rect), crate::origin::half(m.scene.bounds), lit);
+            if let Some(Under::Face(f)) = self.under {
+                let mesh = &m.scene.bodies[f.body];
+                let mut tint = egui::Mesh::default();
+                for t in mesh.triangles.iter().zip(&mesh.faces).filter(|(_, id)| **id == f.face).map(|(t, _)| t) {
+                    let corners: Option<Vec<egui::Pos2>> = t.iter().map(|&q| on_screen(&view_projection, q - anchor, rect)).collect();
+                    if let Some(c) = corners {
+                        let base = tint.vertices.len() as u32;
+                        for p in c {
+                            tint.colored_vertex(p, egui::Color32::from_rgba_unmultiplied(235, 110, 20, 90));
+                        }
+                        tint.add_triangle(base, base + 1, base + 2);
                     }
-                    tint.add_triangle(base, base + 1, base + 2);
                 }
+                painter.add(egui::Shape::mesh(tint));
             }
-            painter.add(egui::Shape::mesh(tint));
+            let hint = match purpose {
+                Purpose::Sketch => "Click an origin plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
+                Purpose::Look => "Click a face or an origin plane to look straight at · Esc: cancel",
+            };
+            painter.text(
+                rect.center_bottom() - egui::vec2(0.0, 12.0),
+                egui::Align2::CENTER_BOTTOM,
+                hint,
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(60, 65, 75),
+            );
         }
         // What the view costs, to tell a slow frame from a slow rebuild.
         let dt = f64::from(ui.input(|i| i.unstable_dt)) * 1e3;
@@ -1439,6 +1465,52 @@ impl Viewer {
             egui::Color32::DARK_GRAY,
         );
         self.view_cube(ui, rect);
+    }
+
+    /// Picking an origin plane or a face, for a sketch or to look at: the nearest under the
+    /// cursor; a click takes it. For a sketch XY is picked from the start, and Enter or a right
+    /// click takes it; Esc gives up.
+    fn pick_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
+        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        let mut chosen = None;
+        if let (Some(purpose), Some(m)) = (self.picking, &self.model) {
+            let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
+            let size = crate::origin::half(m.scene.bounds);
+            self.under = offset.and_then(|(x, y)| {
+                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
+                match (m.scene.pick(origin, dir), crate::origin::hit(origin, dir, size)) {
+                    (Some(f), Some((t, k))) if t < f.distance => Some(Under::Origin(k)),
+                    (Some(f), _) => Some(Under::Face(f)),
+                    (None, Some((_, k))) => Some(Under::Origin(k)),
+                    (None, None) => None,
+                }
+            });
+            if r.clicked() {
+                chosen = self.under.map(|u| (purpose, u));
+            } else if purpose == Purpose::Sketch && (r.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+                chosen = Some((purpose, Under::Origin(crate::origin::FIRST)));
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                self.picking = None;
+            }
+        }
+        match chosen {
+            Some((Purpose::Sketch, Under::Origin(k))) => self.new_sketch(crate::origin::sketch_fields(k)),
+            Some((Purpose::Sketch, Under::Face(f))) => {
+                let body = self.model.as_ref().map(|m| m.bodies[f.body].clone());
+                self.new_sketch(json!({"inputs": [body], "face": format!("{:?}", f.face)}));
+            }
+            Some((Purpose::Look, under)) => {
+                let normal = match under {
+                    Under::Face(f) => f.normal,
+                    Under::Origin(k) => crate::origin::normal_towards(k, self.camera.axes().2),
+                };
+                self.turn = Some(crate::cube::Turn::toward(&self.camera, normal, ui.input(|i| i.time), false));
+                self.picking = None;
+                ui.ctx().request_repaint();
+            }
+            None => {}
+        }
     }
 
     /// The mouse in the model's view: a turn to a view under way, orbit, pan, zoom.
@@ -2078,7 +2150,7 @@ impl Viewer {
             Context::Sketch => self.sketch.is_some(),
         };
         here && match a.act {
-            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home => self.model.is_some(),
+            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
@@ -2091,7 +2163,8 @@ impl Viewer {
         let draft = self.sketch.as_ref().map(|sk| &sk.draft);
         match act {
             Act::SmoothEdges => self.smooth,
-            Act::SketchOnFace => self.picking,
+            Act::NewSketch => self.picking == Some(Purpose::Sketch),
+            Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
@@ -2118,11 +2191,11 @@ impl Viewer {
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
             Act::Home => self.home(ui),
-            Act::NewSketch => self.new_sketch(json!({})),
-            Act::SketchOnFace => {
+            Act::NewSketch => {
                 self.leave();
                 self.start_sketch();
             }
+            Act::LookAt => self.pick(Purpose::Look),
             Act::Rectangle => {
                 if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
                     sk.draft.choose(t.entry.element.clone());
@@ -2192,11 +2265,11 @@ impl Viewer {
         });
         ui.menu_button("View", |ui| {
             self.item(ui, Act::Home, true);
+            self.item(ui, Act::LookAt, true);
             self.item(ui, Act::SmoothEdges, true);
         });
         ui.menu_button("Sketch", |ui| {
             self.item(ui, Act::NewSketch, true);
-            self.item(ui, Act::SketchOnFace, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent]) {
                 self.item(ui, act, true);
@@ -2369,8 +2442,8 @@ mod tests {
             settings_problems: Vec::new(),
             shown: 0,
             maximized: false,
-            picking: false,
-            face: None,
+            picking: None,
+            under: None,
         };
         (v, inbox)
     }
@@ -2466,6 +2539,54 @@ mod tests {
         h.run();
         let c = h.state().camera;
         assert_eq!((c.right, c.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)));
+    }
+
+    /// S picks where to sketch with XY picked already: Enter starts the sketch on it. Look at,
+    /// then a click on XY, turns the view to look down at it.
+    #[test]
+    fn a_plane_is_picked_for_a_sketch_or_to_look_at() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let frame = |v: &mut Viewer, events: Vec<egui::Event>| {
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).with_max_steps(100).build_ui_state(
+                |ui, v: &mut Viewer| {
+                    let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                    let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                    v.view_input(ui, rect, &r);
+                    v.pick_input(ui, rect, &r, offset);
+                },
+                std::mem::replace(v, viewer("symmetric_plate.json").0),
+            );
+            h.run();
+            for e in events {
+                if let egui::Event::PointerButton { pos, .. } = e {
+                    h.hover_at(pos);
+                    h.step();
+                }
+                h.event(e);
+                h.step();
+            }
+            h.run();
+            *v = std::mem::replace(h.state_mut(), viewer("symmetric_plate.json").0);
+        };
+        v.start_sketch();
+        assert_eq!(v.picking, Some(Purpose::Sketch));
+        let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        frame(&mut v, vec![enter]);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(
+            sent.iter()
+                .any(|r| matches!(r, Request::Command("add", f) if f["op"] == "sketch" && f.get("plane").is_none() && f.get("face").is_none())),
+            "a sketch on XY"
+        );
+        // A point of XY in front of the eye, where nothing else is: (2, −2, 0).
+        v.pick(Purpose::Look);
+        let (m, _) = v.camera.matrices(datum_math::Vec3::ZERO, 1.5, 10.0);
+        let at =
+            on_screen(&m, datum_math::Vec3::new(2.0, -2.0, 0.0), egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0))).unwrap();
+        let click = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        frame(&mut v, vec![click(true), click(false)]);
+        assert_eq!(v.picking, None);
+        assert_eq!((v.camera.right, v.camera.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)), "from above");
     }
 
     /// A right click ends the command, as Esc does, for those who draw with the mouse alone, and
@@ -2800,7 +2921,7 @@ mod tests {
         press(egui::Key::L, egui::Modifiers::SHIFT);
         press(egui::Key::S, egui::Modifiers::NONE);
         assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select));
-        assert!(!v.picking && inbox.try_iter().next().is_none(), "no other sketch");
+        assert!(v.picking.is_none() && inbox.try_iter().next().is_none(), "no other sketch");
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();

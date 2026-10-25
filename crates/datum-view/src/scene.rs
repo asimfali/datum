@@ -148,10 +148,11 @@ impl Scene {
         s
     }
 
-    /// The body and face under a ray from `origin` along `dir`: the nearest triangle it passes
-    /// through, by Möller–Trumbore. A pick on the screen, not a geometric decision.
-    pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<(usize, TopoId)> {
-        let mut best: Option<(f64, usize, TopoId)> = None;
+    /// The body and face under a ray from `origin` along the unit `dir`: the nearest triangle it
+    /// passes through, by Möller–Trumbore, how far along the ray, and the triangle's normal
+    /// turned to the eye. A pick on the screen, not a geometric decision.
+    pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
+        let mut best: Option<Hit> = None;
         for (b, m) in self.bodies.iter().enumerate() {
             for (t, &face) in m.triangles.iter().zip(&m.faces) {
                 let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
@@ -164,18 +165,30 @@ impl Scene {
                 let (u, q) = (s.dot(p) / det, s.cross(e1));
                 let v = dir.dot(q) / det;
                 let d = e2.dot(q) / det;
-                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && d > 0.0 && best.is_none_or(|b| d < b.0) {
-                    best = Some((d, b, face));
+                if u >= 0.0 && v >= 0.0 && u + v <= 1.0 && d > 0.0 && best.is_none_or(|h| d < h.distance) {
+                    let n = e1.cross(e2);
+                    let n = n * (1.0 / n.dot(n).sqrt());
+                    best = Some(Hit { distance: d, body: b, face, normal: if n.dot(dir) > 0.0 { -n } else { n } });
                 }
             }
         }
-        best.map(|(_, b, f)| (b, f))
+        best
     }
 
     /// The point vertices are made relative to: the middle of the bounds.
     pub fn anchor(&self) -> Vec3 {
         self.bounds.map_or(Vec3::ZERO, |(lo, hi)| (lo + hi) * 0.5)
     }
+}
+
+/// A face under the cursor (see [`Scene::pick`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Hit {
+    pub distance: f64,
+    pub body: usize,
+    pub face: TopoId,
+    /// Unit, towards the eye.
+    pub normal: Vec3,
 }
 
 /// GPU vertices of one kind, each once, and the indices that make primitives of them. The

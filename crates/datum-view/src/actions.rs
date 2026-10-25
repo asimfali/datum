@@ -18,7 +18,6 @@ pub enum Act {
     Redo,
     SmoothEdges,
     NewSketch,
-    SketchOnFace,
     Select,
     Line,
     Arc,
@@ -32,6 +31,7 @@ pub enum Act {
     CloseProject,
     ExportStep,
     Home,
+    LookAt,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -92,8 +92,14 @@ pub const ACTIONS: [Action; 24] = [
         None,
         Anywhere,
     ),
-    action(Act::NewSketch, "sketch.new", "New sketch", "A sketch on the XY plane", None, Model),
-    action(Act::SketchOnFace, "sketch.on_face", "Sketch on face", "Then click a plane face of the model; with no model, on XY", plain(Key::S), Model),
+    action(
+        Act::NewSketch,
+        "sketch.new",
+        "New sketch",
+        "Then click an origin plane or a plane face; Enter or a right click: XY, picked from the start",
+        plain(Key::S),
+        Model,
+    ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
     action(Act::Arc, "sketch.arc", "Arc", "Centre, start, end", plain(Key::A), Sketch),
@@ -129,6 +135,7 @@ pub const ACTIONS: [Action; 24] = [
         plain(Key::F6),
         Model,
     ),
+    action(Act::LookAt, "view.look_at", "Look at", "Then click a face or an origin plane: the view straight at it", plain(Key::PageUp), Model),
 ];
 
 impl Act {
@@ -231,7 +238,7 @@ mod tests {
         let mut keys = Keys::default();
         let s = KeyboardShortcut::new(Modifiers::NONE, Key::S);
         assert_eq!(keys.set(Act::Line, Some(s)), [], "S of the model is not the sketch's");
-        assert_eq!(keys.with(&s), [Act::SketchOnFace, Act::Line]);
+        assert_eq!(keys.with(&s), [Act::NewSketch, Act::Line]);
         let ctrl_s = Act::Save.action().key;
         assert_eq!(keys.set(Act::Line, ctrl_s), [Act::Save], "Ctrl+S works in a sketch too");
         assert_eq!((keys.get(Act::Save), keys.get(Act::Line)), (None, ctrl_s.as_ref()));
@@ -244,7 +251,7 @@ mod tests {
             input.events = vec![egui::Event::Key { key: Key::S, physical_key: None, pressed: true, repeat: false, modifiers }];
             pressed(&mut input, &key.unwrap())
         };
-        let (save, save_as, sketch) = (Act::Save.action().key, Act::SaveAs.action().key, Act::SketchOnFace.action().key);
+        let (save, save_as, sketch) = (Act::Save.action().key, Act::SaveAs.action().key, Act::NewSketch.action().key);
         let ctrl_shift = Modifiers::CTRL | Modifiers::COMMAND | Modifiers::SHIFT;
         assert!(run(ctrl_shift, save_as));
         assert!(!run(ctrl_shift, save), "Ctrl+Shift+S is not Ctrl+S");

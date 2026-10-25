@@ -11,6 +11,7 @@ mod dims;
 mod draw;
 mod icons;
 pub mod log;
+mod origin;
 pub mod render;
 pub mod scene;
 mod settings;
