@@ -13,6 +13,8 @@ pub enum Icon {
     Up,
     /// Take away.
     Remove,
+    /// A house: the home view.
+    Home,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -76,6 +78,10 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
         Icon::Remove => {
             painter.line_segment([at(-5.0, -5.0), at(5.0, 5.0)], stroke);
             painter.line_segment([at(-5.0, 5.0), at(5.0, -5.0)], stroke);
+        }
+        Icon::Home => {
+            let house = [at(-6.0, 0.0), at(0.0, -6.0), at(6.0, 0.0), at(4.0, 0.0), at(4.0, 6.0), at(-4.0, 6.0), at(-4.0, 0.0), at(-6.0, 0.0)];
+            painter.add(egui::Shape::line(house.to_vec(), stroke));
         }
     }
 }

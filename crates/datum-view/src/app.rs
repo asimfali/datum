@@ -277,6 +277,8 @@ struct Viewer {
     busy: bool,
     camera: Camera,
     fitted: bool,
+    /// The view turning to where the navigation cube or the home view asked.
+    turn: Option<crate::cube::Turn>,
     /// GPU vertices of the current scene, their version, and the anchor they are relative to.
     geometry: Arc<Geometry>,
     version: u64,
@@ -365,6 +367,7 @@ impl Viewer {
             busy: false,
             camera: Camera::default(),
             fitted: false,
+            turn: None,
             geometry,
             version: 0,
             smooth: true,
@@ -1310,8 +1313,19 @@ impl Viewer {
         if self.sketch.is_some() {
             self.sketch_input(ui, rect, &r, offset);
         } else {
+            if let Some(turn) = self.turn {
+                let ([yaw, pitch], done) = turn.at(ui.input(|i| i.time));
+                (self.camera.yaw, self.camera.pitch) = (yaw, pitch);
+                if done {
+                    self.turn = None;
+                    self.fitted &= !turn.fit;
+                } else {
+                    ui.ctx().request_repaint();
+                }
+            }
             let d = r.drag_delta();
             if r.dragged_by(egui::PointerButton::Primary) {
+                self.turn = None;
                 self.camera.orbit(f64::from(d.x), f64::from(d.y));
             } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
                 self.camera.pan(f64::from(d.x), f64::from(d.y), f64::from(rect.height()));
@@ -1446,6 +1460,34 @@ impl Viewer {
             egui::FontId::monospace(12.0),
             egui::Color32::DARK_GRAY,
         );
+        self.view_cube(ui, rect);
+    }
+
+    /// The navigation cube over the model's view; not while a sketch is edited, whose view
+    /// looks straight at it.
+    fn view_cube(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        if self.sketch.is_some() {
+            return;
+        }
+        let now = ui.input(|i| i.time);
+        match crate::cube::show(ui, rect, &self.camera) {
+            Some(crate::cube::Ask::Look(d)) => {
+                let d = datum_math::Vec3::new(d[0].into(), d[1].into(), d[2].into());
+                self.turn = Some(crate::cube::Turn::toward(&self.camera, d, now, false));
+            }
+            Some(crate::cube::Ask::Home) => self.home(now),
+            Some(crate::cube::Ask::Orbit(dx, dy)) => {
+                self.turn = None;
+                self.camera.orbit(dx, dy);
+            }
+            None => {}
+        }
+    }
+
+    /// Turns to the home view, the default direction, and fits the model there.
+    fn home(&mut self, now: f64) {
+        let c = Camera::default();
+        self.turn = Some(crate::cube::Turn::toward(&self.camera, c.eye() - c.target, now, true));
     }
 }
 
@@ -2024,7 +2066,7 @@ impl Viewer {
             Context::Sketch => self.sketch.is_some(),
         };
         here && match a.act {
-            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep => self.model.is_some(),
+            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
@@ -2063,6 +2105,7 @@ impl Viewer {
             Act::Undo => self.send(Request::Command("undo", json!({}))),
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
+            Act::Home => self.home(ui.input(|i| i.time)),
             Act::NewSketch => self.new_sketch(json!({})),
             Act::SketchOnFace => {
                 self.leave();
@@ -2135,7 +2178,10 @@ impl Viewer {
             self.item(ui, Act::Undo, true);
             self.item(ui, Act::Redo, true);
         });
-        ui.menu_button("View", |ui| self.item(ui, Act::SmoothEdges, true));
+        ui.menu_button("View", |ui| {
+            self.item(ui, Act::Home, true);
+            self.item(ui, Act::SmoothEdges, true);
+        });
         ui.menu_button("Sketch", |ui| {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::SketchOnFace, true);
@@ -2279,6 +2325,7 @@ mod tests {
             busy: false,
             camera: Camera::default(),
             fitted: true,
+            turn: None,
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
             version: 0,
             smooth: true,

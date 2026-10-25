@@ -31,6 +31,7 @@ pub enum Act {
     OpenProject,
     CloseProject,
     ExportStep,
+    Home,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -74,7 +75,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 23] = [
+pub const ACTIONS: [Action; 24] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -119,6 +120,14 @@ pub const ACTIONS: [Action; 23] = [
          what STEP has no exact type for is written as B-splines only if you agree",
         None,
         Anywhere,
+    ),
+    action(
+        Act::Home,
+        "view.home",
+        "Home view",
+        "The default direction, the whole model in view; the house over the navigation cube",
+        plain(Key::F6),
+        Model,
     ),
 ];
 

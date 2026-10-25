@@ -27,18 +27,29 @@ pub const VIEWS: [&str; 7] = ["iso", "top", "bottom", "front", "back", "left", "
 impl Camera {
     /// The camera of standard view `name` (one of [`VIEWS`]), to be fitted to a scene.
     pub fn view(name: &str) -> Result<Self, String> {
-        let quarter = std::f64::consts::FRAC_PI_2;
-        let (yaw, pitch) = match name {
+        let from = match name {
             "iso" => return Ok(Self::default()),
-            "top" => (-quarter, quarter),
-            "bottom" => (-quarter, -quarter),
-            "front" => (-quarter, 0.0),
-            "back" => (quarter, 0.0),
-            "left" => (2.0 * quarter, 0.0),
-            "right" => (0.0, 0.0),
+            "top" => Vec3::new(0.0, 0.0, 1.0),
+            "bottom" => Vec3::new(0.0, 0.0, -1.0),
+            "front" => Vec3::new(0.0, -1.0, 0.0),
+            "back" => Vec3::new(0.0, 1.0, 0.0),
+            "left" => Vec3::new(-1.0, 0.0, 0.0),
+            "right" => Vec3::new(1.0, 0.0, 0.0),
             _ => return Err(format!("unknown view `{name}`; one of {}", VIEWS.join(", "))),
         };
-        Ok(Self { yaw, pitch, ..Self::default() })
+        let c = Self::default();
+        let [yaw, pitch] = c.toward(from);
+        Ok(Self { yaw, pitch, ..c })
+    }
+
+    /// The yaw and pitch that look at the target from direction `d` (towards the eye). Straight
+    /// down or up, the yaw is the quarter turn nearest the current one: the picture turns least,
+    /// and from the default view the front is at the bottom, as in other CADs.
+    pub fn toward(&self, d: Vec3) -> [f64; 2] {
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let level = libm::hypot(d.x, d.y);
+        let yaw = if level == 0.0 { libm::round(self.yaw / quarter) * quarter } else { libm::atan2(d.y, d.x) };
+        [yaw, libm::atan2(d.z, level)]
     }
 
     pub fn eye(&self) -> Vec3 {
@@ -88,7 +99,7 @@ impl Camera {
     }
 
     /// Right, up and forward directions of the view.
-    fn axes(&self) -> (Vec3, Vec3, Vec3) {
+    pub fn axes(&self) -> (Vec3, Vec3, Vec3) {
         let f = self.target - self.eye();
         let f = f * (1.0 / f.dot(f).sqrt());
         // Right is horizontal and follows the yaw alone, so straight down (top view) is no special case.
