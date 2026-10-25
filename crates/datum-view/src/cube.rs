@@ -9,16 +9,14 @@ use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use crate::camera::Camera;
 
 /// Side of the square the cube is drawn in, and its margin from the corner of the view.
-const SIZE: f32 = 96.0;
+const SIZE: f32 = 120.0;
 const MARGIN: f32 = 10.0;
 /// Where a face's middle ends and its edge band begins, from its centre (half side 1): the
 /// corners and edges are narrow, the face itself the largest target.
 const BAND: f64 = 0.6;
-/// A label's height and its widest on a face, in the face's units (half side 1), and the points
-/// its glyphs are made at before they are laid on it.
-const LABEL_HEIGHT: f32 = 0.34;
-const LABEL_WIDTH: f32 = 1.3;
-const LABEL_POINTS: f32 = 14.0;
+/// A label's height and its widest on a face, in the face's units (half side 1).
+const LABEL_HEIGHT: f32 = 0.4;
+const LABEL_WIDTH: f32 = 1.5;
 /// A face turned from the eye further than this (the cosine) is too slanted to read: no label.
 const EDGE_ON: f64 = 0.2;
 /// How long a turn to a view takes, in seconds.
@@ -123,8 +121,13 @@ fn place(view: Rect) -> (Rect, Rect) {
 /// without perspective, so that its faces read as in a drawing.
 fn projector(camera: &Camera, area: Rect) -> impl Fn(Vec3) -> Pos2 {
     let (right, up, _) = camera.axes();
-    let (c, scale) = (area.center(), f64::from(SIZE) * 0.5 / 3f64.sqrt() * 0.95);
+    let (c, scale) = (area.center(), f64::from(unit()));
     move |p: Vec3| c + vec2((p.dot(right) * scale) as f32, (-p.dot(up) * scale) as f32)
+}
+
+/// Points per unit of the cube (half side 1): it fits its square however it turns.
+fn unit() -> f32 {
+    SIZE * 0.5 / 3f32.sqrt() * 0.95
 }
 
 /// Paints `label` on the face of normal `n` as if printed on it: its glyphs laid on the face, so
@@ -141,11 +144,12 @@ fn label_face(painter: &egui::Painter, screen: &impl Fn(Vec3) -> Pos2, n: Vec3, 
     };
     let [a, b] = axes;
     let right = [a, b, -a, -b].into_iter().max_by(|p, q| reads(*p).total_cmp(&reads(*q))).unwrap_or(a);
-    let galley = painter.layout_no_wrap(label.into(), FontId::proportional(LABEL_POINTS), colour);
-    let size = galley.size();
-    // Face units per point of text: as high as asked, unless that is too wide.
-    let k = (LABEL_HEIGHT / size.y).min(LABEL_WIDTH / size.x);
-    let (r, down) = (on_screen(right) * k, on_screen(n.cross(right)) * -k);
+    // Glyphs made at the size the label has on a face seen straight, so that they are laid on
+    // it one to one and stay sharp: as high as asked, unless that is too wide.
+    let probe = painter.layout_no_wrap(label.into(), FontId::proportional(10.0), colour).size();
+    let points = 10.0 * (LABEL_HEIGHT * unit() / probe.y).min(LABEL_WIDTH * unit() / probe.x);
+    let galley = painter.layout_no_wrap(label.into(), FontId::proportional(points), colour);
+    let (r, down) = (on_screen(right) / unit(), on_screen(n.cross(right)) / -unit());
     let middle = galley.rect.center();
     // A row's texture coordinates are in pixels of the font atlas, as the tessellator takes them.
     let atlas = painter.ctx().fonts(|f| f.font_image_size()).map(|n| 1.0 / n as f32);
