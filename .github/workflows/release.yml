@@ -32,6 +32,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ hashFiles('Cargo.toml') }}
+      # check.sh reads STEP back with OpenCASCADE on Linux, as in CI (D146).
+      - if: runner.os == 'Linux'
+        run: pip install --user cadquery-ocp
       - run: scripts/check.sh
         shell: bash
       - run: cargo build --release -p datum-cli
