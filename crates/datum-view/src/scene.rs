@@ -100,7 +100,8 @@ impl Scene {
             match v {
                 Value::Body(b) => s.bodies.push(cache.get(b)),
                 // A flat blank is for export (DXF), not drawn in the 3D scene.
-                Value::Flat(_) => {}
+                // Work planes are drawn over the picture, from the model's inspection.
+                Value::Flat(_) | Value::Plane(_) => {}
                 Value::Sketch(p) => {
                     let [o, x, y, _] = p.frame;
                     // In the sketch's plane, or on its cylinder face.

@@ -826,6 +826,7 @@ impl Session {
                                 let [lines, arcs, circles] = f.counts();
                                 json!({"flat": {"width": f.size.x, "height": f.size.y, "lines": lines, "arcs": arcs, "circles": circles}, "hash": hash})
                             }
+                            Feature::Plane(p) => json!({"plane": {"origin": p.origin, "x_axis": p.x_axis, "normal": p.normal}, "hash": hash}),
                         };
                         f.insert("status".into(), status);
                     }

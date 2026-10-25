@@ -21,6 +21,56 @@ pub struct SketchPlane {
     pub normal: Vec3,
 }
 
+/// The model's origin planes (D149, D150): XY, XZ seen from the front (its X along X, its Y
+/// along Z) and YZ seen from the right.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum OriginPlane {
+    #[default]
+    Xy,
+    Xz,
+    Yz,
+}
+
+impl OriginPlane {
+    pub const ALL: [Self; 3] = [Self::Xy, Self::Xz, Self::Yz];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Xy => "XY",
+            Self::Xz => "XZ",
+            Self::Yz => "YZ",
+        }
+    }
+
+    pub fn plane(self) -> SketchPlane {
+        let (x, normal) = match self {
+            Self::Xy => (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+            Self::Xz => (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, -1.0, 0.0)),
+            Self::Yz => (Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0)),
+        };
+        SketchPlane { origin: Vec3::ZERO, x_axis: x, normal }
+    }
+}
+
+/// The plane of plane face `id` of `body`, as a sketch on it lies: the world origin projected
+/// onto it, X the world axis least along the normal, projected; on a top face sketch
+/// coordinates are world X and Y. Not a plane face: `Unsupported`.
+pub fn face_plane(body: &Body, id: &str) -> Result<SketchPlane, BrepError> {
+    plane_of(body, find_face(body, id)?.0)
+}
+
+/// [`face_plane`] of face `f`, by index.
+fn plane_of(body: &Body, f: usize) -> Result<SketchPlane, BrepError> {
+    let Surface::Plane(plane) = body.faces()[f].surface else {
+        return Err(BrepError::Unsupported(format!("face {:?} is not plane", body.faces()[f].id)));
+    };
+    let n = unit(plane.normal).ok_or_else(|| BrepError::Degenerate("the face has no normal".into()))?;
+    let axes = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)];
+    let x = axes.into_iter().min_by(|a, b| a.dot(n).abs().total_cmp(&b.dot(n).abs())).unwrap_or(axes[0]);
+    Ok(SketchPlane { origin: n * n.dot(plane.origin), x_axis: x, normal: n })
+}
+
 /// The name of the point every plane sketch has where the model's origin projects onto its
 /// plane (D93): fixed, to dimension from, as Inventor projects the part's centre point. Not
 /// part of the sketch's hash: the plane says where it is.
@@ -336,12 +386,10 @@ pub fn place(
             let (f, id) = find_face(body, id)?;
             match body.faces()[f].surface {
                 Surface::Plane(_) if k_factor.is_some() => return Err(BrepError::Sketch("`k_factor` is for a sketch on a cylinder face".into())),
-                Surface::Plane(plane) => {
-                    normal = plane.normal;
-                    let n = unit(plane.normal).ok_or_else(|| BrepError::Degenerate("the face has no normal".into()))?;
-                    let axes = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)];
-                    let x = axes.into_iter().min_by(|a, b| a.dot(n).abs().total_cmp(&b.dot(n).abs())).unwrap_or(axes[0]);
-                    (frame(n * n.dot(plane.origin), x, n)?, Some(id))
+                Surface::Plane(raw) => {
+                    let p = plane_of(body, f)?;
+                    normal = raw.normal;
+                    (frame(p.origin, p.x_axis, p.normal)?, Some(id))
                 }
                 Surface::Cylinder(c) => {
                     let k = k_factor.ok_or_else(|| BrepError::Sketch("a sketch on a cylinder face needs the sheet's `k_factor`".into()))?;
@@ -461,6 +509,17 @@ pub fn place(
 /// loop of its own; a loop inside another is a hole, one inside a hole an island. Side faces are
 /// named by their lines and arcs, vertices by their points (§4.2), a circle's by its name:
 /// renaming nothing keeps every ID through edits of the sketch.
+/// How far along the normal of sketch `s` plane `p` lies: an extrusion's depth up to it (D150).
+/// The plane must be parallel to the sketch, exactly, both normals made unit alike: planes offset
+/// from one another and the face a sketch lies on are. A slanted end is not supported yet.
+pub fn depth_to(s: &Placed, p: &SketchPlane) -> Result<f64, BrepError> {
+    let n = unit(p.normal).ok_or_else(|| BrepError::Degenerate("the plane has no normal".into()))?;
+    if !parallel(s.frame[3], n) {
+        return Err(BrepError::Unsupported("an extrusion up to a plane not parallel to its sketch".into()));
+    }
+    Ok((p.origin - s.frame[0]).dot(s.frame[3]))
+}
+
 pub fn extrude_sketch(feature: TopoId, s: &Placed, z0: f64, z1: f64) -> Result<Body, BrepError> {
     if s.developed.is_some() {
         return Err(BrepError::Unsupported("an extrusion of a sketch on a cylinder face".into()));
