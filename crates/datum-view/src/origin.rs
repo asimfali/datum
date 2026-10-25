@@ -1,6 +1,7 @@
 //! Planes in the view: the model's origin planes, XY, XZ and YZ, as Inventor shows them when a
 //! plane is to be picked, and its work planes (D150), always. Each is a square as large as the
 //! model; a sketch starts on one, the view looks straight at one, a work plane is offset from one.
+//! The origin's point and axes show where the planes meet.
 
 use datum_math::Vec3;
 use datum_ops::{OriginPlane, SketchPlane};
@@ -53,6 +54,12 @@ pub fn half(bounds: Option<(Vec3, Vec3)>) -> f64 {
     if reach > 0.0 { reach * 1.15 } else { 50.0 }
 }
 
+/// What the view holds: the model's `bounds`, or with nothing in it the origin planes.
+pub fn held(bounds: Option<(Vec3, Vec3)>) -> (Vec3, Vec3) {
+    let h = half(None);
+    bounds.unwrap_or((Vec3::new(-h, -h, -h), Vec3::new(h, h, h)))
+}
+
 /// The fields of a sketch feature on origin plane `k`: none for XY, where a sketch lies
 /// without a plane, else the plane.
 pub fn sketch_fields(k: usize) -> serde_json::Value {
@@ -81,22 +88,85 @@ pub fn hit(squares: &[Square], origin: Vec3, dir: Vec3, half: f64) -> Option<(f6
         .min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
-/// Draws `squares`, see-through, `lit` the one a click or Enter would take; `screen` places a
-/// point of the model on the screen (none behind the eye). Work planes are bluish, origin
-/// planes yellowish, as in Inventor.
-pub fn paint(painter: &Painter, screen: impl Fn(Vec3) -> Option<Pos2>, squares: &[Square], half: f64, lit: Option<usize>, work: bool) {
+/// The part of convex polygon `corners` (clip coordinates: x, y, depth, w) in front of the near
+/// plane, where depth is not negative: a square the eye stands within is cut, not dropped.
+/// Lines are straight in clip space, so cutting there is exact.
+fn in_front(corners: &[[f32; 4]]) -> Vec<[f32; 4]> {
+    let mut kept = Vec::with_capacity(corners.len() + 1);
+    for (k, &a) in corners.iter().enumerate() {
+        let b = corners[(k + 1) % corners.len()];
+        if a[2] >= 0.0 {
+            kept.push(a);
+        }
+        if (a[2] >= 0.0) != (b[2] >= 0.0) {
+            kept.push(cut(a, b));
+        }
+    }
+    kept
+}
+
+/// The part of segment `a`–`b` (clip coordinates) in front of the near plane, if any.
+fn segment_in_front(a: [f32; 4], b: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
+    match (a[2] >= 0.0, b[2] >= 0.0) {
+        (true, true) => Some((a, b)),
+        (true, false) => Some((a, cut(a, b))),
+        (false, true) => Some((cut(a, b), b)),
+        (false, false) => None,
+    }
+}
+
+/// Where segment `a`–`b`, one end on each side, crosses the near plane.
+fn cut(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
+    let t = a[2] / (a[2] - b[2]);
+    [0, 1, 2, 3].map(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// Draws `squares`, see-through, `lit` the one a click or Enter would take; `clip` takes a
+/// point of the model to clip coordinates, `screen` those in front of the eye to the screen.
+/// Work planes are bluish, origin planes yellowish, as in Inventor.
+pub fn paint(
+    painter: &Painter,
+    clip: impl Fn(Vec3) -> [f32; 4],
+    screen: impl Fn([f32; 4]) -> Pos2,
+    squares: &[Square],
+    half: f64,
+    lit: Option<usize>,
+    work: bool,
+) {
     for (k, s) in squares.iter().enumerate() {
-        let corners: Option<Vec<Pos2>> =
-            [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|&(a, b)| screen(s.middle + (s.x * a + s.y * b) * half)).collect();
-        let Some(corners) = corners else { continue };
+        // From the corner the name is written at.
+        let corners = [(-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (1.0, 1.0)].map(|(a, b)| clip(s.middle + (s.x * a + s.y * b) * half));
+        let shown: Vec<Pos2> = in_front(&corners).into_iter().map(&screen).collect();
+        let Some(&label) = shown.first() else { continue };
         let (fill, line) = match (lit == Some(k), work) {
             (true, _) => (Color32::from_rgba_unmultiplied(235, 110, 20, 70), Color32::from_rgb(220, 100, 20)),
             (false, true) => (Color32::from_rgba_unmultiplied(90, 140, 220, 30), Color32::from_rgb(80, 120, 200)),
             (false, false) => (Color32::from_rgba_unmultiplied(240, 190, 60, 30), Color32::from_rgb(200, 160, 60)),
         };
-        let label = corners[3];
-        painter.add(egui::Shape::convex_polygon(corners, fill, Stroke::new(if lit == Some(k) { 2.0 } else { 1.0 }, line)));
+        painter.add(egui::Shape::convex_polygon(shown, fill, Stroke::new(if lit == Some(k) { 2.0 } else { 1.0 }, line)));
         painter.text(label + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, &s.name, egui::FontId::proportional(12.0), line);
+    }
+}
+
+/// Draws the origin: its axes X, Y and Z (red, green, blue) out to `half`, named at their ends,
+/// and its point. `clip` and `screen` as for [`paint`].
+pub fn paint_origin(painter: &Painter, clip: impl Fn(Vec3) -> [f32; 4], screen: impl Fn([f32; 4]) -> Pos2, half: f64) {
+    let o = clip(Vec3::ZERO);
+    let axes = [
+        ("X", Vec3::new(1.0, 0.0, 0.0), Color32::from_rgb(210, 50, 50)),
+        ("Y", Vec3::new(0.0, 1.0, 0.0), Color32::from_rgb(40, 150, 60)),
+        ("Z", Vec3::new(0.0, 0.0, 1.0), Color32::from_rgb(40, 90, 220)),
+    ];
+    for (name, axis, colour) in axes {
+        let end = clip(axis * half);
+        let Some((a, b)) = segment_in_front(o, end) else { continue };
+        painter.line_segment([screen(a), screen(b)], Stroke::new(1.5, colour));
+        if b == end {
+            painter.text(screen(b) + egui::vec2(4.0, -4.0), egui::Align2::LEFT_BOTTOM, name, egui::FontId::proportional(12.0), colour);
+        }
+    }
+    if o[2] >= 0.0 {
+        painter.circle_filled(screen(o), 3.0, Color32::from_rgb(200, 160, 60));
     }
 }
 
@@ -123,5 +193,36 @@ mod tests {
         assert_eq!([s[0].y, s[1].y, s[2].y], [Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0)]);
         let raised = SketchPlane { origin: Vec3::new(0.0, 0.0, 5.0), x_axis: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::new(0.0, 0.0, 2.0) };
         assert_eq!(square("p", &raised, Vec3::new(3.0, 4.0, 1.0)).middle, Vec3::new(3.0, 4.0, 5.0));
+    }
+
+    /// An empty model's view, fitted to what it holds, shows the origin planes whole.
+    #[test]
+    fn an_empty_view_holds_the_origin_planes() {
+        let mut camera = crate::camera::Camera::default();
+        camera.fit(Some(held(None)), 1.5);
+        let (lo, hi) = held(None);
+        let (m, _) = camera.matrices(Vec3::ZERO, 1.5, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+        for s in origin_squares() {
+            for (a, b) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+                let [x, y, z, w] = crate::camera::clip(&m, s.middle + (s.x * a + s.y * b) * half(None));
+                assert!(z >= 0.0 && x.abs() <= w && y.abs() <= w, "{} at ({a}, {b})", s.name);
+            }
+        }
+    }
+
+    /// A square half behind the near plane keeps the half in front, cut where it crosses; one
+    /// wholly behind keeps nothing.
+    #[test]
+    fn squares_are_cut_at_the_near_plane() {
+        let square = [[0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 1.0, 1.0], [1.0, 0.0, -1.0, 1.0], [0.0, 0.0, -1.0, 1.0]];
+        assert_eq!(in_front(&square), vec![[0.0, 0.0, 1.0, 1.0], [1.0, 0.0, 1.0, 1.0], [1.0, 0.0, 0.0, 1.0], [0.0, 0.0, 0.0, 1.0]]);
+        assert_eq!(in_front(&square.map(|[x, y, _, w]| [x, y, -1.0, w])), Vec::<[f32; 4]>::new());
+        let (a, b) = (square[1], square[2]);
+        assert_eq!(
+            [segment_in_front(a, b), segment_in_front(b, a)],
+            [Some((a, [1.0, 0.0, 0.0, 1.0])), Some(([1.0, 0.0, 0.0, 1.0], a))],
+            "an axis too"
+        );
+        assert_eq!(segment_in_front(b, b), None);
     }
 }

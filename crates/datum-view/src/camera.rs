@@ -257,6 +257,13 @@ impl Camera {
     }
 }
 
+/// Point `q` through view-projection `m` (as [`Camera::matrices`] makes): clip coordinates x, y,
+/// depth, w.
+pub fn clip(m: &[f32; 16], q: Vec3) -> [f32; 4] {
+    let v = [q.x as f32, q.y as f32, q.z as f32, 1.0];
+    [0, 1, 2, 3].map(|r| (0..4).map(|c| m[c * 4 + r] * v[c]).sum::<f32>())
+}
+
 /// The view of a sketch being edited: straight at its plane, orthographic, so that lengths on
 /// the screen are true. Everything in sketch coordinates; `frame` is the sketch's origin and X,
 /// Y, Z axes.
