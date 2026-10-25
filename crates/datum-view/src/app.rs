@@ -1130,7 +1130,7 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter: the last command again",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
@@ -1859,6 +1859,10 @@ impl Viewer {
             let (x, y) = offset.unwrap_or((0.0, 0.0));
             sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
         }
+        // A right click (a right drag pans): the last command again, as Enter, by the mouse alone.
+        if r.secondary_clicked() {
+            sk.draft.again();
+        }
         if !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
             // Enter: the last command again (an Enter that put a value in is not one).
             if !field_done.0 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -2342,10 +2346,10 @@ mod tests {
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
     }
 
-    /// A right click ends the command, as Esc does, for those who draw with the mouse alone; a
-    /// right drag still pans and leaves the command on.
+    /// A right click ends the command, as Esc does, for those who draw with the mouse alone, and
+    /// with no command on takes the last one up again, as Enter does; a right drag still pans.
     #[test]
-    fn a_right_click_ends_the_command() {
+    fn a_right_click_ends_the_command_and_repeats_it() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
@@ -2377,6 +2381,15 @@ mod tests {
         button(&mut h, true, egui::pos2(300.0, 200.0));
         button(&mut h, false, egui::pos2(300.0, 200.0));
         assert_eq!(tool(&h), Tool::Select, "a right click ends");
+        button(&mut h, true, egui::pos2(300.0, 200.0));
+        button(&mut h, false, egui::pos2(400.0, 250.0));
+        assert_eq!(tool(&h), Tool::Select, "a right drag pans, with no command on too");
+        button(&mut h, true, egui::pos2(300.0, 200.0));
+        button(&mut h, false, egui::pos2(300.0, 200.0));
+        assert_eq!(tool(&h), Tool::Line, "a right click again: the last command");
+        button(&mut h, true, egui::pos2(300.0, 200.0));
+        button(&mut h, false, egui::pos2(300.0, 200.0));
+        assert_eq!(tool(&h), Tool::Select);
         h.key_press(egui::Key::Enter);
         h.run();
         assert_eq!(tool(&h), Tool::Line, "Enter: the last command again");

@@ -210,8 +210,8 @@ impl Draft {
         self.tool = tool;
     }
 
-    /// Enter with no command on: the last one taken up again, as in other CADs. A library
-    /// element only while it is still chosen.
+    /// Enter or a right click with no command on: the last one taken up again, as in other CADs.
+    /// A library element only while it is still chosen.
     pub fn again(&mut self) {
         if let Some(t) = self.last.filter(|t| *t != Tool::Template || self.template.is_some()) {
             self.take_up(t);
