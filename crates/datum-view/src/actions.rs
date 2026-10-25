@@ -32,6 +32,7 @@ pub enum Act {
     ExportStep,
     Home,
     LookAt,
+    WorkPlane,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -75,7 +76,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 24] = [
+pub const ACTIONS: [Action; 25] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -135,7 +136,15 @@ pub const ACTIONS: [Action; 24] = [
         plain(Key::F6),
         Model,
     ),
-    action(Act::LookAt, "view.look_at", "Look at", "Then click a face or an origin plane: the view straight at it", plain(Key::PageUp), Model),
+    action(Act::LookAt, "view.look_at", "Look at", "Then click a face or a plane: the view straight at it", plain(Key::PageUp), Model),
+    action(
+        Act::WorkPlane,
+        "model.plane",
+        "Plane",
+        "A work plane: click an origin plane, a work plane or a plane face, then type its offset (a number or a formula)",
+        plain(Key::CloseBracket),
+        Model,
+    ),
 ];
 
 impl Act {
