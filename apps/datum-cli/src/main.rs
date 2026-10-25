@@ -119,6 +119,7 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
             Ok(v) => match (v.body(), v.flat()) {
                 (Some(b), _) => println!("{:width$}  {:>16.6}  {}", node.name, b.volume(), hex8(v.hash())),
                 (_, Some(f)) => println!("{:width$}  {:>16}  {}", node.name, format!("flat {:.1}×{:.1}", f.size.x, f.size.y), hex8(v.hash())),
+                _ if v.plane().is_some() => println!("{:width$}  {:>16}  {}", node.name, "plane", hex8(v.hash())),
                 _ => println!("{:width$}  {:>16}  {}", node.name, "sketch", hex8(v.hash())),
             },
             Err(err) => println!("{:width$}  FAILED: {err}", node.name),

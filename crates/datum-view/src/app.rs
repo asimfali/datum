@@ -111,13 +111,17 @@ enum Request {
 enum Purpose {
     Sketch,
     Look,
+    /// A work plane offset from it.
+    Plane,
 }
 
 /// What is under the cursor while picking.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Under {
-    /// Origin plane `k` of [`crate::origin::PLANES`].
+    /// Origin plane `k` of [`crate::origin::origin_squares`].
     Origin(usize),
+    /// Work plane `k` of [`Viewer::work_planes`].
+    Work(usize),
     Face(crate::scene::Hit),
 }
 
@@ -354,8 +358,10 @@ struct Viewer {
     /// Picking a face to sketch on, and the body and face under the cursor.
     /// A plane or a face to be clicked, and what for.
     picking: Option<Purpose>,
-    /// What a click would take while picking: an origin plane or a face.
+    /// What a click would take while picking: an origin plane, a work plane or a face.
     under: Option<Under>,
+    /// A work plane being made: its base (the feature's fields) and the offset typed.
+    plane_draft: Option<(Json, String)>,
 }
 
 impl Viewer {
@@ -418,6 +424,7 @@ impl Viewer {
             maximized: false,
             picking: None,
             under: None,
+            plane_draft: None,
         };
         if let Some(p) = path {
             v.open(p);
@@ -1038,7 +1045,7 @@ impl Viewer {
                 }
             }
             ui.separator();
-            for act in [Act::NewSketch, Act::LookAt] {
+            for act in [Act::NewSketch, Act::WorkPlane, Act::LookAt] {
                 self.item(ui, act, false);
             }
         });
@@ -1409,14 +1416,25 @@ impl Viewer {
                 sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
             }
         }
-        // While picking: the origin planes, and what a click would take lit (a face tinted).
+        // Work planes always; while picking the origin planes too, and what a click would take
+        // lit (a face tinted).
+        let size = crate::origin::half(m.scene.bounds);
+        let screen = |q| on_screen(&view_projection, q - anchor, rect);
+        let work: Vec<crate::origin::Square> = self.work_planes().into_iter().map(|(_, s)| s).collect();
+        if self.sketch.is_none() {
+            let lit = match (self.picking, self.under) {
+                (Some(_), Some(Under::Work(k))) => Some(k),
+                _ => None,
+            };
+            crate::origin::paint(&painter, screen, &work, size, lit, true);
+        }
         if let Some(purpose) = self.picking {
             let lit = match self.under {
                 Some(Under::Origin(k)) => Some(k),
-                Some(Under::Face(_)) => None,
+                Some(_) => None,
                 None => (purpose == Purpose::Sketch).then_some(crate::origin::FIRST),
             };
-            crate::origin::paint(&painter, |q| on_screen(&view_projection, q - anchor, rect), crate::origin::half(m.scene.bounds), lit);
+            crate::origin::paint(&painter, screen, &crate::origin::origin_squares(), size, lit, false);
             if let Some(Under::Face(f)) = self.under {
                 let mesh = &m.scene.bodies[f.body];
                 let mut tint = egui::Mesh::default();
@@ -1433,8 +1451,9 @@ impl Viewer {
                 painter.add(egui::Shape::mesh(tint));
             }
             let hint = match purpose {
-                Purpose::Sketch => "Click an origin plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
-                Purpose::Look => "Click a face or an origin plane to look straight at · Esc: cancel",
+                Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
+                Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
+                Purpose::Plane => "Click an origin plane, a work plane or a plane face to offset the new plane from · Esc: cancel",
             };
             painter.text(
                 rect.center_bottom() - egui::vec2(0.0, 12.0),
@@ -1473,17 +1492,18 @@ impl Viewer {
     fn pick_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
         let mut chosen = None;
+        let work = self.work_planes();
         if let (Some(purpose), Some(m)) = (self.picking, &self.model) {
             let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
             let size = crate::origin::half(m.scene.bounds);
+            let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
             self.under = offset.and_then(|(x, y)| {
                 let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
-                match (m.scene.pick(origin, dir), crate::origin::hit(origin, dir, size)) {
-                    (Some(f), Some((t, k))) if t < f.distance => Some(Under::Origin(k)),
-                    (Some(f), _) => Some(Under::Face(f)),
-                    (None, Some((_, k))) => Some(Under::Origin(k)),
-                    (None, None) => None,
-                }
+                // The nearest along the ray: a face, an origin plane or a work plane.
+                let face = m.scene.pick(origin, dir).map(|f| (f.distance, Under::Face(f)));
+                let first = crate::origin::hit(&crate::origin::origin_squares(), origin, dir, size).map(|(t, k)| (t, Under::Origin(k)));
+                let planes = crate::origin::hit(&squares, origin, dir, size).map(|(t, k)| (t, Under::Work(k)));
+                [face, first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
             });
             if r.clicked() {
                 chosen = self.under.map(|u| (purpose, u));
@@ -1494,22 +1514,92 @@ impl Viewer {
                 self.picking = None;
             }
         }
+        // What a pick refers to in a feature: an origin plane, a work plane, a body's face.
+        let body = |v: &Self, f: crate::scene::Hit| v.model.as_ref().map(|m| m.bodies[f.body].clone());
         match chosen {
             Some((Purpose::Sketch, Under::Origin(k))) => self.new_sketch(crate::origin::sketch_fields(k)),
+            Some((Purpose::Sketch, Under::Work(k))) => self.new_sketch(json!({"inputs": [work[k].0]})),
             Some((Purpose::Sketch, Under::Face(f))) => {
-                let body = self.model.as_ref().map(|m| m.bodies[f.body].clone());
-                self.new_sketch(json!({"inputs": [body], "face": format!("{:?}", f.face)}));
+                let fields = json!({"inputs": [body(self, f)], "face": format!("{:?}", f.face)});
+                self.new_sketch(fields);
+            }
+            Some((Purpose::Plane, under)) => {
+                let from = match under {
+                    Under::Origin(k) => json!({"base": datum_ops::OriginPlane::ALL[k]}),
+                    Under::Work(k) => json!({"inputs": [work[k].0]}),
+                    Under::Face(f) => json!({"inputs": [body(self, f)], "face": format!("{:?}", f.face)}),
+                };
+                self.plane_draft = Some((from, "10".into()));
+                self.picking = None;
             }
             Some((Purpose::Look, under)) => {
+                let forward = self.camera.axes().2;
                 let normal = match under {
                     Under::Face(f) => f.normal,
-                    Under::Origin(k) => crate::origin::normal_towards(k, self.camera.axes().2),
+                    Under::Origin(k) => crate::origin::origin_squares()[k].normal_towards(forward),
+                    Under::Work(k) => work[k].1.normal_towards(forward),
                 };
                 self.turn = Some(crate::cube::Turn::toward(&self.camera, normal, ui.input(|i| i.time), false));
                 self.picking = None;
                 ui.ctx().request_repaint();
             }
             None => {}
+        }
+    }
+
+    /// The model's work planes (D150) that are made, by feature, as squares about the model.
+    fn work_planes(&self) -> Vec<(String, crate::origin::Square)> {
+        let Some(m) = &self.model else { return Vec::new() };
+        let near = m.scene.anchor();
+        m.inspect["features"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| {
+                let name = f["name"].as_str()?;
+                let plane: datum_ops::SketchPlane = serde_json::from_value(f["status"]["plane"].clone()).ok()?;
+                Some((name.to_string(), crate::origin::square(name, &plane, near)))
+            })
+            .collect()
+    }
+
+    /// The offset of a new work plane, asked once its base is picked: a number or a formula;
+    /// Enter or OK adds the plane, Esc or Cancel drops it.
+    fn plane_window(&mut self, ctx: &egui::Context) {
+        let Some((from, offset)) = &mut self.plane_draft else { return };
+        let (mut add, mut cancel) = (false, false);
+        egui::Window::new("Plane").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0)).show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Offset");
+                let r = ui.add(egui::TextEdit::singleline(offset).desired_width(120.0).hint_text("number or formula"));
+                add = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                // Typed at once, as a sketch's dimension is.
+                if !add && !r.has_focus() {
+                    r.request_focus();
+                }
+            });
+            ui.horizontal(|ui| {
+                add |= ui.button("OK").clicked();
+                cancel = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+            });
+        });
+        if cancel {
+            self.plane_draft = None;
+        } else if add {
+            let mut fields = from.clone();
+            let value = offset.trim();
+            fields["offset"] = value.parse::<f64>().map_or_else(|_| json!(value), |v| json!(v));
+            fields["op"] = json!("plane");
+            let taken: Vec<String> = self.work_planes().into_iter().map(|(n, _)| n).collect();
+            let features: Vec<&str> = self
+                .model
+                .as_ref()
+                .map(|m| m.inspect["features"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect())
+                .unwrap_or_default();
+            fields["name"] =
+                json!((1..).map(|k| format!("plane{k}")).find(|n| !features.contains(&n.as_str()) && !taken.contains(n)).unwrap_or_default());
+            self.plane_draft = None;
+            self.send(Request::Command("add", fields));
         }
     }
 
@@ -2150,7 +2240,7 @@ impl Viewer {
             Context::Sketch => self.sketch.is_some(),
         };
         here && match a.act {
-            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt => self.model.is_some(),
+            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
@@ -2164,6 +2254,7 @@ impl Viewer {
         match act {
             Act::SmoothEdges => self.smooth,
             Act::NewSketch => self.picking == Some(Purpose::Sketch),
+            Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
@@ -2196,6 +2287,10 @@ impl Viewer {
                 self.start_sketch();
             }
             Act::LookAt => self.pick(Purpose::Look),
+            Act::WorkPlane => {
+                self.leave();
+                self.pick(Purpose::Plane);
+            }
             Act::Rectangle => {
                 if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
                     sk.draft.choose(t.entry.element.clone());
@@ -2270,6 +2365,7 @@ impl Viewer {
         });
         ui.menu_button("Sketch", |ui| {
             self.item(ui, Act::NewSketch, true);
+            self.item(ui, Act::WorkPlane, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent]) {
                 self.item(ui, act, true);
@@ -2357,6 +2453,7 @@ impl eframe::App for Viewer {
             egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
         }
         self.keep(ui.ctx());
+        self.plane_window(ui.ctx());
         self.settings_said(ui.ctx());
         let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
         egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
@@ -2444,6 +2541,7 @@ mod tests {
             maximized: false,
             picking: None,
             under: None,
+            plane_draft: None,
         };
         (v, inbox)
     }
@@ -2587,6 +2685,19 @@ mod tests {
         frame(&mut v, vec![click(true), click(false)]);
         assert_eq!(v.picking, None);
         assert_eq!((v.camera.right, v.camera.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)), "from above");
+        // A work plane from XY: the plane picked, then its offset typed and Enter.
+        v.camera = Camera::default();
+        v.pick(Purpose::Plane);
+        frame(&mut v, vec![click(true), click(false)]);
+        assert_eq!(v.plane_draft, Some((json!({"base": "xy"}), "10".to_string())));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.plane_window(ui.ctx()), v);
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let v = h.into_state();
+        assert!(v.plane_draft.is_none());
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("add", f) if f["op"] == "plane" && f["base"] == "xy" && f["offset"] == 10.0)));
     }
 
     /// A right click ends the command, as Esc does, for those who draw with the mouse alone, and
@@ -3171,7 +3282,8 @@ mod tests {
         assert_eq!(v.working_folder(), Some("/work/examples".into()), "closed: where it was");
     }
 
-    /// A sketch on a face uses the plate up: while it is edited, the plate is still shown.
+    /// A sketch on a face only refers to the plate (D150): the plate stays in view beside it,
+    /// and alone, once, while the sketch is edited.
     #[test]
     fn the_face_a_sketch_is_on_stays_in_view() {
         let mut session = Session::default();
@@ -3186,7 +3298,7 @@ mod tests {
                 .map(|i| session.graph().nodes()[i as usize].name.clone())
                 .collect::<Vec<_>>()
         };
-        assert_eq!(names(None), ["sketch1"]);
+        assert_eq!(names(None), ["plate", "sketch1"]);
         assert_eq!(names(Some("sketch1")), ["plate"]);
     }
 

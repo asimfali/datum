@@ -24,7 +24,7 @@ pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, sheet};
-pub use sketch::{Developed, ORIGIN, Placed, Projection, SketchPlane, extrude_sketch, place, profile_regions};
+pub use sketch::{Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, depth_to, extrude_sketch, face_plane, place, profile_regions};
 pub use unfold::{Flat, FlatPiece, unfold};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
@@ -77,8 +77,28 @@ pub enum Op {
         project: BTreeMap<String, Projection>,
     },
     /// The closed profiles of the input sketch swept from `z0` to `z1` along its normal; a loop
-    /// inside another is a hole. One input: a sketch.
-    Extrude { z0: Num, z1: Num },
+    /// inside another is a hole. `symmetric`: `z1` deep, half on each side of the sketch. Up to
+    /// a plane (D150): the work plane as a second input instead of `z1`, parallel to the
+    /// sketch. One input, a sketch, or the sketch and the plane.
+    Extrude {
+        #[serde(default = "zero")]
+        z0: Num,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        z1: Option<Num>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        symmetric: bool,
+    },
+    /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
+    /// given), from the input work plane, or from plane face `face` of the input body. Sketches
+    /// lie on it (as their input), extrusions go up to it. No input, the plane, or the body.
+    Plane {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<OriginPlane>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face: Option<String>,
+        #[serde(default = "zero")]
+        offset: Num,
+    },
     /// The closed profiles of a sketch on a plane face of the body cut through the body,
     /// perpendicular to the face, to the opposite face: holes, slots, any outline of lines and
     /// arcs; the copies of the sketch's patterns too, as punches on a turret press. Two inputs:
@@ -137,6 +157,8 @@ pub enum Value {
     Body(Body),
     Sketch(Placed),
     Flat(Flat),
+    /// A work plane: its origin, X axis and normal, as a sketch plane.
+    Plane(SketchPlane),
 }
 
 impl Value {
@@ -146,27 +168,41 @@ impl Value {
             Self::Body(b) => b.hash(),
             Self::Sketch(s) => s.hash,
             Self::Flat(f) => f.hash,
+            Self::Plane(p) => {
+                let mut h = blake3::Hasher::new();
+                for x in [p.origin, p.x_axis, p.normal].iter().flat_map(|v| v.to_array()) {
+                    h.update(&x.to_bits().to_le_bytes());
+                }
+                *h.finalize().as_bytes()
+            }
         }
     }
 
     pub fn body(&self) -> Option<&Body> {
         match self {
             Self::Body(b) => Some(b),
-            Self::Sketch(_) | Self::Flat(_) => None,
+            _ => None,
         }
     }
 
     pub fn sketch(&self) -> Option<&Placed> {
         match self {
             Self::Sketch(s) => Some(s),
-            Self::Body(_) | Self::Flat(_) => None,
+            _ => None,
         }
     }
 
     pub fn flat(&self) -> Option<&Flat> {
         match self {
             Self::Flat(f) => Some(f),
-            Self::Body(_) | Self::Sketch(_) => None,
+            _ => None,
+        }
+    }
+
+    pub fn plane(&self) -> Option<&SketchPlane> {
+        match self {
+            Self::Plane(p) => Some(p),
+            _ => None,
         }
     }
 }
@@ -188,6 +224,7 @@ impl Op {
             Self::Cut { .. } => "cut",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
+            Self::Plane { .. } => "plane",
         }
     }
 
@@ -195,8 +232,9 @@ impl Op {
     pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
-            Self::Sketch { .. } => 0..=1,
-            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Extrude { .. } | Self::Unfold { .. } | Self::Sheet { .. } => 1..=1,
+            Self::Sketch { .. } | Self::Plane { .. } => 0..=1,
+            Self::Extrude { .. } => 1..=2,
+            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Unfold { .. } | Self::Sheet { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
             Self::Cut { .. } => 2..=2,
         }
@@ -222,7 +260,10 @@ impl Op {
                 k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()?,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1 } => Self::Extrude { z0: r(z0, "z0")?, z1: r(z1, "z1")? },
+            Self::Extrude { z0, z1, symmetric } => {
+                Self::Extrude { z0: r(z0, "z0")?, z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?, symmetric: *symmetric }
+            }
+            Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
             Self::Cut {} => Self::Cut {},
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Sheet { thickness, radius, side, z0, z1, start } => Self::Sheet {
@@ -271,7 +312,10 @@ impl Op {
             Self::Sketch { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
-            Self::Extrude { z0, z1 } => [value(z0), value(z1)].into_iter().for_each(num),
+            // `Debug` spells every field exactly, as for a sketch.
+            Self::Extrude { .. } | Self::Plane { .. } => {
+                h.update(format!("{self:?}").as_bytes());
+            }
             Self::Cut {} => {}
             Self::Unfold { face, k_factor } => {
                 num(value(k_factor));
@@ -290,11 +334,32 @@ impl Op {
         if !self.arity().contains(&values.len()) {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
         }
+        // A work plane, and a sketch on one, take no body.
+        if let Self::Plane { base, face, offset } = self {
+            let from = match (values.first(), face) {
+                (None, None) => base.unwrap_or_default().plane(),
+                (Some(v), None) if base.is_none() => {
+                    *v.plane().ok_or_else(|| BrepError::Sketch("a plane takes a work plane as its input, or a body with `face`".into()))?
+                }
+                (Some(v), Some(f)) if base.is_none() => {
+                    face_plane(v.body().ok_or_else(|| BrepError::Sketch("a plane on a face takes the body as its input".into()))?, f)?
+                }
+                _ => return Err(BrepError::Sketch("a plane is offset from one thing: an origin plane (`base`), a work plane, or a face".into())),
+            };
+            let n = from.normal * (1.0 / from.normal.dot(from.normal).sqrt());
+            return Ok(Value::Plane(SketchPlane { origin: from.origin + n * num(offset)?, ..from }));
+        }
+        if let (Self::Sketch { sketch, plane, face, k_factor, project }, Some(Value::Plane(on))) = (self, values.first().copied()) {
+            if plane.is_some() || face.is_some() || !project.is_empty() || k_factor.is_some() {
+                return Err(BrepError::Sketch("a sketch on a work plane takes no `plane`, `face`, `project` or `k_factor`".into()));
+            }
+            return Ok(Value::Sketch(place(sketch, Some(on), None, None, None, project)?));
+        }
         // Every operation but `extrude`, `sheet` and `cut` takes bodies; a cut takes a body and a sketch.
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
-            Self::Extrude { .. } | Self::Sheet { .. } => Vec::new(),
+            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plane { .. } => Vec::new(),
             Self::Cut { .. } => {
                 vec![values[0].body().ok_or_else(|| BrepError::Sketch("cut takes a body first, then a sketch on one of its faces".into()))?]
             }
@@ -334,12 +399,30 @@ impl Op {
                 return Ok(Value::Sketch(place(sketch, plane.as_ref(), inputs.first().copied(), face.as_deref(), k, project)?));
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
-            Self::Extrude { z0, z1 } => extrude_sketch(feature, sketch(0)?, num(z0)?, num(z1)?)?,
+            Self::Extrude { z0, z1, symmetric } => {
+                let s = sketch(0)?;
+                let (a, b) = match (values.get(1).map(|v| v.plane()), z1, symmetric) {
+                    (None, Some(z1), false) => (num(z0)?, num(z1)?),
+                    (None, Some(depth), true) if num(z0)? == 0.0 => (-num(depth)? * 0.5, num(depth)? * 0.5),
+                    (None, Some(_), true) => return Err(BrepError::Sketch("a symmetric extrusion takes its depth as `z1`, no `z0`".into())),
+                    // The plane says which side: behind the sketch, the extrusion goes back.
+                    (Some(Some(p)), None, false) => {
+                        let (a, b) = (num(z0)?, depth_to(s, p)?);
+                        (a.min(b), a.max(b))
+                    }
+                    (Some(None), ..) => return Err(BrepError::Sketch("an extrusion goes up to a work plane: the second input is not one".into())),
+                    (None, None, _) => return Err(BrepError::Sketch("an extrusion needs `z1` or a plane to go up to".into())),
+                    (Some(_), ..) => return Err(BrepError::Sketch("up to a plane: no `z1`, not symmetric".into())),
+                };
+                extrude_sketch(feature, s, a, b)?
+            }
             Self::Sheet { thickness, radius, side, z0, z1, start } => {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
             Self::Cut {} => cut(feature, inputs[0], sketch(1)?)?,
+            // Made above, before inputs are taken as bodies.
+            Self::Plane { .. } => return Err(BrepError::Invalid("a plane is no body".into())),
         };
         if cfg!(debug_assertions) {
             body.validate()?;

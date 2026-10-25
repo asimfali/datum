@@ -304,3 +304,31 @@ fn the_origin_is_there_to_dimension_from() {
         r => panic!("expected a refusal, got {r:?}"),
     }
 }
+
+/// Work planes and extrusions up to them (D150): offset from an origin plane and from another
+/// plane, a sketch on one, extruded up to a plane behind it or symmetrically; a slanted plane, a
+/// symmetric extrusion given `z0`, and a plane with two bases are refused.
+#[test]
+fn work_planes_and_extents() {
+    let front = eval(&op(serde_json::json!({"op": "plane", "base": "xz", "offset": 20})), "front", &[]).unwrap();
+    let p = front.plane().unwrap();
+    assert_eq!((p.origin, p.normal), (Vec3::new(0.0, -20.0, 0.0), Vec3::new(0.0, -1.0, 0.0)));
+    let back = eval(&op(serde_json::json!({"op": "plane", "offset": -15})), "back", &[&front]).unwrap();
+    assert_eq!(back.plane().unwrap().origin, Vec3::new(0.0, -5.0, 0.0));
+    let sketch = eval(&sketch_op(framed(10.0, 4.0), serde_json::json!({})), "s", &[&front]).unwrap();
+    let up_to = |inputs: &[&Value], extra: serde_json::Value| {
+        let mut o = serde_json::json!({"op": "extrude"});
+        o.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        eval(&op(o), "e", inputs)
+    };
+    let to_back = up_to(&[&sketch, &back], serde_json::json!({})).unwrap();
+    assert_close(body(&to_back).volume(), (100.0 - 16.0) * 15.0);
+    let symmetric = up_to(&[&sketch], serde_json::json!({"z1": 6, "symmetric": true})).unwrap();
+    assert_close(body(&symmetric).volume(), (100.0 - 16.0) * 6.0);
+
+    let slanted = eval(&op(serde_json::json!({"op": "plane", "base": "yz"})), "yz", &[]).unwrap();
+    assert!(matches!(up_to(&[&sketch, &slanted], serde_json::json!({})), Err(BrepError::Unsupported(_))));
+    assert!(matches!(up_to(&[&sketch], serde_json::json!({"z0": 1, "z1": 6, "symmetric": true})), Err(BrepError::Sketch(_))));
+    assert!(matches!(up_to(&[&sketch, &back], serde_json::json!({"z1": 6})), Err(BrepError::Sketch(_))));
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "base": "xy"})), "two", &[&front]), Err(BrepError::Sketch(_))));
+}
