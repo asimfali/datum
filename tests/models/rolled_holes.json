@@ -1,0 +1,216 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "radius": 500.0,
+    "t": 3.0,
+    "length": 400.0,
+    "k": 0.44,
+    "nx": 10,
+    "ny": 1,
+    "hole": 5,
+    "pitch": 10,
+    "margin": 15
+  },
+  "features": [
+    {
+      "name": "profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "a": [
+            500,
+            0
+          ],
+          "b": [
+            503,
+            0
+          ],
+          "c": [
+            0,
+            503
+          ],
+          "d": [
+            0,
+            500
+          ]
+        },
+        "lines": {
+          "start": {
+            "from": "a",
+            "to": "b"
+          },
+          "end": {
+            "from": "c",
+            "to": "d"
+          },
+          "base": {
+            "from": "o",
+            "to": "a",
+            "construction": true
+          },
+          "side": {
+            "from": "o",
+            "to": "d",
+            "construction": true
+          }
+        },
+        "arcs": {
+          "outer": {
+            "center": "o",
+            "from": "b",
+            "to": "c"
+          },
+          "inner": {
+            "center": "o",
+            "from": "a",
+            "to": "d"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "horizontal",
+            "line": "base"
+          },
+          {
+            "type": "horizontal",
+            "line": "start"
+          },
+          {
+            "type": "vertical",
+            "line": "side"
+          },
+          {
+            "type": "vertical",
+            "line": "end"
+          },
+          {
+            "type": "radius",
+            "arc": "inner",
+            "value": "radius"
+          },
+          {
+            "type": "radius",
+            "arc": "outer",
+            "value": "radius + t"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sheet",
+      "op": "extrude",
+      "inputs": [
+        "profile"
+      ],
+      "z0": 0,
+      "z1": "length"
+    },
+    {
+      "name": "holes",
+      "op": "sketch",
+      "inputs": [
+        "sheet"
+      ],
+      "face": "5dbe804f4d82b3ba67524b27b0a1b656",
+      "k_factor": "k",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "m": [
+            15,
+            0
+          ],
+          "c": [
+            15,
+            15
+          ]
+        },
+        "lines": {
+          "along": {
+            "from": "o",
+            "to": "m",
+            "construction": true
+          },
+          "up": {
+            "from": "m",
+            "to": "c",
+            "construction": true
+          }
+        },
+        "circles": {
+          "hole": {
+            "center": "c",
+            "diameter": "hole"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "horizontal",
+            "line": "along"
+          },
+          {
+            "type": "vertical",
+            "line": "up"
+          },
+          {
+            "type": "length",
+            "line": "along",
+            "value": "margin"
+          },
+          {
+            "type": "length",
+            "line": "up",
+            "value": "margin"
+          }
+        ],
+        "groups": {
+          "perforated_cell": [
+            "hole"
+          ]
+        },
+        "patterns": {
+          "perforated": {
+            "of": "perforated_cell",
+            "count": [
+              "nx",
+              "ny"
+            ],
+            "step": [
+              [
+                "pitch",
+                0
+              ],
+              [
+                0,
+                "pitch"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "perforated",
+      "op": "cut",
+      "inputs": [
+        "sheet",
+        "holes"
+      ]
+    }
+  ]
+}

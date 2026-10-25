@@ -11,6 +11,7 @@ mod curve;
 mod id;
 mod prism;
 mod profile;
+mod step;
 mod terrain;
 mod tess;
 mod validate;
@@ -21,6 +22,7 @@ pub use curve::{Arc, Curve, Cylinder, Development, Rolled, Surface};
 pub use id::{Origin, TopoId};
 pub use prism::{Region, cuboid, extrude, prism};
 pub use profile::{Box2, ProfileArc, ProfileLoop, overlap, overlapping};
+pub use step::{DEVIATION, Step, inexact_faces, step};
 pub use terrain::{Grid, terrain};
 pub use tess::{FaceMesh, Mesh, Triangles, edge_points, face_mesh, tessellate, triangulate_face};
 

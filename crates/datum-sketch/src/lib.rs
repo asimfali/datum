@@ -422,6 +422,7 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
             points[p] = *at;
         }
     }
+    eq.level(&mut points);
     free.sort_unstable_by_key(|f| f.0);
     let measures = eq.measures(&points);
     Ok(Solved {

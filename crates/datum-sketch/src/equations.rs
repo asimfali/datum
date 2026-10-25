@@ -588,6 +588,47 @@ impl Equations {
             .collect()
     }
 
+    /// Makes points held level exactly level: the solver leaves them equal only to rounding, and
+    /// a horizontal line must stay one (a cut along the axis of a rolled sheet is flat only if
+    /// its ends share a coordinate, D145). Each run of points tied by horizontals (or verticals)
+    /// takes the coordinate of its fixed point, or of its first point if none is fixed; a fixed
+    /// point never moves.
+    pub fn level(&self, points: &mut [Vec2]) {
+        for axis in 0..2 {
+            let mut parent: Vec<usize> = (0..points.len()).collect();
+            fn find(p: &mut [usize], mut x: usize) -> usize {
+                while p[x] != x {
+                    p[x] = p[p[x]];
+                    x = p[x];
+                }
+                x
+            }
+            for e in &self.eqs[..self.active] {
+                if let Eq::Level(a, b, ax) = *e
+                    && ax == axis
+                {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    // The root is a fixed point if the run has one, else its lowest index.
+                    let a_wins = (self.fixed[ra], rb) > (self.fixed[rb], ra);
+                    let (root, child) = if a_wins { (ra, rb) } else { (rb, ra) };
+                    parent[child] = root;
+                }
+            }
+            let at = |p: Vec2| if axis == 0 { p.x } else { p.y };
+            for p in 0..points.len() {
+                let root = find(&mut parent, p);
+                if root != p && !self.fixed[p] {
+                    let v = at(points[root]);
+                    if axis == 0 {
+                        points[p].x = v;
+                    } else {
+                        points[p].y = v;
+                    }
+                }
+            }
+        }
+    }
+
     /// The reference dimensions measured at the solved `points`, by name.
     pub fn measures(&self, points: &[Vec2]) -> std::collections::BTreeMap<String, f64> {
         let all = Group { points: (0..self.names.len()).collect(), constraints: Vec::new() };

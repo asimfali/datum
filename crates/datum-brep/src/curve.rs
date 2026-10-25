@@ -150,6 +150,18 @@ impl Rolled {
         }
     }
 
+    /// The second derivative in `t` of [`Rolled::at`] at `t`: none on a segment, towards the
+    /// centre on an arc.
+    pub fn second(&self, t: f64) -> Vec2 {
+        match self.arc {
+            None => Vec2::new(0.0, 0.0),
+            Some(a) => {
+                let (p, phi) = (self.at(t).0, a.turn(self.from, self.to));
+                Vec2::new(-phi * phi * (p.x - a.center.x), -phi * phi * (p.y - a.center.y))
+            }
+        }
+    }
+
     /// The unit normal at `p` of the wall over the piece, `r` from the axis: left of the
     /// direction of the piece.
     pub fn normal(&self, p: Vec2, r: f64) -> Vec3 {
@@ -176,7 +188,7 @@ impl Rolled {
 
     /// Pieces of `t` to integrate over: the piece turns at most 45° in each, in the development
     /// and about the axis.
-    fn quadrature_pieces(&self) -> usize {
+    pub(crate) fn quadrature_pieces(&self) -> usize {
         let (_, turn, length) = self.measure();
         (turn.max(length / self.dev.neutral) / FRAC_PI_4).ceil().max(1.0) as usize
     }

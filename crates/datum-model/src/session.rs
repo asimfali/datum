@@ -70,6 +70,20 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "export_step",
+        description: "Write the final bodies as a STEP part (AP242, mm) to `path`, with validation properties (volume, area, \
+                      centroid). Geometry STEP has no exact type for (cuts through a rolled sheet along circles or oblique lines) \
+                      is refused, naming the features; with `approximate: true` it is written as B-splines within 1e-7 mm and \
+                      told of in `<path>.txt`. That is the engineer's decision: ask before passing it.",
+        params: || json!({"type": "object", "properties": {"path": {"type": "string"}, "approximate": {"type": "boolean"}}, "required": ["path"]}),
+        run: |s, p| {
+            let path = PathBuf::from(text(p, "path")?);
+            let approximate = p.get("approximate").and_then(Value::as_bool).unwrap_or(false);
+            let approximated = crate::write_step(&s.graph, &s.last, &path, approximate)?;
+            Ok(json!({"written": path.display().to_string(), "approximated_faces": approximated}))
+        },
+    },
+    Command {
         name: "save",
         description: "Save the model as canonical JSON. Without `path`: to the file it was opened from.",
         params: || json!({"type": "object", "properties": {"path": {"type": "string"}}}),
@@ -836,7 +850,7 @@ impl Session {
             })
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.graph != self.saved, "parameters": parameters,
-               "features": features})
+               "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }
 }
 

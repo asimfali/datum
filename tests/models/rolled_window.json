@@ -1,0 +1,216 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "radius": 500.0,
+    "t": 3.0,
+    "length": 400.0,
+    "k": 0.44,
+    "nx": 10,
+    "ny": 10,
+    "hole": 5,
+    "pitch": 10,
+    "margin": 15
+  },
+  "features": [
+    {
+      "name": "profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "a": [
+            500,
+            0
+          ],
+          "b": [
+            503,
+            0
+          ],
+          "c": [
+            0,
+            503
+          ],
+          "d": [
+            0,
+            500
+          ]
+        },
+        "lines": {
+          "start": {
+            "from": "a",
+            "to": "b"
+          },
+          "end": {
+            "from": "c",
+            "to": "d"
+          },
+          "base": {
+            "from": "o",
+            "to": "a",
+            "construction": true
+          },
+          "side": {
+            "from": "o",
+            "to": "d",
+            "construction": true
+          }
+        },
+        "arcs": {
+          "outer": {
+            "center": "o",
+            "from": "b",
+            "to": "c"
+          },
+          "inner": {
+            "center": "o",
+            "from": "a",
+            "to": "d"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "horizontal",
+            "line": "base"
+          },
+          {
+            "type": "horizontal",
+            "line": "start"
+          },
+          {
+            "type": "vertical",
+            "line": "side"
+          },
+          {
+            "type": "vertical",
+            "line": "end"
+          },
+          {
+            "type": "radius",
+            "arc": "inner",
+            "value": "radius"
+          },
+          {
+            "type": "radius",
+            "arc": "outer",
+            "value": "radius + t"
+          }
+        ]
+      }
+    },
+    {
+      "name": "sheet",
+      "op": "extrude",
+      "inputs": [
+        "profile"
+      ],
+      "z0": 0,
+      "z1": "length"
+    },
+    {
+      "name": "holes",
+      "op": "sketch",
+      "inputs": [
+        "sheet"
+      ],
+      "face": "5dbe804f4d82b3ba67524b27b0a1b656",
+      "k_factor": "k",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "a": [
+            20.3,
+            20.1
+          ],
+          "b": [
+            117,
+            20.4
+          ],
+          "c": [
+            121,
+            61
+          ],
+          "d": [
+            19,
+            58
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "o"
+          },
+          {
+            "type": "distance",
+            "points": [
+              "o",
+              "a"
+            ],
+            "value": "28.2842712474619"
+          },
+          {
+            "type": "horizontal",
+            "line": "ab"
+          },
+          {
+            "type": "horizontal",
+            "line": "cd"
+          },
+          {
+            "type": "vertical",
+            "line": "bc"
+          },
+          {
+            "type": "vertical",
+            "line": "da"
+          },
+          {
+            "type": "length",
+            "line": "ab",
+            "value": "100/3"
+          },
+          {
+            "type": "length",
+            "line": "bc",
+            "value": "40.7"
+          }
+        ]
+      }
+    },
+    {
+      "name": "window",
+      "op": "cut",
+      "inputs": [
+        "sheet",
+        "holes"
+      ]
+    }
+  ]
+}

@@ -30,6 +30,7 @@ pub enum Act {
     NewProject,
     OpenProject,
     CloseProject,
+    ExportStep,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -73,7 +74,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 22] = [
+pub const ACTIONS: [Action; 23] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -110,6 +111,15 @@ pub const ACTIONS: [Action; 22] = [
     action(Act::NewProject, "file.new_project", "New project…", "A folder made a project: new models and exports go into it", None, Anywhere),
     action(Act::OpenProject, "file.open_project", "Open project…", "New models, dialogs and the library work in it", None, Anywhere),
     action(Act::CloseProject, "file.close_project", "Close project", "Back to the folder beside the program", None, Anywhere),
+    action(
+        Act::ExportStep,
+        "file.export_step",
+        "Export STEP…",
+        "The model's bodies for other CADs (AP242, mm), with volume, area and centre of mass to check them by; \
+         what STEP has no exact type for is written as B-splines only if you agree",
+        None,
+        Anywhere,
+    ),
 ];
 
 impl Act {
