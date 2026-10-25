@@ -318,6 +318,8 @@ struct Viewer {
     /// Parameter definitions as typed, by name; a new one's name and definition.
     edits: BTreeMap<String, String>,
     new_parameter: (String, String),
+    /// Work plane offsets as typed in their rows, by feature.
+    offsets: BTreeMap<String, String>,
     /// Why the window refused what was asked, before the model was asked.
     local_error: Option<String>,
     /// The file the model was opened from or saved to.
@@ -401,6 +403,7 @@ impl Viewer {
             ui_ms: 0.0,
             adapter,
             edits: BTreeMap::new(),
+            offsets: BTreeMap::new(),
             new_parameter: Default::default(),
             local_error: None,
             path: None,
@@ -1059,12 +1062,15 @@ impl Viewer {
         while let Ok(m) = self.models.try_recv() {
             self.busy = false;
             // Fitted when it arrives, not when asked for: until then the view holds the last model.
-            self.fitted &= !m.opened;
+            // Again when it becomes empty or stops being so: a new model, its first sketch.
+            let empty = |m: &Model| m.scene.bounds.is_none();
+            self.fitted &= !m.opened && self.model.as_ref().map(empty) == Some(empty(&m));
             self.geometry = m.geometry.clone();
             self.version += 1;
             if let Some(p) = m.inspect["parameters"].as_object() {
                 self.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
+            self.offsets = offsets(&m.inspect);
             // A save that failed while closing the window: it stays open, the error shown.
             if self.quitting == Some(true) && m.error.is_some() {
                 self.quitting = None;
@@ -1265,14 +1271,14 @@ impl Viewer {
             self.busy = true;
         }
         for (name, text) in send {
-            // A plain number stays a number; anything else is an expression.
-            let value = text.trim().parse::<f64>().map_or_else(|_| json!(text.trim()), |v| json!(v));
-            let _ = self.requests.send(Request::SetParameter(name, value));
+            let _ = self.requests.send(Request::SetParameter(name, typed(&text)));
             self.busy = true;
         }
         ui.separator();
         ui.heading("Features");
         let (mut export, mut edit, mut enter) = (None, None, None);
+        // Out of `self` while the rows borrow it.
+        let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let name = f["name"].as_str().unwrap_or_default();
@@ -1302,6 +1308,23 @@ impl Viewer {
                             }
                         });
                     }
+                    // A work plane: what it is offset from, and the offset, changed in place.
+                    None if op == "plane" => {
+                        ui.horizontal(|ui| {
+                            let from = match (f["inputs"][0].as_str(), f["face"].is_string()) {
+                                (Some(body), true) => format!("a face of {body}"),
+                                (Some(plane), false) => plane.to_string(),
+                                (None, _) => f["base"].as_str().unwrap_or("xy").to_uppercase(),
+                            };
+                            ui.label(format!("✔ {name}  ·  {from} +"));
+                            let text = offsets.entry(name.to_string()).or_default();
+                            let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text("offset")).on_hover_text(FORMULAS);
+                            // Applied when the field is left changed, as a parameter's value is.
+                            if r.lost_focus() && *text != definition(&f["offset"]) {
+                                edit = Some((name.to_string(), json!({"offset": typed(text)})));
+                            }
+                        });
+                    }
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
                             ui.label(format!("✔ {name}  ·  {op}"));
@@ -1320,6 +1343,7 @@ impl Viewer {
                 }
             }
         });
+        self.offsets = offsets;
         if let Some((name, mut fields)) = edit {
             fields["name"] = json!(name);
             self.send(Request::Command("edit", fields));
@@ -1349,9 +1373,12 @@ impl Viewer {
         }
         self.pick_input(ui, rect, &r, offset);
         let Some(m) = &self.model else { return };
-        let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
-        // A model just opened is fitted once, where the view's shape is known.
-        if r.double_clicked() || (!self.fitted && m.scene.bounds.is_some()) {
+        let (lo, hi) = crate::origin::held(m.scene.bounds);
+        let radius = (hi - lo).dot(hi - lo).sqrt() * 0.5;
+        let scene = m.scene.bounds.map(|_| (m.scene.anchor(), radius));
+        // A model just opened is fitted once, where the view's shape is known; an empty one to
+        // the origin planes, until something is in it.
+        if r.double_clicked() || !self.fitted {
             match &mut self.sketch {
                 // On a dimension, a double click changes it; elsewhere it fits the view.
                 Some(sk) if r.double_clicked() => {
@@ -1359,12 +1386,11 @@ impl Viewer {
                         sk.fit(scene);
                     }
                 }
-                _ => self.camera.fit(m.scene.bounds, aspect),
+                _ => self.camera.fit(Some((lo, hi)), aspect),
             }
             self.fitted = true;
         }
         let anchor = m.scene.anchor();
-        let radius = scene.map_or(1.0, |s| s.1);
         let (view_projection, eye) = match &self.sketch {
             Some(sk) => sk.camera.matrices(anchor, aspect, radius),
             None => self.camera.matrices(anchor, aspect, radius),
@@ -1416,25 +1442,31 @@ impl Viewer {
                 sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
             }
         }
-        // Work planes always; while picking the origin planes too, and what a click would take
-        // lit (a face tinted).
+        // Work planes always; what a click would take lit while picking (a face tinted).
         let size = crate::origin::half(m.scene.bounds);
-        let screen = |q| on_screen(&view_projection, q - anchor, rect);
+        let (clip, screen) = (|q| crate::camera::clip(&view_projection, q - anchor), |c| in_rect(c, rect));
         let work: Vec<crate::origin::Square> = self.work_planes().into_iter().map(|(_, s)| s).collect();
         if self.sketch.is_none() {
             let lit = match (self.picking, self.under) {
                 (Some(_), Some(Under::Work(k))) => Some(k),
                 _ => None,
             };
-            crate::origin::paint(&painter, screen, &work, size, lit, true);
+            crate::origin::paint(&painter, clip, screen, &work, size, lit, true);
         }
-        if let Some(purpose) = self.picking {
-            let lit = match self.under {
+        // The origin planes while picking, and with no body yet: what work planes and sketches
+        // are placed by.
+        if self.picking.is_some() || (self.sketch.is_none() && m.scene.bodies.is_empty()) {
+            let lit = self.picking.and_then(|purpose| match self.under {
                 Some(Under::Origin(k)) => Some(k),
                 Some(_) => None,
                 None => (purpose == Purpose::Sketch).then_some(crate::origin::FIRST),
-            };
-            crate::origin::paint(&painter, screen, &crate::origin::origin_squares(), size, lit, false);
+            });
+            crate::origin::paint(&painter, clip, screen, &crate::origin::origin_squares(), size, lit, false);
+        }
+        if self.sketch.is_none() {
+            crate::origin::paint_origin(&painter, clip, screen, size);
+        }
+        if let Some(purpose) = self.picking {
             if let Some(Under::Face(f)) = self.under {
                 let mesh = &m.scene.bodies[f.body];
                 let mut tint = egui::Mesh::default();
@@ -1587,8 +1619,7 @@ impl Viewer {
             self.plane_draft = None;
         } else if add {
             let mut fields = from.clone();
-            let value = offset.trim();
-            fields["offset"] = value.parse::<f64>().map_or_else(|_| json!(value), |v| json!(v));
+            fields["offset"] = typed(offset);
             fields["op"] = json!("plane");
             let taken: Vec<String> = self.work_planes().into_iter().map(|(n, _)| n).collect();
             let features: Vec<&str> = self
@@ -1665,13 +1696,16 @@ impl Viewer {
     }
 }
 
+/// Where clip coordinates `c` of a point in front of the eye show in `rect`.
+fn in_rect(c: [f32; 4], rect: egui::Rect) -> egui::Pos2 {
+    rect.center() + egui::vec2(c[0] / c[3] * rect.width() * 0.5, -c[1] / c[3] * rect.height() * 0.5)
+}
+
 /// Where point `q` (relative to the anchor) shows in `rect` through view-projection `m`, if in
 /// front of the eye.
 fn on_screen(m: &[f32; 16], q: datum_math::Vec3, rect: egui::Rect) -> Option<egui::Pos2> {
-    let v = [q.x as f32, q.y as f32, q.z as f32, 1.0];
-    let row = |r: usize| (0..4).map(|c| m[c * 4 + r] * v[c]).sum::<f32>();
-    let w = row(3);
-    (w > 0.0).then(|| rect.center() + egui::vec2(row(0) / w * rect.width() * 0.5, -row(1) / w * rect.height() * 0.5))
+    let c = crate::camera::clip(m, q);
+    (c[3] > 0.0).then(|| in_rect(c, rect))
 }
 
 impl Viewer {
@@ -2191,6 +2225,23 @@ const FORMULAS: &str = "A parameter is a number or a formula of other parameters
 
 /// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
 /// expression as is.
+/// A value as typed: a plain number stays a number, anything else is an expression.
+fn typed(text: &str) -> Json {
+    let text = text.trim();
+    text.parse::<f64>().map_or_else(|_| json!(text), |v| json!(v))
+}
+
+/// The offsets of `inspect`'s work planes as their rows show them, by feature.
+fn offsets(inspect: &Json) -> BTreeMap<String, String> {
+    inspect["features"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|f| f["op"] == "plane")
+        .filter_map(|f| Some((f["name"].as_str()?.to_string(), definition(&f["offset"]))))
+        .collect()
+}
+
 fn definition(v: &Json) -> String {
     match (v.as_str(), v.as_f64()) {
         (Some(e), _) => e.to_string(),
@@ -2488,6 +2539,7 @@ mod tests {
         let (requests, inbox) = channel();
         let (_outbox, models) = channel();
         let edits = inspect["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
+        let planes = offsets(&inspect);
         let v = Viewer {
             requests,
             models,
@@ -2519,6 +2571,7 @@ mod tests {
             adapter: String::new(),
             edits,
             new_parameter: Default::default(),
+            offsets: planes,
             local_error: None,
             path: None,
             update: channel().1,
@@ -3314,5 +3367,30 @@ mod tests {
         h.run();
         let sent = inbox.try_recv();
         assert!(matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "panel", "side": "right"})), "an edit of the side");
+    }
+
+    /// A work plane's row says what it is offset from; its offset changes in place, Enter.
+    #[test]
+    fn a_work_plane_offset_changes_in_its_row() {
+        let (mut v, inbox) = viewer("work_planes.json");
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 600.0]).build_ui(|ui| {
+            egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+        });
+        h.run();
+        for row in ["✔ front  ·  XZ +", "✔ back  ·  front +", "✔ on_top  ·  a face of block +"] {
+            h.get_by_label(row);
+        }
+        h.get_all_by_value("-gap").next().unwrap().click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.get_all_by_value("-gap").next().unwrap().type_text("-gap - 5");
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent = inbox.try_recv();
+        assert!(
+            matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "back", "offset": "-gap - 5"})),
+            "an edit of the offset"
+        );
     }
 }
