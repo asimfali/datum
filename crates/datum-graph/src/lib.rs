@@ -160,7 +160,8 @@ pub struct Evaluation {
 impl Evaluation {
     /// Values of the features nothing else uses: what the model ends in. Failed ones are left out.
     /// An unfold uses nothing up: its blank is made for export, the sheet stays what the model
-    /// ends in.
+    /// ends in. Nor does a sketch or a work plane on a body's face (D150): they only refer to it,
+    /// the body stays.
     pub fn final_values(&self, graph: &Graph) -> Vec<&Value> {
         self.finals(graph).into_iter().map(|i| self.results[i as usize].as_ref().map(|v| v.as_ref())).filter_map(Result::ok).collect()
     }
@@ -168,7 +169,7 @@ impl Evaluation {
     /// The features [`Self::final_values`] are of, failed ones too.
     pub fn finals(&self, graph: &Graph) -> Vec<NodeIx> {
         let mut used = vec![false; graph.nodes.len()];
-        for n in graph.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. })) {
+        for n in graph.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. })) {
             for &i in &n.inputs {
                 used[i as usize] = true;
             }

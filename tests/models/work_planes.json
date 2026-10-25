@@ -1,0 +1,69 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "d": 20,
+    "gap": 15
+  },
+  "features": [
+    {
+      "name": "front",
+      "op": "plane",
+      "base": "xz",
+      "offset": "d"
+    },
+    {
+      "name": "back",
+      "op": "plane",
+      "inputs": ["front"],
+      "offset": "-gap"
+    },
+    {
+      "name": "outline",
+      "op": "sketch",
+      "inputs": ["front"],
+      "sketch": {
+        "points": {"a": [0, 0], "b": [40, 0], "c": [40, 25], "e": [0, 25]},
+        "lines": {
+          "bottom": {"from": "a", "to": "b"},
+          "right": {"from": "b", "to": "c"},
+          "top": {"from": "c", "to": "e"},
+          "left": {"from": "e", "to": "a"}
+        }
+      }
+    },
+    {
+      "name": "block",
+      "op": "extrude",
+      "inputs": ["outline", "back"],
+      "z0": 0
+    },
+    {
+      "name": "on_top",
+      "op": "plane",
+      "inputs": ["block"],
+      "face": "68c19c0c7235c9e62389a83bc4839355",
+      "offset": 5
+    },
+    {
+      "name": "boss_outline",
+      "op": "sketch",
+      "inputs": ["on_top"],
+      "sketch": {
+        "points": {"p": [10, -15], "q": [20, -15], "r": [20, -10], "s": [10, -10]},
+        "lines": {
+          "pq": {"from": "p", "to": "q"},
+          "qr": {"from": "q", "to": "r"},
+          "rs": {"from": "r", "to": "s"},
+          "sp": {"from": "s", "to": "p"}
+        }
+      }
+    },
+    {
+      "name": "boss",
+      "op": "extrude",
+      "inputs": ["boss_outline"],
+      "z1": 6,
+      "symmetric": true
+    }
+  ]
+}
