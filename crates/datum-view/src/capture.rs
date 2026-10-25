@@ -116,7 +116,7 @@ pub fn frame_times(scene: &Scene, full: Geometry, width: u32, height: u32, frame
                 for k in 0..=frames {
                     let mut camera = fitted;
                     camera.distance *= closeness;
-                    camera.yaw += std::f64::consts::TAU * f64::from(k) / f64::from(frames.max(1));
+                    camera.spin(std::f64::consts::TAU * f64::from(k) / f64::from(frames.max(1)));
                     let start = std::time::Instant::now();
                     let frame = o.frame(scene, geometry, version as u64 + 1, &camera);
                     let encoder = o.draw(&frame, smooth);

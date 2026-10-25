@@ -6,6 +6,7 @@ mod app;
 pub mod camera;
 pub mod capture;
 mod constrain;
+mod cube;
 mod dims;
 mod draw;
 mod icons;
