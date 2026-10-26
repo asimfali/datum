@@ -12,6 +12,7 @@ mod draw;
 mod icons;
 pub mod log;
 mod origin;
+mod pattern;
 pub mod render;
 pub mod scene;
 mod select;

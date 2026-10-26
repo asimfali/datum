@@ -36,6 +36,9 @@ pub enum Pick {
     /// A group, by its badge: under the cursor, it marks what the group holds; a click selects
     /// that (a selection holds elements, not groups).
     Group(String),
+    /// A copy of a pattern (D153), by the pattern's name and the copy's place: selected to be
+    /// shifted or left out.
+    Copy(String, [i64; 2]),
 }
 
 pub struct SketchEdit {
@@ -237,6 +240,8 @@ const PROJECTED: egui::Color32 = egui::Color32::from_rgb(150, 110, 20);
 const SELECTED: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 const DIMENSION: egui::Color32 = egui::Color32::from_rgb(20, 120, 60);
 const NAME: egui::Color32 = egui::Color32::from_rgb(110, 110, 120);
+/// A pattern's copies: drawn by the pattern, not by hand.
+const COPY: egui::Color32 = egui::Color32::from_rgb(90, 100, 120);
 const FILL: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(60, 110, 200, 45);
 
 /// A label as shown: its pixel offset from the middle of the picture, and its size.
@@ -648,8 +653,20 @@ impl SketchEdit {
                 Pick::Measure(n) => remove("measures", n),
                 Pick::Projection(n) => remove("project", n),
                 Pick::Constraint(k) => constraints.extend(sketch["constraints"].get(*k).cloned()),
-                Pick::Group(_) => {}
+                Pick::Group(_) | Pick::Copy(..) => {}
             }
+        }
+        // Copies removed are left out of their patterns.
+        let copies: Vec<(String, [i64; 2])> =
+            self.selected.iter().filter_map(|p| if let Pick::Copy(n, k) = p { Some((n.clone(), *k)) } else { None }).collect();
+        for (name, pattern) in self.patterns_changed(&copies, |p, k| {
+            let skip = p["skip"].as_array_mut();
+            match skip {
+                Some(s) => s.push(json!(k)),
+                None => p["skip"] = json!([k]),
+            }
+        }) {
+            params.entry("patterns").or_insert_with(|| json!({}))[name] = pattern;
         }
         if !constraints.is_empty() {
             params.insert("remove_constraints".into(), json!(constraints));
@@ -659,6 +676,65 @@ impl SketchEdit {
         }
         params.insert("name".into(), json!(self.feature));
         Some(Json::Object(params))
+    }
+
+    /// The patterns `copies` are of, each as its JSON with `change` made for each of its copies.
+    pub fn patterns_changed(&self, copies: &[(String, [i64; 2])], mut change: impl FnMut(&mut Json, [i64; 2])) -> BTreeMap<String, Json> {
+        let mut out: BTreeMap<String, Json> = BTreeMap::new();
+        for (name, k) in copies {
+            let Some(p) = self.json["sketch"]["patterns"].get(name) else { continue };
+            change(out.entry(name.clone()).or_insert_with(|| p.clone()), *k);
+        }
+        out
+    }
+
+    /// The copy of a pattern under pixel offset `(dx, dy)`: the cursor taken back into the
+    /// cell's place, near one of its curves. Not the cell itself.
+    pub fn copy_at(&self, dx: f64, dy: f64, height: f64) -> Option<Pick> {
+        let p = self.placed.as_ref().ok()?;
+        let q = self.camera.at(dx, dy, height);
+        let near = NEAR_CURVE * self.camera.per_pixel(height);
+        for c in &p.patterns {
+            let curves: Vec<Vec<[f64; 2]>> = c.cell.iter().filter_map(|n| Self::curve_points(p, n)).collect();
+            let pts = curves.iter().flatten();
+            let lo = pts.clone().fold([f64::INFINITY; 2], |m, v| [m[0].min(v[0]), m[1].min(v[1])]);
+            let hi = pts.fold([f64::NEG_INFINITY; 2], |m, v| [m[0].max(v[0]), m[1].max(v[1])]);
+            for (k, place) in c.at.iter().rev() {
+                if c.source && *k == [0, 0] {
+                    continue;
+                }
+                let (u, t) = ([q[0] - place.by.x, q[1] - place.by.y], place.turn);
+                let v = (t.x * u[0] + t.y * u[1], t.x * u[1] - t.y * u[0]);
+                if v.0 < lo[0] - near || v.0 > hi[0] + near || v.1 < lo[1] - near || v.1 > hi[1] + near {
+                    continue;
+                }
+                if curves.iter().any(|pts| pts.windows(2).any(|w| segment_distance(v, (w[0][0], w[0][1]), (w[1][0], w[1][1])) <= near)) {
+                    return Some(Pick::Copy(c.name.clone(), *k));
+                }
+            }
+        }
+        None
+    }
+
+    /// The outline of copy `k` of pattern `c`: its cell's curves moved there.
+    fn copy_outline(p: &Placed, c: &datum_ops::Copies, place: &datum_ops::Place) -> Vec<Vec<[f64; 2]>> {
+        c.cell
+            .iter()
+            .filter_map(|n| Self::curve_points(p, n))
+            .map(|pts| {
+                pts.into_iter()
+                    .map(|q| {
+                        let v = place.apply(datum_math::Vec2::new(q[0], q[1]));
+                        [v.x, v.y]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// [`Self::curve_points`], for the pattern menu.
+    pub fn curve_points_of(p: &Placed, name: &str) -> Option<Vec<[f64; 2]>> {
+        Self::curve_points(p, name)
     }
 
     /// The points of a curve of the placed sketch, in order, as polyline points: a line its two
@@ -806,7 +882,9 @@ impl SketchEdit {
                 return Some(l.pick);
             }
         }
-        self.curve_at(dx, dy, height).map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
+        self.curve_at(dx, dy, height)
+            .map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
+            .or_else(|| self.copy_at(dx, dy, height))
     }
 
     /// The point under pixel offset `(dx, dy)`, by its own name (a projection's too).
@@ -1074,6 +1152,22 @@ impl SketchEdit {
                     .find(|r| !taken.iter().any(|t| t.intersects(*r)));
                 if let Some(r) = at {
                     painter.galley(r.min, galley, NAME);
+                }
+            }
+        }
+        // The copies of patterns: each one's outline while few, the selected and the one under
+        // the cursor always; many are seen by the regions they open.
+        for c in &p.patterns {
+            let few = c.at.len() <= 2000;
+            for (k, place) in &c.at {
+                let pick = Pick::Copy(c.name.clone(), *k);
+                let lit = marked(&pick);
+                if (c.source && *k == [0, 0]) || !(few || lit) {
+                    continue;
+                }
+                let stroke = egui::Stroke::new(if lit { 2.5 } else { 1.0 }, if self.selected.contains(&pick) { SELECTED } else { COPY });
+                for pts in Self::copy_outline(p, c, place) {
+                    painter.add(egui::Shape::line(pts.into_iter().map(screen).collect(), stroke));
                 }
             }
         }
