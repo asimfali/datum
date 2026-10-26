@@ -1,46 +1,41 @@
-//! The side bar (D162), as in VS Code: an activity bar of icons at the window's edge, each a set of
-//! sections shown in the side bar one under another, folded or open, each scrolled by itself, the
-//! border between two open ones dragged. The model's set holds its parts, parameters and features;
-//! the sketch's, the sketch being edited and the library. The side bar goes left or right, hides,
-//! and is kept between runs.
-
-use std::collections::BTreeMap;
+//! The side bar (D162, D163), as in VS Code: an activity bar of icons at the window's edge, each a
+//! set of sections shown in the side bar one under another, folded or open, each as tall as what
+//! it holds (pressed to the one above; a long one scrolls). The part's set holds its parts,
+//! parameters and features, and while a sketch is edited the sketch under them. The side bar goes
+//! left or right, hides, and is kept between runs.
 
 use serde::{Deserialize, Serialize};
 
-/// A set of sections, by its icon.
+/// A set of sections, by its icon: the environments, as in Inventor (a part; drawings and
+/// assemblies come with their content).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Container {
-    Model,
-    Sketch,
+    Part,
 }
 
 impl Container {
-    pub const ALL: [Container; 2] = [Container::Model, Container::Sketch];
+    pub const ALL: [Container; 1] = [Container::Part];
 
     pub fn title(self) -> &'static str {
         match self {
-            Container::Model => "Model: parts, parameters, features",
-            Container::Sketch => "Sketch: the one being edited, and the library",
+            Container::Part => "Part: its parts, parameters, features and the sketch being edited",
         }
     }
 
     pub fn sections(self) -> &'static [Section] {
         match self {
-            Container::Model => &[Section::Parts, Section::Parameters, Section::Features],
-            Container::Sketch => &[Section::Sketch, Section::Library],
+            Container::Part => &[Section::Parts, Section::Parameters, Section::Features, Section::Sketch],
         }
     }
 }
 
 /// A section of the side bar.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Section {
     Parts,
     Parameters,
     Features,
     Sketch,
-    Library,
 }
 
 impl Section {
@@ -50,13 +45,11 @@ impl Section {
             Section::Parameters => "PARAMETERS",
             Section::Features => "FEATURES",
             Section::Sketch => "SKETCH",
-            Section::Library => "LIBRARY",
         }
     }
 }
 
-/// Where the side bar is and what it shows; what is folded, and the share of the height each open
-/// section takes.
+/// Where the side bar is and what it shows; what is folded.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SideBar {
@@ -64,18 +57,16 @@ pub struct SideBar {
     pub visible: bool,
     pub container: Container,
     pub folded: Vec<Section>,
-    pub weight: BTreeMap<Section, f32>,
 }
 
 impl Default for SideBar {
     fn default() -> Self {
-        Self { right: false, visible: true, container: Container::Model, folded: Vec::new(), weight: BTreeMap::new() }
+        Self { right: false, visible: true, container: Container::Part, folded: Vec::new() }
     }
 }
 
-/// Pixels of a section's title row, and of the border between two open sections.
+/// Pixels of a section's title row.
 pub const HEADER: f32 = 22.0;
-pub const BORDER: f32 = 5.0;
 
 impl SideBar {
     pub fn is_open(&self, s: Section) -> bool {
@@ -90,15 +81,6 @@ impl SideBar {
         }
     }
 
-    /// Its share of the height: as dragged, or at first the parts small and the features large.
-    pub fn weight(&self, s: Section) -> f32 {
-        self.weight.get(&s).copied().unwrap_or(match s {
-            Section::Parts => 0.6,
-            Section::Features => 1.4,
-            _ => 1.0,
-        })
-    }
-
     /// An icon clicked: its set shown; its set again, the side bar hidden (or shown back).
     pub fn click(&mut self, c: Container) {
         if self.container == c {
@@ -107,20 +89,6 @@ impl SideBar {
             self.container = c;
             self.visible = true;
         }
-    }
-
-    /// The border below `a` dragged by `dy` pixels of `body` pixels shared by the open sections:
-    /// `a` grows, `b` (the next open one) shrinks, neither below a tenth of a share.
-    pub fn drag(&mut self, a: Section, b: Section, dy: f32, body: f32) {
-        let open: f32 = self.container.sections().iter().filter(|s| self.is_open(**s)).map(|s| self.weight(*s)).sum();
-        if body <= 0.0 {
-            return;
-        }
-        let d = dy / body * open;
-        let (wa, wb) = (self.weight(a), self.weight(b));
-        let d = d.clamp(0.1 - wa, wb - 0.1);
-        self.weight.insert(a, wa + d);
-        self.weight.insert(b, wb - d);
     }
 
     pub fn to_text(&self) -> String {
@@ -159,20 +127,12 @@ pub fn icon(painter: &egui::Painter, c: egui::Pos2, container: Container, colour
     let stroke = egui::Stroke::new(1.8, colour);
     let at = |x: f32, y: f32| c + egui::vec2(x, y);
     match container {
-        // A tree: a trunk and three branches ending in boxes.
-        Container::Model => {
-            painter.line_segment([at(-7.0, -8.0), at(-7.0, 6.0)], stroke);
-            for y in [-6.0, 0.0, 6.0] {
-                painter.line_segment([at(-7.0, y), at(-2.0, y)], stroke);
-                painter.rect_stroke(egui::Rect::from_center_size(at(3.0, y), egui::vec2(8.0, 4.0)), 0.0, stroke, egui::StrokeKind::Middle);
-            }
-        }
-        // A pencil over a line.
-        Container::Sketch => {
-            let body = [at(-6.0, 4.0), at(-8.0, 8.0), at(-4.0, 6.0), at(6.0, -4.0), at(4.0, -6.0), at(-6.0, 4.0)];
-            painter.add(egui::Shape::line(body.to_vec(), stroke));
-            painter.line_segment([at(2.0, -4.0), at(4.0, -2.0)], stroke);
-            painter.line_segment([at(-2.0, 9.0), at(9.0, 9.0)], stroke);
+        // A part: a block seen from a corner.
+        Container::Part => {
+            let front = [at(-7.0, -2.0), at(2.0, -2.0), at(2.0, 8.0), at(-7.0, 8.0)];
+            painter.add(egui::Shape::closed_line(front.to_vec(), stroke));
+            painter.add(egui::Shape::line(vec![at(-7.0, -2.0), at(-2.0, -7.0), at(7.0, -7.0), at(2.0, -2.0)], stroke));
+            painter.add(egui::Shape::line(vec![at(7.0, -7.0), at(7.0, 3.0), at(2.0, 8.0)], stroke));
         }
     }
 }
@@ -182,21 +142,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn sections_fold_borders_move_and_are_kept() {
+    fn sections_fold_and_are_kept() {
         let mut b = SideBar::default();
         assert!(b.is_open(Section::Parts));
         b.toggle(Section::Parts);
         assert!(!b.is_open(Section::Parts));
-        b.drag(Section::Parameters, Section::Features, 50.0, 200.0);
-        assert!(b.weight(Section::Parameters) > 1.0 && b.weight(Section::Features) < 1.4);
-        b.drag(Section::Parameters, Section::Features, 10_000.0, 200.0);
-        assert!((b.weight(Section::Features) - 0.1).abs() < 1e-6, "not below a tenth");
-        b.click(Container::Model);
+        b.click(Container::Part);
         assert!(!b.visible, "its icon again: hidden");
-        b.click(Container::Sketch);
-        assert!(b.visible && b.container == Container::Sketch);
+        b.click(Container::Part);
+        assert!(b.visible);
         b.right = true;
         assert_eq!(SideBar::from_text(&b.to_text()), b);
         assert_eq!(SideBar::from_text("nonsense"), SideBar::default());
+        assert!(SideBar::from_text(r#"{"right": true, "weight": {"Parts": 2.0}}"#).right, "an older one read");
     }
 }
