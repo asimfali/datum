@@ -336,6 +336,10 @@ struct Viewer {
     library_filter: String,
     /// The selection being kept in the library.
     keeping: Option<Keep>,
+    /// The menu a held right click opened on the sketch (D155), and the hold: since when and
+    /// where; whether it opened the menu (then its release repeats nothing).
+    menu: Option<Menu>,
+    hold: Option<(f64, egui::Pos2, bool)>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
     /// The folder of the model last opened or saved: where the next one is opened from.
@@ -414,6 +418,8 @@ impl Viewer {
             library: crate::templates::library(None),
             library_filter: String::new(),
             keeping: None,
+            menu: None,
+            hold: None,
             quitting: None,
             worked_in: None,
             recent: Vec::new(),
@@ -956,6 +962,7 @@ impl Viewer {
     }
 
     fn leave(&mut self) {
+        self.menu = None;
         if self.sketch.is_some() || self.entering.is_some() {
             self.sketch = None;
             self.entering = None;
@@ -1196,7 +1203,7 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, a group: along or filling it, nothing: the axes), or the copies selected shifted, left out, their pattern edited · a pattern's badge (squares): a click selects its copies, the right button held on it edits the pattern",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
@@ -1368,6 +1375,7 @@ impl Viewer {
         let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
         if self.sketch.is_some() {
             self.sketch_input(ui, rect, &r, offset);
+            self.sketch_menu(ui.ctx());
         } else {
             self.view_input(ui, rect, &r);
         }
@@ -1711,6 +1719,157 @@ fn on_screen(m: &[f32; 16], q: datum_math::Vec3, rect: egui::Rect) -> Option<egu
 impl Viewer {
     /// The mouse and keys while a sketch is edited: hover, select, drag points, pan, zoom,
     /// delete, Esc.
+    /// The menu a held right click opened (D155): a pattern's numbers and the elements it
+    /// copies, or what to do with the copies selected; previewed as it changes, sent on Done.
+    fn sketch_menu(&mut self, ctx: &egui::Context) {
+        let (Some(sk), Some(menu)) = (&mut self.sketch, &mut self.menu) else { return };
+        let at = match menu {
+            Menu::Pattern { at, .. } | Menu::Copies { at, .. } | Menu::Note { at, .. } => *at,
+        };
+        // What the menu ends in: sent, and what follows it.
+        enum End {
+            Stay,
+            Cancel,
+            Send(serde_json::Map<String, Json>),
+            Edit(String),
+        }
+        let mut end = End::Stay;
+        let (esc, enter) = ctx.input(|i| (i.key_pressed(egui::Key::Escape), i.key_pressed(egui::Key::Enter)));
+        egui::Area::new(egui::Id::new("datum_sketch_menu")).fixed_pos(at).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| match menu {
+                Menu::Note { why, .. } => {
+                    ui.label(why.as_str());
+                    if ui.button("OK").clicked() || esc || enter {
+                        end = End::Cancel;
+                    }
+                }
+                Menu::Pattern { form, error, .. } => {
+                    ui.strong(form.title());
+                    if matches!(form.base, crate::pattern::Base::Along { closed: true, .. }) {
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut form.fill, true, "Fill it");
+                            ui.radio_value(&mut form.fill, false, "Along its outline");
+                        });
+                    }
+                    for (row, keys, flip) in form.rows() {
+                        ui.horizontal(|ui| {
+                            ui.label(row);
+                            if let Some(i) = flip
+                                && ui.selectable_label(form.flip[i], "⇄").on_hover_text("The other way").clicked()
+                            {
+                                form.flip[i] = !form.flip[i];
+                            }
+                        });
+                        egui::Grid::new(("datum_pattern_row", row)).num_columns(2).show(ui, |ui| {
+                            for k in keys {
+                                ui.label(crate::pattern::PatternForm::label(k));
+                                if let Some(t) = form.fields.get_mut(k) {
+                                    ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(t).hint_text("—"));
+                                }
+                                ui.end_row();
+                            }
+                        });
+                    }
+                    if matches!(form.base, crate::pattern::Base::Along { .. }) && !form.fill {
+                        ui.checkbox(&mut form.rotate, "Turn with the path");
+                    }
+                    ui.horizontal(|ui| {
+                        let hint = "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away";
+                        if ui.selectable_label(form.picking, "Select elements").on_hover_text(hint).clicked() && !form.picking {
+                            form.picking = true;
+                            sk.selected.clear();
+                        }
+                        match (form.cell.len(), &form.of) {
+                            (0, Some(of)) => ui.weak(format!("copies `{of}`")),
+                            (n, _) => ui.weak(format!("{n} picked")),
+                        };
+                    });
+                    if !form.picking || !form.cell.is_empty() || form.of.is_some() {
+                        *error = form.preview(sk).err().or_else(|| sk.placed.as_ref().err().cloned());
+                    }
+                    if let Some(e) = error {
+                        ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e.as_str());
+                    }
+                    let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
+                    ui.horizontal(|ui| {
+                        if (ui.add_enabled(ready, egui::Button::new("Done")).clicked() || (enter && ready))
+                            && let Ok(Some(p)) = form.patch()
+                        {
+                            end = End::Send(p);
+                        }
+                        if ui.button("Cancel").clicked() || esc {
+                            end = End::Cancel;
+                        }
+                    });
+                }
+                Menu::Copies { form, .. } => {
+                    let n = form.copies.len();
+                    match form.pattern() {
+                        Some(p) => ui.strong(format!("{n} {} of `{p}`", if n == 1 { "copy" } else { "copies" })),
+                        None => ui.strong(format!("{n} copies")),
+                    };
+                    let axes = form.axes(sk);
+                    egui::Grid::new("datum_copies_shift").num_columns(2).show(ui, |ui| {
+                        for (axis, shift) in axes.iter().zip(&mut form.shift) {
+                            ui.label(*axis);
+                            ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(shift).hint_text("0"));
+                            ui.end_row();
+                        }
+                    });
+                    let shifted = form.shifted(sk);
+                    form.preview(sk, &shifted);
+                    ui.horizontal(|ui| {
+                        if ui.button("Shift").on_hover_text("Move them by these numbers; both empty: back where the pattern puts them").clicked()
+                            || enter
+                        {
+                            end = End::Send(shifted);
+                        }
+                        if ui.button("Leave out").on_hover_text("No copy there (Del does it too)").clicked() {
+                            end = End::Send(form.removed(sk));
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        if let Some(p) = form.pattern().map(String::from) {
+                            if ui.button("Edit pattern…").clicked() {
+                                end = End::Edit(p.clone());
+                            }
+                            if ui.button("Delete pattern").on_hover_text("The copies go; the elements copied stay").clicked() {
+                                let mut m = serde_json::Map::new();
+                                m.insert("patterns".into(), json!({ p: null }));
+                                end = End::Send(m);
+                            }
+                        }
+                        if ui.button("Cancel").clicked() || esc {
+                            end = End::Cancel;
+                        }
+                    });
+                }
+            });
+        });
+        match end {
+            End::Stay => {}
+            End::Cancel => {
+                menu.cancel(sk);
+                self.menu = None;
+            }
+            End::Send(p) => {
+                menu.cancel(sk);
+                sk.selected.clear();
+                let params = sk.apply(p);
+                self.menu = None;
+                self.send(Request::Command("edit_sketch", params));
+            }
+            End::Edit(name) => {
+                menu.cancel(sk);
+                sk.selected.clear();
+                self.menu = Some(match crate::pattern::PatternForm::edit(sk, &name) {
+                    Ok(form) => Menu::Pattern { at, form, error: None },
+                    Err(why) => Menu::Note { at, why },
+                });
+            }
+        }
+    }
+
     fn sketch_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
         let Some(sk) = &mut self.sketch else { return };
         let h = f64::from(rect.height());
@@ -2107,6 +2266,7 @@ impl Viewer {
             // A group's badge stands for what the group holds.
             let picks = match sk.hover.clone() {
                 Some(Pick::Group(g)) => sk.group_picks(&g),
+                Some(Pick::Pattern(n)) => sk.pattern_copies(&n),
                 p => p.into_iter().collect(),
             };
             crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
@@ -2116,11 +2276,43 @@ impl Viewer {
             let (x, y) = offset.unwrap_or((0.0, 0.0));
             sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
         }
-        // A right click (a right drag pans): the last command again, as Enter, by the mouse alone.
-        if r.secondary_clicked() {
+        // A right click held still for half a second: the menu of what is selected (D155); a
+        // short one (a right drag pans): the last command again, as Enter, by the mouse alone.
+        let (now, pos, down, pressed) = ui.input(|i| (i.time, i.pointer.latest_pos(), i.pointer.secondary_down(), i.pointer.secondary_pressed()));
+        if pressed && r.hovered() {
+            self.hold = pos.map(|p| (now, p, false));
+        }
+        let mut held = false;
+        if let (Some((since, at, opened)), Some(p)) = (&mut self.hold, pos) {
+            if !down || p.distance(*at) > 6.0 {
+                // Let go, or moved: a drag pans. A hold that opened the menu repeats nothing.
+                held = *opened;
+                self.hold = None;
+            } else if !*opened && now - *since >= HOLD {
+                *opened = true;
+                if let Some(m) = self.menu.take() {
+                    m.cancel(sk);
+                }
+                self.menu = Some(Menu::open(sk, *at));
+            } else if !*opened {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+            }
+        }
+        if r.secondary_clicked() && !held && self.menu.is_none() {
             sk.draft.again();
         }
-        if !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
+        // The menu's pattern takes the selection as the elements to copy, previewed at once.
+        if let Some(Menu::Pattern { form, error, .. }) = &mut self.menu
+            && form.picking
+        {
+            let before = form.cell.len();
+            form.take_cell(sk);
+            if before == 0 && !form.cell.is_empty() {
+                form.suggest_steps(sk);
+            }
+            *error = form.preview(sk).err();
+        }
+        if self.menu.is_none() && !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
             // Enter: the last command again (an Enter that put a value in is not one).
             if !field_done.0 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 sk.draft.again();
@@ -2144,6 +2336,56 @@ impl Viewer {
         }
         if leave {
             self.leave();
+        }
+    }
+}
+
+/// How long a right click is held still to open the menu, in seconds.
+const HOLD: f64 = 0.5;
+
+/// The menu a held right click opens on the sketch: by what is selected, a pattern (its kind
+/// by the selection), or what to do with copies selected (D155).
+enum Menu {
+    Pattern {
+        at: egui::Pos2,
+        form: crate::pattern::PatternForm,
+        error: Option<String>,
+    },
+    Copies {
+        at: egui::Pos2,
+        form: crate::pattern::CopiesForm,
+    },
+    /// Nothing to do with this selection, and why.
+    Note {
+        at: egui::Pos2,
+        why: String,
+    },
+}
+
+impl Menu {
+    fn open(sk: &SketchEdit, at: egui::Pos2) -> Self {
+        // On a pattern's badge: that pattern, as it was given.
+        if let Some(Pick::Pattern(n)) = &sk.hover {
+            return match crate::pattern::PatternForm::edit(sk, n) {
+                Ok(form) => Menu::Pattern { at, form, error: None },
+                Err(why) => Menu::Note { at, why },
+            };
+        }
+        if let Some(form) = crate::pattern::CopiesForm::new(sk) {
+            return Menu::Copies { at, form };
+        }
+        match crate::pattern::base_of(sk) {
+            Ok(base) => Menu::Pattern { at, form: crate::pattern::PatternForm::new(sk, base), error: None },
+            Err(why) => Menu::Note { at, why },
+        }
+    }
+
+    /// Back to the sketch as it was before the menu's preview.
+    fn cancel(&self, sk: &mut SketchEdit) {
+        match self {
+            Menu::Pattern { form, .. } => form.cancel(sk),
+            Menu::Copies { form, .. } => form.preview(sk, &serde_json::Map::new()),
+            Menu::Note { .. } => {}
         }
     }
 }
@@ -2563,6 +2805,8 @@ mod tests {
             library: crate::templates::library(None),
             library_filter: String::new(),
             keeping: None,
+            menu: None,
+            hold: None,
             quitting: None,
             worked_in: None,
             recent: Vec::new(),
@@ -2782,6 +3026,82 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         assert_eq!(tool(&h), Tool::Line, "Enter: the last command again");
+    }
+
+    /// A right click held still opens the menu (D155) and repeats nothing: the point selected
+    /// first makes it a pattern around it; the hole picked next is copied, sent on Enter.
+    #[test]
+    fn a_held_right_click_opens_the_pattern_menu() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.draft.take_up(Tool::Line);
+        sk.draft.escape();
+        sk.selected = vec![Pick::Point("o".into())];
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+                v.sketch_menu(ui.ctx());
+            },
+            v,
+        );
+        let at = egui::pos2(40.0, 40.0);
+        h.run();
+        h.hover_at(at);
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+        for _ in 0..40 {
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        assert_eq!(h.state().sketch.as_ref().unwrap().draft.tool, Tool::Select, "held: no command again");
+        let Some(Menu::Pattern { form, .. }) = &mut h.state_mut().menu else { panic!("the pattern menu") };
+        assert_eq!(form.base, crate::pattern::Base::Around("o".into()));
+        form.fields.insert("n", "2".into());
+        form.fields.insert("angle", "90".into());
+        form.picking = true;
+        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve("right_hole".into())];
+        h.step();
+        assert_eq!(h.state().sketch.as_ref().unwrap().placed.as_ref().map(|p| p.patterns.len()), Ok(1), "previewed");
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(h.state().menu.is_none());
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(
+            sent.iter().any(|r| matches!(r, Request::Command("edit_sketch", p)
+                if p["patterns"]["pattern1"] == json!({"of": "right_hole", "around": {"center": "o", "count": 2.0, "angle": 90.0}}))),
+            "the pattern sent"
+        );
+        // The pattern's badge: a click selects its copy; held, the menu as it was given.
+        let sk = h.state().sketch.as_ref().unwrap();
+        let badge = sk.badges(400.0).into_iter().find(|b| b.pick == Pick::Pattern("pattern1".into())).expect("a badge");
+        let at = egui::pos2(300.0 + badge.at.0 as f32, 200.0 + badge.at.1 as f32);
+        h.hover_at(at);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.step();
+        }
+        assert_eq!(h.state().sketch.as_ref().unwrap().selected, [Pick::Copy("pattern1".into(), [1, 0])]);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+        for _ in 0..40 {
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern's menu") };
+        assert_eq!((form.name.as_str(), form.fields["n"].as_str(), form.fields["angle"].as_str()), ("pattern1", "2", "90"));
+        assert_eq!(form.of.as_deref(), Some("right_hole"));
     }
 
     /// In the dimension tool a click on a line opens its length at once; a click on a line

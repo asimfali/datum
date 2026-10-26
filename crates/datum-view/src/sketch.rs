@@ -36,6 +36,12 @@ pub enum Pick {
     /// A group, by its badge: under the cursor, it marks what the group holds; a click selects
     /// that (a selection holds elements, not groups).
     Group(String),
+    /// A copy of a pattern (D153), by the pattern's name and the copy's place: selected to be
+    /// shifted or left out.
+    Copy(String, [i64; 2]),
+    /// A pattern, by its badge: under the cursor, it marks its cell and copies; a click selects
+    /// the copies; the right button held on it opens the pattern's menu, filled.
+    Pattern(String),
 }
 
 pub struct SketchEdit {
@@ -112,6 +118,8 @@ pub enum Glyph {
     Concentric,
     /// A group's badge: the corners of a frame.
     Group,
+    /// A pattern's badge: squares in rows.
+    Pattern,
 }
 
 /// A geometric constraint's badge by one of the elements it ties: the constraint, its glyph,
@@ -224,6 +232,13 @@ pub(crate) fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colo
                 line((x, y), (x, y * 0.3));
             }
         }
+        Glyph::Pattern => {
+            for x in [-0.7, 0.7] {
+                for y in [-0.7, 0.7] {
+                    painter.rect_filled(egui::Rect::from_center_size(p(x, y), egui::vec2(0.6 * s, 0.6 * s)), 0.0, colour);
+                }
+            }
+        }
     }
 }
 
@@ -237,6 +252,8 @@ const PROJECTED: egui::Color32 = egui::Color32::from_rgb(150, 110, 20);
 const SELECTED: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 const DIMENSION: egui::Color32 = egui::Color32::from_rgb(20, 120, 60);
 const NAME: egui::Color32 = egui::Color32::from_rgb(110, 110, 120);
+/// A pattern's copies: drawn by the pattern, not by hand.
+const COPY: egui::Color32 = egui::Color32::from_rgb(90, 100, 120);
 const FILL: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(60, 110, 200, 45);
 
 /// A label as shown: its pixel offset from the middle of the picture, and its size.
@@ -492,6 +509,16 @@ impl SketchEdit {
         members.into_iter().map(|n| if points.get(&n).is_some() { Pick::Point(n) } else { Pick::Curve(n) }).collect()
     }
 
+    /// The copies of pattern `name`, as picks: what a click on its badge selects.
+    pub fn pattern_copies(&self, name: &str) -> Vec<Pick> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        p.patterns
+            .iter()
+            .filter(|c| c.name == name)
+            .flat_map(|c| c.at.iter().filter(|(k, _)| !(c.source && *k == [0, 0])).map(|(k, _)| Pick::Copy(c.name.clone(), *k)))
+            .collect()
+    }
+
     /// The group whose elements are exactly those selected, if one is.
     pub fn selected_group(&self) -> Option<String> {
         self.groups().into_keys().find(|g| {
@@ -648,8 +675,20 @@ impl SketchEdit {
                 Pick::Measure(n) => remove("measures", n),
                 Pick::Projection(n) => remove("project", n),
                 Pick::Constraint(k) => constraints.extend(sketch["constraints"].get(*k).cloned()),
-                Pick::Group(_) => {}
+                Pick::Group(_) | Pick::Copy(..) | Pick::Pattern(_) => {}
             }
+        }
+        // Copies removed are left out of their patterns.
+        let copies: Vec<(String, [i64; 2])> =
+            self.selected.iter().filter_map(|p| if let Pick::Copy(n, k) = p { Some((n.clone(), *k)) } else { None }).collect();
+        for (name, pattern) in self.patterns_changed(&copies, |p, k| {
+            let skip = p["skip"].as_array_mut();
+            match skip {
+                Some(s) => s.push(json!(k)),
+                None => p["skip"] = json!([k]),
+            }
+        }) {
+            params.entry("patterns").or_insert_with(|| json!({}))[name] = pattern;
         }
         if !constraints.is_empty() {
             params.insert("remove_constraints".into(), json!(constraints));
@@ -659,6 +698,65 @@ impl SketchEdit {
         }
         params.insert("name".into(), json!(self.feature));
         Some(Json::Object(params))
+    }
+
+    /// The patterns `copies` are of, each as its JSON with `change` made for each of its copies.
+    pub fn patterns_changed(&self, copies: &[(String, [i64; 2])], mut change: impl FnMut(&mut Json, [i64; 2])) -> BTreeMap<String, Json> {
+        let mut out: BTreeMap<String, Json> = BTreeMap::new();
+        for (name, k) in copies {
+            let Some(p) = self.json["sketch"]["patterns"].get(name) else { continue };
+            change(out.entry(name.clone()).or_insert_with(|| p.clone()), *k);
+        }
+        out
+    }
+
+    /// The copy of a pattern under pixel offset `(dx, dy)`: the cursor taken back into the
+    /// cell's place, near one of its curves. Not the cell itself.
+    pub fn copy_at(&self, dx: f64, dy: f64, height: f64) -> Option<Pick> {
+        let p = self.placed.as_ref().ok()?;
+        let q = self.camera.at(dx, dy, height);
+        let near = NEAR_CURVE * self.camera.per_pixel(height);
+        for c in &p.patterns {
+            let curves: Vec<Vec<[f64; 2]>> = c.cell.iter().filter_map(|n| Self::curve_points(p, n)).collect();
+            let pts = curves.iter().flatten();
+            let lo = pts.clone().fold([f64::INFINITY; 2], |m, v| [m[0].min(v[0]), m[1].min(v[1])]);
+            let hi = pts.fold([f64::NEG_INFINITY; 2], |m, v| [m[0].max(v[0]), m[1].max(v[1])]);
+            for (k, place) in c.at.iter().rev() {
+                if c.source && *k == [0, 0] {
+                    continue;
+                }
+                let (u, t) = ([q[0] - place.by.x, q[1] - place.by.y], place.turn);
+                let v = (t.x * u[0] + t.y * u[1], t.x * u[1] - t.y * u[0]);
+                if v.0 < lo[0] - near || v.0 > hi[0] + near || v.1 < lo[1] - near || v.1 > hi[1] + near {
+                    continue;
+                }
+                if curves.iter().any(|pts| pts.windows(2).any(|w| segment_distance(v, (w[0][0], w[0][1]), (w[1][0], w[1][1])) <= near)) {
+                    return Some(Pick::Copy(c.name.clone(), *k));
+                }
+            }
+        }
+        None
+    }
+
+    /// The outline of copy `k` of pattern `c`: its cell's curves moved there.
+    fn copy_outline(p: &Placed, c: &datum_ops::Copies, place: &datum_ops::Place) -> Vec<Vec<[f64; 2]>> {
+        c.cell
+            .iter()
+            .filter_map(|n| Self::curve_points(p, n))
+            .map(|pts| {
+                pts.into_iter()
+                    .map(|q| {
+                        let v = place.apply(datum_math::Vec2::new(q[0], q[1]));
+                        [v.x, v.y]
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// [`Self::curve_points`], for the pattern menu.
+    pub fn curve_points_of(p: &Placed, name: &str) -> Option<Vec<[f64; 2]>> {
+        Self::curve_points(p, name)
     }
 
     /// The points of a curve of the placed sketch, in order, as polyline points: a line its two
@@ -806,7 +904,9 @@ impl SketchEdit {
                 return Some(l.pick);
             }
         }
-        self.curve_at(dx, dy, height).map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
+        self.curve_at(dx, dy, height)
+            .map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
+            .or_else(|| self.copy_at(dx, dy, height))
     }
 
     /// The point under pixel offset `(dx, dy)`, by its own name (a projection's too).
@@ -910,6 +1010,21 @@ impl SketchEdit {
             }
             out.push(Badge { pick: Pick::Group(g), glyph: Glyph::Group, at });
         }
+        // A pattern's badge by the upper right of its cell.
+        for c in &p.patterns {
+            let cell: Vec<Pick> = c.cell.iter().map(|n| Pick::Curve(n.clone())).collect();
+            let corner = self
+                .points_of(&cell)
+                .iter()
+                .filter_map(|n| px(n))
+                .fold(None, |c: Option<(f64, f64)>, q| Some(c.map_or(q, |c| (c.0.max(q.0), c.1.min(q.1)))));
+            let Some((x, y)) = corner else { continue };
+            let mut at = (x + 14.0, y - 14.0);
+            while out.iter().any(|b| (b.at.0 - at.0).abs() < step && (b.at.1 - at.1).abs() < step) {
+                at.0 += step;
+            }
+            out.push(Badge { pick: Pick::Pattern(c.name.clone()), glyph: Glyph::Pattern, at });
+        }
         if !self.constraints {
             return out;
         }
@@ -997,6 +1112,12 @@ impl SketchEdit {
         };
         let mut held = match &self.hover {
             Some(Pick::Group(g)) => self.group_picks(g),
+            // A pattern's badge: its copies, and the curves they copy.
+            Some(Pick::Pattern(n)) => {
+                let mut v = self.pattern_copies(n);
+                v.extend(p.patterns.iter().filter(|c| &c.name == n).flat_map(|c| c.cell.iter().map(|m| Pick::Curve(m.clone()))));
+                v
+            }
             Some(p) => self.referred(p),
             None => Vec::new(),
         };
@@ -1077,6 +1198,22 @@ impl SketchEdit {
                 }
             }
         }
+        // The copies of patterns: each one's outline while few, the selected and the one under
+        // the cursor always; many are seen by the regions they open.
+        for c in &p.patterns {
+            let few = c.at.len() <= 2000;
+            for (k, place) in &c.at {
+                let pick = Pick::Copy(c.name.clone(), *k);
+                let lit = marked(&pick);
+                if (c.source && *k == [0, 0]) || !(few || lit) {
+                    continue;
+                }
+                let stroke = egui::Stroke::new(if lit { 2.5 } else { 1.0 }, if self.selected.contains(&pick) { SELECTED } else { COPY });
+                for pts in Self::copy_outline(p, c, place) {
+                    painter.add(egui::Shape::line(pts.into_iter().map(screen).collect(), stroke));
+                }
+            }
+        }
         // The model's origin: its axes, faint, to the edges of the view.
         if let Some(o) = p.solved.points.get(datum_ops::ORIGIN) {
             let at = screen([o.x, o.y]);
@@ -1100,7 +1237,7 @@ impl SketchEdit {
             painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
             painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
             paint_glyph(painter, r.center(), b.glyph, c);
-            if let (Pick::Group(g), true) = (&b.pick, self.names) {
+            if let (Pick::Group(g) | Pick::Pattern(g), true) = (&b.pick, self.names) {
                 painter.text(r.right_center() + egui::vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, g, egui::FontId::proportional(11.0), c);
             }
         }
