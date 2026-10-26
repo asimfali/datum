@@ -22,6 +22,8 @@ serde_json = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true, features = ["default_fonts", "persistence", "wgpu", "x11", "wayland"] }
 egui-wgpu = { workspace = true }
+egui_dock = { workspace = true }
+serde = { workspace = true }
 pollster = { workspace = true }
 png = { workspace = true }
 rfd = { workspace = true }

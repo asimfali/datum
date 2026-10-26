@@ -49,6 +49,9 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             viewer.maximized = maximized;
             viewer.recent = serde_json::from_str(&kept(RECENT)).unwrap_or_default();
             viewer.recent_projects = serde_json::from_str(&kept(RECENT_PROJECTS)).unwrap_or_default();
+            if let Some(layout) = cc.storage.and_then(|s| s.get_string(LAYOUT)) {
+                viewer.dock = crate::dock::from_text(&layout);
+            }
             // The project left open opens again, if it is still one (D142).
             if let Some(p) = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p)) {
                 viewer.set_project(Some(p));
@@ -62,6 +65,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
 /// Whether the window was left maximized: kept apart from the window's size and place, which
 /// Windows does not restore maximized.
 const MAXIMIZED: &str = "datum_maximized";
+/// Where the panes are (D161).
+const LAYOUT: &str = "datum_layout";
 
 /// The models opened or saved last, the latest first: state beside the window's, not a setting.
 const RECENT: &str = "datum_recent";
@@ -183,6 +188,8 @@ struct Model {
     scene_ms: f64,
     /// The feature each body of the scene is of.
     bodies: Vec<String>,
+    /// The flat blanks of the model, by feature (D161).
+    flats: Vec<(String, datum_graph::ValueRef)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
     editing: Option<(String, Context)>,
 }
@@ -277,8 +284,17 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         });
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
+        let flats: Vec<(String, datum_graph::ValueRef)> = graph
+            .nodes()
+            .iter()
+            .zip(&evaluation.results)
+            .filter_map(|(n, r)| r.as_ref().ok().filter(|v| v.flat().is_some()).map(|v| (n.name.clone(), v.clone())))
+            .collect();
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
+        if models
+            .send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, flats, editing: context })
+            .is_err()
+        {
             return;
         }
         ctx.request_repaint();
@@ -351,6 +367,9 @@ struct Viewer {
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
+    /// The panes and where they are (D161); what the flat pattern pane looks at.
+    dock: egui_dock::DockState<crate::dock::Pane>,
+    flat: crate::flat::FlatView,
     /// A part or variant being named: below which level (none: a part, below the frame), and the
     /// name typed.
     new_level: Option<(Option<String>, String)>,
@@ -434,6 +453,8 @@ impl Viewer {
             library_filter: String::new(),
             keeping: None,
             menu: None,
+            dock: crate::dock::default_layout(),
+            flat: crate::flat::FlatView::default(),
             new_level: None,
             hold: None,
             quitting: None,
@@ -1449,6 +1470,7 @@ impl Viewer {
         ui.heading("Features");
         let (mut export, mut edit, mut enter) = (None, None, None);
         let mut toggle: Option<(String, Json)> = None;
+        let mut show_flat: Option<String> = None;
         // Out of `self` while the rows borrow it.
         let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1465,6 +1487,9 @@ impl Viewer {
                         ui.horizontal(|ui| {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
+                            if ui.button("Show").on_hover_text("In the flat pattern pane").clicked() {
+                                show_flat = Some(bare.to_string());
+                            }
                             if ui.button("DXF…").clicked()
                                 && let Some(p) = self.exported("dxf", name).save_file()
                             {
@@ -1552,6 +1577,10 @@ impl Viewer {
         });
         self.offsets = offsets;
         let edit = edit.or(toggle);
+        if let Some(f) = show_flat {
+            self.flat.chosen = Some(f);
+            crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+        }
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
         }
@@ -2746,6 +2775,9 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
+            Act::BrowserPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Browser),
+            Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
+            Act::LibraryPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Library),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
         }
@@ -2796,6 +2828,21 @@ impl Viewer {
                     sk.draft.take_up(tool(act));
                 }
             }
+            Act::BrowserPane | Act::FlatPane | Act::LibraryPane => {
+                use crate::dock::Pane;
+                let pane = match act {
+                    Act::BrowserPane => Pane::Browser,
+                    Act::FlatPane => Pane::Flat,
+                    _ => Pane::Library,
+                };
+                // A pane on is closed; off, it opens where it belongs.
+                if crate::dock::is_open(&self.dock, pane) {
+                    crate::dock::close(&mut self.dock, pane);
+                } else {
+                    crate::dock::open(&mut self.dock, pane);
+                }
+            }
+            Act::ResetLayout => self.dock = crate::dock::default_layout(),
         }
     }
 
@@ -2851,6 +2898,11 @@ impl Viewer {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
             self.item(ui, Act::SmoothEdges, true);
+            ui.separator();
+            for act in [Act::BrowserPane, Act::FlatPane, Act::LibraryPane] {
+                self.item(ui, act, true);
+            }
+            self.item(ui, Act::ResetLayout, true);
         });
         ui.menu_button("Sketch", |ui| {
             self.item(ui, Act::NewSketch, true);
@@ -2905,6 +2957,82 @@ fn recent_menu(ui: &mut egui::Ui, list: &[PathBuf], there: impl Fn(&std::path::P
     chosen
 }
 
+/// The panes' contents (D161).
+struct Tabs<'a> {
+    v: &'a mut Viewer,
+    rs: Option<&'a egui_wgpu::RenderState>,
+}
+
+impl egui_dock::TabViewer for Tabs<'_> {
+    type Tab = crate::dock::Pane;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(("datum_pane", *tab))
+    }
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        use crate::dock::Pane;
+        match tab {
+            Pane::Browser => self.v.side(ui),
+            Pane::Library if self.v.sketch.is_some() => self.v.palette(ui),
+            Pane::Library => {
+                ui.weak("Sketch elements to place: open a sketch.");
+            }
+            Pane::Model => {
+                let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
+                ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(r, g, b));
+                if let Some(rs) = self.rs {
+                    self.v.viewport(ui, rs);
+                }
+            }
+            Pane::Flat => self.v.flat_pane(ui),
+        }
+    }
+
+    fn is_closeable(&self, tab: &Self::Tab) -> bool {
+        *tab != crate::dock::Pane::Model
+    }
+
+    fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
+        use crate::dock::Pane;
+        match tab {
+            Pane::Browser | Pane::Library => [false, true],
+            Pane::Model | Pane::Flat => [false, false],
+        }
+    }
+}
+
+impl Viewer {
+    /// The flat pattern pane: the model's blank (of the several, the one chosen), or what makes one.
+    fn flat_pane(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = &self.model else {
+            ui.weak("No model open.");
+            return;
+        };
+        if m.flats.is_empty() {
+            ui.weak("No flat pattern here: a sheet's blank comes from an unfold feature for now.");
+            return;
+        }
+        let chosen = self.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
+        if m.flats.len() > 1 {
+            egui::ComboBox::from_id_salt("datum_flat_chosen").selected_text(chosen.as_str()).show_ui(ui, |ui| {
+                for (n, _) in &m.flats {
+                    if ui.selectable_label(*n == chosen, n.as_str()).clicked() {
+                        self.flat.chosen = Some(n.clone());
+                    }
+                }
+            });
+        }
+        if let Some(f) = m.flats.iter().find(|(n, _)| *n == chosen).and_then(|(_, v)| v.flat()) {
+            self.flat.show(ui, f);
+        }
+    }
+}
+
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
@@ -2937,24 +3065,25 @@ impl eframe::App for Viewer {
         }
         self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
-        egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
-        if self.sketch.is_some() {
-            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
-        }
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
         self.settings_said(ui.ctx());
-        let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
-            if let Some(rs) = frame.wgpu_render_state() {
-                self.viewport(ui, rs);
-            }
+        // The panes, docked where the engineer put them (D161).
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
+            let style = egui_dock::Style::from_egui(ui.style());
+            egui_dock::DockArea::new(&mut dock)
+                .style(style)
+                .show_add_buttons(false)
+                .show_inside(ui, &mut Tabs { v: self, rs: frame.wgpu_render_state() });
+            self.dock = dock;
         });
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
+        storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(RECENT, json!(self.recent).to_string());
         storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
         storage.set_string(PROJECT, json!(self.project).to_string());
@@ -2992,6 +3121,7 @@ mod tests {
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
                 bodies: Vec::new(),
+                flats: Vec::new(),
                 editing: None,
             }),
             busy: false,
@@ -3020,6 +3150,8 @@ mod tests {
             library_filter: String::new(),
             keeping: None,
             menu: None,
+            dock: crate::dock::default_layout(),
+            flat: crate::flat::FlatView::default(),
             new_level: None,
             hold: None,
             quitting: None,

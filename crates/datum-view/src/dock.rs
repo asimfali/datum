@@ -1,0 +1,125 @@
+//! The window's panes (D161): the model's browser, the 3D view, the flat pattern and the library,
+//! each a tab of a dock (`egui_dock`): put left or right, below, together as tabs, closed and
+//! opened again from the View menu. The layout is kept between runs.
+
+use egui_dock::{DockState, NodeIndex};
+use serde::{Deserialize, Serialize};
+
+/// A pane of the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Pane {
+    /// Parts, parameters, features, the sketch being edited.
+    Browser,
+    /// The model in 3D.
+    Model,
+    /// The flat pattern of a body.
+    Flat,
+    /// Sketch elements to place.
+    Library,
+}
+
+impl Pane {
+    pub fn title(self) -> &'static str {
+        match self {
+            Pane::Browser => "Model",
+            Pane::Model => "3D",
+            Pane::Flat => "Flat pattern",
+            Pane::Library => "Library",
+        }
+    }
+}
+
+/// The layout a first run starts with: the browser on the left, the 3D view, the library on the
+/// right; the flat pattern opens beside the 3D view when asked for.
+pub fn default_layout() -> DockState<Pane> {
+    let mut dock = DockState::new(vec![Pane::Model]);
+    let surface = dock.main_surface_mut();
+    let [model, _] = surface.split_left(NodeIndex::root(), 0.24, vec![Pane::Browser]);
+    surface.split_right(model, 0.82, vec![Pane::Library]);
+    dock
+}
+
+/// Whether `pane` is open.
+pub fn is_open(dock: &DockState<Pane>, pane: Pane) -> bool {
+    dock.find_tab(&pane).is_some()
+}
+
+/// Opens `pane` where it belongs (the flat pattern to the right of the 3D view, the others by
+/// the default layout's sides), or brings it to the front if open.
+pub fn open(dock: &mut DockState<Pane>, pane: Pane) {
+    if let Some(path) = dock.find_tab(&pane) {
+        let _ = dock.set_active_tab(path);
+        return;
+    }
+    let beside = |dock: &DockState<Pane>| dock.find_main_surface_tab(&Pane::Model).map(|(n, _)| n);
+    let surface_root = NodeIndex::root();
+    match (pane, beside(dock)) {
+        (Pane::Flat, Some(model)) => {
+            dock.main_surface_mut().split_right(model, 0.5, vec![pane]);
+        }
+        (Pane::Browser, _) => {
+            dock.main_surface_mut().split_left(surface_root, 0.24, vec![pane]);
+        }
+        (Pane::Library, _) => {
+            dock.main_surface_mut().split_right(surface_root, 0.82, vec![pane]);
+        }
+        _ => dock.push_to_first_leaf(pane),
+    }
+}
+
+/// Closes `pane` if it is open.
+pub fn close(dock: &mut DockState<Pane>, pane: Pane) {
+    if let Some(path) = dock.find_tab(&pane) {
+        dock.remove_tab(path);
+    }
+}
+
+/// The layout as kept between runs, and back; a layout that does not read (or lacks the 3D
+/// view) gives the default.
+pub fn to_text(dock: &DockState<Pane>) -> String {
+    serde_json::to_string(dock).unwrap_or_default()
+}
+
+pub fn from_text(text: &str) -> DockState<Pane> {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text) else { return default_layout() };
+    unbounded(&mut v);
+    serde_json::from_value::<DockState<Pane>>(v).ok().filter(|d| is_open(d, Pane::Model)).unwrap_or_else(default_layout)
+}
+
+/// A pane's rectangle not laid out yet is infinite, which JSON writes as null: read as 0, it is
+/// laid out again on the next frame anyway.
+fn unbounded(v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::Object(m) => {
+            if m.len() == 2 && m.contains_key("x") && m.contains_key("y") {
+                for c in m.values_mut().filter(|c| c.is_null()) {
+                    *c = serde_json::json!(0.0);
+                }
+            }
+            m.values_mut().for_each(unbounded);
+        }
+        serde_json::Value::Array(a) => a.iter_mut().for_each(unbounded),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn panes_open_close_and_are_kept() {
+        let mut dock = default_layout();
+        assert!(is_open(&dock, Pane::Browser) && is_open(&dock, Pane::Model) && is_open(&dock, Pane::Library));
+        assert!(!is_open(&dock, Pane::Flat));
+        open(&mut dock, Pane::Flat);
+        assert!(is_open(&dock, Pane::Flat));
+        close(&mut dock, Pane::Browser);
+        assert!(!is_open(&dock, Pane::Browser));
+        let back = from_text(&to_text(&dock));
+        assert!(is_open(&back, Pane::Flat) && !is_open(&back, Pane::Browser));
+        assert!(is_open(&from_text("not a layout"), Pane::Browser), "the default");
+        open(&mut dock, Pane::Browser);
+        assert!(is_open(&dock, Pane::Browser));
+    }
+}

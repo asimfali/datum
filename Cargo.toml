@@ -32,6 +32,7 @@ datum-view = { path = "crates/datum-view" }
 egui = "0.36"
 eframe = { version = "0.36", default-features = false }
 egui-wgpu = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
 pollster = "0.4"
 png = "0.18"
 rfd = "0.17"
