@@ -33,6 +33,10 @@ pub enum Act {
     Home,
     LookAt,
     WorkPlane,
+    SideBar,
+    SideBarRight,
+    FlatPane,
+    ResetLayout,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -76,7 +80,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 25] = [
+pub const ACTIONS: [Action; 29] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -145,6 +149,17 @@ pub const ACTIONS: [Action; 25] = [
         plain(Key::CloseBracket),
         Model,
     ),
+    action(Act::SideBar, "view.side_bar", "Side bar", "The sections of the icon chosen on the activity bar", ctrl(Key::B), Anywhere),
+    action(Act::SideBarRight, "view.side_bar_right", "Side bar on the right", "The activity bar and side bar at the right edge", None, Anywhere),
+    action(
+        Act::FlatPane,
+        "view.flat_pane",
+        "Flat pattern",
+        "The flat blank in a pane beside the 3D view; drag its tab to put it elsewhere",
+        None,
+        Anywhere,
+    ),
+    action(Act::ResetLayout, "view.reset_layout", "Reset layout", "The panes and the side bar back as a first run has them", None, Anywhere),
 ];
 
 impl Act {

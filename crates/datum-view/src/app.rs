@@ -49,6 +49,10 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             viewer.maximized = maximized;
             viewer.recent = serde_json::from_str(&kept(RECENT)).unwrap_or_default();
             viewer.recent_projects = serde_json::from_str(&kept(RECENT_PROJECTS)).unwrap_or_default();
+            if let Some(layout) = cc.storage.and_then(|s| s.get_string(LAYOUT)) {
+                viewer.dock = crate::dock::from_text(&layout);
+            }
+            viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
             // The project left open opens again, if it is still one (D142).
             if let Some(p) = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p)) {
                 viewer.set_project(Some(p));
@@ -62,6 +66,10 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
 /// Whether the window was left maximized: kept apart from the window's size and place, which
 /// Windows does not restore maximized.
 const MAXIMIZED: &str = "datum_maximized";
+/// Where the panes are (D161).
+const LAYOUT: &str = "datum_layout";
+/// The side bar's side, set and sections (D162).
+const SIDE_BAR: &str = "datum_side_bar";
 
 /// The models opened or saved last, the latest first: state beside the window's, not a setting.
 const RECENT: &str = "datum_recent";
@@ -183,6 +191,8 @@ struct Model {
     scene_ms: f64,
     /// The feature each body of the scene is of.
     bodies: Vec<String>,
+    /// The flat blanks of the model, by feature (D161).
+    flats: Vec<(String, datum_graph::ValueRef)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
     editing: Option<(String, Context)>,
 }
@@ -277,8 +287,17 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         });
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
+        let flats: Vec<(String, datum_graph::ValueRef)> = graph
+            .nodes()
+            .iter()
+            .zip(&evaluation.results)
+            .filter_map(|(n, r)| r.as_ref().ok().filter(|v| v.flat().is_some()).map(|v| (n.name.clone(), v.clone())))
+            .collect();
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
-        if models.send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, editing: context }).is_err() {
+        if models
+            .send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, flats, editing: context })
+            .is_err()
+        {
             return;
         }
         ctx.request_repaint();
@@ -351,6 +370,11 @@ struct Viewer {
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
+    /// The activity bar and side bar: which side, what it shows, folded sections (D162).
+    side_bar: crate::sidebar::SideBar,
+    /// The panes and where they are (D161); what the flat pattern pane looks at.
+    dock: egui_dock::DockState<crate::dock::Pane>,
+    flat: crate::flat::FlatView,
     /// A part or variant being named: below which level (none: a part, below the frame), and the
     /// name typed.
     new_level: Option<(Option<String>, String)>,
@@ -434,6 +458,9 @@ impl Viewer {
             library_filter: String::new(),
             keeping: None,
             menu: None,
+            side_bar: crate::sidebar::SideBar::default(),
+            dock: crate::dock::default_layout(),
+            flat: crate::flat::FlatView::default(),
             new_level: None,
             hold: None,
             quitting: None,
@@ -979,6 +1006,7 @@ impl Viewer {
 
     fn leave(&mut self) {
         self.menu = None;
+        self.side_bar.container = crate::sidebar::Container::Model;
         if self.sketch.is_some() || self.entering.is_some() {
             self.sketch = None;
             self.entering = None;
@@ -1034,6 +1062,9 @@ impl Viewer {
                 None => {
                     let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
                     self.sketch = Some(SketchEdit::new(name, context.clone(), json, params, scene));
+                    // Its sections in the side bar while it is edited (D162).
+                    self.side_bar.container = crate::sidebar::Container::Sketch;
+                    self.side_bar.visible = true;
                     self.entering = None;
                 }
             },
@@ -1124,7 +1155,6 @@ impl Viewer {
         let mut choose: Option<String> = None;
         let mut show: Option<(String, bool)> = None;
         let mut remove: Option<String> = None;
-        ui.heading("Parts").on_hover_text(LEVELS);
         let frame = "The frame: the shared sketches, planes and parameters every part and variant takes";
         if ui.selectable_label(active.is_none(), "Frame").on_hover_text(frame).clicked() {
             go = Some(None);
@@ -1231,7 +1261,86 @@ impl Viewer {
         }
     }
 
+    /// The side bar (D162): the model's state, then the sections of the set its icon chose, one
+    /// under another.
     fn side(&mut self, ui: &mut egui::Ui) {
+        use crate::sidebar::{BORDER, HEADER, Section, header};
+        self.status(ui);
+        ui.separator();
+        let list = self.side_bar.container.sections();
+        let open: Vec<Section> = list.iter().copied().filter(|s| self.side_bar.is_open(*s)).collect();
+        let fixed = HEADER * list.len() as f32 + BORDER * open.len().saturating_sub(1) as f32;
+        let body = (ui.available_height() - fixed - 4.0).max(0.0);
+        let total: f32 = open.iter().map(|s| self.side_bar.weight(*s)).sum::<f32>().max(1e-6);
+        for s in list {
+            let hint = match s {
+                Section::Parts => LEVELS,
+                Section::Parameters => FORMULAS,
+                _ => "",
+            };
+            if header(ui, *s, self.side_bar.is_open(*s), hint) {
+                self.side_bar.toggle(*s);
+            }
+            if !self.side_bar.is_open(*s) {
+                continue;
+            }
+            let h = body * self.side_bar.weight(*s) / total;
+            let w = ui.available_width();
+            ui.allocate_ui_with_layout(egui::vec2(w, h), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_min_size(egui::vec2(w, h));
+                egui::ScrollArea::vertical().id_salt(("datum_section", *s)).auto_shrink([false, false]).max_height(h).show(ui, |ui| match s {
+                    Section::Parts => {
+                        let editing = self.sketch.is_some();
+                        ui.add_enabled_ui(!editing, |ui| self.levels_panel(ui)).response.on_disabled_hover_text("Done with the sketch first");
+                    }
+                    Section::Parameters => self.parameters_section(ui),
+                    Section::Features => self.features_section(ui),
+                    Section::Sketch if self.sketch.is_some() => self.sketch_section(ui),
+                    Section::Sketch => {
+                        ui.weak("No sketch open: S starts one, the pencil of a sketch feature edits it.");
+                    }
+                    Section::Library => self.palette(ui),
+                });
+            });
+            // The border to the next open section, dragged.
+            if let Some(next) = open.iter().skip_while(|o| *o != s).nth(1) {
+                let (rect, r) = ui.allocate_exact_size(egui::vec2(w, BORDER), egui::Sense::drag());
+                let r = r.on_hover_cursor(egui::CursorIcon::ResizeVertical);
+                if r.hovered() || r.dragged() {
+                    ui.painter().hline(rect.x_range(), rect.center().y, ui.visuals().widgets.hovered.fg_stroke);
+                }
+                if r.dragged() {
+                    self.side_bar.drag(*s, *next, r.drag_delta().y, body);
+                }
+            }
+        }
+    }
+
+    /// The activity bar (D162): an icon for each set of sections; clicked, the side bar shows it,
+    /// or hides if it shows it already.
+    fn activity(&mut self, ui: &mut egui::Ui) {
+        use crate::sidebar::Container;
+        ui.add_space(6.0);
+        for c in Container::ALL {
+            let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
+            let on = self.side_bar.visible && self.side_bar.container == c;
+            let visuals = ui.visuals();
+            let colour = if on || r.hovered() { visuals.strong_text_color() } else { visuals.weak_text_color() };
+            crate::sidebar::icon(ui.painter(), rect.center(), c, colour);
+            if on {
+                // The mark of the set shown, at the edge toward the side bar.
+                let x = if self.side_bar.right { rect.left() + 1.0 } else { rect.right() - 1.0 };
+                ui.painter().vline(x, rect.y_range(), egui::Stroke::new(2.0, visuals.strong_text_color()));
+            }
+            if r.on_hover_text(c.title()).clicked() {
+                self.side_bar.click(c);
+            }
+        }
+    }
+
+    /// The model's state over the side bar: the version, the journal of actions, the last error
+    /// and what the last commands changed beyond what they asked.
+    fn status(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
             ui.label(if self.busy { "Opening…" } else { "No model open." });
             return;
@@ -1251,6 +1360,11 @@ impl Viewer {
         for n in &m.notes {
             ui.colored_label(egui::Color32::from_rgb(190, 120, 0), format!("⚠ {n}"));
         }
+    }
+
+    /// The sketch being edited: its state, tools, constraints, groups, Done.
+    fn sketch_section(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = &self.model else { return };
         let mut done = false;
         let mut sent = Vec::new();
         if let Some(sk) = &mut self.sketch {
@@ -1359,19 +1473,22 @@ impl Viewer {
             done = ui.button("Done").clicked();
             ui.separator();
         }
-        let editing = self.sketch.is_some();
-        ui.add_enabled_ui(!editing, |ui| self.levels_panel(ui)).response.on_disabled_hover_text("Done with the sketch first");
+        if done {
+            self.leave();
+        }
+        for r in sent {
+            self.send(r);
+        }
+    }
+
+    /// The parameters of the level worked in: changed in place, added, removed or back as the
+    /// parent has them.
+    fn parameters_section(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else { return };
-        // What the level worked in does to its parent: the marks on its features and parameters.
         let level = m.inspect["level"].as_str();
-        let this = m.inspect["levels"].as_array().into_iter().flatten().find(|l| Some(l["name"].as_str().unwrap_or_default()) == level);
-        let names = |key: &str| -> Vec<String> {
-            this.and_then(|l| l[key].as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
-        };
-        let (changed, own, set) = (names("changed"), names("own"), names("parameters_set"));
-        let own_parameters = names("own_parameters");
+        let (changed, own, set, own_parameters) = marks(&m.inspect);
         let mut revert: Option<Json> = None;
-        ui.heading("Parameters").on_hover_text(FORMULAS);
+        let _ = (&changed, &own);
         let params = m.inspect["parameters"].as_object().cloned().unwrap_or_default();
         let (mut send, mut removed, mut added) = (Vec::new(), None, false);
         let field = |ui: &mut egui::Ui, text: &mut String, hint: &str| {
@@ -1445,10 +1562,20 @@ impl Viewer {
             let _ = self.requests.send(Request::SetParameter(name, typed(&text)));
             self.busy = true;
         }
-        ui.separator();
-        ui.heading("Features");
+        if let Some(r) = revert {
+            self.send(Request::Command("revert", r));
+        }
+    }
+
+    /// The features of the level worked in: their state, on or off, what to do with each.
+    fn features_section(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = &self.model else { return };
+        let (changed, own, set, own_parameters) = marks(&m.inspect);
+        let mut revert: Option<Json> = None;
+        let _ = (&set, &own_parameters);
         let (mut export, mut edit, mut enter) = (None, None, None);
         let mut toggle: Option<(String, Json)> = None;
+        let mut show_flat: Option<String> = None;
         // Out of `self` while the rows borrow it.
         let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1465,6 +1592,9 @@ impl Viewer {
                         ui.horizontal(|ui| {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
+                            if ui.button("Show").on_hover_text("In the flat pattern pane").clicked() {
+                                show_flat = Some(bare.to_string());
+                            }
                             if ui.button("DXF…").clicked()
                                 && let Some(p) = self.exported("dxf", name).save_file()
                             {
@@ -1552,6 +1682,10 @@ impl Viewer {
         });
         self.offsets = offsets;
         let edit = edit.or(toggle);
+        if let Some(f) = show_flat {
+            self.flat.chosen = Some(f);
+            crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+        }
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
         }
@@ -1564,12 +1698,6 @@ impl Viewer {
         }
         if let Some(name) = enter {
             self.enter(name);
-        }
-        if done {
-            self.leave();
-        }
-        for r in sent {
-            self.send(r);
         }
     }
 
@@ -2544,6 +2672,17 @@ impl Viewer {
     }
 }
 
+/// What the level worked in does to its parent, by `inspect`: the parent's features it changes,
+/// its own features, the parent's parameters it sets otherwise, its own parameters.
+fn marks(inspect: &Json) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+    let level = inspect["level"].as_str();
+    let this = inspect["levels"].as_array().into_iter().flatten().find(|l| Some(l["name"].as_str().unwrap_or_default()) == level);
+    let names = |key: &str| -> Vec<String> {
+        this.and_then(|l| l[key].as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
+    };
+    (names("changed"), names("own"), names("parameters_set"), names("own_parameters"))
+}
+
 /// What parts and variants are, for the hint over them (D152).
 const LEVELS: &str = "A part takes the frame's sketches and adds its own features; a variant takes its part and changes only what \
                       differs (a length, a few holes): a change to the frame or the part reaches every variant. A dot: changed here, \
@@ -2746,6 +2885,9 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
+            Act::SideBar => self.side_bar.visible,
+            Act::SideBarRight => self.side_bar.right,
+            Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
         }
@@ -2795,6 +2937,20 @@ impl Viewer {
                 if let Some(sk) = &mut self.sketch {
                     sk.draft.take_up(tool(act));
                 }
+            }
+            Act::SideBar => self.side_bar.visible = !self.side_bar.visible,
+            Act::SideBarRight => self.side_bar.right = !self.side_bar.right,
+            Act::FlatPane => {
+                // On, closed; off, it opens where it belongs.
+                if crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
+                    crate::dock::close(&mut self.dock, crate::dock::Pane::Flat);
+                } else {
+                    crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+                }
+            }
+            Act::ResetLayout => {
+                self.dock = crate::dock::default_layout();
+                self.side_bar = crate::sidebar::SideBar::default();
             }
         }
     }
@@ -2851,6 +3007,11 @@ impl Viewer {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
             self.item(ui, Act::SmoothEdges, true);
+            ui.separator();
+            for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
+                self.item(ui, act, true);
+            }
+            self.item(ui, Act::ResetLayout, true);
         });
         ui.menu_button("Sketch", |ui| {
             self.item(ui, Act::NewSketch, true);
@@ -2905,6 +3066,76 @@ fn recent_menu(ui: &mut egui::Ui, list: &[PathBuf], there: impl Fn(&std::path::P
     chosen
 }
 
+/// The panes' contents (D161).
+struct Tabs<'a> {
+    v: &'a mut Viewer,
+    rs: Option<&'a egui_wgpu::RenderState>,
+}
+
+impl egui_dock::TabViewer for Tabs<'_> {
+    type Tab = crate::dock::Pane;
+
+    fn id(&mut self, tab: &mut Self::Tab) -> egui::Id {
+        egui::Id::new(("datum_pane", *tab))
+    }
+
+    fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
+        tab.title().into()
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        use crate::dock::Pane;
+        match tab {
+            Pane::Model => {
+                let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
+                ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(r, g, b));
+                if let Some(rs) = self.rs {
+                    self.v.viewport(ui, rs);
+                }
+            }
+            Pane::Flat => self.v.flat_pane(ui),
+        }
+    }
+
+    fn is_closeable(&self, tab: &Self::Tab) -> bool {
+        *tab != crate::dock::Pane::Model
+    }
+
+    fn scroll_bars(&self, tab: &Self::Tab) -> [bool; 2] {
+        use crate::dock::Pane;
+        match tab {
+            Pane::Model | Pane::Flat => [false, false],
+        }
+    }
+}
+
+impl Viewer {
+    /// The flat pattern pane: the model's blank (of the several, the one chosen), or what makes one.
+    fn flat_pane(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = &self.model else {
+            ui.weak("No model open.");
+            return;
+        };
+        if m.flats.is_empty() {
+            ui.weak("No flat pattern here: a sheet's blank comes from an unfold feature for now.");
+            return;
+        }
+        let chosen = self.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
+        if m.flats.len() > 1 {
+            egui::ComboBox::from_id_salt("datum_flat_chosen").selected_text(chosen.as_str()).show_ui(ui, |ui| {
+                for (n, _) in &m.flats {
+                    if ui.selectable_label(*n == chosen, n.as_str()).clicked() {
+                        self.flat.chosen = Some(n.clone());
+                    }
+                }
+            });
+        }
+        if let Some(f) = m.flats.iter().find(|(n, _)| *n == chosen).and_then(|(_, v)| v.flat()) {
+            self.flat.show(ui, f);
+        }
+    }
+}
+
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let start = std::time::Instant::now();
@@ -2937,24 +3168,36 @@ impl eframe::App for Viewer {
         }
         self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
-        egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| self.side(ui));
-        if self.sketch.is_some() {
-            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| self.palette(ui));
+        // The activity bar at the edge, the side bar beside it (D162).
+        let (activity, side) = if self.side_bar.right {
+            (egui::Panel::right("datum_activity"), egui::Panel::right("datum_side"))
+        } else {
+            (egui::Panel::left("datum_activity"), egui::Panel::left("datum_side"))
+        };
+        activity.exact_size(44.0).resizable(false).show(ui, |ui| self.activity(ui));
+        if self.side_bar.visible {
+            side.default_size(360.0).min_size(240.0).show(ui, |ui| self.side(ui));
         }
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
         self.settings_said(ui.ctx());
-        let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
-        egui::CentralPanel::default().frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(r, g, b))).show(ui, |ui| {
-            if let Some(rs) = frame.wgpu_render_state() {
-                self.viewport(ui, rs);
-            }
+        // The panes, docked where the engineer put them (D161).
+        egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
+            let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
+            let style = egui_dock::Style::from_egui(ui.style());
+            egui_dock::DockArea::new(&mut dock)
+                .style(style)
+                .show_add_buttons(false)
+                .show_inside(ui, &mut Tabs { v: self, rs: frame.wgpu_render_state() });
+            self.dock = dock;
         });
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
+        storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
+        storage.set_string(SIDE_BAR, self.side_bar.to_text());
         storage.set_string(RECENT, json!(self.recent).to_string());
         storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
         storage.set_string(PROJECT, json!(self.project).to_string());
@@ -2992,6 +3235,7 @@ mod tests {
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
                 bodies: Vec::new(),
+                flats: Vec::new(),
                 editing: None,
             }),
             busy: false,
@@ -3020,6 +3264,9 @@ mod tests {
             library_filter: String::new(),
             keeping: None,
             menu: None,
+            side_bar: crate::sidebar::SideBar::default(),
+            dock: crate::dock::default_layout(),
+            flat: crate::flat::FlatView::default(),
             new_level: None,
             hold: None,
             quitting: None,
@@ -3855,6 +4102,30 @@ mod tests {
         drop(h);
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if p["name"] == last.as_str() && p["enabled"] == false)));
+    }
+
+    /// The activity bar shows the side bar's sets (D162): the model's sections under one another;
+    /// its icon again hides the side bar.
+    #[test]
+    fn the_activity_bar_shows_and_hides_the_side_bar() {
+        let (mut v, _inbox) = viewer("wall_variants.json");
+        let mut h = egui_kittest::Harness::builder().with_size([420.0, 700.0]).with_pixels_per_point(1.0).build_ui(|ui| {
+            egui::Panel::left("datum_activity").exact_size(44.0).resizable(false).show(ui, |ui| v.activity(ui));
+            if v.side_bar.visible {
+                egui::Panel::left("datum_side").exact_size(360.0).show(ui, |ui| v.side(ui));
+            }
+        });
+        h.run();
+        for title in ["PARTS", "PARAMETERS", "FEATURES"] {
+            assert!(h.query_by_label(title).is_some(), "{title}");
+        }
+        if std::env::var_os("DATUM_PICTURE").is_some() {
+            let image = h.render().unwrap();
+            image.save(std::env::var("DATUM_PICTURE").unwrap()).unwrap();
+        }
+        drop(h);
+        v.side_bar.click(crate::sidebar::Container::Model);
+        assert!(!v.side_bar.visible);
     }
 
     /// Ctrl+W closes and Ctrl+N gives an empty model (issue #57), with a button focused by Tab
