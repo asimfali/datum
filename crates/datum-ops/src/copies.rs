@@ -20,6 +20,8 @@ pub struct Copies {
     pub name: String,
     /// The profile curves copied: the group's lines, arcs and circles, not construction.
     pub cell: BTreeSet<String>,
+    /// The profile curves of its path (not construction): a guide, no profile of the sketch.
+    pub guide: BTreeSet<String>,
     pub at: At,
     /// Copy `(0, 0)` is the cell itself (`count`), keeping its IDs; filling, the cell is a sample.
     pub source: bool,
@@ -78,11 +80,14 @@ pub(crate) fn place_patterns(sketch: &Sketch, s: &Placed) -> Result<Vec<Copies>,
     let construction = |n: &str| {
         s.lines.get(n).map(|l| l.construction).or_else(|| s.arcs.get(n).map(|a| a.construction)).or_else(|| s.circles.get(n).map(|c| c.construction))
     };
-    let cells: Vec<BTreeSet<String>> =
-        sketch.patterns.values().map(|p| members(&p.of).into_iter().filter(|n| curve(n) && construction(n) == Some(false)).collect()).collect();
-    let copied: BTreeSet<&String> = cells.iter().flatten().collect();
+    let profiles = |n: &str| members(n).into_iter().filter(|n| curve(n) && construction(n) == Some(false)).collect::<BTreeSet<String>>();
+    let cells: Vec<BTreeSet<String>> = sketch.patterns.values().map(|p| profiles(&p.of)).collect();
+    // A path is a guide, as construction geometry is: drawn as profile lines (as in Inventor), it
+    // bounds nothing.
+    let guides: Vec<BTreeSet<String>> = sketch.patterns.values().map(|p| p.along.as_ref().map(|a| profiles(&a.path)).unwrap_or_default()).collect();
+    let copied: BTreeSet<&String> = cells.iter().chain(&guides).flatten().collect();
     let mut out = Vec::with_capacity(sketch.patterns.len());
-    for ((name, p), cell) in sketch.patterns.iter().zip(&cells) {
+    for (((name, p), cell), guide) in sketch.patterns.iter().zip(&cells).zip(&guides) {
         let bad = |m: String| BrepError::Sketch(format!("pattern `{name}`: {m}"));
         let base = loops(TopoId::derive("sketch.cell").finish(), s, &|n| cell.contains(n), false).map_err(|e| bad(format!("its cell: {e}")))?;
         if base.is_empty() {
@@ -156,7 +161,7 @@ pub(crate) fn place_patterns(sketch: &Sketch, s: &Placed) -> Result<Vec<Copies>,
             }
         };
         let at: At = at.into_iter().filter(|(k, _)| !p.skip.contains(k)).collect();
-        out.push(Copies { name: name.clone(), cell: cell.clone(), at, source, area, loops: base.len(), region });
+        out.push(Copies { name: name.clone(), cell: cell.clone(), guide: guide.clone(), at, source, area, loops: base.len(), region });
     }
     keep_apart(s, &out)?;
     Ok(out)
@@ -562,11 +567,16 @@ pub(crate) fn moved(l: &ProfileLoop, place: Place, feature: TopoId, name: &str, 
     }
 }
 
+/// The curves that are no profile of the sketch's own: the cells patterns copy, and their paths.
+pub(crate) fn aside(patterns: &[Copies]) -> BTreeSet<&String> {
+    patterns.iter().flat_map(|p| p.cell.iter().chain(&p.guide)).collect()
+}
+
 /// Copies touch nothing and hold nothing: no other copy, no other profile of the sketch.
 fn keep_apart(s: &Placed, patterns: &[Copies]) -> Result<(), BrepError> {
     let id = TopoId::derive("sketch.check").finish();
-    let copied: BTreeSet<&String> = patterns.iter().flat_map(|p| &p.cell).collect();
-    let own = loops(id, s, &|n| !copied.contains(&n.to_string()), false)?;
+    let aside = aside(patterns);
+    let own = loops(id, s, &|n| !aside.contains(&n.to_string()), false)?;
     let mut all: Vec<(Option<usize>, ProfileLoop)> = own.into_iter().map(|l| (None, l.ring)).collect();
     for (k, p) in patterns.iter().enumerate() {
         let base = loops(id, s, &|n| p.cell.contains(n), false)?;

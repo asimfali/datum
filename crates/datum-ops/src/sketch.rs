@@ -488,6 +488,14 @@ pub fn place(
             bytes(c.as_bytes());
         }
         bytes(&[u8::from(p.source)]);
+        // A path of profile lines bounds nothing (D157); one of construction lines changed
+        // nothing, its sketch hashed as before.
+        if !p.guide.is_empty() {
+            bytes(b"guide");
+            for c in &p.guide {
+                bytes(c.as_bytes());
+            }
+        }
         for (k, d) in &p.at {
             bytes(&[k[0].to_le_bytes(), k[1].to_le_bytes(), d.by.x.to_bits().to_le_bytes(), d.by.y.to_bits().to_le_bytes()].concat());
             // A grid's copies are not turned: their bytes as before turns (D153).
@@ -613,8 +621,8 @@ pub(crate) struct Copy {
 /// Profile loops: the sketch's own (see [`loops`]), then each copy of each pattern, its cell's
 /// loops moved.
 pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, BrepError> {
-    let copied: std::collections::BTreeSet<&String> = s.patterns.iter().flat_map(|p| &p.cell).collect();
-    let mut out = loops(feature, s, &|n| !copied.contains(&n.to_string()), false)?;
+    let aside = crate::copies::aside(&s.patterns);
+    let mut out = loops(feature, s, &|n| !aside.contains(&n.to_string()), false)?;
     for (pattern, p) in s.patterns.iter().enumerate() {
         let base = loops(feature, s, &|n| p.cell.contains(n), false)?;
         out.par_extend(p.at.par_iter().flat_map_iter(|&(k, d)| {
