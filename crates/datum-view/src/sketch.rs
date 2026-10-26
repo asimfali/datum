@@ -39,6 +39,9 @@ pub enum Pick {
     /// A copy of a pattern (D153), by the pattern's name and the copy's place: selected to be
     /// shifted or left out.
     Copy(String, [i64; 2]),
+    /// A pattern, by its badge: under the cursor, it marks its cell and copies; a click selects
+    /// the copies; the right button held on it opens the pattern's menu, filled.
+    Pattern(String),
 }
 
 pub struct SketchEdit {
@@ -115,6 +118,8 @@ pub enum Glyph {
     Concentric,
     /// A group's badge: the corners of a frame.
     Group,
+    /// A pattern's badge: squares in rows.
+    Pattern,
 }
 
 /// A geometric constraint's badge by one of the elements it ties: the constraint, its glyph,
@@ -225,6 +230,13 @@ pub(crate) fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colo
             for (x, y) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
                 line((x, y), (x * 0.3, y));
                 line((x, y), (x, y * 0.3));
+            }
+        }
+        Glyph::Pattern => {
+            for x in [-0.7, 0.7] {
+                for y in [-0.7, 0.7] {
+                    painter.rect_filled(egui::Rect::from_center_size(p(x, y), egui::vec2(0.6 * s, 0.6 * s)), 0.0, colour);
+                }
             }
         }
     }
@@ -497,6 +509,16 @@ impl SketchEdit {
         members.into_iter().map(|n| if points.get(&n).is_some() { Pick::Point(n) } else { Pick::Curve(n) }).collect()
     }
 
+    /// The copies of pattern `name`, as picks: what a click on its badge selects.
+    pub fn pattern_copies(&self, name: &str) -> Vec<Pick> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        p.patterns
+            .iter()
+            .filter(|c| c.name == name)
+            .flat_map(|c| c.at.iter().filter(|(k, _)| !(c.source && *k == [0, 0])).map(|(k, _)| Pick::Copy(c.name.clone(), *k)))
+            .collect()
+    }
+
     /// The group whose elements are exactly those selected, if one is.
     pub fn selected_group(&self) -> Option<String> {
         self.groups().into_keys().find(|g| {
@@ -653,7 +675,7 @@ impl SketchEdit {
                 Pick::Measure(n) => remove("measures", n),
                 Pick::Projection(n) => remove("project", n),
                 Pick::Constraint(k) => constraints.extend(sketch["constraints"].get(*k).cloned()),
-                Pick::Group(_) | Pick::Copy(..) => {}
+                Pick::Group(_) | Pick::Copy(..) | Pick::Pattern(_) => {}
             }
         }
         // Copies removed are left out of their patterns.
@@ -988,6 +1010,21 @@ impl SketchEdit {
             }
             out.push(Badge { pick: Pick::Group(g), glyph: Glyph::Group, at });
         }
+        // A pattern's badge by the upper right of its cell.
+        for c in &p.patterns {
+            let cell: Vec<Pick> = c.cell.iter().map(|n| Pick::Curve(n.clone())).collect();
+            let corner = self
+                .points_of(&cell)
+                .iter()
+                .filter_map(|n| px(n))
+                .fold(None, |c: Option<(f64, f64)>, q| Some(c.map_or(q, |c| (c.0.max(q.0), c.1.min(q.1)))));
+            let Some((x, y)) = corner else { continue };
+            let mut at = (x + 14.0, y - 14.0);
+            while out.iter().any(|b| (b.at.0 - at.0).abs() < step && (b.at.1 - at.1).abs() < step) {
+                at.0 += step;
+            }
+            out.push(Badge { pick: Pick::Pattern(c.name.clone()), glyph: Glyph::Pattern, at });
+        }
         if !self.constraints {
             return out;
         }
@@ -1075,6 +1112,12 @@ impl SketchEdit {
         };
         let mut held = match &self.hover {
             Some(Pick::Group(g)) => self.group_picks(g),
+            // A pattern's badge: its copies, and the curves they copy.
+            Some(Pick::Pattern(n)) => {
+                let mut v = self.pattern_copies(n);
+                v.extend(p.patterns.iter().filter(|c| &c.name == n).flat_map(|c| c.cell.iter().map(|m| Pick::Curve(m.clone()))));
+                v
+            }
             Some(p) => self.referred(p),
             None => Vec::new(),
         };
@@ -1194,7 +1237,7 @@ impl SketchEdit {
             painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
             painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
             paint_glyph(painter, r.center(), b.glyph, c);
-            if let (Pick::Group(g), true) = (&b.pick, self.names) {
+            if let (Pick::Group(g) | Pick::Pattern(g), true) = (&b.pick, self.names) {
                 painter.text(r.right_center() + egui::vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, g, egui::FontId::proportional(11.0), c);
             }
         }

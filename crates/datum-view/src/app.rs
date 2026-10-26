@@ -1203,7 +1203,7 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, a group: along or filling it, nothing: the axes), or the copies selected shifted, left out, their pattern edited",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, a group: along or filling it, nothing: the axes), or the copies selected shifted, left out, their pattern edited · a pattern's badge (squares): a click selects its copies, the right button held on it edits the pattern",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
@@ -2266,6 +2266,7 @@ impl Viewer {
             // A group's badge stands for what the group holds.
             let picks = match sk.hover.clone() {
                 Some(Pick::Group(g)) => sk.group_picks(&g),
+                Some(Pick::Pattern(n)) => sk.pattern_copies(&n),
                 p => p.into_iter().collect(),
             };
             crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
@@ -2363,6 +2364,13 @@ enum Menu {
 
 impl Menu {
     fn open(sk: &SketchEdit, at: egui::Pos2) -> Self {
+        // On a pattern's badge: that pattern, as it was given.
+        if let Some(Pick::Pattern(n)) = &sk.hover {
+            return match crate::pattern::PatternForm::edit(sk, n) {
+                Ok(form) => Menu::Pattern { at, form, error: None },
+                Err(why) => Menu::Note { at, why },
+            };
+        }
         if let Some(form) = crate::pattern::CopiesForm::new(sk) {
             return Menu::Copies { at, form };
         }
@@ -3074,6 +3082,26 @@ mod tests {
                 if p["patterns"]["pattern1"] == json!({"of": "right_hole", "around": {"center": "o", "count": 2.0, "angle": 90.0}}))),
             "the pattern sent"
         );
+        // The pattern's badge: a click selects its copy; held, the menu as it was given.
+        let sk = h.state().sketch.as_ref().unwrap();
+        let badge = sk.badges(400.0).into_iter().find(|b| b.pick == Pick::Pattern("pattern1".into())).expect("a badge");
+        let at = egui::pos2(300.0 + badge.at.0 as f32, 200.0 + badge.at.1 as f32);
+        h.hover_at(at);
+        h.step();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.step();
+        }
+        assert_eq!(h.state().sketch.as_ref().unwrap().selected, [Pick::Copy("pattern1".into(), [1, 0])]);
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
+        for _ in 0..40 {
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern's menu") };
+        assert_eq!((form.name.as_str(), form.fields["n"].as_str(), form.fields["angle"].as_str()), ("pattern1", "2", "90"));
+        assert_eq!(form.of.as_deref(), Some("right_hole"));
     }
 
     /// In the dimension tool a click on a line opens its length at once; a click on a line
