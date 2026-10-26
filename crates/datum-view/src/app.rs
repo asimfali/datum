@@ -1422,22 +1422,16 @@ impl Viewer {
         ui.separator();
         ui.heading("Features");
         let (mut export, mut edit, mut enter) = (None, None, None);
+        let mut toggle: Option<(String, Json)> = None;
         // Out of `self` while the rows borrow it.
         let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let bare = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
-                // In a level: what it changes of its parent's (● and ↺ back), what is its own (+).
-                let tag = if changed.iter().any(|c| c == bare) {
-                    " ●"
-                } else if own.iter().any(|c| c == bare) {
-                    " +"
-                } else {
-                    ""
-                };
-                let shown = format!("{bare}{tag}");
-                let name = shown.as_str();
+                // In a level: what it changes of its parent's (a dot, ↺ back), what is its own (+).
+                let (is_changed, is_own) = (changed.iter().any(|c| c == bare), own.iter().any(|c| c == bare));
+                let name = bare;
                 let mut row = |ui: &mut egui::Ui| match f["error"].as_str() {
                     // A flat blank: its size, and its DXF for the turret press.
                     None if f["status"]["flat"].is_object() => {
@@ -1496,19 +1490,42 @@ impl Viewer {
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
-                if tag == " ●" {
-                    ui.horizontal(|ui| {
-                        if ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
-                            revert = Some(json!({"feature": bare}));
+                ui.horizontal(|ui| {
+                    if is_changed && ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
+                        revert = Some(json!({"feature": bare}));
+                    }
+                    // On or off (D159); by a formula, it says which and is changed in the JSON.
+                    match &f["enabled"] {
+                        Json::String(formula) => {
+                            ui.weak("ƒ").on_hover_text(format!("On while {formula} is not 0"));
                         }
-                        ui.vertical(|ui| row(ui));
-                    });
-                } else {
-                    row(ui);
-                }
+                        e => {
+                            let mut on = e.as_f64().is_none_or(|v| v != 0.0);
+                            let hint = "Off: the feature passes its input on unchanged — a variant does without a parent's feature so";
+                            if ui.checkbox(&mut on, "").on_hover_text(hint).changed() {
+                                toggle = Some((bare.to_string(), json!({ "enabled": on })));
+                            }
+                        }
+                    }
+                    // Drawn, not a glyph: the window's font may lack one.
+                    let (r, painter) = ui.allocate_painter(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    let colour = ui.visuals().widgets.active.fg_stroke.color;
+                    if is_changed {
+                        painter.circle_filled(r.rect.center(), 3.5, colour);
+                        r.on_hover_text("Changed in this variant");
+                    } else if is_own {
+                        let c = r.rect.center();
+                        let stroke = egui::Stroke::new(1.5, colour);
+                        painter.line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], stroke);
+                        painter.line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], stroke);
+                        r.on_hover_text("This variant's own");
+                    }
+                    ui.vertical(|ui| row(ui));
+                });
             }
         });
         self.offsets = offsets;
+        let edit = edit.or(toggle);
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
         }
@@ -2503,7 +2520,7 @@ impl Viewer {
 
 /// What parts and variants are, for the hint over them (D152).
 const LEVELS: &str = "A part takes the frame's sketches and adds its own features; a variant takes its part and changes only what \
-                      differs (a length, a few holes): a change to the frame or the part reaches every variant. ● changed here, \
+                      differs (a length, a few holes): a change to the frame or the part reaches every variant. A dot: changed here, \
                       ↺ back as the parent has it, + its own";
 
 /// `prefix k`, the first not a level's name yet.
@@ -3793,7 +3810,7 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "Стенка верхняя")));
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Part 1" && p["parent"].is_null())));
         assert_eq!(v.chosen.get("Part 1").map(String::as_str), Some("Part 1"));
-        // In the variant of 2.5 m: its sketch changed (●), its length set (↺ by the parameter too).
+        // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
@@ -3801,14 +3818,28 @@ mod tests {
         v.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
         h.run();
-        assert!(h.query_by_label("✔ outline ●  ·  sketch").is_some(), "the changed sketch marked");
+        assert!(h.query_by_label("✔ outline  ·  sketch").is_some());
         let reverts: Vec<_> = h.get_all_by_label("↺").collect();
-        assert_eq!(reverts.len(), 2, "the length and the sketch");
+        assert_eq!(reverts.len(), 3, "the length, the sketch and the notch turned off");
         reverts[1].click();
         h.run();
         drop(h);
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("revert", p) if p["feature"] == "outline")), "the sketch back");
+    }
+
+    /// A feature's box turns it off (D159): `edit` with `enabled` false.
+    #[test]
+    fn a_feature_is_turned_off_by_its_box() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let last = v.model.as_ref().unwrap().inspect["features"].as_array().unwrap().last().unwrap()["name"].as_str().unwrap().to_string();
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
+        h.run();
+        h.get_all_by_role(egui::accesskit::Role::CheckBox).last().unwrap().click();
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if p["name"] == last.as_str() && p["enabled"] == false)));
     }
 
     /// Ctrl+W closes and Ctrl+N gives an empty model (issue #57), with a button focused by Tab

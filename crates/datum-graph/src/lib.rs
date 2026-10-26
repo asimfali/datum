@@ -33,6 +33,9 @@ pub struct Node {
     pub id: TopoId,
     pub op: Op,
     pub inputs: Vec<NodeIx>,
+    /// Off (0, or a formula coming to 0): the feature passes its first input on unchanged, as if it
+    /// were not there (D159). A variant turns a parent's feature off instead of removing it.
+    pub enabled: Num,
 }
 
 /// The model as a DAG. Inputs always precede the node, so the graph is acyclic by construction.
@@ -91,7 +94,13 @@ impl Graph {
         }
         check_arity(name, &op, inputs.len())?;
         let ix = self.nodes.len() as NodeIx;
-        self.nodes.push(Node { name: name.into(), id: TopoId::derive("feature").tag(name).finish(), op, inputs: inputs.to_vec() });
+        self.nodes.push(Node {
+            name: name.into(),
+            id: TopoId::derive("feature").tag(name).finish(),
+            op,
+            inputs: inputs.to_vec(),
+            enabled: Num::Value(1.0),
+        });
         self.by_name.insert(name.into(), ix);
         Ok(ix)
     }
@@ -111,6 +120,11 @@ impl Graph {
 
     pub fn remove_parameter(&mut self, name: &str) -> Result<(), GraphError> {
         self.parameters.remove(name).map(|_| ()).ok_or_else(|| GraphError::Parameter(format!("no parameter named `{name}`")))
+    }
+
+    /// Turns a node on or off: a number (0: off) or a formula of the parameters.
+    pub fn set_enabled(&mut self, ix: NodeIx, enabled: Num) {
+        self.nodes[ix as usize].enabled = enabled;
     }
 
     /// Replaces a node's operation (a parameter edit) keeping its inputs.
@@ -133,6 +147,8 @@ pub enum EvalError {
     Parameter(String),
     /// The named input failed, so this node could not run.
     Input(String),
+    /// Turned off, with no input to pass on.
+    Disabled,
 }
 
 impl fmt::Display for EvalError {
@@ -141,6 +157,7 @@ impl fmt::Display for EvalError {
             Self::Op(e) => e.fmt(f),
             Self::Parameter(m) => write!(f, "parameter: {m}"),
             Self::Input(n) => write!(f, "input `{n}` failed"),
+            Self::Disabled => write!(f, "turned off, and it has no input to pass on"),
         }
     }
 }
@@ -271,6 +288,10 @@ impl<'a> Run<'a> {
         // Numbers are evaluated before the key: a parameter edit recomputes exactly the features
         // whose numbers change.
         let lookup = |n: &str| self.values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
+        // Off: the first input as it came, its own key and all (D159).
+        if node.enabled.resolve(&lookup).map_err(|e| EvalError::Parameter(format!("enabled: {e}")))? == 0.0 {
+            return inputs.into_iter().next().ok_or(EvalError::Disabled);
+        }
         let op = node.op.resolve(&lookup).map_err(EvalError::Parameter)?;
         let mut h = blake3::Hasher::new();
         h.update(&node.id.0.to_le_bytes());

@@ -154,7 +154,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "edit",
         description: "Change a feature's parameters: give `name` and only the fields to change (e.g. {name: \"moved\", angle_deg: 45}); \
-                      `op` changes its kind. Inputs stay.",
+                      `op` changes its kind. Inputs stay. `enabled` (true, false, a number, 0: off, or a formula) turns it off or on: \
+                      off, it passes its first input on unchanged — in a variant, the way to do without a parent's feature.",
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": true}),
         run: |s, p| {
             let ix = s.find(text(p, "name")?)?;
@@ -162,7 +163,10 @@ const COMMANDS: &[Command] = &[
                 Ok(Value::Object(m)) => m,
                 _ => Map::new(),
             };
-            fields.extend(p.iter().filter(|(k, _)| *k != "name").map(|(k, v)| (k.clone(), v.clone())));
+            if let Some(e) = p.get("enabled") {
+                s.graph.set_enabled(ix, crate::enabled_of(text(p, "name")?, e.clone())?);
+            }
+            fields.extend(p.iter().filter(|(k, _)| *k != "name" && *k != "enabled").map(|(k, v)| (k.clone(), v.clone())));
             let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
             Ok(s.rebuild_recording(ix))
@@ -588,7 +592,8 @@ fn name_param() -> Value {
 fn feature_schema() -> Value {
     json!({
         "type": "object",
-        "properties": {"name": {"type": "string"}, "inputs": {"type": "array", "items": {"type": "string"}}},
+        "properties": {"name": {"type": "string"}, "inputs": {"type": "array", "items": {"type": "string"}},
+                       "enabled": {"type": ["boolean", "number", "string"], "description": "Off (false, 0 or a formula coming to 0): the feature passes its first input on unchanged"}},
         "required": ["name", "op"],
         "allOf": [schemars::schema_for!(Op)]
     })

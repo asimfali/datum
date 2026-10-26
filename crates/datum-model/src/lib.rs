@@ -142,8 +142,21 @@ pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<Node
         .iter()
         .map(|i| g.find(i).ok_or_else(|| format!("`{name}`: unknown input `{i}` (features come after their inputs)")))
         .collect::<Result<Vec<_>, _>>()?;
+    let enabled = fields.remove("enabled").map(|v| enabled_of(&name, v)).transpose()?;
     let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| format!("`{name}`: {e}"))?;
-    g.add(&name, op, &inputs).map_err(|e| e.to_string())
+    let ix = g.add(&name, op, &inputs).map_err(|e| e.to_string())?;
+    if let Some(e) = enabled {
+        g.set_enabled(ix, e);
+    }
+    Ok(ix)
+}
+
+/// A feature's `enabled` (D159): `true`, `false`, a number (0: off) or a formula.
+pub fn enabled_of(name: &str, v: Value) -> Result<Num, String> {
+    match v {
+        Value::Bool(b) => Ok(Num::Value(f64::from(u8::from(b)))),
+        v => serde_json::from_value(v).map_err(|e| format!("`{name}`: enabled: {e}")),
+    }
 }
 
 /// A feature as its file object.
@@ -154,6 +167,9 @@ pub fn feature_json(g: &Graph, ix: NodeIx) -> Map<String, Value> {
         _ => Map::new(),
     };
     fields.insert("name".into(), Value::String(node.name.clone()));
+    if node.enabled != Num::Value(1.0) {
+        fields.insert("enabled".into(), serde_json::to_value(&node.enabled).unwrap_or(Value::Null));
+    }
     if !node.inputs.is_empty() {
         let names = node.inputs.iter().map(|&i| Value::String(g.nodes()[i as usize].name.clone())).collect();
         fields.insert("inputs".into(), Value::Array(names));
