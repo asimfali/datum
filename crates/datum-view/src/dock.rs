@@ -1,4 +1,5 @@
-//! The window's main panes (D161): the 3D view and the flat pattern (later drawings, documents),
+//! The window's main panes (D161): the 3D view, the flat pattern, the sketch library (later
+//! drawings, documents),
 //! each a tab of a dock (`egui_dock`): put left or right, below, together as tabs, closed and
 //! opened again from the View menu. The layout is kept between runs. The model's sections live in
 //! the side bar (D162).
@@ -13,6 +14,8 @@ pub enum Pane {
     Model,
     /// The flat pattern of a body.
     Flat,
+    /// Sketch elements to place: open while a sketch is edited (D163).
+    Library,
 }
 
 impl Pane {
@@ -20,6 +23,7 @@ impl Pane {
         match self {
             Pane::Model => "3D",
             Pane::Flat => "Flat pattern",
+            Pane::Library => "Library",
         }
     }
 }
@@ -35,8 +39,8 @@ pub fn is_open(dock: &DockState<Pane>, pane: Pane) -> bool {
     dock.find_tab(&pane).is_some()
 }
 
-/// Opens `pane` where it belongs (the flat pattern to the right of the 3D view), or brings it to
-/// the front if open.
+/// Opens `pane` where it belongs (the flat pattern and the library to the right of the 3D view),
+/// or brings it to the front if open.
 pub fn open(dock: &mut DockState<Pane>, pane: Pane) {
     if let Some(path) = dock.find_tab(&pane) {
         let _ = dock.set_active_tab(path);
@@ -45,6 +49,9 @@ pub fn open(dock: &mut DockState<Pane>, pane: Pane) {
     match dock.find_main_surface_tab(&Pane::Model) {
         Some((model, _)) if pane == Pane::Flat => {
             dock.main_surface_mut().split_right(model, 0.5, vec![pane]);
+        }
+        Some((model, _)) if pane == Pane::Library => {
+            dock.main_surface_mut().split_right(model, 0.8, vec![pane]);
         }
         _ => dock.push_to_first_leaf(pane),
     }

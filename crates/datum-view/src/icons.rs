@@ -15,6 +15,13 @@ pub enum Icon {
     Remove,
     /// A house: the home view.
     Home,
+    /// Sketch tools: the cursor, a line, an arc, a circle, a point, a dimension.
+    Select,
+    Line,
+    Arc,
+    Circle,
+    Point,
+    Dimension,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -82,6 +89,42 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
         Icon::Home => {
             let house = [at(-6.0, 0.0), at(0.0, -6.0), at(6.0, 0.0), at(4.0, 0.0), at(4.0, 6.0), at(-4.0, 6.0), at(-4.0, 0.0), at(-6.0, 0.0)];
             painter.add(egui::Shape::line(house.to_vec(), stroke));
+        }
+        Icon::Select => {
+            let arrow = vec![at(-4.0, -7.0), at(-4.0, 5.0), at(-1.0, 2.0), at(2.0, 7.0), at(4.0, 6.0), at(1.0, 1.0), at(5.0, 1.0)];
+            painter.add(egui::Shape::closed_line(arrow, stroke));
+        }
+        Icon::Line => {
+            painter.line_segment([at(-6.0, 5.0), at(6.0, -5.0)], stroke);
+            for p in [at(-6.0, 5.0), at(6.0, -5.0)] {
+                painter.rect_filled(egui::Rect::from_center_size(p, vec2(3.0, 3.0)), 0.0, colour);
+            }
+        }
+        Icon::Arc => {
+            let pts: Vec<Pos2> = (0..=16)
+                .map(|k| {
+                    let a = (180.0 - 180.0 * k as f32 / 16.0).to_radians();
+                    at(6.0 * a.cos(), 3.0 - 6.0 * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(pts, stroke));
+            painter.circle_filled(at(0.0, 3.0), 1.3, colour);
+        }
+        Icon::Circle => {
+            painter.circle_stroke(c, 6.0, stroke);
+            painter.circle_filled(c, 1.3, colour);
+        }
+        Icon::Point => {
+            painter.rect_filled(egui::Rect::from_center_size(c, vec2(4.0, 4.0)), 0.0, colour);
+            painter.line_segment([at(-6.0, 0.0), at(-3.5, 0.0)], stroke);
+            painter.line_segment([at(3.5, 0.0), at(6.0, 0.0)], stroke);
+        }
+        Icon::Dimension => {
+            painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);
+            painter.line_segment([at(6.0, -6.0), at(6.0, 6.0)], stroke);
+            painter.line_segment([at(-6.0, 0.0), at(6.0, 0.0)], stroke);
+            painter.add(egui::Shape::convex_polygon(vec![at(-6.0, 0.0), at(-3.0, -2.0), at(-3.0, 2.0)], colour, Stroke::NONE));
+            painter.add(egui::Shape::convex_polygon(vec![at(6.0, 0.0), at(3.0, 2.0), at(3.0, -2.0)], colour, Stroke::NONE));
         }
     }
 }
