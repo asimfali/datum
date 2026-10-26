@@ -65,6 +65,12 @@ struct File {
     /// Parts and variants (D152): each what differs from its parent.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     levels: BTreeMap<String, levels::Level>,
+    /// The variant of each part in the product, when not the part itself.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    chosen: BTreeMap<String, String>,
+    /// Parts not shown in the product.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    hidden: std::collections::BTreeSet<String>,
 }
 
 /// The root's graph of a model file (its levels left out).
@@ -87,7 +93,7 @@ pub fn parse_doc(json: &str) -> Result<levels::Doc, ModelError> {
     for (index, fields) in features.into_iter().enumerate() {
         add_feature(&mut g, fields).map_err(|msg| ModelError::Feature { index, msg })?;
     }
-    Ok(levels::Doc { root: g, levels: file.levels })
+    Ok(levels::Doc { root: g, levels: file.levels, chosen: file.chosen, hidden: file.hidden })
 }
 
 /// Files from before patterns in sketches (D128) gave a cut a `pattern`: it becomes a pattern
@@ -249,14 +255,21 @@ pub fn write_step(g: &Graph, e: &datum_graph::Evaluation, path: &std::path::Path
 
 /// Canonical JSON: sorted keys, two-space indent, trailing newline.
 pub fn to_json(g: &Graph) -> String {
-    to_json_doc(&levels::Doc { root: g.clone(), levels: BTreeMap::new() })
+    to_json_doc(&levels::Doc { root: g.clone(), ..levels::Doc::default() })
 }
 
 /// [`to_json`] of a whole model, its levels too.
 pub fn to_json_doc(d: &levels::Doc) -> String {
     let g = &d.root;
     let features = (0..g.nodes().len() as NodeIx).map(|i| feature_json(g, i)).collect();
-    let file = File { format: FORMAT.into(), parameters: g.parameters().clone(), features, levels: d.levels.clone() };
+    let file = File {
+        format: FORMAT.into(),
+        parameters: g.parameters().clone(),
+        features,
+        levels: d.levels.clone(),
+        chosen: d.chosen.clone(),
+        hidden: d.hidden.clone(),
+    };
     let mut s = serde_json::to_string_pretty(&file).unwrap_or_default();
     s.push('\n');
     s

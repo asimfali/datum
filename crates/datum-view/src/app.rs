@@ -256,8 +256,20 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             .collect();
         let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
         let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
-        let scene = Scene::new(&finals, &mut meshes);
-        meshes.retain(&finals.iter().filter_map(|v| v.body()).collect::<Vec<_>>());
+        // The rest of the product (D160): in the frame, every part in its chosen variant, whole; in a
+        // part, the other parts, faded.
+        let mine = session.active().and_then(|a| session.part_of(a));
+        let around: Vec<datum_graph::ValueRef> = session
+            .product()
+            .into_iter()
+            .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
+            .filter_map(|(_, _, bodies)| bodies.ok())
+            .flatten()
+            .map(|(_, v)| v)
+            .collect();
+        let context: Vec<&datum_brep::Body> = around.iter().filter_map(|v| v.body()).collect();
+        let scene = Scene::new(&finals, &mut meshes).with_context(&context, session.active().is_some(), &mut meshes);
+        meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().copied()).collect::<Vec<_>>());
         let context = editing.as_ref().and_then(|name| {
             let node = graph.nodes().iter().position(|n| &n.name == name)?;
             let input = graph.nodes()[node].inputs.first().and_then(|&i| evaluation.results[i as usize].as_ref().ok().cloned());
@@ -339,9 +351,8 @@ struct Viewer {
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
-    /// Each part's variant chosen in its list (D152), by the part; and a part or variant being
-    /// named: below which level (none: a part, below the frame), and the name typed.
-    chosen: BTreeMap<String, String>,
+    /// A part or variant being named: below which level (none: a part, below the frame), and the
+    /// name typed.
     new_level: Option<(Option<String>, String)>,
     hold: Option<(f64, egui::Pos2, bool)>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
@@ -423,7 +434,6 @@ impl Viewer {
             library_filter: String::new(),
             keeping: None,
             menu: None,
-            chosen: BTreeMap::new(),
             new_level: None,
             hold: None,
             quitting: None,
@@ -1108,7 +1118,11 @@ impl Viewer {
                 (s("name").unwrap_or_default(), s("parent"), l["depth"].as_u64().unwrap_or(0) as usize, s("error"))
             })
             .collect();
+        // The variant of each part in the product: the model's (D160).
+        let chosen_of = |part: &str| m.inspect["chosen"][part].as_str().unwrap_or(part).to_string();
         let mut go: Option<Option<String>> = None;
+        let mut choose: Option<String> = None;
+        let mut show: Option<(String, bool)> = None;
         let mut remove: Option<String> = None;
         ui.heading("Parts").on_hover_text(LEVELS);
         let frame = "The frame: the shared sketches, planes and parameters every part and variant takes";
@@ -1122,9 +1136,13 @@ impl Viewer {
             // The part and what is below it, up to the next part.
             let family: Vec<&(String, Option<String>, usize, Option<String>)> =
                 std::iter::once(&levels[k]).chain(levels[k + 1..].iter().take_while(|l| l.2 > 0)).collect();
-            let chosen = self.chosen.get(part).filter(|c| family.iter().any(|l| &l.0 == *c)).cloned().unwrap_or_else(|| part.clone());
+            let chosen = chosen_of(part);
             let here = family.iter().any(|l| Some(&l.0) == active.as_ref());
             ui.horizontal(|ui| {
+                let mut visible = !m.inspect["hidden"].as_array().is_some_and(|h| h.iter().any(|p| p == part.as_str()));
+                if ui.checkbox(&mut visible, "").on_hover_text("Shown in the product: in the frame, and faint around another part").changed() {
+                    show = Some((part.clone(), visible));
+                }
                 if ui.selectable_label(here, part.as_str()).on_hover_text("Work in this part, in the variant chosen beside it").clicked() {
                     go = Some(Some(chosen.clone()));
                 }
@@ -1138,7 +1156,7 @@ impl Viewer {
                             None => r,
                         };
                         if r.clicked() {
-                            self.chosen.insert(part.clone(), n.clone());
+                            choose = Some(n.clone());
                             go = Some(Some(n.clone()));
                         }
                     }
@@ -1189,11 +1207,19 @@ impl Viewer {
         if let Some((parent, name)) = add {
             self.new_level = None;
             if !name.is_empty() {
-                // The new level is the one chosen in its part's list.
-                let part = parent.as_ref().map_or_else(|| name.clone(), |p| part_of(&levels, p));
-                self.chosen.insert(part, name.clone());
+                // A new variant is the one its part shows in the product.
+                let variant = parent.is_some();
                 self.send(Request::Command("add_level", json!({"name": name, "parent": parent})));
+                if variant {
+                    self.send(Request::Command("choose", json!({ "level": name })));
+                }
             }
+        }
+        if let Some(level) = choose {
+            self.send(Request::Command("choose", json!({ "level": level })));
+        }
+        if let Some((part, visible)) = show {
+            self.send(Request::Command("show", json!({ "part": part, "visible": visible })));
         }
         if let Some(level) = go
             && level != active
@@ -2528,15 +2554,6 @@ fn fresh(levels: &[(String, Option<String>, usize, Option<String>)], prefix: &st
     (1..).map(|k| format!("{prefix} {k}")).find(|n| !levels.iter().any(|l| &l.0 == n)).unwrap_or_default()
 }
 
-/// The part level `name` is of: itself, or the level at the top of its parents.
-fn part_of(levels: &[(String, Option<String>, usize, Option<String>)], name: &str) -> String {
-    let mut at = name.to_string();
-    while let Some(p) = levels.iter().find(|l| l.0 == at).and_then(|l| l.1.clone()) {
-        at = p;
-    }
-    at
-}
-
 /// How long a right click is held still to open the menu, in seconds.
 const HOLD: f64 = 0.5;
 
@@ -3003,7 +3020,6 @@ mod tests {
             library_filter: String::new(),
             keeping: None,
             menu: None,
-            chosen: BTreeMap::new(),
             new_level: None,
             hold: None,
             quitting: None,
@@ -3791,8 +3807,8 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::Command("remove_parameter", p) if p["name"] == "h")), "the first row's");
     }
 
-    /// The frame and its part in the panel (D152): a click on the part works in it, + Part names a
-    /// new one; in a variant, the sketch it changes has ↺, which takes it back.
+    /// The frame and its part in the panel (D152): a click on the part works in it, in the variant
+    /// the product has of it (D160); + Part names a new one; in a variant, the sketch it changes has ↺, which takes it back.
     #[test]
     fn parts_and_variants_in_the_panel() {
         let (mut v, inbox) = viewer("wall_variants.json");
@@ -3807,9 +3823,8 @@ mod tests {
         assert_eq!(v.new_level, Some((None, "Part 1".to_string())));
         click(&mut v, "Create");
         let sent: Vec<Request> = inbox.try_iter().collect();
-        assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "Стенка верхняя")));
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "2 м")));
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Part 1" && p["parent"].is_null())));
-        assert_eq!(v.chosen.get("Part 1").map(String::as_str), Some("Part 1"));
         // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");

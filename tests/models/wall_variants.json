@@ -1,4 +1,8 @@
 {
+  "chosen": {
+    "Стенка боковая": "Стенка боковая 2 м",
+    "Стенка верхняя": "2 м"
+  },
   "features": [
     {
       "name": "outline",
@@ -70,6 +74,89 @@
           "d": [
             0,
             300
+          ]
+        }
+      }
+    },
+    {
+      "base": "xz",
+      "name": "front",
+      "offset": 0,
+      "op": "plane"
+    },
+    {
+      "inputs": [
+        "front"
+      ],
+      "name": "side_profile",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "point": "s1",
+            "type": "fix"
+          },
+          {
+            "line": "sb",
+            "type": "horizontal"
+          },
+          {
+            "line": "sr",
+            "type": "vertical"
+          },
+          {
+            "line": "st",
+            "type": "horizontal"
+          },
+          {
+            "line": "sl",
+            "type": "vertical"
+          },
+          {
+            "line": "sb",
+            "type": "length",
+            "value": "L"
+          },
+          {
+            "line": "sl",
+            "type": "length",
+            "value": "H"
+          }
+        ],
+        "lines": {
+          "sb": {
+            "from": "s1",
+            "to": "s2"
+          },
+          "sl": {
+            "from": "s4",
+            "to": "s1"
+          },
+          "sr": {
+            "from": "s2",
+            "to": "s3"
+          },
+          "st": {
+            "from": "s3",
+            "to": "s4"
+          }
+        },
+        "points": {
+          "s1": [
+            0,
+            0
+          ],
+          "s2": [
+            1000,
+            0
+          ],
+          "s3": [
+            1000,
+            100
+          ],
+          "s4": [
+            0,
+            100
           ]
         }
       }
@@ -160,6 +247,25 @@
       },
       "parent": "Стенка верхняя"
     },
+    "Стенка боковая": {
+      "features": [
+        {
+          "inputs": [
+            "side_profile"
+          ],
+          "name": "side",
+          "op": "extrude",
+          "z0": 0,
+          "z1": "t"
+        }
+      ]
+    },
+    "Стенка боковая 2 м": {
+      "parameters": {
+        "L": 2000
+      },
+      "parent": "Стенка боковая"
+    },
     "Стенка верхняя": {
       "features": [
         {
@@ -208,6 +314,7 @@
     }
   },
   "parameters": {
+    "H": 100,
     "L": 1000,
     "W": 300,
     "hole": 6,

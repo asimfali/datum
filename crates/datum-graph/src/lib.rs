@@ -127,6 +127,17 @@ impl Graph {
         self.nodes[ix as usize].enabled = enabled;
     }
 
+    /// The features nothing else uses: what the model ends in (see [`Evaluation::final_values`]).
+    pub fn finals(&self) -> Vec<NodeIx> {
+        let mut used = vec![false; self.nodes.len()];
+        for n in self.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. })) {
+            for &i in &n.inputs {
+                used[i as usize] = true;
+            }
+        }
+        (0..self.nodes.len() as NodeIx).filter(|&i| !used[i as usize]).collect()
+    }
+
     /// Replaces a node's operation (a parameter edit) keeping its inputs.
     pub fn set_op(&mut self, ix: NodeIx, op: Op) -> Result<(), GraphError> {
         let node = &mut self.nodes[ix as usize];
@@ -185,13 +196,7 @@ impl Evaluation {
 
     /// The features [`Self::final_values`] are of, failed ones too.
     pub fn finals(&self, graph: &Graph) -> Vec<NodeIx> {
-        let mut used = vec![false; graph.nodes.len()];
-        for n in graph.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. })) {
-            for &i in &n.inputs {
-                used[i as usize] = true;
-            }
-        }
-        (0..graph.nodes.len() as NodeIx).filter(|&i| !used[i as usize]).collect()
+        graph.finals()
     }
 }
 
