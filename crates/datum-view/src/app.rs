@@ -339,6 +339,10 @@ struct Viewer {
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
+    /// Each part's variant chosen in its list (D152), by the part; and a part or variant being
+    /// named: below which level (none: a part, below the frame), and the name typed.
+    chosen: BTreeMap<String, String>,
+    new_level: Option<(Option<String>, String)>,
     hold: Option<(f64, egui::Pos2, bool)>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
@@ -419,6 +423,8 @@ impl Viewer {
             library_filter: String::new(),
             keeping: None,
             menu: None,
+            chosen: BTreeMap::new(),
+            new_level: None,
             hold: None,
             quitting: None,
             worked_in: None,
@@ -1087,6 +1093,118 @@ impl Viewer {
         }
     }
 
+    /// The frame and its parts (D152), each part a list of itself and its variants, one chosen:
+    /// a click works in it; a new part or variant is named here.
+    fn levels_panel(&mut self, ui: &mut egui::Ui) {
+        let Some(m) = &self.model else { return };
+        let active = m.inspect["level"].as_str().map(String::from);
+        // (name, parent, depth), depth first: a part, then its variants.
+        let levels: Vec<(String, Option<String>, usize, Option<String>)> = m.inspect["levels"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|l| {
+                let s = |k: &str| l[k].as_str().map(String::from);
+                (s("name").unwrap_or_default(), s("parent"), l["depth"].as_u64().unwrap_or(0) as usize, s("error"))
+            })
+            .collect();
+        let mut go: Option<Option<String>> = None;
+        let mut remove: Option<String> = None;
+        ui.heading("Parts").on_hover_text(LEVELS);
+        let frame = "The frame: the shared sketches, planes and parameters every part and variant takes";
+        if ui.selectable_label(active.is_none(), "Frame").on_hover_text(frame).clicked() {
+            go = Some(None);
+        }
+        for (k, (part, _, depth, _)) in levels.iter().enumerate() {
+            if *depth > 0 {
+                continue;
+            }
+            // The part and what is below it, up to the next part.
+            let family: Vec<&(String, Option<String>, usize, Option<String>)> =
+                std::iter::once(&levels[k]).chain(levels[k + 1..].iter().take_while(|l| l.2 > 0)).collect();
+            let chosen = self.chosen.get(part).filter(|c| family.iter().any(|l| &l.0 == *c)).cloned().unwrap_or_else(|| part.clone());
+            let here = family.iter().any(|l| Some(&l.0) == active.as_ref());
+            ui.horizontal(|ui| {
+                if ui.selectable_label(here, part.as_str()).on_hover_text("Work in this part, in the variant chosen beside it").clicked() {
+                    go = Some(Some(chosen.clone()));
+                }
+                let shown = if &chosen == part { "shared".to_string() } else { chosen.clone() };
+                egui::ComboBox::from_id_salt(("datum_part", part)).selected_text(shown).show_ui(ui, |ui| {
+                    for (n, _, d, err) in &family {
+                        let label = if n == part { format!("{part} (shared)") } else { format!("{}{n}", "   ".repeat(*d)) };
+                        let r = ui.selectable_label(&chosen == n, label);
+                        let r = match err {
+                            Some(e) => r.on_hover_text(format!("✖ {e}")),
+                            None => r,
+                        };
+                        if r.clicked() {
+                            self.chosen.insert(part.clone(), n.clone());
+                            go = Some(Some(n.clone()));
+                        }
+                    }
+                    ui.separator();
+                    if ui.button("+ New variant").on_hover_text(format!("Below `{chosen}`: it differs only where you change it")).clicked() {
+                        self.new_level = Some((Some(chosen.clone()), fresh(&levels, "Variant")));
+                    }
+                });
+                if here
+                    && let Some(a) = &active
+                    && crate::icons::button(ui, crate::icons::Icon::Remove, "Remove", &format!("Remove `{a}` (if nothing is below it)"), true)
+                        .clicked()
+                {
+                    remove = Some(a.clone());
+                }
+            });
+            for (n, _, _, err) in &family {
+                if let Some(e) = err {
+                    ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {n}: {e}"));
+                }
+            }
+        }
+        let mut add: Option<(Option<String>, String)> = None;
+        match &mut self.new_level {
+            Some((parent, name)) => {
+                ui.horizontal(|ui| {
+                    ui.label(match parent {
+                        Some(p) => format!("New variant of {p}:"),
+                        None => "New part:".to_string(),
+                    });
+                    let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
+                    r.request_focus();
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if (ui.button("Create").clicked() || enter) && !name.trim().is_empty() {
+                        add = Some((parent.clone(), name.trim().to_string()));
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                        add = Some((None, String::new()));
+                    }
+                });
+            }
+            None => {
+                if ui.button("+ Part").on_hover_text("A part below the frame: its own features on the frame's sketches").clicked() {
+                    self.new_level = Some((None, fresh(&levels, "Part")));
+                }
+            }
+        }
+        if let Some((parent, name)) = add {
+            self.new_level = None;
+            if !name.is_empty() {
+                // The new level is the one chosen in its part's list.
+                let part = parent.as_ref().map_or_else(|| name.clone(), |p| part_of(&levels, p));
+                self.chosen.insert(part, name.clone());
+                self.send(Request::Command("add_level", json!({"name": name, "parent": parent})));
+            }
+        }
+        if let Some(level) = go
+            && level != active
+        {
+            self.send(Request::Command("activate", json!({ "level": level })));
+        }
+        if let Some(level) = remove {
+            self.send(Request::Command("remove_level", json!({ "name": level })));
+        }
+    }
+
     fn side(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
             ui.label(if self.busy { "Opening…" } else { "No model open." });
@@ -1215,6 +1333,18 @@ impl Viewer {
             done = ui.button("Done").clicked();
             ui.separator();
         }
+        let editing = self.sketch.is_some();
+        ui.add_enabled_ui(!editing, |ui| self.levels_panel(ui)).response.on_disabled_hover_text("Done with the sketch first");
+        let Some(m) = &self.model else { return };
+        // What the level worked in does to its parent: the marks on its features and parameters.
+        let level = m.inspect["level"].as_str();
+        let this = m.inspect["levels"].as_array().into_iter().flatten().find(|l| Some(l["name"].as_str().unwrap_or_default()) == level);
+        let names = |key: &str| -> Vec<String> {
+            this.and_then(|l| l[key].as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect()
+        };
+        let (changed, own, set) = (names("changed"), names("own"), names("parameters_set"));
+        let own_parameters = names("own_parameters");
+        let mut revert: Option<Json> = None;
         ui.heading("Parameters").on_hover_text(FORMULAS);
         let params = m.inspect["parameters"].as_object().cloned().unwrap_or_default();
         let (mut send, mut removed, mut added) = (Vec::new(), None, false);
@@ -1237,16 +1367,24 @@ impl Viewer {
                     (_, Some(e)) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
                     _ => ui.label(""),
                 };
-                if crate::icons::button(
-                    ui,
-                    crate::icons::Icon::Remove,
-                    "Remove the parameter",
-                    "Remove the parameter: what uses it then fails and says so",
-                    true,
-                )
-                .clicked()
+                // In a level: one it sets otherwise goes back to the parent's; one it inherits stays.
+                if set.contains(name) {
+                    if ui.button("↺").on_hover_text("Set in this variant: back to the parent's value").clicked() {
+                        revert = Some(json!({"parameter": name}));
+                    }
+                } else if (level.is_none() || own_parameters.contains(name))
+                    && crate::icons::button(
+                        ui,
+                        crate::icons::Icon::Remove,
+                        "Remove the parameter",
+                        "Remove the parameter: what uses it then fails and says so",
+                        true,
+                    )
+                    .clicked()
                 {
                     removed = Some(name.clone());
+                } else if level.is_some() && !own_parameters.contains(name) {
+                    ui.weak("·").on_hover_text("From the parent: type another value to set it in this variant");
                 }
                 ui.end_row();
             }
@@ -1288,9 +1426,19 @@ impl Viewer {
         let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
-                let name = f["name"].as_str().unwrap_or_default();
+                let bare = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
-                match f["error"].as_str() {
+                // In a level: what it changes of its parent's (● and ↺ back), what is its own (+).
+                let tag = if changed.iter().any(|c| c == bare) {
+                    " ●"
+                } else if own.iter().any(|c| c == bare) {
+                    " +"
+                } else {
+                    ""
+                };
+                let shown = format!("{bare}{tag}");
+                let name = shown.as_str();
+                let mut row = |ui: &mut egui::Ui| match f["error"].as_str() {
                     // A flat blank: its size, and its DXF for the turret press.
                     None if f["status"]["flat"].is_object() => {
                         let flat = &f["status"]["flat"];
@@ -1300,7 +1448,7 @@ impl Viewer {
                             if ui.button("DXF…").clicked()
                                 && let Some(p) = self.exported("dxf", name).save_file()
                             {
-                                export = Some((name.to_string(), p));
+                                export = Some((bare.to_string(), p));
                             }
                         });
                     }
@@ -1311,7 +1459,7 @@ impl Viewer {
                             let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
                             let label = serde_json::to_value(side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
                             if ui.button(format!("Side: {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
-                                edit = Some((name.to_string(), json!({"side": side.next()})));
+                                edit = Some((bare.to_string(), json!({"side": side.next()})));
                             }
                         });
                     }
@@ -1324,11 +1472,11 @@ impl Viewer {
                                 (None, _) => f["base"].as_str().unwrap_or("xy").to_uppercase(),
                             };
                             ui.label(format!("✔ {name}  ·  {from} +"));
-                            let text = offsets.entry(name.to_string()).or_default();
+                            let text = offsets.entry(bare.to_string()).or_default();
                             let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text("offset")).on_hover_text(FORMULAS);
                             // Applied when the field is left changed, as a parameter's value is.
                             if r.lost_focus() && *text != definition(&f["offset"]) {
-                                edit = Some((name.to_string(), json!({"offset": typed(text)})));
+                                edit = Some((bare.to_string(), json!({"offset": typed(text)})));
                             }
                         });
                     }
@@ -1336,7 +1484,7 @@ impl Viewer {
                         ui.horizontal(|ui| {
                             ui.label(format!("✔ {name}  ·  {op}"));
                             if crate::icons::button(ui, crate::icons::Icon::Edit, "Edit the sketch", "Edit the sketch", true).clicked() {
-                                enter = Some(name.to_string());
+                                enter = Some(bare.to_string());
                             }
                         });
                     }
@@ -1347,10 +1495,23 @@ impl Viewer {
                         ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}  ·  {op}"));
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
+                };
+                if tag == " ●" {
+                    ui.horizontal(|ui| {
+                        if ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
+                            revert = Some(json!({"feature": bare}));
+                        }
+                        ui.vertical(|ui| row(ui));
+                    });
+                } else {
+                    row(ui);
                 }
             }
         });
         self.offsets = offsets;
+        if let Some(r) = revert {
+            self.send(Request::Command("revert", r));
+        }
         if let Some((name, mut fields)) = edit {
             fields["name"] = json!(name);
             self.send(Request::Command("edit", fields));
@@ -2340,6 +2501,25 @@ impl Viewer {
     }
 }
 
+/// What parts and variants are, for the hint over them (D152).
+const LEVELS: &str = "A part takes the frame's sketches and adds its own features; a variant takes its part and changes only what \
+                      differs (a length, a few holes): a change to the frame or the part reaches every variant. ● changed here, \
+                      ↺ back as the parent has it, + its own";
+
+/// `prefix k`, the first not a level's name yet.
+fn fresh(levels: &[(String, Option<String>, usize, Option<String>)], prefix: &str) -> String {
+    (1..).map(|k| format!("{prefix} {k}")).find(|n| !levels.iter().any(|l| &l.0 == n)).unwrap_or_default()
+}
+
+/// The part level `name` is of: itself, or the level at the top of its parents.
+fn part_of(levels: &[(String, Option<String>, usize, Option<String>)], name: &str) -> String {
+    let mut at = name.to_string();
+    while let Some(p) = levels.iter().find(|l| l.0 == at).and_then(|l| l.1.clone()) {
+        at = p;
+    }
+    at
+}
+
 /// How long a right click is held still to open the menu, in seconds.
 const HOLD: f64 = 0.5;
 
@@ -2806,6 +2986,8 @@ mod tests {
             library_filter: String::new(),
             keeping: None,
             menu: None,
+            chosen: BTreeMap::new(),
+            new_level: None,
             hold: None,
             quitting: None,
             worked_in: None,
@@ -3590,6 +3772,43 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::SetParameter(n, val) if n == "gap" && val == "w / 10")));
         assert!(!sent.iter().any(|r| matches!(r, Request::SetParameter(n, _) if n == "hole")));
         assert!(sent.iter().any(|r| matches!(r, Request::Command("remove_parameter", p) if p["name"] == "h")), "the first row's");
+    }
+
+    /// The frame and its part in the panel (D152): a click on the part works in it, + Part names a
+    /// new one; in a variant, the sketch it changes has ↺, which takes it back.
+    #[test]
+    fn parts_and_variants_in_the_panel() {
+        let (mut v, inbox) = viewer("wall_variants.json");
+        let click = |v: &mut Viewer, label: &str| {
+            let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
+            h.run();
+            h.get_by_label(label).click();
+            h.run();
+        };
+        click(&mut v, "Стенка верхняя");
+        click(&mut v, "+ Part");
+        assert_eq!(v.new_level, Some((None, "Part 1".to_string())));
+        click(&mut v, "Create");
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "Стенка верхняя")));
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Part 1" && p["parent"].is_null())));
+        assert_eq!(v.chosen.get("Part 1").map(String::as_str), Some("Part 1"));
+        // In the variant of 2.5 m: its sketch changed (●), its length set (↺ by the parameter too).
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        session.execute("activate", &json!({"level": "2,5 м"})).unwrap();
+        v.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
+        h.run();
+        assert!(h.query_by_label("✔ outline ●  ·  sketch").is_some(), "the changed sketch marked");
+        let reverts: Vec<_> = h.get_all_by_label("↺").collect();
+        assert_eq!(reverts.len(), 2, "the length and the sketch");
+        reverts[1].click();
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("revert", p) if p["feature"] == "outline")), "the sketch back");
     }
 
     /// Ctrl+W closes and Ctrl+N gives an empty model (issue #57), with a button focused by Tab

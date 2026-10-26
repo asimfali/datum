@@ -455,6 +455,21 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.activate(p.get("level").and_then(Value::as_str).map(String::from)),
     },
     Command {
+        name: "revert",
+        description: "In the level worked in, a parent's feature `feature` or parameter `parameter` as the parent has it again: \
+                      what the level changed in it dropped.",
+        params: || json!({"type": "object", "properties": {"feature": {"type": "string"}, "parameter": {"type": "string"}}}),
+        run: |s, p| {
+            let level = s.active.clone().ok_or("the root has no parent to go back to: work in a level")?;
+            let (feature, parameter) = (p.get("feature").and_then(Value::as_str), p.get("parameter").and_then(Value::as_str));
+            if feature.is_none() && parameter.is_none() {
+                return Err("give `feature` or `parameter`".into());
+            }
+            s.doc.revert(&level, feature, parameter)?;
+            s.activate(Some(level))
+        },
+    },
+    Command {
         name: "undo",
         description: "Go back one change of the model: one command, whatever it changed.",
         params: no_params,
@@ -706,8 +721,14 @@ impl Session {
                 let l = &self.doc.levels[&name];
                 let mut v = json!({"name": name, "parent": parent, "depth": depth, "parameters": l.parameters,
                                    "features": l.features.iter().filter_map(|f| f.get("name").cloned()).collect::<Vec<_>>()});
-                if let Err(e) = self.doc.graph(Some(&name)) {
-                    v["error"] = json!(e);
+                match self.doc.changes(&name).and_then(|c| self.doc.graph(Some(&name)).map(|_| c)) {
+                    Ok([changed, own, set, new]) => {
+                        v["changed"] = json!(changed);
+                        v["own"] = json!(own);
+                        v["parameters_set"] = json!(set);
+                        v["own_parameters"] = json!(new);
+                    }
+                    Err(e) => v["error"] = json!(e),
                 }
                 v
             })
