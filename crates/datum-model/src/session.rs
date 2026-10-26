@@ -10,20 +10,27 @@ use datum_math::Vec3;
 use datum_math::expr::{ExprError, Num, parameter_values};
 use serde_json::{Map, Value, json};
 
-use crate::{SketchPatch, add_feature, feature_json, library, parse, to_json};
+use crate::levels::Doc;
+use crate::{SketchPatch, add_feature, feature_json, library, parse_doc, to_json_doc};
 
 /// The model being edited, its cache and its latest evaluation. Every edit re-evaluates; the
 /// cache makes that cost proportional to what changed.
 pub struct Session {
+    /// The graph of the level worked in, evaluated; the model whole is `doc`, kept to it after
+    /// every change (D152).
     graph: Graph,
+    doc: Doc,
+    /// The level worked in; none: the root.
+    active: Option<String>,
     evaluator: Evaluator,
     last: Evaluation,
     path: Option<PathBuf>,
     /// The model as last opened or saved: what differs from it is not saved yet.
-    saved: Graph,
-    /// Models before each change, the latest last; and those undone, for `redo`.
-    undo: Vec<Graph>,
-    redo: Vec<Graph>,
+    saved: Doc,
+    /// Models before each change (and the level then worked in), the latest last; and those
+    /// undone, for `redo`.
+    undo: Vec<(Doc, Option<String>)>,
+    redo: Vec<(Doc, Option<String>)>,
 }
 
 /// Changes `undo` goes back through.
@@ -33,7 +40,17 @@ impl Default for Session {
     fn default() -> Self {
         let evaluator = Evaluator::default();
         let last = evaluator.evaluate(&Graph::default());
-        Self { graph: Graph::default(), evaluator, last, path: None, saved: Graph::default(), undo: Vec::new(), redo: Vec::new() }
+        Self {
+            graph: Graph::default(),
+            doc: Doc::default(),
+            active: None,
+            evaluator,
+            last,
+            path: None,
+            saved: Doc::default(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
     }
 }
 
@@ -45,7 +62,7 @@ struct Command {
 }
 
 const COMMANDS: &[Command] = &[
-    Command { name: "new", description: "Start an empty model.", params: no_params, run: |s, _| Ok(s.replace(Graph::default(), None)) },
+    Command { name: "new", description: "Start an empty model.", params: no_params, run: |s, _| Ok(s.replace(Doc::default(), None)) },
     Command {
         name: "open",
         description: "Open a model file (.json).",
@@ -53,8 +70,8 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             let path = PathBuf::from(text(p, "path")?);
             let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-            let g = parse(&src).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(s.replace(g, Some(path)))
+            let d = parse_doc(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+            Ok(s.replace(d, Some(path)))
         },
     },
     Command {
@@ -92,9 +109,9 @@ const COMMANDS: &[Command] = &[
                 Some(x) => PathBuf::from(x),
                 None => s.path.clone().ok_or("the model has no file yet: give `path`")?,
             };
-            std::fs::write(&path, to_json(&s.graph)).map_err(|e| format!("{}: {e}", path.display()))?;
+            std::fs::write(&path, to_json_doc(&s.doc)).map_err(|e| format!("{}: {e}", path.display()))?;
             s.path = Some(path.clone());
-            s.saved = s.graph.clone();
+            s.saved = s.doc.clone();
             Ok(json!({"saved": path.display().to_string()}))
         },
     },
@@ -398,6 +415,46 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "levels",
+        description: "The model's levels (D152): the root (the frame: shared sketches, planes, parameters), parts below it, their \
+                      variants below them; each with its parent, depth, what it sets otherwise, and `active` the one worked in. \
+                      A level holds only what differs from its parent; a change to the parent reaches every level below.",
+        params: no_params,
+        run: |s, _| Ok(s.levels()),
+    },
+    Command {
+        name: "add_level",
+        description: "Add level `name` below `parent` (a level's name; left out or null: the root), the same as it to begin with, \
+                      and work in it. Commands then change it: `set_parameter` gives a parameter another value, `edit` and \
+                      `edit_sketch` change an inherited feature (sketch holes added, a size changed), `add` adds its own features. \
+                      Inherited features and parameters cannot be removed in it.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "parent": {"type": ["string", "null"]}}, "required": ["name"]}),
+        run: |s, p| {
+            let parent = p.get("parent").and_then(Value::as_str);
+            s.doc.add_level(text(p, "name")?, parent)?;
+            s.activate(Some(text(p, "name")?.to_string()))
+        },
+    },
+    Command {
+        name: "remove_level",
+        description: "Remove level `name`, if no level is below it; the root is worked in if it was.",
+        params: name_param,
+        run: |s, p| {
+            let name = text(p, "name")?;
+            s.doc.remove_level(name)?;
+            if s.active.as_deref() == Some(name) {
+                return s.activate(None);
+            }
+            Ok(s.levels())
+        },
+    },
+    Command {
+        name: "activate",
+        description: "Work in level `level` (null: the root): commands then change it, `inspect` lists its features.",
+        params: || json!({"type": "object", "properties": {"level": {"type": ["string", "null"]}}, "required": ["level"]}),
+        run: |s, p| s.activate(p.get("level").and_then(Value::as_str).map(String::from)),
+    },
+    Command {
         name: "undo",
         description: "Go back one change of the model: one command, whatever it changed.",
         params: no_params,
@@ -562,41 +619,64 @@ impl Session {
         json!({"commands": list})
     }
 
-    /// Runs a command. Edits return the rebuild summary.
+    /// Runs a command. Edits return the rebuild summary. `level` in the parameters runs it in that
+    /// level (null: the root), then goes back to the one worked in.
     pub fn execute(&mut self, command: &str, params: &Value) -> Result<Value, String> {
         let c = COMMANDS.iter().find(|c| c.name == command).ok_or_else(|| format!("unknown command `{command}` (see list_commands)"))?;
-        let empty = Map::new();
-        let p = match params {
-            Value::Object(m) => m,
-            Value::Null => &empty,
+        let mut p = match params {
+            Value::Object(m) => m.clone(),
+            Value::Null => Map::new(),
             _ => return Err("params must be an object".into()),
         };
+        if c.name != "activate"
+            && let Some(level) = p.remove("level")
+        {
+            let back = self.active.clone();
+            self.activate(level.as_str().map(String::from))?;
+            let result = self.run(c, &p);
+            self.activate(back.filter(|b| self.doc.levels.contains_key(b)))?;
+            return result;
+        }
+        self.run(c, &p)
+    }
+
+    fn run(&mut self, c: &Command, p: &Map<String, Value>) -> Result<Value, String> {
         if matches!(c.name, "undo" | "redo") {
             return (c.run)(self, p);
         }
         // A command changes the model whole or not at all: one that fails halfway leaves it as
         // it was, and each change is one step of `undo`.
-        let before = self.graph.clone();
+        let (doc, active, graph) = (self.doc.clone(), self.active.clone(), self.graph.clone());
         let results_before = self.last.results.clone();
         let mut result = (c.run)(self, p);
+        // The model whole follows the level's graph: what it differs in from its parent kept.
+        if result.is_ok()
+            && self.graph != graph
+            && self.active == active
+            && let Err(e) = self.doc.store(self.active.as_deref(), &self.graph)
+        {
+            result = Err(e);
+        }
         if let Ok(reply) = &mut result {
-            let changed = self.shape_changes(&before, &results_before);
+            let changed = self.shape_changes(&graph, &results_before);
             if !changed.is_empty() {
                 reply["shape_changed"] = json!(changed);
             }
         }
-        match (&result, self.graph == before) {
-            (_, true) => {}
-            (Err(_), false) => {
-                self.graph = before;
-                self.rebuild();
+        match (&result, self.doc == doc) {
+            (Err(_), _) => {
+                if self.doc != doc || self.graph != graph || self.active != active {
+                    (self.doc, self.active, self.graph) = (doc, active, graph);
+                    self.rebuild();
+                }
             }
+            (Ok(_), true) => {}
             (Ok(_), false) if matches!(c.name, "new" | "open") => {
                 self.undo.clear();
                 self.redo.clear();
             }
             (Ok(_), false) => {
-                self.undo.push(before);
+                self.undo.push((doc, active));
                 if self.undo.len() > UNDO_DEPTH {
                     self.undo.remove(0);
                 }
@@ -604,6 +684,35 @@ impl Session {
             }
         }
         result
+    }
+
+    /// Works in level `level` (none: the root): its graph evaluated.
+    fn activate(&mut self, level: Option<String>) -> Result<Value, String> {
+        let g = self.doc.graph(level.as_deref())?;
+        self.active = level;
+        self.graph = g;
+        let mut reply = self.rebuild();
+        reply["level"] = json!(self.active);
+        Ok(reply)
+    }
+
+    /// The levels as a tree, what each sets otherwise, and the one worked in.
+    fn levels(&self) -> Value {
+        let list: Vec<Value> = self
+            .doc
+            .tree()
+            .into_iter()
+            .map(|(name, parent, depth)| {
+                let l = &self.doc.levels[&name];
+                let mut v = json!({"name": name, "parent": parent, "depth": depth, "parameters": l.parameters,
+                                   "features": l.features.iter().filter_map(|f| f.get("name").cloned()).collect::<Vec<_>>()});
+                if let Err(e) = self.doc.graph(Some(&name)) {
+                    v["error"] = json!(e);
+                }
+                v
+            })
+            .collect();
+        json!({"active": self.active, "levels": list})
     }
 
     /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
@@ -629,14 +738,17 @@ impl Session {
     /// One step back (`undo`) or forward.
     fn step(&mut self, back: bool) -> Result<Value, String> {
         let (from, to) = if back { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
-        let g = from.pop().ok_or(if back { "nothing to undo" } else { "nothing to redo" })?;
-        to.push(std::mem::replace(&mut self.graph, g));
-        Ok(self.rebuild())
+        let (d, a) = from.pop().ok_or(if back { "nothing to undo" } else { "nothing to redo" })?;
+        to.push((std::mem::replace(&mut self.doc, d), std::mem::replace(&mut self.active, a)));
+        let active = self.active.take().filter(|a| self.doc.levels.contains_key(a));
+        self.activate(active)
     }
 
-    fn replace(&mut self, g: Graph, path: Option<PathBuf>) -> Value {
-        self.saved = g.clone();
-        self.graph = g;
+    fn replace(&mut self, d: Doc, path: Option<PathBuf>) -> Value {
+        self.saved = d.clone();
+        self.graph = d.root.clone();
+        self.doc = d;
+        self.active = None;
         self.path = path;
         self.rebuild()
     }
@@ -678,6 +790,9 @@ impl Session {
             _ => None,
         };
         rename_names(&mut op, &renamed);
+        // The levels below change this sketch by its names: theirs follow (D152).
+        let below = self.doc.below(self.active.as_deref());
+        self.doc.patches_of(&below, feature, |p| rename_names(p, &renamed));
         let mut ops: Vec<(NodeIx, Op)> = vec![(ix, serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?)];
         for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1) {
             if let (Op::Sheet { start: Some(st), .. }, true) = (&n.op, n.inputs.contains(&ix))
@@ -855,7 +970,8 @@ impl Session {
                 (n.clone(), v)
             })
             .collect();
-        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.graph != self.saved, "parameters": parameters,
+        json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
+               "level": self.active, "levels": self.levels()["levels"],
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }
 }

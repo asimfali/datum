@@ -15,30 +15,38 @@ fn reference_models_export_or_say_why_not() {
     let mut files: Vec<_> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).collect();
     files.sort();
     for path in files {
-        let g = datum_model::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let e = Evaluator::default().evaluate(&g);
+        let doc = datum_model::parse_doc(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let name = path.file_stem().unwrap().to_string_lossy().into_owned();
-        let step = out.join(format!("{name}.step"));
-        let note = out.join(format!("{name}.step.txt"));
-        // Round holes and slots in a rolled sheet: circles of the development, not circles in 3D.
-        let inexact: &[&str] = match name.as_str() {
-            "rolled_perforation" => &["perforated", "slotted"],
-            "rolled_holes" => &["perforated"],
-            _ => &[],
-        };
-        assert_eq!(datum_model::inexact_features(&g, &e), inexact, "{name}");
-        if inexact.is_empty() {
-            assert_eq!(datum_model::write_step(&g, &e, &step, false), Ok(0), "{name}");
-            assert!(!note.exists(), "{name}: a note for exact geometry");
-        } else {
-            let err = datum_model::write_step(&g, &e, &step, false).unwrap_err();
-            assert!(err.starts_with(&format!("`{}`", inexact[0])), "{err}");
-            assert!(datum_model::write_step(&g, &e, &step, true).unwrap() > 0, "{name}");
-            let told = std::fs::read_to_string(&note).unwrap();
-            assert!(told.contains(&format!("Features: {}.", inexact.join(", "))), "{told}");
+        // The root, then each part and variant (D152); a frame with levels below may hold no body.
+        for (level, g) in doc.graphs() {
+            let g = g.unwrap();
+            let e = Evaluator::default().evaluate(&g);
+            if level.is_none() && !doc.levels.is_empty() && e.final_values(&g).iter().all(|v| v.body().is_none()) {
+                continue;
+            }
+            let name = level.map_or_else(|| name.clone(), |l| format!("{name} [{l}]"));
+            let step = out.join(format!("{name}.step"));
+            let note = out.join(format!("{name}.step.txt"));
+            // Round holes and slots in a rolled sheet: circles of the development, not circles in 3D.
+            let inexact: &[&str] = match name.as_str() {
+                "rolled_perforation" => &["perforated", "slotted"],
+                "rolled_holes" => &["perforated"],
+                _ => &[],
+            };
+            assert_eq!(datum_model::inexact_features(&g, &e), inexact, "{name}");
+            if inexact.is_empty() {
+                assert_eq!(datum_model::write_step(&g, &e, &step, false), Ok(0), "{name}");
+                assert!(!note.exists(), "{name}: a note for exact geometry");
+            } else {
+                let err = datum_model::write_step(&g, &e, &step, false).unwrap_err();
+                assert!(err.starts_with(&format!("`{}`", inexact[0])), "{err}");
+                assert!(datum_model::write_step(&g, &e, &step, true).unwrap() > 0, "{name}");
+                let told = std::fs::read_to_string(&note).unwrap();
+                assert!(told.contains(&format!("Features: {}.", inexact.join(", "))), "{told}");
+            }
+            let text = std::fs::read_to_string(&step).unwrap();
+            assert!(text.starts_with("ISO-10303-21;") && text.ends_with("END-ISO-10303-21;\n"), "{name}");
         }
-        let text = std::fs::read_to_string(&step).unwrap();
-        assert!(text.starts_with("ISO-10303-21;") && text.ends_with("END-ISO-10303-21;\n"), "{name}");
     }
     std::fs::remove_dir_all(&out).unwrap();
 }
