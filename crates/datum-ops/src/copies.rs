@@ -221,7 +221,7 @@ enum Piece {
 impl Piece {
     fn length(&self) -> f64 {
         match *self {
-            Piece::Line { a, b } => (b.x - a.x).hypot(b.y - a.y),
+            Piece::Line { a, b } => libm::hypot(b.x - a.x, b.y - a.y),
             Piece::Arc { r, sweep, .. } => r * sweep.abs(),
         }
     }
@@ -277,7 +277,7 @@ impl Path {
             } else if let Some(arc) = s.arcs.get(n) {
                 let (c, a, b) = (pt(&arc.center)?, pt(&arc.from)?, pt(&arc.to)?);
                 let sweep = datum_brep::ProfileArc { center: c, ccw: true }.turn(a, b);
-                let (r, from, to) = ((a.x - c.x).hypot(a.y - c.y), libm::atan2(a.y - c.y, a.x - c.x), libm::atan2(b.y - c.y, b.x - c.x));
+                let (r, from, to) = (libm::hypot(a.x - c.x, a.y - c.y), libm::atan2(a.y - c.y, a.x - c.x), libm::atan2(b.y - c.y, b.x - c.x));
                 ends.push((&arc.from, &arc.to, Piece::Arc { c, r, from, sweep }, Piece::Arc { c, r, from: to, sweep: -sweep }));
             } else if s.circles.contains_key(n) {
                 return Err(format!("the path takes lines and arcs; round a circle, copy `around` its centre: `{n}`"));
@@ -358,7 +358,7 @@ impl Path {
         for (k, piece) in self.pieces.iter().enumerate() {
             let t = piece.nearest(p);
             let (q, _) = piece.at(t);
-            let d = (q.x - p.x).hypot(q.y - p.y);
+            let d = libm::hypot(q.x - p.x, q.y - p.y);
             if d < best.0 {
                 best = (d, self.starts[k] + t * piece.length());
             }
@@ -410,7 +410,7 @@ fn along(s: &Placed, sketch: &Sketch, a: &Along, centre: Vec2, shift: &BTreeMap<
         let (p, t) = path.at(along)?;
         let turn = if a.rotate {
             let (c, sn) = (t0.x * t.x + t0.y * t.y, t0.x * t.y - t0.y * t.x);
-            let h = c.hypot(sn);
+            let h = libm::hypot(c, sn);
             Vec2::new(c / h, sn / h)
         } else {
             Vec2::new(1.0, 0.0)
@@ -437,7 +437,7 @@ fn around(s: &Placed, a: &Around, centre: Vec2, shift: &BTreeMap<[i64; 2], Vec2>
         }
     };
     let out = Vec2::new(centre.x - c.x, centre.y - c.y);
-    let r = out.x.hypot(out.y);
+    let r = libm::hypot(out.x, out.y);
     let mut at = Vec::with_capacity(n as usize);
     for i in 0..n {
         let k = [i, 0];
