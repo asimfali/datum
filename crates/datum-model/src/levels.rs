@@ -126,6 +126,39 @@ impl Doc {
         out
     }
 
+    /// What level `name` does to its parent: the parent's features it changes, its own features,
+    /// the parent's parameters it gives other values, its own parameters.
+    pub fn changes(&self, name: &str) -> Result<[Vec<String>; 4], String> {
+        let level = self.levels.get(name).ok_or_else(|| format!("no level `{name}`"))?;
+        let parent = self.graph(self.chain_check(name)?.as_deref())?;
+        let (mut changed, mut own) = (Vec::new(), Vec::new());
+        for f in level.features.iter().filter_map(|f| f.get("name").and_then(Value::as_str)) {
+            if parent.find(f).is_some() { changed.push(f.to_string()) } else { own.push(f.to_string()) }
+        }
+        let (set, new): (Vec<String>, Vec<String>) = level.parameters.keys().cloned().partition(|n| parent.parameters().contains_key(n));
+        Ok([changed, own, set, new])
+    }
+
+    /// Feature `feature` or parameter `parameter` of level `name` as its parent has it again:
+    /// what the level changed in it dropped.
+    pub fn revert(&mut self, name: &str, feature: Option<&str>, parameter: Option<&str>) -> Result<(), String> {
+        let [changed, _, set, _] = self.changes(name)?;
+        let level = self.levels.get_mut(name).ok_or_else(|| format!("no level `{name}`"))?;
+        if let Some(f) = feature {
+            if !changed.iter().any(|c| c == f) {
+                return Err(format!("`{name}` does not change the parent's feature `{f}`"));
+            }
+            level.features.retain(|p| p.get("name").and_then(Value::as_str) != Some(f));
+        }
+        if let Some(p) = parameter {
+            if !set.iter().any(|c| c == p) {
+                return Err(format!("`{name}` does not give the parent's parameter `{p}` another value"));
+            }
+            level.parameters.remove(p);
+        }
+        Ok(())
+    }
+
     /// The levels below `level` (none: the root), however deep.
     pub fn below(&self, level: Option<&str>) -> Vec<String> {
         let Some(level) = level else { return self.levels.keys().cloned().collect() };

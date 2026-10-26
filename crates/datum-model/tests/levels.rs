@@ -71,10 +71,19 @@ fn variants_follow_their_parent() {
     assert_eq!(
         levels["levels"],
         json!([
-            {"name": "long", "parent": null, "depth": 0, "parameters": {"w": 200.0}, "features": []},
-            {"name": "long_holed", "parent": "long", "depth": 1, "parameters": {}, "features": ["outline"]}
+            {"name": "long", "parent": null, "depth": 0, "parameters": {"w": 200.0}, "features": [],
+             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": []},
+            {"name": "long_holed", "parent": "long", "depth": 1, "parameters": {}, "features": ["outline"],
+             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": []}
         ])
     );
+    // Back as the parent has it: the hole goes, then the length.
+    run(&mut s, "revert", json!({"feature": "outline"}));
+    assert_eq!(volume(&mut s, "plate"), 36000.0);
+    let e = s.execute("revert", &json!({"parameter": "w"})).unwrap_err();
+    assert!(e.contains("does not give"), "`w` is set in `long`, not here: {e}");
+    run(&mut s, "revert", json!({"parameter": "w", "level": "long"}));
+    assert_eq!(volume(&mut s, "plate"), 18000.0);
 }
 
 /// A command given `level` runs there and comes back; a level cannot drop what it inherits;
