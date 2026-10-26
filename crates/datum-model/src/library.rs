@@ -879,7 +879,7 @@ mod tests {
         assert_eq!(renamed["bar"], "l3", "named as asked");
         assert_eq!((renamed["a"].as_str(), renamed["b"].as_str(), renamed["m"].as_str()), ("p5", "p6", "p7"));
         let p = Value::Object(patch.done().unwrap());
-        let near = |n: &str, q: [f64; 2]| (p["points"][n][0].as_f64().unwrap() - q[0]).hypot(p["points"][n][1].as_f64().unwrap() - q[1]) < 1e-9;
+        let near = |n: &str, q: [f64; 2]| libm::hypot(p["points"][n][0].as_f64().unwrap() - q[0], p["points"][n][1].as_f64().unwrap() - q[1]) < 1e-9;
         assert!(near("p6", [24.0, 42.0]), "40 long, as its dimension says, turned along p2 → p4: {p}");
         assert!(near("p7", [12.0, 26.0]), "halfway: {p}");
         let c = p["add_constraints"].as_array().unwrap();

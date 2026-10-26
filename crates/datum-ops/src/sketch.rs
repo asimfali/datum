@@ -489,7 +489,11 @@ pub fn place(
         }
         bytes(&[u8::from(p.source)]);
         for (k, d) in &p.at {
-            bytes(&[k[0].to_le_bytes(), k[1].to_le_bytes(), d.x.to_bits().to_le_bytes(), d.y.to_bits().to_le_bytes()].concat());
+            bytes(&[k[0].to_le_bytes(), k[1].to_le_bytes(), d.by.x.to_bits().to_le_bytes(), d.by.y.to_bits().to_le_bytes()].concat());
+            // A grid's copies are not turned: their bytes as before turns (D153).
+            if d.turned() {
+                bytes(&[d.turn.x.to_bits().to_le_bytes(), d.turn.y.to_bits().to_le_bytes()].concat());
+            }
         }
     }
     if let Some(d) = developed {
