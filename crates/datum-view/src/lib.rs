@@ -14,6 +14,7 @@ pub mod log;
 mod origin;
 pub mod render;
 pub mod scene;
+mod select;
 mod settings;
 mod sketch;
 mod templates;

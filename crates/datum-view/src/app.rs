@@ -1196,7 +1196,7 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             ui.weak(match sk.draft.tool {
-                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift to add · frame: to the right what is inside, to the left what it touches · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again",
+                Tool::Select => "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again",
                 Tool::Dimension => "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
@@ -2061,14 +2061,7 @@ impl Viewer {
             }
         }
         if let Some(framed) = sk.frame_to(offset, r.drag_stopped(), h, |t| crate::sketch::label_size(ui.painter(), t)) {
-            if !ui.input(|i| i.modifiers.shift) {
-                sk.selected.clear();
-            }
-            for p in framed {
-                if !sk.selected.contains(&p) {
-                    sk.selected.push(p);
-                }
-            }
+            crate::select::frame(&mut sk.selected, framed, ui.input(|i| crate::select::adding(&i.modifiers)));
         }
         if sk.drag.is_some() {
             if let Some((x, y)) = offset {
@@ -2111,23 +2104,12 @@ impl Viewer {
                 }
             }
         } else if r.clicked() {
-            let shift = ui.input(|i| i.modifiers.shift);
             // A group's badge stands for what the group holds.
             let picks = match sk.hover.clone() {
                 Some(Pick::Group(g)) => sk.group_picks(&g),
                 p => p.into_iter().collect(),
             };
-            if !shift {
-                sk.selected = picks;
-            } else if picks.iter().all(|p| sk.selected.contains(p)) {
-                sk.selected.retain(|q| !picks.contains(q));
-            } else {
-                for p in picks {
-                    if !sk.selected.contains(&p) {
-                        sk.selected.push(p);
-                    }
-                }
-            }
+            crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
         }
         let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
         if scroll != 0.0 {
