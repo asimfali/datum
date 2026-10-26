@@ -1429,16 +1429,9 @@ impl Viewer {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let bare = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
-                // In a level: what it changes of its parent's (● and ↺ back), what is its own (+).
-                let tag = if changed.iter().any(|c| c == bare) {
-                    " ●"
-                } else if own.iter().any(|c| c == bare) {
-                    " +"
-                } else {
-                    ""
-                };
-                let shown = format!("{bare}{tag}");
-                let name = shown.as_str();
+                // In a level: what it changes of its parent's (a dot, ↺ back), what is its own (+).
+                let (is_changed, is_own) = (changed.iter().any(|c| c == bare), own.iter().any(|c| c == bare));
+                let name = bare;
                 let mut row = |ui: &mut egui::Ui| match f["error"].as_str() {
                     // A flat blank: its size, and its DXF for the turret press.
                     None if f["status"]["flat"].is_object() => {
@@ -1498,7 +1491,7 @@ impl Viewer {
                     }
                 };
                 ui.horizontal(|ui| {
-                    if tag == " ●" && ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
+                    if is_changed && ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
                         revert = Some(json!({"feature": bare}));
                     }
                     // On or off (D159); by a formula, it says which and is changed in the JSON.
@@ -1513,6 +1506,19 @@ impl Viewer {
                                 toggle = Some((bare.to_string(), json!({ "enabled": on })));
                             }
                         }
+                    }
+                    // Drawn, not a glyph: the window's font may lack one.
+                    let (r, painter) = ui.allocate_painter(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    let colour = ui.visuals().widgets.active.fg_stroke.color;
+                    if is_changed {
+                        painter.circle_filled(r.rect.center(), 3.5, colour);
+                        r.on_hover_text("Changed in this variant");
+                    } else if is_own {
+                        let c = r.rect.center();
+                        let stroke = egui::Stroke::new(1.5, colour);
+                        painter.line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], stroke);
+                        painter.line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], stroke);
+                        r.on_hover_text("This variant's own");
                     }
                     ui.vertical(|ui| row(ui));
                 });
@@ -2514,7 +2520,7 @@ impl Viewer {
 
 /// What parts and variants are, for the hint over them (D152).
 const LEVELS: &str = "A part takes the frame's sketches and adds its own features; a variant takes its part and changes only what \
-                      differs (a length, a few holes): a change to the frame or the part reaches every variant. ● changed here, \
+                      differs (a length, a few holes): a change to the frame or the part reaches every variant. A dot: changed here, \
                       ↺ back as the parent has it, + its own";
 
 /// `prefix k`, the first not a level's name yet.
@@ -3804,7 +3810,7 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "Стенка верхняя")));
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Part 1" && p["parent"].is_null())));
         assert_eq!(v.chosen.get("Part 1").map(String::as_str), Some("Part 1"));
-        // In the variant of 2.5 m: its sketch changed (●), its length set (↺ by the parameter too).
+        // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
@@ -3812,7 +3818,7 @@ mod tests {
         v.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
         h.run();
-        assert!(h.query_by_label("✔ outline ●  ·  sketch").is_some(), "the changed sketch marked");
+        assert!(h.query_by_label("✔ outline  ·  sketch").is_some());
         let reverts: Vec<_> = h.get_all_by_label("↺").collect();
         assert_eq!(reverts.len(), 3, "the length, the sketch and the notch turned off");
         reverts[1].click();
