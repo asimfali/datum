@@ -287,3 +287,25 @@ fn bad_paths_are_refused() {
     refused(grid, "one of them");
     refused(plate(serde_json::json!({"of": "cell", "step": [[10, 0], [0, 10]], "fill": "panel", "grow": [[1, 0], [0, 0]]})), "cannot grow");
 }
+
+/// A path drawn as profile lines (as in Inventor, not construction) is a guide: the holes along
+/// it are placed and cut, the path bounds nothing (D157).
+#[test]
+fn a_path_of_profile_lines_is_a_guide() {
+    let s = placed(serde_json::json!({
+        "points": {"a": [-50, -50], "b": [150, -50], "c": [150, 100], "d": [-50, 100], "p1": [0, 0], "p2": [100, 0], "pc": [100, 30], "p3": [130, 30], "h": [5, 5]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"},
+                  "l1": {"from": "p1", "to": "p2"}},
+        "arcs": {"a1": {"center": "pc", "from": "p2", "to": "p3"}},
+        "circles": {"hole": {"center": "h", "diameter": 3}},
+        "groups": {"g1": ["p2", "l1", "a1"]},
+        "patterns": {"p": {"of": "hole", "along": {"path": "g1", "step": 20, "count": 5}}}
+    }))
+    .unwrap();
+    assert_eq!(copies(&s).patterns[0].at.len(), 5);
+    let extrude: Op = serde_json::from_value(serde_json::json!({"op": "extrude", "z0": 0, "z1": 2})).unwrap();
+    let b = extrude.eval(id("plate"), &[&s]).unwrap();
+    let b = b.body().unwrap();
+    b.validate().unwrap();
+    assert_close(b.volume(), 2.0 * (200.0 * 150.0 - 5.0 * 2.25 * PI));
+}
