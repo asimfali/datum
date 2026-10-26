@@ -31,6 +31,7 @@ const USAGE: &str = "usage:
   datum bench-view <model.json> [--size WxH] [--frames N] [--set name=value]...
                                                         GPU time per frame, whole model and close up
   datum mcp                                             MCP server on stdin/stdout
+--level <name>: build, dxf, snapshot and bench-view take that part or variant of the model
 threads: RAYON_NUM_THREADS (default: all cores)";
 
 fn main() -> ExitCode {
@@ -74,12 +75,24 @@ fn let_go_of_own_console() {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
+    // `--level <name>`: a part or variant of the model (D152), wherever it is given.
+    let mut args = args.to_vec();
+    let level = match args.iter().position(|a| a == "--level") {
+        Some(k) if k + 1 < args.len() => {
+            let l = args.remove(k + 1);
+            args.remove(k);
+            Some(l)
+        }
+        Some(_) => return Err(USAGE.into()),
+        None => None,
+    };
+    let level = level.as_deref();
     match args.split_first() {
-        Some((cmd, rest)) if cmd == "build" => cmd_build(rest),
-        Some((cmd, rest)) if cmd == "dxf" => cmd_dxf(rest),
+        Some((cmd, rest)) if cmd == "build" => cmd_build(rest, level),
+        Some((cmd, rest)) if cmd == "dxf" => cmd_dxf(rest, level),
         Some((cmd, rest)) if cmd == "determinism-check" => cmd_determinism(rest),
-        Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest),
-        Some((cmd, rest)) if cmd == "bench-view" => cmd_bench_view(rest),
+        Some((cmd, rest)) if cmd == "snapshot" => cmd_snapshot(rest, level),
+        Some((cmd, rest)) if cmd == "bench-view" => cmd_bench_view(rest, level),
         Some((cmd, [model])) if cmd == "view" => window(Some(PathBuf::from(model))),
         // A model dropped on the program, or opened with it: show it.
         Some((model, [])) if model.ends_with(".json") && Path::new(model).is_file() => window(Some(PathBuf::from(model))),
@@ -92,23 +105,25 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-fn load(path: &Path) -> Result<Graph, String> {
+/// The graph of model `path`, of its root or of level `level`.
+fn load(path: &Path, level: Option<&str>) -> Result<Graph, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
-    datum_model::parse(&text).map_err(|e| format!("{}: {e}", path.display()))
+    let doc = datum_model::parse_doc(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+    doc.graph(level).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn hex8(h: [u8; 32]) -> String {
     h[..4].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn cmd_build(args: &[String]) -> Result<(), String> {
+fn cmd_build(args: &[String], level: Option<&str>) -> Result<(), String> {
     let (model, out, approximate) = match args {
         [m] => (m, None, false),
         [m, flag, o] if flag == "--out" => (m, Some(Path::new(o)), false),
         [m, flag, o, a] if flag == "--out" && a == "--approximate" => (m, Some(Path::new(o)), true),
         _ => return Err(USAGE.into()),
     };
-    let g = load(Path::new(model))?;
+    let g = load(Path::new(model), level)?;
     let start = Instant::now();
     let e = Evaluator::default().evaluate(&g);
     let elapsed = start.elapsed();
@@ -144,13 +159,13 @@ fn cmd_build(args: &[String]) -> Result<(), String> {
 }
 
 /// The flat blank of an unfold feature as DXF: the one named, or the model's only one.
-fn cmd_dxf(args: &[String]) -> Result<(), String> {
+fn cmd_dxf(args: &[String], level: Option<&str>) -> Result<(), String> {
     let (model, out, feature) = match args {
         [m, o, out] if o == "--out" => (m, out, None),
         [m, o, out, f, name] if o == "--out" && f == "--feature" => (m, out, Some(name.as_str())),
         _ => return Err(USAGE.into()),
     };
-    let g = load(Path::new(model))?;
+    let g = load(Path::new(model), level)?;
     let e = Evaluator::default().evaluate(&g);
     let flats: Vec<_> = g
         .nodes()
@@ -174,7 +189,7 @@ fn cmd_dxf(args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn cmd_snapshot(args: &[String]) -> Result<(), String> {
+fn cmd_snapshot(args: &[String], level: Option<&str>) -> Result<(), String> {
     let [model, rest @ ..] = args else { return Err(USAGE.into()) };
     let (mut out, mut size, mut view) = (None, "1024x768", "iso");
     for pair in rest.chunks(2) {
@@ -187,7 +202,7 @@ fn cmd_snapshot(args: &[String]) -> Result<(), String> {
     }
     let out = out.ok_or(USAGE)?;
     let (w, h) = parse_size(size)?;
-    let g = load(Path::new(model))?;
+    let g = load(Path::new(model), level)?;
     let e = Evaluator::default().evaluate(&g);
     let png = datum_view::capture::snapshot(&e.final_values(&g), view, w, h)?;
     std::fs::write(out, png).map_err(|e| format!("{out}: {e}"))?;
@@ -202,9 +217,9 @@ fn parse_size(size: &str) -> Result<(u32, u32), String> {
         .ok_or_else(|| "--size takes WxH, e.g. 1024x768".into())
 }
 
-fn cmd_bench_view(args: &[String]) -> Result<(), String> {
+fn cmd_bench_view(args: &[String], level: Option<&str>) -> Result<(), String> {
     let [model, rest @ ..] = args else { return Err(USAGE.into()) };
-    let mut g = load(Path::new(model))?;
+    let mut g = load(Path::new(model), level)?;
     let (mut size, mut frames) = ("1600x900", 60);
     for pair in rest.chunks(2) {
         match pair {
@@ -284,28 +299,37 @@ fn model_files(args: &[String]) -> Result<Vec<PathBuf>, String> {
 fn cmd_determinism(args: &[String]) -> Result<(), String> {
     let mut failed = 0;
     for path in model_files(args)? {
-        let g = load(&path)?;
-        // Each result reduced to its hash or its error text.
-        let run = |threads: usize| -> Result<Vec<Result<[u8; 32], String>>, String> {
-            let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().map_err(|e| e.to_string())?;
-            let e = pool.install(|| Evaluator::default().evaluate(&g));
-            Ok(e.results.iter().map(|r| r.as_ref().map(|b| b.hash()).map_err(|e| e.to_string())).collect())
-        };
-        let one = run(1)?;
-        let mut mismatch = Vec::new();
-        for threads in [4, 16] {
-            let other = run(threads)?;
-            for ((node, a), b) in g.nodes().iter().zip(&one).zip(&other) {
-                if a != b {
-                    mismatch.push(format!("{} (threads={threads})", node.name));
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let doc = datum_model::parse_doc(&text).map_err(|e| format!("{}: {e}", path.display()))?;
+        // The root, and each level of parts and variants (D152).
+        for (level, g) in doc.graphs() {
+            let g = g.map_err(|e| format!("{}: {e}", path.display()))?;
+            let shown = match &level {
+                Some(l) => format!("{} [{l}]", path.display()),
+                None => path.display().to_string(),
+            };
+            // Each result reduced to its hash or its error text.
+            let run = |threads: usize| -> Result<Vec<Result<[u8; 32], String>>, String> {
+                let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().map_err(|e| e.to_string())?;
+                let e = pool.install(|| Evaluator::default().evaluate(&g));
+                Ok(e.results.iter().map(|r| r.as_ref().map(|b| b.hash()).map_err(|e| e.to_string())).collect())
+            };
+            let one = run(1)?;
+            let mut mismatch = Vec::new();
+            for threads in [4, 16] {
+                let other = run(threads)?;
+                for ((node, a), b) in g.nodes().iter().zip(&one).zip(&other) {
+                    if a != b {
+                        mismatch.push(format!("{} (threads={threads})", node.name));
+                    }
                 }
             }
-        }
-        if mismatch.is_empty() {
-            println!("ok        {} ({} features)", path.display(), g.nodes().len());
-        } else {
-            failed += 1;
-            println!("MISMATCH  {}: {}", path.display(), mismatch.join(", "));
+            if mismatch.is_empty() {
+                println!("ok        {shown} ({} features)", g.nodes().len());
+            } else {
+                failed += 1;
+                println!("MISMATCH  {shown}: {}", mismatch.join(", "));
+            }
         }
     }
     if failed == 0 { Ok(()) } else { Err(format!("{failed} model(s) depend on thread count")) }

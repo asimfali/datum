@@ -18,6 +18,7 @@ use std::fmt;
 
 use datum_math::expr::Num;
 
+pub mod levels;
 pub mod library;
 mod patch;
 mod session;
@@ -61,9 +62,18 @@ struct File {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     parameters: BTreeMap<String, Num>,
     features: Vec<Map<String, Value>>,
+    /// Parts and variants (D152): each what differs from its parent.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    levels: BTreeMap<String, levels::Level>,
 }
 
+/// The root's graph of a model file (its levels left out).
 pub fn parse(json: &str) -> Result<Graph, ModelError> {
+    parse_doc(json).map(|d| d.root)
+}
+
+/// A model file whole: the root's graph and the levels.
+pub fn parse_doc(json: &str) -> Result<levels::Doc, ModelError> {
     let file: File = serde_json::from_str(json).map_err(ModelError::Json)?;
     if file.format != FORMAT {
         return Err(ModelError::Format(file.format));
@@ -77,7 +87,7 @@ pub fn parse(json: &str) -> Result<Graph, ModelError> {
     for (index, fields) in features.into_iter().enumerate() {
         add_feature(&mut g, fields).map_err(|msg| ModelError::Feature { index, msg })?;
     }
-    Ok(g)
+    Ok(levels::Doc { root: g, levels: file.levels })
 }
 
 /// Files from before patterns in sketches (D128) gave a cut a `pattern`: it becomes a pattern
@@ -223,8 +233,15 @@ pub fn write_step(g: &Graph, e: &datum_graph::Evaluation, path: &std::path::Path
 
 /// Canonical JSON: sorted keys, two-space indent, trailing newline.
 pub fn to_json(g: &Graph) -> String {
+    to_json_doc(&levels::Doc { root: g.clone(), levels: BTreeMap::new() })
+}
+
+/// [`to_json`] of a whole model, its levels too.
+pub fn to_json_doc(d: &levels::Doc) -> String {
+    let g = &d.root;
     let features = (0..g.nodes().len() as NodeIx).map(|i| feature_json(g, i)).collect();
-    let mut s = serde_json::to_string_pretty(&File { format: FORMAT.into(), parameters: g.parameters().clone(), features }).unwrap_or_default();
+    let file = File { format: FORMAT.into(), parameters: g.parameters().clone(), features, levels: d.levels.clone() };
+    let mut s = serde_json::to_string_pretty(&file).unwrap_or_default();
     s.push('\n');
     s
 }
