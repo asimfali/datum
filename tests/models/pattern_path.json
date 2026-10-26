@@ -1,0 +1,186 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "t": 3,
+    "bolts": 6,
+    "pitch": 25,
+    "edge_holes": 10,
+    "grow": 2
+  },
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            300,
+            0
+          ],
+          "c": [
+            300,
+            200
+          ],
+          "d": [
+            0,
+            200
+          ],
+          "o": [
+            80,
+            100
+          ],
+          "bolt": [
+            125,
+            100
+          ],
+          "p1": [
+            160,
+            20
+          ],
+          "p2": [
+            240,
+            20
+          ],
+          "pc": [
+            240,
+            60
+          ],
+          "p3": [
+            280,
+            60
+          ],
+          "p4": [
+            280,
+            180
+          ],
+          "e": [
+            170,
+            30
+          ],
+          "r": [
+            20,
+            185
+          ]
+        },
+        "lines": {
+          "bottom": {
+            "from": "a",
+            "to": "b"
+          },
+          "right": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "c",
+            "to": "d"
+          },
+          "left": {
+            "from": "d",
+            "to": "a"
+          },
+          "g1": {
+            "from": "p1",
+            "to": "p2",
+            "construction": true
+          },
+          "g3": {
+            "from": "p3",
+            "to": "p4",
+            "construction": true
+          }
+        },
+        "arcs": {
+          "g2": {
+            "center": "pc",
+            "from": "p2",
+            "to": "p3",
+            "construction": true
+          }
+        },
+        "circles": {
+          "bore_hole": {
+            "center": "o",
+            "diameter": 60
+          },
+          "bolt_hole": {
+            "center": "bolt",
+            "diameter": 8
+          },
+          "edge_hole": {
+            "center": "e",
+            "diameter": 5
+          },
+          "row_hole": {
+            "center": "r",
+            "diameter": 4
+          }
+        },
+        "groups": {
+          "guide": [
+            "g1",
+            "g2",
+            "g3"
+          ]
+        },
+        "patterns": {
+          "bolt_circle": {
+            "of": "bolt_hole",
+            "around": {
+              "center": "o",
+              "count": "bolts"
+            }
+          },
+          "along_edge": {
+            "of": "edge_hole",
+            "along": {
+              "path": "guide",
+              "step": "pitch",
+              "count": "edge_holes"
+            }
+          },
+          "growing_row": {
+            "of": "row_hole",
+            "count": [
+              6,
+              1
+            ],
+            "step": [
+              [
+                10,
+                0
+              ],
+              [
+                0,
+                10
+              ]
+            ],
+            "grow": [
+              [
+                "grow",
+                0
+              ],
+              [
+                0,
+                0
+              ]
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "plate",
+      "op": "extrude",
+      "inputs": [
+        "outline"
+      ],
+      "z0": 0,
+      "z1": "t"
+    }
+  ]
+}

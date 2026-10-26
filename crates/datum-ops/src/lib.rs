@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
-pub use copies::Copies;
+pub use copies::{Copies, Place};
 pub use cut::cut;
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};

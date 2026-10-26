@@ -162,7 +162,12 @@ const COMMANDS: &[Command] = &[
                       copies along each step, or as many as `fill` (a group bounding a region, or a circle) holds, centred, \
                       `clearance` from its edge and every other profile; `skip` [[i, j]] leaves copies out, `shift` \
                       {\"i,j\": [dx, dy]} moves one: `{\"perf\": {\"of\": \"cell\", \"step\": [[19, 0], [0, 17]], \"fill\": \"panel\", \
-                      \"clearance\": 3}}`. A cut and an extrusion take the copies with the sketch's own profiles; `inspect` \
+                      \"clearance\": 3}}`; `grow` [[dx, dy], [dx, dy]] makes each step longer than the one before. Or copies go \
+                      `along` a path: `{\"path\": \"edge\", \"step\": 20, \"count\": 10}` (a group of lines and arcs end to end, or \
+                      a curve; copy 0 where the cell is nearest it, turned with the path unless `rotate` false; `count` alone spreads \
+                      them to the path's end, `step` alone fits them centred; `grow`; shift [along, across]); or `around` a point: \
+                      `{\"center\": \"c\", \"count\": 6}` (`step` degrees or `angle` spread, 360 by default; `grow`; shift \
+                      [degrees, outward]); their copies are `i,0`. A cut and an extrusion take the copies with the sketch's own profiles; `inspect` \
                       gives each pattern's copies, profiles and open area. `add_constraints` appends constraints; `remove_constraints` removes those equal \
                       to the ones given (as `inspect` lists them).",
         params: || {
@@ -892,7 +897,9 @@ pub fn visit_names(v: &mut Value, f: &mut impl FnMut(&mut String)) {
         Value::Object(m) => {
             for (k, v) in m.iter_mut() {
                 // Numbers (or parameters' names), and a pattern's: not elements.
-                if !["type", "value", "degrees", "diameter", "id", "step", "count", "clearance", "skip", "shift"].contains(&k.as_str()) {
+                if !["type", "value", "degrees", "diameter", "id", "step", "count", "grow", "angle", "clearance", "skip", "shift"]
+                    .contains(&k.as_str())
+                {
                     visit_names(v, f);
                 }
             }

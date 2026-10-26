@@ -1,25 +1,26 @@
-//! Patterns of a sketch (D128): copies of a group's closed profiles on a grid, so many or as
-//! many as a region holds. The copies are a cell and the offsets it is moved by: the solver sees
-//! only the cell, and the profiles of the copies are made where the sketch's profiles are
-//! (`profile_loops`), for a cut and an extrusion alike.
+//! Patterns of a sketch (D128, D153): copies of a group's closed profiles on a grid (so many or as
+//! many as a region holds), along a path or around a point. The copies are a cell and where each
+//! goes: the solver sees only the cell, and the profiles of the copies are made where the
+//! sketch's profiles are (`profile_loops`), for a cut and an extrusion alike.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use datum_brep::{Box2, BrepError, ProfileArc, ProfileLoop, TopoId, overlap, overlapping};
 use datum_math::Vec2;
-use datum_sketch::{Pattern, Sketch};
+use datum_sketch::{Along, Around, Pattern, Sketch};
 use rayon::prelude::*;
 
 use crate::sketch::{Found, Placed, loops};
 
 /// A pattern of a sketch, placed: the curves it copies and each copy, by its place on the grid
-/// and the offset it is moved by; what the sketch's status reports of it.
+/// (along a path or around a point, `(i, 0)`) and where it goes; what the sketch's status reports
+/// of it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Copies {
     pub name: String,
     /// The profile curves copied: the group's lines, arcs and circles, not construction.
     pub cell: BTreeSet<String>,
-    pub at: Vec<([i64; 2], Vec2)>,
+    pub at: At,
     /// Copy `(0, 0)` is the cell itself (`count`), keeping its IDs; filling, the cell is a sample.
     pub source: bool,
     /// The area one copy opens, and its profiles.
@@ -27,6 +28,42 @@ pub struct Copies {
     pub loops: usize,
     /// The area of the region filled.
     pub region: Option<f64>,
+}
+
+/// Each copy, by its place on the grid, and where it goes.
+type At = Vec<([i64; 2], Place)>;
+
+/// Where a copy goes: point `p` of the cell to `turn·p + by`, `turn` a rotation `(cos, sin)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Place {
+    pub turn: Vec2,
+    pub by: Vec2,
+}
+
+impl Place {
+    /// Moved by `by`, not turned.
+    pub fn moved(by: Vec2) -> Self {
+        Self { turn: Vec2::new(1.0, 0.0), by }
+    }
+
+    pub fn turned(&self) -> bool {
+        self.turn != Vec2::new(1.0, 0.0)
+    }
+
+    pub fn apply(&self, p: Vec2) -> Vec2 {
+        // Not turned, only added to: a grid's copies are where they were before turns (D153).
+        if !self.turned() {
+            return Vec2::new(p.x + self.by.x, p.y + self.by.y);
+        }
+        let Vec2 { x: c, y: s } = self.turn;
+        Vec2::new(c * p.x - s * p.y + self.by.x, s * p.x + c * p.y + self.by.y)
+    }
+
+    /// Turned by `turn` about `about`, then moved to `to`.
+    fn about(turn: Vec2, about: Vec2, to: Vec2) -> Self {
+        let t = Self { turn, by: Vec2::new(0.0, 0.0) }.apply(about);
+        Self { turn, by: Vec2::new(to.x - t.x, to.y - t.y) }
+    }
 }
 
 /// The patterns of `sketch`, placed in `s` (solved, with no patterns yet): their copies, which
@@ -51,52 +88,374 @@ pub(crate) fn place_patterns(sketch: &Sketch, s: &Placed) -> Result<Vec<Copies>,
         if base.is_empty() {
             return Err(bad(format!("`{}` has no closed profile to copy", p.of)));
         }
-        let step = steps(p).map_err(bad)?;
         let (area, _) = nesting(&base);
-        let (at, source, region) = match (&p.count, &p.fill) {
-            (Some(count), _) => {
-                let n = count.each_ref().map(|c| c.value().filter(|v| v.fract() == 0.0 && *v >= 1.0 && *v <= 1e6));
-                let [Some(nx), Some(ny)] = n else { return Err(bad("`count` must be whole numbers from 1".into())) };
-                let (nx, ny) = (nx as i64, ny as i64);
-                let at = (0..ny).flat_map(|j| (0..nx).map(move |i| [i, j])).map(|k| (k, offset(step, k[0] as f64, k[1] as f64))).collect();
-                (at, true, None)
-            }
-            (None, Some(fill)) => {
-                let region: BTreeSet<String> = members(fill).into_iter().collect();
-                let ring =
-                    loops(TopoId::derive("sketch.region").finish(), s, &|n| region.contains(n), true).map_err(|e| bad(format!("its region: {e}")))?;
-                let [ring] = &ring[..] else { return Err(bad(format!("`{fill}` must bound one region"))) };
-                let others = loops(TopoId::derive("sketch.others").finish(), s, &|n| !copied.contains(&n.to_string()) && !region.contains(n), false)?;
-                let clearance =
-                    p.clearance.value().filter(|c| c.is_finite() && *c >= 0.0).ok_or_else(|| bad("`clearance` must be 0 or more".into()))?;
-                let at = fill_region(&base, &ring.ring, &others, step, clearance).map_err(bad)?;
-                (at, false, Some(ring.ring.area().abs()))
-            }
-            (None, None) => return Err(bad("give `count` or `fill`".into())),
-        };
-        let mut at: Vec<([i64; 2], Vec2)> = at.into_iter().filter(|(k, _)| !p.skip.contains(k)).collect();
+        let mut shift = BTreeMap::new();
         for (key, by) in &p.shift {
             let k = parse_copy(key).ok_or_else(|| bad(format!("shift `{key}`: a copy is named `i,j`")))?;
             let [Some(dx), Some(dy)] = by.each_ref().map(|n| n.value().filter(|v| v.is_finite())) else {
                 return Err(bad(format!("shift `{key}`: not a number")));
             };
-            if let Some((_, d)) = at.iter_mut().find(|(c, _)| *c == k) {
-                *d = Vec2::new(d.x + dx, d.y + dy);
-            }
+            shift.insert(k, Vec2::new(dx, dy));
         }
+        let centre = mid(union(base.iter().map(|l| l.ring.bounds())));
+        let (at, source, region) = match (&p.along, &p.around) {
+            (Some(a), _) => {
+                let (at, source) = along(s, sketch, a, centre, &shift).map_err(bad)?;
+                (at, source, None)
+            }
+            (None, Some(a)) => (around(s, a, centre, &shift).map_err(bad)?, true, None),
+            (None, None) => {
+                let step = steps(p).map_err(bad)?;
+                let grow = match &p.grow {
+                    Some(g) => Some(vectors(g, "grow").map_err(bad)?),
+                    None => None,
+                };
+                let (at, source, region) = match (&p.count, &p.fill) {
+                    (Some(count), _) => {
+                        let n = count.each_ref().map(whole);
+                        let [Some(nx), Some(ny)] = n else { return Err(bad("`count` must be whole numbers from 1".into())) };
+                        let g = grow.unwrap_or([Vec2::new(0.0, 0.0); 2]);
+                        let at = (0..ny)
+                            .flat_map(|j| (0..nx).map(move |i| [i, j]))
+                            .map(|k| {
+                                let [a, b] = [k[0] as f64, k[1] as f64];
+                                let mut o = offset(step, a, b);
+                                if grow.is_some() {
+                                    let d = offset(g, a * (a - 1.0) / 2.0, b * (b - 1.0) / 2.0);
+                                    o = Vec2::new(o.x + d.x, o.y + d.y);
+                                }
+                                (k, Place::moved(o))
+                            })
+                            .collect();
+                        (at, true, None)
+                    }
+                    (None, Some(fill)) => {
+                        if grow.is_some() {
+                            return Err(bad("filling, the steps cannot grow".into()));
+                        }
+                        let region: BTreeSet<String> = members(fill).into_iter().collect();
+                        let ring = loops(TopoId::derive("sketch.region").finish(), s, &|n| region.contains(n), true)
+                            .map_err(|e| bad(format!("its region: {e}")))?;
+                        let [ring] = &ring[..] else { return Err(bad(format!("`{fill}` must bound one region"))) };
+                        let others =
+                            loops(TopoId::derive("sketch.others").finish(), s, &|n| !copied.contains(&n.to_string()) && !region.contains(n), false)?;
+                        let clearance =
+                            p.clearance.value().filter(|c| c.is_finite() && *c >= 0.0).ok_or_else(|| bad("`clearance` must be 0 or more".into()))?;
+                        let at = fill_region(&base, &ring.ring, &others, step, clearance).map_err(bad)?;
+                        (at.into_iter().map(|(k, d)| (k, Place::moved(d))).collect(), false, Some(ring.ring.area().abs()))
+                    }
+                    (None, None) => return Err(bad("give `count` or `fill`".into())),
+                };
+                let mut at: At = at;
+                for (k, d) in &shift {
+                    if let Some((_, p)) = at.iter_mut().find(|(c, _)| c == k) {
+                        p.by = Vec2::new(p.by.x + d.x, p.by.y + d.y);
+                    }
+                }
+                (at, source, region)
+            }
+        };
+        let at: At = at.into_iter().filter(|(k, _)| !p.skip.contains(k)).collect();
         out.push(Copies { name: name.clone(), cell: cell.clone(), at, source, area, loops: base.len(), region });
     }
     keep_apart(s, &out)?;
     Ok(out)
 }
 
-/// The two steps of a pattern.
+/// The two steps of a grid.
 fn steps(p: &Pattern) -> Result<[Vec2; 2], String> {
+    vectors(p.step.as_ref().ok_or("give `step`, `along` or `around`")?, "step")
+}
+
+fn vectors(s: &[[datum_math::expr::Num; 2]; 2], what: &str) -> Result<[Vec2; 2], String> {
     let v = |s: &[datum_math::expr::Num; 2]| match s.each_ref().map(|n| n.value().filter(|v| v.is_finite())) {
         [Some(x), Some(y)] => Ok(Vec2::new(x, y)),
-        _ => Err("`step` must be numbers".to_string()),
+        _ => Err(format!("`{what}` must be numbers")),
     };
-    Ok([v(&p.step[0])?, v(&p.step[1])?])
+    Ok([v(&s[0])?, v(&s[1])?])
+}
+
+/// A count: a whole number from 1.
+fn whole(n: &datum_math::expr::Num) -> Option<i64> {
+    n.value().filter(|v| v.fract() == 0.0 && *v >= 1.0 && *v <= 1e6).map(|v| v as i64)
+}
+
+fn number(n: &datum_math::expr::Num, what: &str) -> Result<f64, String> {
+    n.value().filter(|v| v.is_finite()).ok_or_else(|| format!("`{what}` must be a number"))
+}
+
+/// How far copy `i` is from copy 0: `i` steps, each `grow` longer than the one before.
+fn reach(step: f64, grow: f64, i: f64) -> f64 {
+    step * i + grow * (i * (i - 1.0) / 2.0)
+}
+
+/// The step that takes copy `i` to `span`, given `grow`.
+fn step_to(span: f64, grow: f64, i: f64) -> f64 {
+    (span - grow * (i * (i - 1.0) / 2.0)) / i
+}
+
+/// A path's curves, joined end to end: from the first named, the way it runs, on along what
+/// meets its end, back along what meets its start.
+struct Path {
+    pieces: Vec<Piece>,
+    /// Where each piece starts along the path, and the path's length last.
+    starts: Vec<f64>,
+    closed: bool,
+}
+
+#[derive(Clone, Copy)]
+enum Piece {
+    Line {
+        a: Vec2,
+        b: Vec2,
+    },
+    /// Around `c`, `r` from it, from angle `from` by `sweep` (negative: clockwise).
+    Arc {
+        c: Vec2,
+        r: f64,
+        from: f64,
+        sweep: f64,
+    },
+}
+
+impl Piece {
+    fn length(&self) -> f64 {
+        match *self {
+            Piece::Line { a, b } => (b.x - a.x).hypot(b.y - a.y),
+            Piece::Arc { r, sweep, .. } => r * sweep.abs(),
+        }
+    }
+
+    /// The point `t` of the way along (0 to 1), and the unit direction there.
+    fn at(&self, t: f64) -> (Vec2, Vec2) {
+        match *self {
+            Piece::Line { a, b } => {
+                let l = self.length();
+                (Vec2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t), Vec2::new((b.x - a.x) / l, (b.y - a.y) / l))
+            }
+            Piece::Arc { c, r, from, sweep } => {
+                let (s, k) = (libm::sin(from + sweep * t), libm::cos(from + sweep * t));
+                let w = sweep.signum();
+                (Vec2::new(c.x + r * k, c.y + r * s), Vec2::new(-s * w, k * w))
+            }
+        }
+    }
+
+    /// How far along (0 to 1) the point of the piece nearest `p` is.
+    fn nearest(&self, p: Vec2) -> f64 {
+        match *self {
+            Piece::Line { a, b } => {
+                let (dx, dy) = (b.x - a.x, b.y - a.y);
+                (((p.x - a.x) * dx + (p.y - a.y) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0)
+            }
+            Piece::Arc { c, from, sweep, .. } => {
+                // The angle of `p` past the start, the way the arc runs, in [0, 2π).
+                let tau = std::f64::consts::TAU;
+                let a = (libm::atan2(p.y - c.y, p.x - c.x) - from) * sweep.signum();
+                let a = a.rem_euclid(tau);
+                if a <= sweep.abs() {
+                    a / sweep.abs()
+                } else if a - sweep.abs() < tau - a {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+}
+
+impl Path {
+    fn new(s: &Placed, curves: &[String]) -> Result<Path, String> {
+        let pt = |n: &str| s.solved.points.get(n).copied().ok_or_else(|| format!("no point `{n}`"));
+        // Each curve as (start, end, piece forward, piece back).
+        let mut ends: Vec<(&str, &str, Piece, Piece)> = Vec::new();
+        for n in curves {
+            if let Some(l) = s.lines.get(n) {
+                let (a, b) = (pt(&l.from)?, pt(&l.to)?);
+                ends.push((&l.from, &l.to, Piece::Line { a, b }, Piece::Line { a: b, b: a }));
+            } else if let Some(arc) = s.arcs.get(n) {
+                let (c, a, b) = (pt(&arc.center)?, pt(&arc.from)?, pt(&arc.to)?);
+                let sweep = datum_brep::ProfileArc { center: c, ccw: true }.turn(a, b);
+                let (r, from, to) = ((a.x - c.x).hypot(a.y - c.y), libm::atan2(a.y - c.y, a.x - c.x), libm::atan2(b.y - c.y, b.x - c.x));
+                ends.push((&arc.from, &arc.to, Piece::Arc { c, r, from, sweep }, Piece::Arc { c, r, from: to, sweep: -sweep }));
+            } else if s.circles.contains_key(n) {
+                return Err(format!("the path takes lines and arcs; round a circle, copy `around` its centre: `{n}`"));
+            }
+        }
+        let Some(&(start, end, first, _)) = ends.first() else { return Err("the path has no line or arc".into()) };
+        let mut used = vec![false; ends.len()];
+        used[0] = true;
+        let mut pieces = std::collections::VecDeque::from([first]);
+        // On from the end, then back from the start.
+        let mut take = |at: &str, forward: bool, pieces: &mut std::collections::VecDeque<Piece>| -> Result<Option<String>, String> {
+            let next: Vec<usize> = (0..ends.len()).filter(|&k| !used[k] && (ends[k].0 == at || ends[k].1 == at)).collect();
+            match next[..] {
+                [] => Ok(None),
+                [k] => {
+                    used[k] = true;
+                    let (a, b, f, r) = ends[k];
+                    // Forward, a piece starting here runs on as it is; back, one ending here does.
+                    let (piece, other) = if (a == at) == forward { (f, if forward { b } else { a }) } else { (r, if forward { a } else { b }) };
+                    if forward {
+                        pieces.push_back(piece)
+                    } else {
+                        pieces.push_front(piece)
+                    }
+                    Ok(Some(other.to_string()))
+                }
+                _ => Err(format!("the path branches at `{at}`")),
+            }
+        };
+        let mut at = end.to_string();
+        while at != start {
+            match take(&at, true, &mut pieces)? {
+                Some(next) => at = next,
+                None => break,
+            }
+        }
+        let closed = at == start && pieces.len() > 1 || (pieces.len() == 1 && start == end);
+        if !closed {
+            let mut at = start.to_string();
+            while let Some(next) = take(&at, false, &mut pieces)? {
+                at = next;
+            }
+        }
+        if used.iter().any(|u| !u) {
+            return Err("the path's lines and arcs are not one chain".into());
+        }
+        let pieces: Vec<Piece> = pieces.into();
+        let mut starts = Vec::with_capacity(pieces.len() + 1);
+        let mut l = 0.0;
+        for p in &pieces {
+            starts.push(l);
+            l += p.length();
+        }
+        starts.push(l);
+        Ok(Path { pieces, starts, closed })
+    }
+
+    fn length(&self) -> f64 {
+        self.starts[self.pieces.len()]
+    }
+
+    /// The point `d` along the path and the unit direction there (round a closed path, `d` wraps).
+    fn at(&self, d: f64) -> Result<(Vec2, Vec2), String> {
+        let l = self.length();
+        let d = if self.closed { d.rem_euclid(l) } else { d };
+        if !(0.0..=l).contains(&d) {
+            return Err(format!("a copy falls {} past the end of the path", if d < 0.0 { -d } else { d - l }));
+        }
+        let k = self.starts[1..].partition_point(|&s| s < d).min(self.pieces.len() - 1);
+        let p = &self.pieces[k];
+        let len = p.length();
+        Ok(p.at(if len > 0.0 { (d - self.starts[k]) / len } else { 0.0 }))
+    }
+
+    /// How far along the path its point nearest `p` is (the first, of equally near).
+    fn nearest(&self, p: Vec2) -> f64 {
+        let mut best = (f64::INFINITY, 0.0);
+        for (k, piece) in self.pieces.iter().enumerate() {
+            let t = piece.nearest(p);
+            let (q, _) = piece.at(t);
+            let d = (q.x - p.x).hypot(q.y - p.y);
+            if d < best.0 {
+                best = (d, self.starts[k] + t * piece.length());
+            }
+        }
+        best.1
+    }
+}
+
+/// Copies along a path (D153), and whether the cell is copy 0.
+fn along(s: &Placed, sketch: &Sketch, a: &Along, centre: Vec2, shift: &BTreeMap<[i64; 2], Vec2>) -> Result<(At, bool), String> {
+    let curves = sketch.groups.get(&a.path).cloned().unwrap_or_else(|| vec![a.path.clone()]);
+    let path = Path::new(s, &curves).map_err(|e| format!("its path: {e}"))?;
+    let l = path.length();
+    let grow = number(&a.grow, "grow")?;
+    let count = a.count.as_ref().map(|c| whole(c).ok_or("`count` must be a whole number from 1")).transpose()?;
+    let step = a.step.as_ref().map(|s| number(s, "step")).transpose()?;
+    let s0 = path.nearest(centre);
+    // Where copy 0 is along the path, the step, the copies; and whether the cell is copy 0.
+    let (first, step, n, source) = match (step, count) {
+        (Some(h), Some(n)) => (s0, h, n, true),
+        (None, Some(n)) => {
+            let (span, i) = if path.closed { (l, n as f64) } else { (l - s0, (n - 1) as f64) };
+            (s0, if i > 0.0 { step_to(span, grow, i) } else { 0.0 }, n, true)
+        }
+        (Some(h), None) => {
+            if h == 0.0 {
+                return Err("`step` must not be 0".into());
+            }
+            let h = h.abs();
+            let fits = |n: i64| if path.closed { reach(h, grow, n as f64) <= l } else { reach(h, grow, (n - 1) as f64) <= l };
+            let mut n = 1;
+            while n < 1_000_000 && fits(n + 1) && reach(h, grow, n as f64) > reach(h, grow, (n - 1) as f64) {
+                n += 1;
+            }
+            if path.closed { (s0, h, n, true) } else { ((l - reach(h, grow, (n - 1) as f64)) / 2.0, h, n, false) }
+        }
+        (None, None) => return Err("along a path, give `step`, `count` or both".into()),
+    };
+    let (anchor, t0) = path.at(s0)?;
+    let mut at = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let k = [i, 0];
+        let d = shift.get(&k).copied().unwrap_or(Vec2::new(0.0, 0.0));
+        let along = first + reach(step, grow, i as f64) + d.x;
+        if source && along == s0 && d.y == 0.0 {
+            at.push((k, Place::moved(Vec2::new(0.0, 0.0))));
+            continue;
+        }
+        let (p, t) = path.at(along)?;
+        let turn = if a.rotate {
+            let (c, sn) = (t0.x * t.x + t0.y * t.y, t0.x * t.y - t0.y * t.x);
+            let h = c.hypot(sn);
+            Vec2::new(c / h, sn / h)
+        } else {
+            Vec2::new(1.0, 0.0)
+        };
+        // Across: to the left of the way the path runs.
+        let to = Vec2::new(p.x - t.y * d.y, p.y + t.x * d.y);
+        at.push((k, Place::about(turn, anchor, to)));
+    }
+    Ok((at, source))
+}
+
+/// Copies around a point (D153).
+fn around(s: &Placed, a: &Around, centre: Vec2, shift: &BTreeMap<[i64; 2], Vec2>) -> Result<At, String> {
+    let c = s.solved.points.get(&a.center).copied().ok_or_else(|| format!("no point `{}`", a.center))?;
+    let n = whole(&a.count).ok_or("`count` must be a whole number from 1")?;
+    let grow = number(&a.grow, "grow")?;
+    let step = match (&a.step, &a.angle) {
+        (Some(h), _) => number(h, "step")?,
+        (None, angle) => {
+            let angle = angle.as_ref().map(|x| number(x, "angle")).transpose()?.unwrap_or(360.0);
+            // Round the whole circle the last copy is a step short of the first; less, it ends the span.
+            let i = if angle.abs() == 360.0 { n as f64 } else { (n - 1) as f64 };
+            if i > 0.0 { step_to(angle, grow, i) } else { 0.0 }
+        }
+    };
+    let out = Vec2::new(centre.x - c.x, centre.y - c.y);
+    let r = out.x.hypot(out.y);
+    let mut at = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let k = [i, 0];
+        let d = shift.get(&k).copied().unwrap_or(Vec2::new(0.0, 0.0));
+        let deg = reach(step, grow, i as f64) + d.x;
+        let rad = deg.to_radians();
+        let turn = if deg == 0.0 { Vec2::new(1.0, 0.0) } else { Vec2::new(libm::cos(rad), libm::sin(rad)) };
+        let mut place = Place::about(turn, c, c);
+        if d.y != 0.0 {
+            if r == 0.0 {
+                return Err(format!("shift `{i},0`: the cell's centre is the centre: no way out"));
+            }
+            let o = Place { turn, by: Vec2::new(0.0, 0.0) }.apply(out);
+            place.by = Vec2::new(place.by.x + o.x / r * d.y, place.by.y + o.y / r * d.y);
+        }
+        at.push((k, place));
+    }
+    Ok(at)
 }
 
 fn offset(step: [Vec2; 2], i: f64, j: f64) -> Vec2 {
@@ -190,16 +549,16 @@ fn mid((lo, hi): Box2) -> Vec2 {
     Vec2::new(0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y))
 }
 
-/// Loop `l` moved by `d`, its IDs those of copy `k` of pattern `name` (copy `(0, 0)` of a cell
-/// copied from itself keeps its own).
-pub(crate) fn moved(l: &ProfileLoop, d: Vec2, feature: TopoId, name: &str, k: [i64; 2], own: bool) -> ProfileLoop {
+/// Loop `l` moved to `place`, its IDs those of copy `k` of pattern `name` (copy `(0, 0)` of a
+/// cell copied from itself keeps its own).
+pub(crate) fn moved(l: &ProfileLoop, place: Place, feature: TopoId, name: &str, k: [i64; 2], own: bool) -> ProfileLoop {
     let id =
         |t: TopoId| if own { t } else { TopoId::derive("sketch.copy").id(feature).tag(name).index(k[0] as u64).index(k[1] as u64).id(t).finish() };
     ProfileLoop {
-        points: l.points.iter().map(|p| Vec2::new(p.x + d.x, p.y + d.y)).collect(),
+        points: l.points.iter().map(|&p| place.apply(p)).collect(),
         vertices: l.vertices.iter().map(|v| v.map(id)).collect(),
         sides: l.sides.iter().map(|&s| id(s)).collect(),
-        arcs: l.arcs.iter().map(|a| a.map(|a| ProfileArc { center: Vec2::new(a.center.x + d.x, a.center.y + d.y), ..a })).collect(),
+        arcs: l.arcs.iter().map(|a| a.map(|a| ProfileArc { center: place.apply(a.center), ..a })).collect(),
     }
 }
 

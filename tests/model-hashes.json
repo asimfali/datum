@@ -87,6 +87,10 @@
     "t8": "9015d8846a0022e12e3d6d2093b269719facd453d0f3eec730343614ff49d0ea",
     "t9": "948451db8860e8378e19458251aabb817a19842a9d03eb57a6d99e12ae2df48b"
   },
+  "pattern_path.json": {
+    "outline": "ef2f72dce4090c0e3859c87bdd3b0aa594ddf1db63d5e10c513c3ce051c56086",
+    "plate": "4fdb7a63958995b1a2a34f9573c230f0484aeefbf3105eb7af2857f0dc7e7862"
+  },
   "perforation.json": {
     "first_pin": "5e9e3e9d01fb68257e47ad6d4e99e3c84e647fdb059d06eb818f32d5a92fdf91",
     "perforated": "017323a5599f9c4e5595f0c9236041dfd1afecb8bec80c8d533967a7ad26536f",
