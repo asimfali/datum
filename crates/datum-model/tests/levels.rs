@@ -158,3 +158,34 @@ fn levels_are_saved_and_opened() {
     assert!((v - (10000.0 - 2.0 * 25.0 * std::f64::consts::PI)).abs() < 1e-9);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A feature turned off passes its first input on (D159): a variant does without the parent's
+/// hole, a formula turns it off by a parameter, ↺ brings it back; off with no input, it fails.
+#[test]
+fn a_variant_turns_a_parents_feature_off() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "add", json!({"name": "pin", "op": "prism", "polygon": [[10, 10], [20, 10], [20, 20], [10, 20]], "z0": -1, "z1": 5}));
+    run(&mut s, "add", json!({"name": "drilled", "op": "boolean", "kind": "difference", "inputs": ["plate", "pin"]}));
+    run(&mut s, "add", json!({"name": "moved", "op": "transform", "inputs": ["drilled"], "translate": [0, 0, 10]}));
+    assert_eq!(volume(&mut s, "moved"), 10000.0 - 200.0);
+    run(&mut s, "add_level", json!({"name": "plain"}));
+    run(&mut s, "edit", json!({"name": "drilled", "enabled": false}));
+    assert_eq!(volume(&mut s, "moved"), 10000.0, "the plate passed on as it was");
+    let levels = run(&mut s, "levels", json!({}));
+    assert_eq!(levels["levels"][0]["changed"], json!(["drilled"]));
+    run(&mut s, "revert", json!({"feature": "drilled"}));
+    assert_eq!(volume(&mut s, "moved"), 9800.0);
+    // By a parameter: off while `holes` is 0.
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "set_parameter", json!({"name": "holes", "value": 1}));
+    run(&mut s, "edit", json!({"name": "drilled", "enabled": "holes"}));
+    run(&mut s, "set_parameter", json!({"name": "holes", "value": 0, "level": "plain"}));
+    assert_eq!(volume(&mut s, "moved"), 9800.0);
+    assert_eq!(s.execute("mass_properties", &json!({"name": "moved", "level": "plain"})).unwrap()["volume"].as_f64(), Some(10000.0));
+    // Off with nothing to pass on.
+    run(&mut s, "edit", json!({"name": "outline", "enabled": 0}));
+    let f = &run(&mut s, "inspect", json!({}))["features"][0];
+    assert!(f["error"].as_str().unwrap().contains("no input"), "{f}");
+    assert_eq!(f["enabled"], json!(0.0));
+}

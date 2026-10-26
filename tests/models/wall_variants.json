@@ -81,6 +81,12 @@
       "parent": "Стенка верхняя"
     },
     "2 м": {
+      "features": [
+        {
+          "enabled": 0,
+          "name": "notched"
+        }
+      ],
       "parameters": {
         "L": 2000
       },
@@ -143,6 +149,10 @@
               ]
             }
           }
+        },
+        {
+          "enabled": 0,
+          "name": "notched"
         }
       ],
       "parameters": {
@@ -160,6 +170,39 @@
           "op": "extrude",
           "z0": 0,
           "z1": "t"
+        },
+        {
+          "name": "corner",
+          "op": "prism",
+          "polygon": [
+            [
+              -1,
+              -1
+            ],
+            [
+              20,
+              -1
+            ],
+            [
+              20,
+              20
+            ],
+            [
+              -1,
+              20
+            ]
+          ],
+          "z0": -1,
+          "z1": 5
+        },
+        {
+          "inputs": [
+            "wall",
+            "corner"
+          ],
+          "kind": "difference",
+          "name": "notched",
+          "op": "boolean"
         }
       ]
     }

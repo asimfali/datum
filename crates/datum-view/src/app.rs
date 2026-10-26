@@ -1422,6 +1422,7 @@ impl Viewer {
         ui.separator();
         ui.heading("Features");
         let (mut export, mut edit, mut enter) = (None, None, None);
+        let mut toggle: Option<(String, Json)> = None;
         // Out of `self` while the rows borrow it.
         let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1496,19 +1497,29 @@ impl Viewer {
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
-                if tag == " ●" {
-                    ui.horizontal(|ui| {
-                        if ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
-                            revert = Some(json!({"feature": bare}));
+                ui.horizontal(|ui| {
+                    if tag == " ●" && ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
+                        revert = Some(json!({"feature": bare}));
+                    }
+                    // On or off (D159); by a formula, it says which and is changed in the JSON.
+                    match &f["enabled"] {
+                        Json::String(formula) => {
+                            ui.weak("ƒ").on_hover_text(format!("On while {formula} is not 0"));
                         }
-                        ui.vertical(|ui| row(ui));
-                    });
-                } else {
-                    row(ui);
-                }
+                        e => {
+                            let mut on = e.as_f64().is_none_or(|v| v != 0.0);
+                            let hint = "Off: the feature passes its input on unchanged — a variant does without a parent's feature so";
+                            if ui.checkbox(&mut on, "").on_hover_text(hint).changed() {
+                                toggle = Some((bare.to_string(), json!({ "enabled": on })));
+                            }
+                        }
+                    }
+                    ui.vertical(|ui| row(ui));
+                });
             }
         });
         self.offsets = offsets;
+        let edit = edit.or(toggle);
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
         }
@@ -3803,12 +3814,26 @@ mod tests {
         h.run();
         assert!(h.query_by_label("✔ outline ●  ·  sketch").is_some(), "the changed sketch marked");
         let reverts: Vec<_> = h.get_all_by_label("↺").collect();
-        assert_eq!(reverts.len(), 2, "the length and the sketch");
+        assert_eq!(reverts.len(), 3, "the length, the sketch and the notch turned off");
         reverts[1].click();
         h.run();
         drop(h);
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("revert", p) if p["feature"] == "outline")), "the sketch back");
+    }
+
+    /// A feature's box turns it off (D159): `edit` with `enabled` false.
+    #[test]
+    fn a_feature_is_turned_off_by_its_box() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let last = v.model.as_ref().unwrap().inspect["features"].as_array().unwrap().last().unwrap()["name"].as_str().unwrap().to_string();
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
+        h.run();
+        h.get_all_by_role(egui::accesskit::Role::CheckBox).last().unwrap().click();
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if p["name"] == last.as_str() && p["enabled"] == false)));
     }
 
     /// Ctrl+W closes and Ctrl+N gives an empty model (issue #57), with a button focused by Tab

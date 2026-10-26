@@ -166,18 +166,26 @@
     "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed"
   },
   "wall_variants.json [1 м]": {
+    "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "notched": "22ead95a615b59fdc7cb41c4ca570d7be2823dffe3d8d36caf9f9c877cef17e0",
     "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed",
     "wall": "fb3467ca2b4ed3213ad1d8671e96472fe03c274b39dc2e77662884ff02d23bbe"
   },
   "wall_variants.json [2 м]": {
+    "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "notched": "ed94a06b2210234b79f3f879e1fdb69e444c2c2a5e4bbc88a6f03f2e7f244783",
     "outline": "ee7ef8192fea4e64bddeaa305fa1ca9ee57a497c08e157d229836de689d82e4d",
     "wall": "ed94a06b2210234b79f3f879e1fdb69e444c2c2a5e4bbc88a6f03f2e7f244783"
   },
   "wall_variants.json [2,5 м]": {
+    "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "notched": "cd0bd2efd84276e39381f1b1c5461a0a384795491ab0029998023420ae219066",
     "outline": "9ed116e9f620c66e1d775837e3a116c0134cdb887015b07fe89f0ce30167b73e",
     "wall": "cd0bd2efd84276e39381f1b1c5461a0a384795491ab0029998023420ae219066"
   },
   "wall_variants.json [Стенка верхняя]": {
+    "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "notched": "22ead95a615b59fdc7cb41c4ca570d7be2823dffe3d8d36caf9f9c877cef17e0",
     "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed",
     "wall": "fb3467ca2b4ed3213ad1d8671e96472fe03c274b39dc2e77662884ff02d23bbe"
   },
