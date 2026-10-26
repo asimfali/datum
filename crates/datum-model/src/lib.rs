@@ -71,6 +71,9 @@ struct File {
     /// Parts not shown in the product.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     hidden: std::collections::BTreeSet<String>,
+    /// How each body is laid flat, when not the default (D164).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    flats: BTreeMap<String, levels::FlatSettings>,
 }
 
 /// The root's graph of a model file (its levels left out).
@@ -93,7 +96,7 @@ pub fn parse_doc(json: &str) -> Result<levels::Doc, ModelError> {
     for (index, fields) in features.into_iter().enumerate() {
         add_feature(&mut g, fields).map_err(|msg| ModelError::Feature { index, msg })?;
     }
-    Ok(levels::Doc { root: g, levels: file.levels, chosen: file.chosen, hidden: file.hidden })
+    Ok(levels::Doc { root: g, levels: file.levels, chosen: file.chosen, hidden: file.hidden, flats: file.flats })
 }
 
 /// Files from before patterns in sketches (D128) gave a cut a `pattern`: it becomes a pattern
@@ -269,6 +272,7 @@ pub fn to_json_doc(d: &levels::Doc) -> String {
         levels: d.levels.clone(),
         chosen: d.chosen.clone(),
         hidden: d.hidden.clone(),
+        flats: d.flats.clone(),
     };
     let mut s = serde_json::to_string_pretty(&file).unwrap_or_default();
     s.push('\n');

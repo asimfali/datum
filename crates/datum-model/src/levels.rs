@@ -34,6 +34,30 @@ pub struct Level {
     pub output: Option<Vec<String>>,
 }
 
+/// How a body is laid flat (D164): seen from its back side, at a K-factor.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlatSettings {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub back: bool,
+    #[serde(default = "half", skip_serializing_if = "is_half")]
+    pub k_factor: Num,
+}
+
+fn half() -> Num {
+    Num::Value(0.5)
+}
+
+fn is_half(n: &Num) -> bool {
+    *n == half()
+}
+
+impl Default for FlatSettings {
+    fn default() -> Self {
+        Self { back: false, k_factor: half() }
+    }
+}
+
 /// A whole model: the root's graph, the levels by name, and the variant of each part that goes
 /// into the product (none: the part itself).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -43,6 +67,8 @@ pub struct Doc {
     pub chosen: BTreeMap<String, String>,
     /// Parts not shown in the product.
     pub hidden: std::collections::BTreeSet<String>,
+    /// How each body (by its feature) is laid flat, when not the default.
+    pub flats: BTreeMap<String, FlatSettings>,
 }
 
 impl Doc {

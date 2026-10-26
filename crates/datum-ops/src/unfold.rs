@@ -31,6 +31,9 @@ pub struct Flat {
     pub pieces: Vec<FlatPiece>,
     /// Width (along X) and height of the blank.
     pub size: Vec2,
+    /// The bend lines (both tangent lines of each bend): guides on the blank, not in its DXF.
+    pub bends: Vec<[Vec2; 2]>,
+    /// Of the pieces, what the DXF holds.
     pub hash: [u8; 32],
 }
 
@@ -77,32 +80,27 @@ impl Laid {
     }
 }
 
-/// The flat blank of the sheet one face of which is `face` of `body`, seen from that face's side,
-/// the neutral layer of every bend at `k` of the thickness from its inside. Cuts on a bend must
-/// have been sketched with the same K-factor: their pieces are then exact.
-pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
-    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
-    if !(0.0..=1.0).contains(&k) {
-        return Err(BrepError::Degenerate(format!("a K-factor lies between 0 and 1, got {k}")));
-    }
-    let (f, _) = find_face(body, face)?;
-    let f = f as Ix;
+/// The faces that go on smoothly from `x` across an edge of its outline, each with the half-edge
+/// it is across: outward normals agree along the edge (a bend line), where an end or a cap of the
+/// sheet turns by a right angle.
+fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
     let he = |h: Ix| body.half_edges()[h as usize];
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
     let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
-    // The faces that go on smoothly from `x` across an edge of its outline: outward normals
-    // agree along the edge (a bend line), where an end or a cap of the sheet turns by a right angle.
-    let smooth = |x: Ix| -> Vec<(Ix, Ix)> {
-        body.loop_half_edges(body.faces()[x as usize].first_loop)
-            .filter_map(|h| {
-                let y = face_of(he(h).twin);
-                let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
-                (y != x && normal(x, m).dot(normal(y, m)) > 0.5).then_some((y, h))
-            })
-            .collect()
-    };
-    // The chain through `f`: on from it each way while one face goes on.
-    let ways = smooth(f);
+    body.loop_half_edges(body.faces()[x as usize].first_loop)
+        .filter_map(|h| {
+            let y = face_of(he(h).twin);
+            let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
+            (y != x && normal(x, m).dot(normal(y, m)) > 0.5).then_some((y, h))
+        })
+        .collect()
+}
+
+/// The chain of faces through `f`: on from it each way while one face goes on, in order along the
+/// sheet (not yet turned the way it is laid).
+fn chain_through(body: &Body, f: Ix) -> Result<Vec<Ix>, BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
+    let ways = smooth(body, f);
     if ways.len() > 2 {
         return Err(unsupported("the face meets more than two faces smoothly: not a sheet"));
     }
@@ -110,7 +108,7 @@ pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
     for &(first, _) in &ways {
         let (mut prev, mut cur, mut half) = (f, first, vec![first]);
         loop {
-            let on: Vec<Ix> = smooth(cur).into_iter().map(|(y, _)| y).filter(|&y| y != prev).collect();
+            let on: Vec<Ix> = smooth(body, cur).into_iter().map(|(y, _)| y).filter(|&y| y != prev).collect();
             match on[..] {
                 [] => break,
                 [y] if y == f || half.contains(&y) => return Err(unsupported("the sheet closes on itself: a closed path comes later")),
@@ -126,6 +124,67 @@ pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
     let mut chain: Vec<Ix> = halves.first().map(|h| h.iter().rev().copied().collect()).unwrap_or_default();
     chain.push(f);
     chain.extend(halves.get(1).into_iter().flatten());
+    Ok(chain)
+}
+
+/// The faces naming the two sides of the sheet `body` is, the front first: the two longest
+/// chains of faces going on smoothly (a plate's two faces; a bent sheet's inner and outer side).
+/// The front is the side facing more toward +Z, then +Y, then +X: seen from there the blank has
+/// the orientation of a sketch on XY. A solid with no two sides standing out is no sheet.
+pub fn sheet_sides(body: &Body) -> Result<[Ix; 2], BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
+    let plain = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_) | Surface::Cylinder(_));
+    let mut seen: BTreeSet<Ix> = BTreeSet::new();
+    // Each chain: its area, its area vector, the face of it with the largest area.
+    let mut chains: Vec<(f64, Vec3, Ix)> = Vec::new();
+    for f in 0..body.faces().len() as Ix {
+        if seen.contains(&f) || !plain(f) {
+            continue;
+        }
+        let Ok(chain) = chain_through(body, f) else { continue };
+        seen.extend(chain.iter().copied());
+        if !chain.iter().all(|&x| plain(x)) {
+            continue;
+        }
+        let area: f64 = chain.iter().map(|&x| body.face_area(x)).sum();
+        let vector = chain.iter().fold(Vec3::ZERO, |s, &x| s + body.face_area_vector(x));
+        let main = chain.iter().copied().max_by(|&a, &b| body.face_area(a).total_cmp(&body.face_area(b))).unwrap_or(f);
+        chains.push((area, vector, main));
+    }
+    chains.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let [front, back, rest @ ..] = &chains[..] else { return Err(unsupported("fewer than two sides: not a sheet")) };
+    if rest.first().is_some_and(|third| third.0 >= back.0) {
+        return Err(unsupported("no two sides stand out: not a sheet"));
+    }
+    let toward = |v: Vec3| [v.z, v.y, v.x];
+    let first = toward(front.1).iter().zip(toward(back.1)).find_map(|(a, b)| (*a != b).then_some(*a > b));
+    Ok(if first == Some(false) { [back.2, front.2] } else { [front.2, back.2] })
+}
+
+/// The flat blank of the sheet one face of which is `face` of `body`, seen from that face's side,
+/// the neutral layer of every bend at `k` of the thickness from its inside. Cuts on a bend must
+/// have been sketched with the same K-factor: their pieces are then exact.
+pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
+    let (f, _) = find_face(body, face)?;
+    unfold_face(body, f as Ix, k)
+}
+
+/// The flat blank of sheet `body` seen from its front side, or from its back (D164).
+pub fn unfold_side(body: &Body, back: bool, k: f64) -> Result<Flat, BrepError> {
+    let sides = sheet_sides(body)?;
+    unfold_face(body, sides[usize::from(back)], k)
+}
+
+fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
+    if !(0.0..=1.0).contains(&k) {
+        return Err(BrepError::Degenerate(format!("a K-factor lies between 0 and 1, got {k}")));
+    }
+    let he = |h: Ix| body.half_edges()[h as usize];
+    let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
+    let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
+    let smooth = |x: Ix| smooth(body, x);
+    let mut chain = chain_through(body, f)?;
 
     // Y runs along the bends' axis; a flat sheet takes the first edge of its face.
     let axis = chain.iter().find_map(|&x| match body.faces()[x as usize].surface {
@@ -134,7 +193,13 @@ pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
     });
     let first = body.faces()[chain[0] as usize].first_loop;
     let corner = body.point(he(body.loop_half_edges(first).start).origin);
-    let a = unit(axis.unwrap_or_else(|| body.point(he(body.loop_half_edges(first).start + 1).origin) - corner));
+    // A plate has no axis of bends: Y runs up the face as the sketch drawn on it would see it
+    // (world +Z projected onto the face; +Y on a face lying flat), so the blank looks as drawn.
+    let upright = |n: Vec3| {
+        let up = if n.cross(Vec3::new(0.0, 0.0, 1.0)) == Vec3::ZERO { Vec3::new(0.0, 1.0, 0.0) } else { Vec3::new(0.0, 0.0, 1.0) };
+        unit(up - n * (up.dot(n) / n.dot(n)))
+    };
+    let a = unit(axis.unwrap_or_else(|| upright(normal(chain[0], corner))));
     // X along `a × n`: the chain runs from the end it points away from.
     if chain.len() > 1 {
         let seam = smooth(chain[0]).into_iter().find(|&(y, _)| y == chain[1]).map(|(_, h)| h);
@@ -280,6 +345,19 @@ pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
         (Vec2::new(lo.x.min(p.x), lo.y.min(p.y)), Vec2::new(hi.x.max(p.x), hi.y.max(p.y)))
     });
     let shift = |p: Vec2| Vec2::new(p.x - lo.x, p.y - lo.y);
+    // Each seam between two faces of the chain, from its lowest end to its highest: a bend line.
+    let by_y = |p: &&Vec2, q: &&Vec2| p.y.total_cmp(&q.y);
+    let bends: Vec<[Vec2; 2]> = chain
+        .windows(2)
+        .filter_map(|w| {
+            let seam: Vec<Vec2> = body
+                .loop_half_edges(body.faces()[w[1] as usize].first_loop)
+                .filter(|&h| face_of(he(h).twin) == w[0])
+                .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
+                .collect();
+            Some([shift(*seam.iter().min_by(by_y)?), shift(*seam.iter().max_by(by_y)?)])
+        })
+        .collect();
     let pieces: Vec<FlatPiece> = outline
         .into_iter()
         .chain(holes)
@@ -299,7 +377,7 @@ pub fn unfold(body: &Body, face: &str, k: f64) -> Result<Flat, BrepError> {
         bytes.push(tag);
         bytes.extend(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
     }
-    Ok(Flat { pieces, size: Vec2::new(hi.x - lo.x, hi.y - lo.y), hash: *blake3::hash(&bytes).as_bytes() })
+    Ok(Flat { pieces, size: Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, hash: *blake3::hash(&bytes).as_bytes() })
 }
 
 /// An arc around `center` from `from` to `to`, turning counterclockwise if `ccw`.
