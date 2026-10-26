@@ -72,9 +72,9 @@ fn variants_follow_their_parent() {
         levels["levels"],
         json!([
             {"name": "long", "parent": null, "depth": 0, "parameters": {"w": 200.0}, "features": [],
-             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": []},
+             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": [], "output": []},
             {"name": "long_holed", "parent": "long", "depth": 1, "parameters": {}, "features": ["outline"],
-             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": []}
+             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": [], "output": []}
         ])
     );
     // Back as the parent has it: the hole goes, then the length.
@@ -188,4 +188,63 @@ fn a_variant_turns_a_parents_feature_off() {
     let f = &run(&mut s, "inspect", json!({}))["features"][0];
     assert!(f["error"].as_str().unwrap().contains("no input"), "{f}");
     assert_eq!(f["enabled"], json!(0.0));
+}
+
+/// The product (D160): each part in its chosen variant, with the bodies it makes; the choice and
+/// a part's output are saved with the model.
+#[test]
+fn the_product_is_each_part_in_its_chosen_variant() {
+    let mut s = Session::default();
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 100}));
+    run(
+        &mut s,
+        "add",
+        json!({"name": "outline", "op": "sketch", "sketch": {
+        "points": {"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+        "constraints": [{"type": "fix", "point": "a"}, {"type": "horizontal", "line": "bottom"}, {"type": "vertical", "line": "right"},
+                        {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
+                        {"type": "length", "line": "bottom", "value": "w"}, {"type": "length", "line": "left", "value": 50}]}}),
+    );
+    // Two parts on the frame's sketch: a plate, and a lid 10 above it with a helper body.
+    run(&mut s, "add_level", json!({"name": "plate"}));
+    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": 2}));
+    run(&mut s, "add_level", json!({"name": "long", "parent": "plate"}));
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 200}));
+    run(&mut s, "add_level", json!({"name": "lid"}));
+    run(&mut s, "add", json!({"name": "cover", "op": "extrude", "inputs": ["outline"], "z0": 10, "z1": 11}));
+    run(&mut s, "add", json!({"name": "helper", "op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0, "z1": 1}));
+    let product = |s: &mut Session| -> Vec<(String, String, Vec<String>)> {
+        run(s, "product", json!({}))["parts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                let names = p["bodies"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap().to_string()).collect();
+                (p["part"].as_str().unwrap().into(), p["level"].as_str().unwrap().into(), names)
+            })
+            .collect()
+    };
+    let owned = |v: &[(&str, &str, &[&str])]| -> Vec<(String, String, Vec<String>)> {
+        v.iter().map(|(p, l, b)| (p.to_string(), l.to_string(), b.iter().map(|n| n.to_string()).collect())).collect()
+    };
+    assert_eq!(product(&mut s), owned(&[("lid", "lid", &["cover", "helper"]), ("plate", "plate", &["slab"])]));
+    run(&mut s, "set_output", json!({"output": ["cover"]}));
+    run(&mut s, "choose", json!({"level": "long"}));
+    assert_eq!(product(&mut s), owned(&[("lid", "lid", &["cover"]), ("plate", "long", &["slab"])]));
+    let r = run(&mut s, "product", json!({}));
+    assert_eq!(r["parts"][1]["bodies"][0]["volume"].as_f64(), Some(200.0 * 50.0 * 2.0), "the long plate");
+    assert!(s.execute("set_output", &json!({"output": ["nothing"]})).is_err());
+    // Saved and opened: the choice and the output kept.
+    let dir = std::env::temp_dir().join(format!("datum-product-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("product.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    assert_eq!(product(&mut t), owned(&[("lid", "lid", &["cover"]), ("plate", "long", &["slab"])]));
+    std::fs::remove_dir_all(&dir).unwrap();
+    // A level removed: its part goes back to itself.
+    run(&mut s, "remove_level", json!({"name": "long"}));
+    assert_eq!(product(&mut s)[1].1, "plate");
 }

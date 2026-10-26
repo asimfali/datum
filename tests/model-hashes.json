@@ -163,30 +163,52 @@
     "remaining": "c5faeed036e759fd2281bc3637a172da47eba9b0c9e42439522d2eea4ad17efc"
   },
   "wall_variants.json": {
-    "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed"
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
+    "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed",
+    "side_profile": "96fc83d37964ebff31804ea7c0d064943133942801f800704cce151f06c0f0e0"
   },
   "wall_variants.json [1 м]": {
     "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
     "notched": "22ead95a615b59fdc7cb41c4ca570d7be2823dffe3d8d36caf9f9c877cef17e0",
     "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed",
+    "side_profile": "96fc83d37964ebff31804ea7c0d064943133942801f800704cce151f06c0f0e0",
     "wall": "fb3467ca2b4ed3213ad1d8671e96472fe03c274b39dc2e77662884ff02d23bbe"
   },
   "wall_variants.json [2 м]": {
     "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
     "notched": "ed94a06b2210234b79f3f879e1fdb69e444c2c2a5e4bbc88a6f03f2e7f244783",
     "outline": "ee7ef8192fea4e64bddeaa305fa1ca9ee57a497c08e157d229836de689d82e4d",
+    "side_profile": "9bb0e68b35ca3b63511c1aab4ad4884fa30e18621e743f371a633402f656df03",
     "wall": "ed94a06b2210234b79f3f879e1fdb69e444c2c2a5e4bbc88a6f03f2e7f244783"
   },
   "wall_variants.json [2,5 м]": {
     "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
     "notched": "cd0bd2efd84276e39381f1b1c5461a0a384795491ab0029998023420ae219066",
     "outline": "9ed116e9f620c66e1d775837e3a116c0134cdb887015b07fe89f0ce30167b73e",
+    "side_profile": "21daf165f2b96d1a2daaa64648993ba620cafd1200de20a2bb3cbc78a778bf21",
     "wall": "cd0bd2efd84276e39381f1b1c5461a0a384795491ab0029998023420ae219066"
+  },
+  "wall_variants.json [Стенка боковая 2 м]": {
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
+    "outline": "ee7ef8192fea4e64bddeaa305fa1ca9ee57a497c08e157d229836de689d82e4d",
+    "side": "688d9517b974a9410cb81841ff0c89b5c7f70a4006f98a4ed7e687acac319254",
+    "side_profile": "9bb0e68b35ca3b63511c1aab4ad4884fa30e18621e743f371a633402f656df03"
+  },
+  "wall_variants.json [Стенка боковая]": {
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
+    "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed",
+    "side": "a0220cff9cbbce1292315fc1ca299a88011defa13ec93901450f7194fe104375",
+    "side_profile": "96fc83d37964ebff31804ea7c0d064943133942801f800704cce151f06c0f0e0"
   },
   "wall_variants.json [Стенка верхняя]": {
     "corner": "62206edce12f3749061481b2bfcf43a79bef9edc86f29d5b3e80075f6e2d8b46",
+    "front": "9a953a174fe797227f833a874219feab2f731da3da9f3c18b7bd3764cc2dcfcb",
     "notched": "22ead95a615b59fdc7cb41c4ca570d7be2823dffe3d8d36caf9f9c877cef17e0",
     "outline": "e96d305862733ebfe5f3a6374eafe1bff65b552f3b63c25cef1bd705a098d2ed",
+    "side_profile": "96fc83d37964ebff31804ea7c0d064943133942801f800704cce151f06c0f0e0",
     "wall": "fb3467ca2b4ed3213ad1d8671e96472fe03c274b39dc2e77662884ff02d23bbe"
   },
   "work_planes.json": {

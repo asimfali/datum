@@ -28,13 +28,19 @@ pub struct Level {
     /// and its own features, whole.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<Map<String, Value>>,
+    /// The bodies the level makes, by feature; none: as its parent's, and at the top the final
+    /// bodies not of the frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output: Option<Vec<String>>,
 }
 
-/// A whole model: the root's graph and the levels by name.
+/// A whole model: the root's graph, the levels by name, and the variant of each part that goes
+/// into the product (none: the part itself).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Doc {
     pub root: Graph,
     pub levels: BTreeMap<String, Level>,
+    pub chosen: BTreeMap<String, String>,
 }
 
 impl Doc {
@@ -109,6 +115,7 @@ impl Doc {
             return Err(format!("`{child}` is below `{name}`: remove it first"));
         }
         self.levels.remove(name);
+        self.chosen.retain(|_, c| c != name);
         Ok(())
     }
 
@@ -157,6 +164,50 @@ impl Doc {
             level.parameters.remove(p);
         }
         Ok(())
+    }
+
+    /// The parts: the levels right below the root.
+    pub fn parts(&self) -> Vec<String> {
+        self.levels.iter().filter(|(_, l)| l.parent.is_none()).map(|(n, _)| n.clone()).collect()
+    }
+
+    /// The part level `name` is of: itself, or the level at the top of its parents.
+    pub fn part_of(&self, name: &str) -> Result<String, String> {
+        self.chain_check(name)?;
+        let mut at = name.to_string();
+        while let Some(p) = self.levels.get(&at).and_then(|l| l.parent.clone()) {
+            at = p;
+        }
+        Ok(at)
+    }
+
+    /// The level of part `part` that goes into the product.
+    pub fn chosen(&self, part: &str) -> String {
+        self.chosen.get(part).filter(|c| self.levels.contains_key(*c)).cloned().unwrap_or_else(|| part.to_string())
+    }
+
+    /// Level `level` (the part itself, or below it) goes into the product for its part.
+    pub fn choose(&mut self, level: &str) -> Result<(), String> {
+        let part = self.part_of(level)?;
+        if part == level {
+            self.chosen.remove(&part);
+        } else {
+            self.chosen.insert(part, level.to_string());
+        }
+        Ok(())
+    }
+
+    /// The output given to level `name` or to the nearest of its parents, if one was.
+    pub fn output_given(&self, name: &str) -> Option<Vec<String>> {
+        let mut at = Some(name.to_string());
+        while let Some(n) = at {
+            let l = self.levels.get(&n)?;
+            if let Some(o) = &l.output {
+                return Some(o.clone());
+            }
+            at = l.parent.clone();
+        }
+        None
     }
 
     /// The levels below `level` (none: the root), however deep.
@@ -262,7 +313,7 @@ fn differ(base: &Graph, child: &Graph) -> Result<Level, String> {
             }
         }
     }
-    Ok(Level { parent: None, parameters, features })
+    Ok(Level { parent: None, parameters, features, output: None })
 }
 
 /// JSON merge patch (RFC 7386): objects merged key by key, `null` removes, anything else replaces;

@@ -33,6 +33,10 @@ pub struct Session {
     redo: Vec<(Doc, Option<String>)>,
 }
 
+/// A part of the product: its name, the variant chosen, and the bodies it makes by feature, or
+/// why it makes none.
+pub type Part = (String, String, Result<Vec<(String, datum_graph::ValueRef)>, String>);
+
 /// Changes `undo` goes back through.
 const UNDO_DEPTH: usize = 100;
 
@@ -459,6 +463,59 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.activate(p.get("level").and_then(Value::as_str).map(String::from)),
     },
     Command {
+        name: "choose",
+        description: "Level `level` (a part, or a variant below it) is the one of its part that goes into the product: the view \
+                      of the whole model shows it, `product` lists it. Saved with the model.",
+        params: || json!({"type": "object", "properties": {"level": {"type": "string"}}, "required": ["level"]}),
+        run: |s, p| {
+            s.doc.choose(text(p, "level")?)?;
+            Ok(s.levels())
+        },
+    },
+    Command {
+        name: "set_output",
+        description: "The bodies the level worked in makes, by feature name (`output`: [names]); null: as its parent's, at the \
+                      top the final bodies that are not the frame's. A variant takes its part's.",
+        params: || json!({"type": "object", "properties": {"output": {"type": ["array", "null"], "items": {"type": "string"}}}, "required": ["output"]}),
+        run: |s, p| {
+            let level = s.active.clone().ok_or("the frame makes no part: work in a part")?;
+            let output: Option<Vec<String>> =
+                serde_json::from_value(p.get("output").cloned().unwrap_or(Value::Null)).map_err(|e| format!("output: {e}"))?;
+            if let Some(o) = &output
+                && let Some(n) = o.iter().find(|n| s.graph.find(n).is_none())
+            {
+                return Err(format!("no feature named `{n}`"));
+            }
+            if let Some(l) = s.doc.levels.get_mut(&level) {
+                l.output = output;
+            }
+            Ok(s.levels())
+        },
+    },
+    Command {
+        name: "product",
+        description: "The product: each part in its chosen variant (`choose`), with the bodies it makes (volume, centre of mass).",
+        params: no_params,
+        run: |s, _| {
+            let parts: Vec<Value> = s
+                .product()
+                .into_iter()
+                .map(|(part, level, bodies)| {
+                    let out: Vec<Value> = match bodies {
+                        Ok(b) => b
+                            .iter()
+                            .filter_map(|(n, v)| v.body().map(|b| (n, b.mass_properties())))
+                            .map(|(n, m)| json!({"name": n, "volume": m.volume, "centroid": m.centroid}))
+                            .collect(),
+                        Err(e) => vec![json!({"error": e})],
+                    };
+                    json!({"part": part, "level": level, "bodies": out})
+                })
+                .collect();
+            Ok(json!({ "parts": parts }))
+        },
+    },
+    Command {
         name: "revert",
         description: "In the level worked in, a parent's feature `feature` or parameter `parameter` as the parent has it again: \
                       what the level changed in it dropped.",
@@ -648,7 +705,8 @@ impl Session {
             Value::Null => Map::new(),
             _ => return Err("params must be an object".into()),
         };
-        if c.name != "activate"
+        // `level` of these is what they work on, not where they run.
+        if !matches!(c.name, "activate" | "choose")
             && let Some(level) = p.remove("level")
         {
             let back = self.active.clone();
@@ -716,6 +774,50 @@ impl Session {
         Ok(reply)
     }
 
+    /// The bodies level `name` (graph `g`) makes, by feature: its output as given, else the final
+    /// features that are not the frame's and make a body (no sketch, plane or blank).
+    fn output(&self, name: &str, g: &Graph) -> Vec<String> {
+        match self.doc.output_given(name) {
+            Some(o) => o,
+            None => g
+                .finals()
+                .into_iter()
+                .map(|i| &g.nodes()[i as usize])
+                .filter(|n| !matches!(n.op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. }) && self.doc.root.find(&n.name).is_none())
+                .map(|n| n.name.clone())
+                .collect(),
+        }
+    }
+
+    /// Each part in the variant chosen for the product, and the bodies it makes (or why not).
+    pub fn product(&self) -> Vec<Part> {
+        self.doc
+            .parts()
+            .into_iter()
+            .map(|part| {
+                let level = self.doc.chosen(&part);
+                let bodies = self.doc.graph(Some(&level)).map(|g| {
+                    let e = self.evaluator.evaluate(&g);
+                    self.output(&level, &g)
+                        .into_iter()
+                        .filter_map(|n| Some((n.clone(), e.results[g.find(&n)? as usize].as_ref().ok()?.clone())))
+                        .collect()
+                });
+                (part, level, bodies)
+            })
+            .collect()
+    }
+
+    /// The level worked in, if any.
+    pub fn active(&self) -> Option<&str> {
+        self.active.as_deref()
+    }
+
+    /// The part a level is of.
+    pub fn part_of(&self, level: &str) -> Option<String> {
+        self.doc.part_of(level).ok()
+    }
+
     /// The levels as a tree, what each sets otherwise, and the one worked in.
     fn levels(&self) -> Value {
         let list: Vec<Value> = self
@@ -726,8 +828,9 @@ impl Session {
                 let l = &self.doc.levels[&name];
                 let mut v = json!({"name": name, "parent": parent, "depth": depth, "parameters": l.parameters,
                                    "features": l.features.iter().filter_map(|f| f.get("name").cloned()).collect::<Vec<_>>()});
-                match self.doc.changes(&name).and_then(|c| self.doc.graph(Some(&name)).map(|_| c)) {
-                    Ok([changed, own, set, new]) => {
+                match self.doc.changes(&name).and_then(|c| self.doc.graph(Some(&name)).map(|g| (c, g))) {
+                    Ok(([changed, own, set, new], g)) => {
+                        v["output"] = json!(self.output(&name, &g));
                         v["changed"] = json!(changed);
                         v["own"] = json!(own);
                         v["parameters_set"] = json!(set);
@@ -738,7 +841,8 @@ impl Session {
                 v
             })
             .collect();
-        json!({"active": self.active, "levels": list})
+        let chosen: Map<String, Value> = self.doc.parts().into_iter().map(|p| (p.clone(), json!(self.doc.chosen(&p)))).collect();
+        json!({"active": self.active, "levels": list, "chosen": chosen})
     }
 
     /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
@@ -929,6 +1033,7 @@ impl Session {
     }
 
     fn inspect(&self) -> Value {
+        let levels = self.levels();
         let features: Vec<Value> = (0..self.graph.nodes().len() as NodeIx)
             .zip(&self.last.results)
             .map(|(i, r)| {
@@ -997,7 +1102,7 @@ impl Session {
             })
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
-               "level": self.active, "levels": self.levels()["levels"],
+               "level": self.active, "levels": levels["levels"], "chosen": levels["chosen"],
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }
 }

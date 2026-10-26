@@ -90,6 +90,10 @@ pub struct Scene {
     pub bodies: Vec<Arc<BodyMesh>>,
     pub sketch_lines: Vec<[Vec3; 2]>,
     pub bounds: Option<(Vec3, Vec3)>,
+    /// The rest of the product around what is worked on (D160): drawn, not picked; `faded`, by
+    /// its edges alone, faint, so as not to hide the part being worked on.
+    pub context: Vec<Arc<BodyMesh>>,
+    pub faded: bool,
 }
 
 impl Scene {
@@ -139,14 +143,26 @@ impl Scene {
                 }
             }
         }
-        let points = s.bodies.iter().flat_map(|m| m.triangles.iter().flatten()).chain(s.sketch_lines.iter().flatten());
-        s.bounds = points.fold(None, |b, &p| {
+        s.bound();
+        s
+    }
+
+    /// The scene with `bodies` around it, the rest of the product: drawn whole, or `faded`.
+    pub fn with_context(mut self, bodies: &[&Body], faded: bool, cache: &mut MeshCache) -> Self {
+        self.context = bodies.iter().map(|b| cache.get(b)).collect();
+        self.faded = faded;
+        self.bound();
+        self
+    }
+
+    fn bound(&mut self) {
+        let points = self.bodies.iter().chain(&self.context).flat_map(|m| m.triangles.iter().flatten()).chain(self.sketch_lines.iter().flatten());
+        self.bounds = points.fold(None, |b, &p| {
             Some(match b {
                 None => (p, p),
                 Some((lo, hi)) => (Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)), Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z))),
             })
         });
-        s
     }
 
     /// The body and face under a ray from `origin` along the unit `dir`: the nearest triangle it
@@ -290,6 +306,8 @@ pub const LINE_VERTEX: u64 = 16;
 const BODY: [u8; 4] = [168, 182, 199, 255];
 const EDGE: [u8; 4] = [32, 36, 44, 255];
 const SKETCH: [u8; 4] = [214, 96, 32, 255];
+/// The rest of the product, faded: its edges, faint.
+const FADED: [u8; 4] = [150, 158, 170, 255];
 
 /// A vertex's bytes: `floats`, then `colour`.
 fn vertex<const N: usize>(floats: &[f32], colour: [u8; 4]) -> [u8; N] {
@@ -312,22 +330,31 @@ impl Geometry {
             let c = points.iter().fold(Vec3::ZERO, |s, &p| s + p) * (1.0 / points.len() as f64);
             (morton(c, lo, hi - lo), group as u32, item as u32)
         };
-        let bodies = &scene.bodies;
+        // Solid: the bodies, and the product around them unless it is faded.
+        let solid: Vec<&BodyMesh> = scene.bodies.iter().chain(scene.context.iter().filter(|_| !scene.faded)).map(|m| &**m).collect();
+        let bodies = &solid;
         let triangles = bodies.iter().enumerate().flat_map(|(b, m)| m.triangles.iter().enumerate().map(move |(i, t)| key(t, b, i))).collect();
         let triangles = Part::new(triangles, |b, i| {
-            let (m, i) = (&bodies[b as usize], i as usize);
+            let (m, i) = (bodies[b as usize], i as usize);
             let (t, n) = (m.triangles[i], m.normals[i]);
             [0, 1, 2].map(|k| {
                 let (p, n) = (rel(t[k]), n[k]);
                 vertex::<28>(&[p[0], p[1], p[2], n[0], n[1], n[2]], BODY)
             })
         });
-        // Sketch lines are the group after the bodies.
-        let edges = |g: usize| if g < bodies.len() { &bodies[g].edges } else { &scene.sketch_lines };
-        let lines = (0..=bodies.len()).flat_map(|g| edges(g).iter().enumerate().map(move |(i, e)| key(e, g, i))).collect::<Vec<_>>();
+        // Edges of the bodies, of the product around them, then the sketch lines: a group each.
+        let around = if scene.faded { FADED } else { EDGE };
+        let groups: Vec<(&[[Vec3; 2]], [u8; 4])> = scene
+            .bodies
+            .iter()
+            .map(|m| (&m.edges[..], EDGE))
+            .chain(scene.context.iter().map(|m| (&m.edges[..], around)))
+            .chain([(&scene.sketch_lines[..], SKETCH)])
+            .collect();
+        let lines = groups.iter().enumerate().flat_map(|(g, (e, _))| e.iter().enumerate().map(move |(i, e)| key(e, g, i))).collect::<Vec<_>>();
         let lines = Part::new(lines, |g, i| {
-            let colour = if (g as usize) < bodies.len() { EDGE } else { SKETCH };
-            edges(g as usize)[i as usize].map(|p| vertex::<16>(&rel(p), colour))
+            let (e, colour) = groups[g as usize];
+            e[i as usize].map(|p| vertex::<16>(&rel(p), colour))
         });
         Self { triangles, lines }
     }
