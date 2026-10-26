@@ -15,6 +15,8 @@ pub struct FlatView {
 }
 
 const LINE: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
+/// The bend lines, guides: faint, dashed.
+const BEND: egui::Color32 = egui::Color32::from_rgb(120, 130, 150);
 const PAPER: egui::Color32 = egui::Color32::from_rgb(250, 250, 248);
 
 impl FlatView {
@@ -58,6 +60,10 @@ impl FlatView {
                 rect.center().y - ((q[1] - self.center[1]) * self.scale) as f32,
             )
         };
+        let guide = egui::Stroke::new(1.0, BEND);
+        for [a, b] in &flat.bends {
+            crate::draw::dashed(&painter, &[screen([a.x, a.y]), screen([b.x, b.y])], guide, 7.0, 4.0);
+        }
         let stroke = egui::Stroke::new(1.2, LINE);
         for piece in &flat.pieces {
             match *piece {

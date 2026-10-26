@@ -1234,6 +1234,7 @@ impl Session {
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
                "level": self.active, "levels": levels["levels"], "chosen": levels["chosen"], "hidden": levels["hidden"],
+               "flats": self.doc.flats,
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }
 }
