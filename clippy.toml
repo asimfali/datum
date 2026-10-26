@@ -2,3 +2,20 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+# Maths whose result is not exact differs between OS libraries: only through `libm` (CLAUDE.md).
+disallowed-methods = [
+    { path = "f64::hypot", reason = "libm::hypot: the same bits on every OS" },
+    { path = "f64::sin", reason = "libm::sin" },
+    { path = "f64::cos", reason = "libm::cos" },
+    { path = "f64::tan", reason = "libm::tan" },
+    { path = "f64::sin_cos", reason = "libm::sincos" },
+    { path = "f64::asin", reason = "libm::asin" },
+    { path = "f64::acos", reason = "libm::acos" },
+    { path = "f64::atan", reason = "libm::atan" },
+    { path = "f64::atan2", reason = "libm::atan2" },
+    { path = "f64::exp", reason = "libm::exp" },
+    { path = "f64::ln", reason = "libm::log" },
+    { path = "f64::log10", reason = "libm::log10" },
+    { path = "f64::powf", reason = "libm::pow" },
+    { path = "f64::cbrt", reason = "libm::cbrt" },
+]

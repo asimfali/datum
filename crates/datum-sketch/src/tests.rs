@@ -118,7 +118,7 @@ fn angle_and_distance_from_a_line() {
     }"#,
     );
     let r = solve(&s).unwrap();
-    let (c, sn) = (30f64.to_radians().cos(), 30f64.to_radians().sin());
+    let (c, sn) = (libm::cos(30f64.to_radians()), libm::sin(30f64.to_radians()));
     close(r.points["p"], [8.0 * c, 8.0 * sn], 1e-12);
     // On the side it was drawn: above the base.
     close(r.points["q"], [3.0, 4.0], 1e-12);

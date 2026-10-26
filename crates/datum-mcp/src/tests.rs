@@ -211,6 +211,35 @@ fn a_pattern_fills_a_plate() {
     assert!(r["also_removed"].as_array().unwrap().contains(&json!("patterns: perf")), "{r}");
 }
 
+/// A pattern around a point and along a path: renaming the point and the path's group reaches
+/// them, an expression in `grow` stays; removing the path removes its pattern.
+#[test]
+fn patterns_around_and_along_follow_renames() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    execute(&mut s, "set_parameter", json!({"name": "c", "value": 0.1}));
+    execute(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline", "points": {"h": [4, 2], "k": [2, 1], "o": [5, 2], "p": [1, 0.5], "q": [9, 0.5]},
+            "circles": {"hole": {"center": "h", "diameter": 0.2}, "pin": {"center": "k", "diameter": 0.2}},
+            "lines": {"guide": {"from": "p", "to": "q", "construction": true}}, "groups": {"rail": ["guide"]},
+            "add_constraints": [{"type": "horizontal_distance", "points": ["a", "b"], "value": 10}, {"type": "vertical_distance", "points": ["a", "d"], "value": 4}],
+            "patterns": {"ring": {"of": "hole", "around": {"center": "o", "count": 4}},
+                         "row": {"of": "pin", "along": {"path": "rail", "step": 1, "count": 3, "grow": "c"}}}}),
+    );
+    let t = tool(&mut s, "inspect_model", json!({})).1["features"][0]["status"]["sketch"]["patterns"].clone();
+    assert_eq!((t["ring"]["copies"].clone(), t["row"]["copies"].clone()), (json!(4), json!(3)), "{t}");
+    execute(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "o", "to": "hub"}));
+    execute(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "rail", "to": "track"}));
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    let patterns = &feature(&m, "outline")["sketch"]["patterns"];
+    assert_eq!(patterns["ring"]["around"]["center"], "hub");
+    assert_eq!((patterns["row"]["along"]["path"].clone(), patterns["row"]["along"]["grow"].clone()), (json!("track"), json!("c")), "{patterns}");
+    let r = execute(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"guide": null}}));
+    assert!(r["also_removed"].as_array().unwrap().contains(&json!("patterns: row")), "{r}");
+}
+
 /// Renaming the line a side face is named after: the sketch on that face and its projected edge
 /// are found again by their geometry, and nothing downstream breaks.
 #[test]

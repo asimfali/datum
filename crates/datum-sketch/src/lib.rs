@@ -60,27 +60,81 @@ pub struct Sketch {
     pub patterns: BTreeMap<String, Pattern>,
 }
 
-/// Copies of the closed profiles of `of` (a group or a curve), on the grid of `step`: copy
-/// `(i, j)` moved by `i·step[0] + j·step[1]`. Either `count` copies along each step, the group
+/// Copies of the closed profiles of `of` (a group or a curve): on a grid, along a path or around a
+/// point (D128, D153). On the grid of `step`, copy `(i, j)` is moved by `i·step[0] + j·step[1]`,
+/// each step `grow` longer than the one before. Either `count` copies along each step, the group
 /// itself copy `(0, 0)`; or as many as `fill` (a group bounding a region, or a circle) holds,
-/// centred in it, `clearance` from its edge and from every other profile of the sketch, the
-/// group a sample only. `skip` leaves copies out, `shift` moves one copy by its own vector.
+/// centred in it, `clearance` from its edge and from every other profile of the sketch, the group
+/// a sample only. `skip` leaves copies out, `shift` moves one copy by its own vector: along a path
+/// `[along, across]`, around a point `[degrees, outward]`. A copy of a path or of a point is
+/// `(i, 0)`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Pattern {
     pub of: String,
-    pub step: [[Num; 2]; 2],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<[[Num; 2]; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub count: Option<[Num; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grow: Option<[[Num; 2]; 2]>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill: Option<String>,
     #[serde(default = "zero", skip_serializing_if = "is_zero")]
     pub clearance: Num,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub along: Option<Along>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub around: Option<Around>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip: Vec<[i64; 2]>,
     /// By copy, `"i,j"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub shift: BTreeMap<String, [Num; 2]>,
+}
+
+/// Copies along `path` (a group of lines and arcs joined end to end, or one curve), run the way
+/// its first curve runs. Copy 0 sits where the cell's centre is nearest the path, and each copy
+/// keeps its distance from the path, turned with it if `rotate`. `count` copies `step` apart
+/// (negative: back along the path); `count` alone, spread from the cell to the path's end (round
+/// a closed path, evenly); `step` alone, as many as the path is long, centred on it, the cell a
+/// sample (round a closed path, from the cell). Each step is `grow` longer than the one before.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Along {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<Num>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<Num>,
+    #[serde(default = "zero", skip_serializing_if = "is_zero")]
+    pub grow: Num,
+    #[serde(default = "yes", skip_serializing_if = "is_yes")]
+    pub rotate: bool,
+}
+
+/// `count` copies turned around point `center`: `step` degrees apart, or spread over `angle`
+/// (360 by default: evenly round; less: the first copy to the last), counterclockwise, negative
+/// clockwise. Each step is `grow` degrees more than the one before.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Around {
+    pub center: String,
+    pub count: Num,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<Num>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub angle: Option<Num>,
+    #[serde(default = "zero", skip_serializing_if = "is_zero")]
+    pub grow: Num,
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn is_yes(b: &bool) -> bool {
+    *b
 }
 
 fn zero() -> Num {
@@ -271,8 +325,21 @@ impl Sketch {
                 *n = Num::Value(n.resolve(lookup).map_err(|e| format!("pattern `{name}`: {what}: {e}"))?);
                 Ok(())
             };
-            for n in p.step.iter_mut().flatten().chain(p.count.iter_mut().flatten()) {
+            for n in p.step.iter_mut().flatten().flatten().chain(p.count.iter_mut().flatten()) {
                 num(n, "step or count")?;
+            }
+            for n in p.grow.iter_mut().flatten().flatten() {
+                num(n, "grow")?;
+            }
+            if let Some(a) = &mut p.along {
+                for n in a.step.iter_mut().chain(a.count.iter_mut()).chain([&mut a.grow]) {
+                    num(n, "along")?;
+                }
+            }
+            if let Some(a) = &mut p.around {
+                for n in a.step.iter_mut().chain(a.angle.iter_mut()).chain([&mut a.count, &mut a.grow]) {
+                    num(n, "around")?;
+                }
             }
             num(&mut p.clearance, "clearance")?;
             for (k, v) in &mut p.shift {

@@ -146,11 +146,36 @@ impl Equations {
             if !(sketch.groups.contains_key(&p.of) || curve(&p.of)) {
                 return invalid(format!("pattern `{n}`: `of` names no group or curve: `{}`", p.of));
             }
-            match (&p.count, &p.fill) {
-                (Some(_), None) => {}
-                (None, Some(f)) if sketch.groups.contains_key(f) || sketch.circles.contains_key(f) => {}
-                (None, Some(f)) => return invalid(format!("pattern `{n}`: `fill` names no group or circle: `{f}`")),
-                _ => return invalid(format!("pattern `{n}`: give `count` or `fill`, one of them")),
+            let grid = p.step.is_some() || p.count.is_some() || p.fill.is_some() || p.grow.is_some();
+            match (grid, &p.along, &p.around) {
+                (true, None, None) => match (&p.step, &p.count, &p.fill) {
+                    (None, ..) => return invalid(format!("pattern `{n}`: give `step`, `along` or `around`")),
+                    (Some(_), Some(_), None) => {}
+                    (Some(_), None, Some(f)) if sketch.groups.contains_key(f) || sketch.circles.contains_key(f) => {}
+                    (Some(_), None, Some(f)) => return invalid(format!("pattern `{n}`: `fill` names no group or circle: `{f}`")),
+                    _ => return invalid(format!("pattern `{n}`: give `count` or `fill`, one of them")),
+                },
+                (false, Some(a), None) => {
+                    let path = sketch.groups.get(&a.path).map_or_else(|| vec![a.path.clone()], Clone::clone);
+                    if !sketch.groups.contains_key(&a.path) && !curve(&a.path) {
+                        return invalid(format!("pattern `{n}`: `path` names no group or curve: `{}`", a.path));
+                    }
+                    if !path.iter().any(|c| sketch.lines.contains_key(c) || sketch.arcs.contains_key(c)) {
+                        return invalid(format!("pattern `{n}`: the path `{}` has no line or arc", a.path));
+                    }
+                    if a.step.is_none() && a.count.is_none() {
+                        return invalid(format!("pattern `{n}`: along a path, give `step`, `count` or both"));
+                    }
+                }
+                (false, None, Some(a)) => {
+                    if !sketch.points.contains_key(&a.center) {
+                        return invalid(format!("pattern `{n}`: `center` names no point: `{}`", a.center));
+                    }
+                    if a.step.is_some() && a.angle.is_some() {
+                        return invalid(format!("pattern `{n}`: around a point, give `step` or `angle`, not both"));
+                    }
+                }
+                _ => return invalid(format!("pattern `{n}`: copies go on a grid (`step`), `along` a path or `around` a point, one of them")),
             }
         }
         let line_names: Vec<&String> = sketch.lines.keys().collect();
