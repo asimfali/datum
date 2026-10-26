@@ -191,8 +191,8 @@ struct Model {
     scene_ms: f64,
     /// The feature each body of the scene is of.
     bodies: Vec<String>,
-    /// The flat blanks of the model, by feature (D161).
-    flats: Vec<(String, datum_graph::ValueRef)>,
+    /// The flat blanks of what the level worked in makes, by feature, or why there is none (D164).
+    flats: Vec<(String, Result<Arc<datum_ops::Flat>, String>)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
     editing: Option<(String, Context)>,
 }
@@ -259,6 +259,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         }
         let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = std::time::Instant::now();
+        let flats = session.flats();
         let (graph, evaluation) = (session.graph(), session.evaluation());
         let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing.as_deref())
             .into_iter()
@@ -287,12 +288,6 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         });
         let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let flats: Vec<(String, datum_graph::ValueRef)> = graph
-            .nodes()
-            .iter()
-            .zip(&evaluation.results)
-            .filter_map(|(n, r)| r.as_ref().ok().filter(|v| v.flat().is_some()).map(|v| (n.name.clone(), v.clone())))
-            .collect();
         let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
         if models
             .send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, flats, editing: context })
@@ -1886,6 +1881,19 @@ impl Viewer {
                 self.picking = None;
             }
         }
+        // A click on a body in 3D (no pick asked for) brings its flat pattern forward (D164).
+        if self.picking.is_none()
+            && self.sketch.is_none()
+            && r.clicked()
+            && crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
+            && let (Some(m), Some((x, y))) = (&self.model, offset)
+        {
+            let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect);
+            let named = m.scene.pick(origin, dir).and_then(|f| m.bodies.get(f.body)).filter(|n| m.flats.iter().any(|(f, _)| f == *n)).cloned();
+            if named.is_some() {
+                self.flat.chosen = named;
+            }
+        }
         // What a pick refers to in a feature: an origin plane, a work plane, a body's face.
         let body = |v: &Self, f: crate::scene::Hit| v.model.as_ref().map(|m| m.bodies[f.body].clone());
         match chosen {
@@ -3110,28 +3118,58 @@ impl egui_dock::TabViewer for Tabs<'_> {
 }
 
 impl Viewer {
-    /// The flat pattern pane: the model's blank (of the several, the one chosen), or what makes one.
+    /// The flat pattern pane (D161, D164): the blank of a body of what the level worked in makes
+    /// (of the several, the one chosen here or by a click on the body in 3D), its side, its bend
+    /// lines as guides.
     fn flat_pane(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
             ui.weak("No model open.");
             return;
         };
         if m.flats.is_empty() {
-            ui.weak("No flat pattern here: a sheet's blank comes from an unfold feature for now.");
+            ui.weak("No flat pattern here: work in a part that makes a sheet or a plate (a body's blank comes by itself).");
             return;
         }
         let chosen = self.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
-        if m.flats.len() > 1 {
-            egui::ComboBox::from_id_salt("datum_flat_chosen").selected_text(chosen.as_str()).show_ui(ui, |ui| {
-                for (n, _) in &m.flats {
-                    if ui.selectable_label(*n == chosen, n.as_str()).clicked() {
-                        self.flat.chosen = Some(n.clone());
+        let by_hand = m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == chosen.as_str() && f["op"] == "unfold");
+        let back = m.inspect["flats"][&chosen]["back"].as_bool().unwrap_or(false);
+        let (mut set_back, mut export) = (None, false);
+        ui.horizontal(|ui| {
+            if m.flats.len() > 1 {
+                egui::ComboBox::from_id_salt("datum_flat_chosen").selected_text(chosen.as_str()).show_ui(ui, |ui| {
+                    for (n, _) in &m.flats {
+                        if ui.selectable_label(*n == chosen, n.as_str()).clicked() {
+                            self.flat.chosen = Some(n.clone());
+                        }
                     }
+                });
+            } else {
+                ui.label(chosen.as_str());
+            }
+            // A body's two sides; an unfold feature names its face itself.
+            if !by_hand {
+                let mut on = back;
+                if ui.checkbox(&mut on, "Back side").on_hover_text("Seen from the other side of the sheet: the mirror image").changed() {
+                    set_back = Some(on);
                 }
-            });
+            }
+            if matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_)))) {
+                export = ui.button("DXF…").on_hover_text("The blank for the turret press: R12, lines, arcs and circles, no bend lines").clicked();
+            }
+        });
+        if export && let Some(p) = self.exported("dxf", &chosen).save_file() {
+            self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string()})));
         }
-        if let Some(f) = m.flats.iter().find(|(n, _)| *n == chosen).and_then(|(_, v)| v.flat()) {
-            self.flat.show(ui, f);
+        let Some(m) = &self.model else { return };
+        match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
+            Some(Ok(f)) => self.flat.show(ui, f),
+            Some(Err(e)) => {
+                ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("No blank for {chosen}: {e}"));
+            }
+            None => {}
+        }
+        if let Some(on) = set_back {
+            self.send(Request::Command("set_flat", json!({"feature": chosen, "back": on})));
         }
     }
 }
@@ -4126,6 +4164,43 @@ mod tests {
         drop(h);
         v.side_bar.click(crate::sidebar::Container::Model);
         assert!(!v.side_bar.visible);
+    }
+
+    /// The flat pattern pane (D164): a body's blank with its side box and DXF button; the box asks
+    /// for the other side by `set_flat`; a click in 3D on a body brings its blank forward.
+    #[test]
+    fn the_flat_pane_shows_a_bodys_blank() {
+        let (mut v, inbox) = viewer("wall_variants.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        session.execute("activate", &json!({"level": "2,5 м"})).unwrap();
+        let m = v.model.as_mut().unwrap();
+        m.flats = session.flats();
+        m.inspect = session.execute("inspect", &json!({})).unwrap();
+        assert!(matches!(&m.flats[..], [(n, Ok(_))] if n == "notched"), "the part's body, laid flat");
+        let mut h = egui_kittest::Harness::builder().with_size([700.0, 300.0]).with_pixels_per_point(1.0).build_ui(|ui| v.flat_pane(ui));
+        h.run();
+        assert!(h.query_by_label("DXF…").is_some());
+        h.get_by_label("Back side").click();
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(
+            sent.iter().any(|r| matches!(r, Request::Command("set_flat", p) if p["feature"] == "notched" && p["back"] == true)),
+            "the other side"
+        );
+        // A flat of a model with no levels: a bent sheet's blank, its bend lines drawn dashed.
+        if let Ok(dir) = std::env::var("DATUM_PICTURE") {
+            let (mut v, _inbox) = viewer("sheet_panel.json");
+            let mut session = Session::default();
+            let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/sheet_panel.json");
+            session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+            v.model.as_mut().unwrap().flats = session.flats();
+            let mut h = egui_kittest::Harness::builder().with_size([800.0, 360.0]).with_pixels_per_point(1.0).build_ui(|ui| v.flat_pane(ui));
+            h.run();
+            h.render().unwrap().save(dir).unwrap();
+        }
     }
 
     /// Ctrl+W closes and Ctrl+N gives an empty model (issue #57), with a button focused by Tab
