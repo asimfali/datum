@@ -1,0 +1,173 @@
+{
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "point": "a",
+            "type": "fix"
+          },
+          {
+            "line": "bottom",
+            "type": "horizontal"
+          },
+          {
+            "line": "right",
+            "type": "vertical"
+          },
+          {
+            "line": "top",
+            "type": "horizontal"
+          },
+          {
+            "line": "left",
+            "type": "vertical"
+          },
+          {
+            "line": "bottom",
+            "type": "length",
+            "value": "L"
+          },
+          {
+            "line": "left",
+            "type": "length",
+            "value": "W"
+          }
+        ],
+        "lines": {
+          "bottom": {
+            "from": "a",
+            "to": "b"
+          },
+          "left": {
+            "from": "d",
+            "to": "a"
+          },
+          "right": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "c",
+            "to": "d"
+          }
+        },
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            1000,
+            0
+          ],
+          "c": [
+            1000,
+            300
+          ],
+          "d": [
+            0,
+            300
+          ]
+        }
+      }
+    }
+  ],
+  "format": "datum/1",
+  "levels": {
+    "1 м": {
+      "parent": "Стенка верхняя"
+    },
+    "2 м": {
+      "parameters": {
+        "L": 2000
+      },
+      "parent": "Стенка верхняя"
+    },
+    "2,5 м": {
+      "features": [
+        {
+          "name": "outline",
+          "sketch": {
+            "circles": {
+              "fixing": {
+                "center": "h",
+                "diameter": "hole"
+              }
+            },
+            "constraints": {
+              "add": [
+                {
+                  "points": [
+                    "a",
+                    "h"
+                  ],
+                  "type": "horizontal_distance",
+                  "value": 50
+                },
+                {
+                  "points": [
+                    "a",
+                    "h"
+                  ],
+                  "type": "vertical_distance",
+                  "value": "W / 2"
+                }
+              ]
+            },
+            "patterns": {
+              "fixings": {
+                "count": [
+                  5,
+                  1
+                ],
+                "of": "fixing",
+                "step": [
+                  [
+                    "(L - 100) / 4",
+                    0
+                  ],
+                  [
+                    0,
+                    1
+                  ]
+                ]
+              }
+            },
+            "points": {
+              "h": [
+                50,
+                150
+              ]
+            }
+          }
+        }
+      ],
+      "parameters": {
+        "L": 2500
+      },
+      "parent": "Стенка верхняя"
+    },
+    "Стенка верхняя": {
+      "features": [
+        {
+          "inputs": [
+            "outline"
+          ],
+          "name": "wall",
+          "op": "extrude",
+          "z0": 0,
+          "z1": "t"
+        }
+      ]
+    }
+  },
+  "parameters": {
+    "L": 1000,
+    "W": 300,
+    "hole": 6,
+    "t": 1.5
+  }
+}
