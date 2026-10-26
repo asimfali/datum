@@ -19,6 +19,7 @@ pub mod render;
 pub mod scene;
 mod select;
 mod settings;
+mod sidebar;
 mod sketch;
 mod templates;
 mod update;

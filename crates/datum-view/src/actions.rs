@@ -33,9 +33,9 @@ pub enum Act {
     Home,
     LookAt,
     WorkPlane,
-    BrowserPane,
+    SideBar,
+    SideBarRight,
     FlatPane,
-    LibraryPane,
     ResetLayout,
 }
 
@@ -149,7 +149,8 @@ pub const ACTIONS: [Action; 29] = [
         plain(Key::CloseBracket),
         Model,
     ),
-    action(Act::BrowserPane, "view.model_pane", "Model browser", "Parts, parameters and features: a pane to put where you like", None, Anywhere),
+    action(Act::SideBar, "view.side_bar", "Side bar", "The sections of the icon chosen on the activity bar", ctrl(Key::B), Anywhere),
+    action(Act::SideBarRight, "view.side_bar_right", "Side bar on the right", "The activity bar and side bar at the right edge", None, Anywhere),
     action(
         Act::FlatPane,
         "view.flat_pane",
@@ -158,8 +159,7 @@ pub const ACTIONS: [Action; 29] = [
         None,
         Anywhere,
     ),
-    action(Act::LibraryPane, "view.library_pane", "Library", "Sketch elements to place", None, Anywhere),
-    action(Act::ResetLayout, "view.reset_layout", "Reset layout", "The panes back where a first run puts them", None, Anywhere),
+    action(Act::ResetLayout, "view.reset_layout", "Reset layout", "The panes and the side bar back as a first run has them", None, Anywhere),
 ];
 
 impl Act {
