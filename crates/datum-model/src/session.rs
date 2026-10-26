@@ -3,11 +3,13 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use datum_brep::{Body, Curve, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use datum_math::expr::{ExprError, Num, parameter_values};
+use datum_ops::Flat;
 use serde_json::{Map, Value, json};
 
 use crate::levels::Doc;
@@ -31,6 +33,9 @@ pub struct Session {
     /// undone, for `redo`.
     undo: Vec<(Doc, Option<String>)>,
     redo: Vec<(Doc, Option<String>)>,
+    /// Bodies laid flat (D164), by the body's hash and the settings: a perforated sheet is not
+    /// unfolded again for an edit that leaves it as it was.
+    flat_memo: BTreeMap<[u8; 32], Arc<Result<Flat, String>>>,
 }
 
 /// A part of the product: its name, the variant chosen, and the bodies it makes by feature, or
@@ -54,6 +59,7 @@ impl Default for Session {
             saved: Doc::default(),
             undo: Vec::new(),
             redo: Vec::new(),
+            flat_memo: BTreeMap::new(),
         }
     }
 }
@@ -80,11 +86,12 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "export_dxf",
-        description: "Write the flat blank of an `unfold` feature as DXF (R12: lines, arcs, circles on layer 0, mm) to `path`.",
+        description: "Write the flat blank of feature `name` as DXF (R12: lines, arcs, circles on layer 0, mm; no bend lines) to `path`: \
+                      an `unfold` feature's, or a sheet or plate body's, seen from the side `set_flat` chose (front by default).",
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name", "path"]}),
         run: |s, p| {
             let name = text(p, "name")?;
-            let flat = s.value(name)?.flat().ok_or_else(|| format!("`{name}` is not an unfold"))?;
+            let flat = s.flat_of(name)?;
             let path = PathBuf::from(text(p, "path")?);
             std::fs::write(&path, flat.dxf()).map_err(|e| format!("{}: {e}", path.display()))?;
             Ok(json!({"written": path.display().to_string(), "width": flat.size.x, "height": flat.size.y, "pieces": flat.pieces.len()}))
@@ -463,6 +470,43 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.activate(p.get("level").and_then(Value::as_str).map(String::from)),
     },
     Command {
+        name: "flats",
+        description: "The flat blanks of the bodies the level worked in makes (a model without levels: its final bodies): feature, side \
+                      (`front`: seen from where a sketch on XY is, `back`), K-factor, and size, pieces and bend lines, or why the body \
+                      is no sheet.",
+        params: no_params,
+        run: |s, _| Ok(s.flats_report()),
+    },
+    Command {
+        name: "set_flat",
+        description: "How body `feature` is laid flat: `back` (true: seen from the other side), `k_factor` (a number or a formula; 0.5 \
+                      by default; cuts on bends were sketched with their own, they must agree). Saved with the model, for the \
+                      feature wherever it is inherited.",
+        params: || {
+            json!({"type": "object", "properties": {"feature": {"type": "string"}, "back": {"type": "boolean"},
+                   "k_factor": {"type": ["number", "string"]}}, "required": ["feature"]})
+        },
+        run: |s, p| {
+            let feature = text(p, "feature")?;
+            if s.graph.find(feature).is_none() {
+                return Err(format!("no feature named `{feature}`"));
+            }
+            let mut set = s.doc.flats.get(feature).cloned().unwrap_or_default();
+            if let Some(b) = p.get("back") {
+                set.back = b.as_bool().ok_or("`back` must be true or false")?;
+            }
+            if let Some(k) = p.get("k_factor") {
+                set.k_factor = serde_json::from_value(k.clone()).map_err(|e| format!("k_factor: {e}"))?;
+            }
+            if set == crate::levels::FlatSettings::default() {
+                s.doc.flats.remove(feature);
+            } else {
+                s.doc.flats.insert(feature.to_string(), set);
+            }
+            Ok(s.flats_report())
+        },
+    },
+    Command {
         name: "choose",
         description: "Level `level` (a part, or a variant below it) is the one of its part that goes into the product: the view \
                       of the whole model shows it, `product` lists it. Saved with the model.",
@@ -788,16 +832,87 @@ impl Session {
     /// The bodies level `name` (graph `g`) makes, by feature: its output as given, else the final
     /// features that are not the frame's and make a body (no sketch, plane or blank).
     fn output(&self, name: &str, g: &Graph) -> Vec<String> {
-        match self.doc.output_given(name) {
-            Some(o) => o,
-            None => g
-                .finals()
-                .into_iter()
-                .map(|i| &g.nodes()[i as usize])
-                .filter(|n| !matches!(n.op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. }) && self.doc.root.find(&n.name).is_none())
-                .map(|n| n.name.clone())
-                .collect(),
+        self.output_of(Some(name), g)
+    }
+
+    /// [`Self::output`] of a level, or of the root: a model with no levels is one part, whose
+    /// final bodies are its output; with levels, the root is the frame and makes none.
+    fn output_of(&self, level: Option<&str>, g: &Graph) -> Vec<String> {
+        let given = level.and_then(|l| self.doc.output_given(l));
+        if let Some(o) = given {
+            return o;
         }
+        if level.is_none() && !self.doc.levels.is_empty() {
+            return Vec::new();
+        }
+        g.finals()
+            .into_iter()
+            .map(|i| &g.nodes()[i as usize])
+            .filter(|n| {
+                !matches!(n.op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. })
+                    && (level.is_none() || self.doc.root.find(&n.name).is_none())
+            })
+            .map(|n| n.name.clone())
+            .collect()
+    }
+
+    /// The blank of feature `name` of the level worked in: an `unfold` feature's, or a sheet
+    /// or plate body's laid flat as its settings say (D164).
+    pub fn flat_of(&mut self, name: &str) -> Result<Arc<Flat>, String> {
+        let ix = self.find(name)?;
+        let value = self.last.results[ix as usize].as_ref().map_err(|e| format!("`{name}` failed: {e}"))?.clone();
+        if let Some(f) = value.flat() {
+            return Ok(Arc::new(f.clone()));
+        }
+        let body = value.body().ok_or_else(|| format!("`{name}` is no body"))?;
+        let settings = self.doc.flats.get(name).cloned().unwrap_or_default();
+        let values = parameter_values(self.graph.parameters());
+        let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
+        let k = settings.k_factor.resolve(&lookup).map_err(|e| format!("k_factor: {e}"))?;
+        let mut h = blake3::Hasher::new();
+        h.update(&value.hash());
+        h.update(&[u8::from(settings.back)]);
+        h.update(&k.to_bits().to_le_bytes());
+        let key = *h.finalize().as_bytes();
+        if self.flat_memo.len() > 64 {
+            self.flat_memo.clear();
+        }
+        let made = self.flat_memo.entry(key).or_insert_with(|| Arc::new(datum_ops::unfold_side(body, settings.back, k).map_err(|e| e.to_string())));
+        match made.as_ref() {
+            Ok(f) => Ok(Arc::new(f.clone())),
+            Err(e) => Err(e.clone()),
+        }
+    }
+
+    /// The blanks of what the level worked in makes, by feature: the bodies' (settings as saved)
+    /// and `unfold` features'.
+    pub fn flats(&mut self) -> Vec<(String, Result<Arc<Flat>, String>)> {
+        let mut names = self.output_of(self.active.as_deref(), &self.graph);
+        names.extend(self.graph.nodes().iter().filter(|n| matches!(n.op, Op::Unfold { .. })).map(|n| n.name.clone()));
+        names.into_iter().map(|n| (n.clone(), self.flat_of(&n))).collect()
+    }
+
+    fn flats_report(&mut self) -> Value {
+        let list: Vec<Value> = self
+            .flats()
+            .into_iter()
+            .map(|(name, flat)| {
+                let set = self.doc.flats.get(&name).cloned().unwrap_or_default();
+                let mut v = json!({"feature": name, "side": if set.back { "back" } else { "front" }, "k_factor": set.k_factor});
+                match flat {
+                    Ok(f) => {
+                        let [lines, arcs, circles] = f.counts();
+                        v["width"] = json!(f.size.x);
+                        v["height"] = json!(f.size.y);
+                        v["pieces"] = json!({"lines": lines, "arcs": arcs, "circles": circles});
+                        v["bend_lines"] = json!(f.bends.len());
+                    }
+                    Err(e) => v["error"] = json!(e),
+                }
+                v
+            })
+            .collect();
+        json!({ "flats": list })
     }
 
     /// Each part in the variant chosen for the product, and the bodies it makes (or why not).

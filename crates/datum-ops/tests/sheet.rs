@@ -177,3 +177,49 @@ fn names_stay_and_bad_paths_are_refused() {
     let rolled = serde_json::json!({"points": {"o": [0, 0], "a": [10, 0], "b": [0, 10]}, "arcs": {"r": {"center": "o", "from": "a", "to": "b"}}});
     assert!(matches!(refused(rolled, 2.0), BrepError::Unsupported(_)));
 }
+
+fn plate_with_hole() -> Body {
+    let s = op(serde_json::json!({"op": "sketch", "sketch": {
+        "points": {"a": [0, 0], "b": [100, 0], "c": [100, 60], "d": [0, 60], "h": [20, 25]},
+        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
+        "circles": {"hole": {"center": "h", "diameter": 10}}}}))
+    .eval(id("plate_sketch"), &[])
+    .unwrap();
+    let b = op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 3})).eval(id("plate"), &[&s]).unwrap().body().unwrap().clone();
+    b.validate().unwrap();
+    b
+}
+
+/// A plate's two sides, and a bent sheet's: the front seen as drawn, the back as its mirror;
+/// the bend lines are guides, one pair for each bend, across the whole width; a cube is no sheet.
+#[test]
+fn a_sheets_sides_and_bend_lines() {
+    use datum_ops::{FlatPiece, sheet_sides, unfold_side};
+    let hole = |f: &datum_ops::Flat| {
+        f.pieces.iter().find_map(|p| if let FlatPiece::Circle { center, .. } = p { Some((center.x, center.y)) } else { None }).unwrap()
+    };
+    let b = plate_with_hole();
+    let sides = sheet_sides(&b).unwrap();
+    let normal = |s: u32| b.faces()[s as usize].surface.plane().unwrap().normal;
+    assert_eq!((normal(sides[0]).z, normal(sides[1]).z), (1.0, -1.0), "the front faces up");
+    let (front, back) = (unfold_side(&b, false, 0.5).unwrap(), unfold_side(&b, true, 0.5).unwrap());
+    assert_eq!((hole(&front), hole(&back)), ((20.0, 25.0), (80.0, 25.0)), "as drawn, and its mirror");
+    assert!(front.bends.is_empty() && close(front.size.x, 100.0) && close(front.size.y, 60.0));
+    assert_ne!(front.hash, back.hash);
+    // Three bends, a tangent line each side of each, as long as the sheet is wide.
+    let p = sheet_of(panel_path(), "left", 1.5, 2.0, 1000.0).unwrap();
+    for back in [false, true] {
+        let flat = unfold_side(&p, back, 0.44).unwrap();
+        assert_eq!(flat.bends.len(), 6, "back: {back}");
+        assert!(flat.bends.iter().all(|l| l[0].x == l[1].x && l[0].y == 0.0 && close(l[1].y, 1000.0)), "{:?}", flat.bends);
+        let xs: Vec<f64> = flat.bends.iter().map(|l| l[0].x).collect();
+        assert!(xs.windows(2).all(|w| w[0] < w[1]) && xs[0] > 0.0 && xs[5] < flat.size.x, "{xs:?}");
+        // Seen from either side the blank is as long; DXF has no bend lines.
+        assert!(close(flat.size.x, 577.2266941436376), "{:?}", flat.size);
+        assert_eq!(flat.dxf().matches("LINE").count(), 4);
+    }
+    // A cube has no two sides standing out.
+    let cube =
+        op(serde_json::json!({"op": "prism", "polygon": [[0, 0], [10, 0], [10, 10], [0, 10]], "z0": 0, "z1": 10})).eval(id("cube"), &[]).unwrap();
+    assert!(matches!(sheet_sides(cube.body().unwrap()), Err(BrepError::Unsupported(_))));
+}

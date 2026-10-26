@@ -127,7 +127,7 @@ fn parameters_drive_the_model() {
     assert_eq!(datum_model::to_json(t.graph()), datum_model::to_json(s.graph()));
 }
 
-/// The flat blank of the rolled reference sheet goes out as DXF; a body is no blank.
+/// The flat blank of the rolled reference sheet goes out as DXF; a sheet body too, a sketch not.
 #[test]
 fn export_dxf() {
     let mut s = Session::default();
@@ -142,7 +142,11 @@ fn export_dxf() {
     let dxf = std::fs::read_to_string(&path).unwrap();
     std::fs::remove_file(&path).unwrap();
     assert_eq!(dxf.matches("\nCIRCLE\n").count(), 100);
-    assert!(s.execute("export_dxf", &json!({"name": "sheet", "path": path.display().to_string()})).unwrap_err().contains("not an unfold"));
+    // A sheet body goes out too, laid flat on its own (D164): the uncut sheet's four lines; a sketch is no body.
+    let r = run(&mut s, "export_dxf", json!({"name": "sheet", "path": path.display().to_string()}));
+    assert_eq!(r["pieces"], 4);
+    std::fs::remove_file(&path).unwrap();
+    assert!(s.execute("export_dxf", &json!({"name": "profile", "path": path.display().to_string()})).unwrap_err().contains("no body"));
 }
 
 /// The middle of an outline replaced by another section (a library element in place of a piece

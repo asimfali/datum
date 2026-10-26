@@ -253,3 +253,56 @@ fn the_product_is_each_part_in_its_chosen_variant() {
     run(&mut s, "remove_level", json!({"name": "long"}));
     assert_eq!(product(&mut s)[1].1, "plate");
 }
+
+/// A body is laid flat as its settings say (D164): the front as drawn, the back mirrored, a
+/// K-factor of a formula; a model with no levels is one part; the settings are saved; the DXF
+/// of a body has its holes and no bend lines.
+#[test]
+fn bodies_are_laid_flat_by_their_settings() {
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models");
+    let mut s = Session::default();
+    run(&mut s, "open", json!({"path": model.join("symmetric_plate.json").display().to_string()}));
+    let r = run(&mut s, "flats", json!({}));
+    let plate = &r["flats"][0];
+    assert_eq!((plate["feature"].as_str(), plate["side"].as_str(), plate["bend_lines"].as_u64()), (Some("plate"), Some("front"), Some(0)), "{r}");
+    assert_eq!((plate["width"].as_f64(), plate["height"].as_f64()), (Some(80.0), Some(40.0)));
+    // A part's variant: the length and the row of holes of the 2.5 m wall.
+    run(&mut s, "open", json!({"path": model.join("wall_variants.json").display().to_string()}));
+    assert_eq!(run(&mut s, "flats", json!({}))["flats"], json!([]), "the frame makes no part");
+    run(&mut s, "activate", json!({"level": "2,5 м"}));
+    let r = run(&mut s, "flats", json!({}));
+    let wall = &r["flats"][0];
+    assert_eq!((wall["feature"].as_str(), wall["width"].as_f64(), wall["height"].as_f64()), (Some("notched"), Some(2500.0), Some(300.0)), "{r}");
+    assert_eq!(wall["pieces"], json!({"lines": 4, "arcs": 0, "circles": 5}));
+    let dir = std::env::temp_dir().join(format!("datum-flats-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dxf = |s: &mut Session, name: &str| {
+        let path = dir.join(name);
+        run(s, "export_dxf", json!({"name": "notched", "path": path.display().to_string()}));
+        std::fs::read_to_string(path).unwrap()
+    };
+    let front = dxf(&mut s, "front.dxf");
+    assert_eq!((front.matches("\nCIRCLE\n").count(), front.matches("\nLINE\n").count()), (5, 4), "holes and the outline, no bend lines");
+    // The back side: as its mirror; settings saved with the model.
+    run(&mut s, "set_flat", json!({"feature": "notched", "back": true}));
+    let back = dxf(&mut s, "back.dxf");
+    assert_ne!(front, back);
+    assert_eq!(run(&mut s, "flats", json!({}))["flats"][0]["side"], "back");
+    let saved = dir.join("wall.json");
+    run(&mut s, "save", json!({"path": saved.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&saved).unwrap()).unwrap();
+    assert_eq!(file["flats"], json!({"notched": {"back": true}}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": saved.display().to_string()}));
+    run(&mut t, "activate", json!({"level": "2,5 м"}));
+    assert_eq!(run(&mut t, "flats", json!({}))["flats"][0]["side"], "back");
+    // Back to the default: the entry goes. A K-factor of a formula that is no parameter is an error
+    // told on the blank, not a failed command.
+    run(&mut s, "set_flat", json!({"feature": "notched", "back": false}));
+    run(&mut s, "save", json!({"path": saved.display().to_string()}));
+    assert!(!std::fs::read_to_string(&saved).unwrap().contains("flats"));
+    run(&mut s, "set_flat", json!({"feature": "notched", "k_factor": "kk"}));
+    assert!(run(&mut s, "flats", json!({}))["flats"][0]["error"].as_str().unwrap().contains("kk"));
+    assert!(s.execute("set_flat", &json!({"feature": "nothing", "back": true})).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}

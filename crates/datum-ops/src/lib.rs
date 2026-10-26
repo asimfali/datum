@@ -25,7 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, sheet};
 pub use sketch::{Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, depth_to, extrude_sketch, face_plane, place, profile_regions};
-pub use unfold::{Flat, FlatPiece, unfold};
+pub use unfold::{Flat, FlatPiece, sheet_sides, unfold, unfold_side};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
