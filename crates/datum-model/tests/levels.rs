@@ -235,6 +235,10 @@ fn the_product_is_each_part_in_its_chosen_variant() {
     let r = run(&mut s, "product", json!({}));
     assert_eq!(r["parts"][1]["bodies"][0]["volume"].as_f64(), Some(200.0 * 50.0 * 2.0), "the long plate");
     assert!(s.execute("set_output", &json!({"output": ["nothing"]})).is_err());
+    // The lid hidden in the product: listed, but not shown; kept in the file.
+    run(&mut s, "show", json!({"part": "lid", "visible": false}));
+    assert_eq!(run(&mut s, "product", json!({}))["parts"][0]["visible"], false);
+    assert!(s.execute("show", &json!({"part": "long", "visible": false})).is_err(), "a variant is no part");
     // Saved and opened: the choice and the output kept.
     let dir = std::env::temp_dir().join(format!("datum-product-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -243,6 +247,7 @@ fn the_product_is_each_part_in_its_chosen_variant() {
     let mut t = Session::default();
     run(&mut t, "open", json!({"path": path.display().to_string()}));
     assert_eq!(product(&mut t), owned(&[("lid", "lid", &["cover"]), ("plate", "long", &["slab"])]));
+    assert_eq!(run(&mut t, "inspect", json!({}))["hidden"], json!(["lid"]));
     std::fs::remove_dir_all(&dir).unwrap();
     // A level removed: its part goes back to itself.
     run(&mut s, "remove_level", json!({"name": "long"}));

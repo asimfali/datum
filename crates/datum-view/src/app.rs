@@ -262,7 +262,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let around: Vec<datum_graph::ValueRef> = session
             .product()
             .into_iter()
-            .filter(|(part, _, _)| Some(part) != mine.as_ref())
+            .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
             .filter_map(|(_, _, bodies)| bodies.ok())
             .flatten()
             .map(|(_, v)| v)
@@ -1122,6 +1122,7 @@ impl Viewer {
         let chosen_of = |part: &str| m.inspect["chosen"][part].as_str().unwrap_or(part).to_string();
         let mut go: Option<Option<String>> = None;
         let mut choose: Option<String> = None;
+        let mut show: Option<(String, bool)> = None;
         let mut remove: Option<String> = None;
         ui.heading("Parts").on_hover_text(LEVELS);
         let frame = "The frame: the shared sketches, planes and parameters every part and variant takes";
@@ -1138,6 +1139,10 @@ impl Viewer {
             let chosen = chosen_of(part);
             let here = family.iter().any(|l| Some(&l.0) == active.as_ref());
             ui.horizontal(|ui| {
+                let mut visible = !m.inspect["hidden"].as_array().is_some_and(|h| h.iter().any(|p| p == part.as_str()));
+                if ui.checkbox(&mut visible, "").on_hover_text("Shown in the product: in the frame, and faint around another part").changed() {
+                    show = Some((part.clone(), visible));
+                }
                 if ui.selectable_label(here, part.as_str()).on_hover_text("Work in this part, in the variant chosen beside it").clicked() {
                     go = Some(Some(chosen.clone()));
                 }
@@ -1212,6 +1217,9 @@ impl Viewer {
         }
         if let Some(level) = choose {
             self.send(Request::Command("choose", json!({ "level": level })));
+        }
+        if let Some((part, visible)) = show {
+            self.send(Request::Command("show", json!({ "part": part, "visible": visible })));
         }
         if let Some(level) = go
             && level != active

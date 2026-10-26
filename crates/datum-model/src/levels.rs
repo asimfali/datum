@@ -41,6 +41,8 @@ pub struct Doc {
     pub root: Graph,
     pub levels: BTreeMap<String, Level>,
     pub chosen: BTreeMap<String, String>,
+    /// Parts not shown in the product.
+    pub hidden: std::collections::BTreeSet<String>,
 }
 
 impl Doc {
@@ -116,6 +118,7 @@ impl Doc {
         }
         self.levels.remove(name);
         self.chosen.retain(|_, c| c != name);
+        self.hidden.remove(name);
         Ok(())
     }
 
@@ -193,6 +196,19 @@ impl Doc {
             self.chosen.remove(&part);
         } else {
             self.chosen.insert(part, level.to_string());
+        }
+        Ok(())
+    }
+
+    /// Part `part` shown in the product, or not.
+    pub fn show(&mut self, part: &str, visible: bool) -> Result<(), String> {
+        if !self.parts().iter().any(|p| p == part) {
+            return Err(format!("no part `{part}`"));
+        }
+        if visible {
+            self.hidden.remove(part);
+        } else {
+            self.hidden.insert(part.to_string());
         }
         Ok(())
     }

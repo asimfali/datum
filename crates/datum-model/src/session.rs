@@ -473,6 +473,17 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "show",
+        description: "Part `part` shown in the product (`visible`: true) or hidden: the view of the whole model and around a part \
+                      leaves hidden parts out (the part worked in is always shown). Saved with the model.",
+        params: || json!({"type": "object", "properties": {"part": {"type": "string"}, "visible": {"type": "boolean"}}, "required": ["part", "visible"]}),
+        run: |s, p| {
+            let visible = p.get("visible").and_then(Value::as_bool).ok_or("`visible` must be true or false")?;
+            s.doc.show(text(p, "part")?, visible)?;
+            Ok(s.levels())
+        },
+    },
+    Command {
         name: "set_output",
         description: "The bodies the level worked in makes, by feature name (`output`: [names]); null: as its parent's, at the \
                       top the final bodies that are not the frame's. A variant takes its part's.",
@@ -509,7 +520,7 @@ const COMMANDS: &[Command] = &[
                             .collect(),
                         Err(e) => vec![json!({"error": e})],
                     };
-                    json!({"part": part, "level": level, "bodies": out})
+                    json!({"part": part, "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out})
                 })
                 .collect();
             Ok(json!({ "parts": parts }))
@@ -808,6 +819,11 @@ impl Session {
             .collect()
     }
 
+    /// Whether part `part` is shown in the product.
+    pub fn visible(&self, part: &str) -> bool {
+        !self.doc.hidden.contains(part)
+    }
+
     /// The level worked in, if any.
     pub fn active(&self) -> Option<&str> {
         self.active.as_deref()
@@ -842,7 +858,7 @@ impl Session {
             })
             .collect();
         let chosen: Map<String, Value> = self.doc.parts().into_iter().map(|p| (p.clone(), json!(self.doc.chosen(&p)))).collect();
-        json!({"active": self.active, "levels": list, "chosen": chosen})
+        json!({"active": self.active, "levels": list, "chosen": chosen, "hidden": self.doc.hidden})
     }
 
     /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
@@ -1102,7 +1118,7 @@ impl Session {
             })
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
-               "level": self.active, "levels": levels["levels"], "chosen": levels["chosen"],
+               "level": self.active, "levels": levels["levels"], "chosen": levels["chosen"], "hidden": levels["hidden"],
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }
 }
