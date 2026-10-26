@@ -153,7 +153,7 @@ fn star_polygon() -> impl Strategy<Value = Vec<Vec2>> {
             .enumerate()
             .map(|(k, &(jitter, r))| {
                 let a = std::f64::consts::TAU * (k as f64 + jitter) / n;
-                Vec2::new(r * a.cos(), r * a.sin())
+                Vec2::new(r * libm::cos(a), r * libm::sin(a))
             })
             .collect()
     })

@@ -437,7 +437,7 @@ const COMMANDS: &[Command] = &[
                 Some(v) => Some(serde_json::from_value::<Vec3>(v.clone()).map_err(|e| format!("normal: {e}"))?),
                 None => None,
             };
-            let cos_tol = p.get("tolerance_deg").and_then(Value::as_f64).unwrap_or(0.01).to_radians().cos();
+            let cos_tol = libm::cos(p.get("tolerance_deg").and_then(Value::as_f64).unwrap_or(0.01).to_radians());
             let b = s.body(text(p, "name")?)?;
             let unit = |v: Vec3| v * (1.0 / v.dot(v).sqrt());
             let faces: Vec<Value> = b

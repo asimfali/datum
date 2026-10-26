@@ -698,6 +698,7 @@ dependencies = [
  "datum-brep",
  "datum-math",
  "datum-ops",
+ "libm",
  "rayon",
 ]
 

@@ -144,7 +144,7 @@ fn path_sketch(h: [f64; 2], path: serde_json::Value, pattern: serde_json::Value)
 fn copies_follow_a_path_of_lines_and_arcs() {
     let pattern = serde_json::json!({"of": "hole", "along": {"path": "edge", "step": 50, "count": 4}});
     let phi = -std::f64::consts::FRAC_PI_2 + 1.0;
-    let on_arc = [100.0 + 40.0 * phi.cos(), 50.0 + 40.0 * phi.sin()];
+    let on_arc = [100.0 + 40.0 * libm::cos(phi), 50.0 + 40.0 * libm::sin(phi)];
     let want = [[0.0, 10.0], [50.0, 10.0], [100.0, 10.0], on_arc];
     for group in [serde_json::json!(["l1", "r1"]), serde_json::json!(["r1", "l1"])] {
         let s = placed(path_sketch([0.0, 10.0], group, pattern.clone())).unwrap();
@@ -155,8 +155,8 @@ fn copies_follow_a_path_of_lines_and_arcs() {
     let pattern = serde_json::json!({"of": "hole", "along": {"path": "edge", "step": 50, "count": 4, "rotate": false}});
     let s = placed(path_sketch([0.0, 10.0], serde_json::json!(["l1", "r1"]), pattern)).unwrap();
     let last = centres(&s, [0.0, 10.0])[3].1;
-    assert_close(last[0], 100.0 + 50.0 * phi.cos());
-    assert_close(last[1], 60.0 + 50.0 * phi.sin());
+    assert_close(last[0], 100.0 + 50.0 * libm::cos(phi));
+    assert_close(last[1], 60.0 + 50.0 * libm::sin(phi));
 }
 
 /// `count` alone spreads the copies from the cell to the path's end; `step` alone fits as many as

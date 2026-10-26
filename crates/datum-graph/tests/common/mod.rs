@@ -9,7 +9,7 @@ pub fn ngon(n: usize, r: f64) -> Vec<Vec2> {
     (0..n)
         .map(|k| {
             let a = std::f64::consts::TAU * k as f64 / n as f64;
-            Vec2::new(r * a.cos(), r * a.sin())
+            Vec2::new(r * libm::cos(a), r * libm::sin(a))
         })
         .collect()
 }
