@@ -392,6 +392,8 @@ struct Viewer {
     /// A variant being named: below which variant (none: the base), of which part, and the name
     /// typed.
     new_level: Option<(Option<String>, String, String)>,
+    /// A set of the product being named (D169): the name typed.
+    new_set: Option<String>,
     hold: Option<(f64, egui::Pos2, bool)>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
@@ -477,6 +479,7 @@ impl Viewer {
             dock: crate::dock::default_layout(),
             flat: crate::flat::FlatView::default(),
             new_level: None,
+            new_set: None,
             hold: None,
             quitting: None,
             worked_in: None,
@@ -1174,9 +1177,47 @@ impl Viewer {
         let mut choose: Option<(String, Option<String>)> = None;
         let mut show: Option<(String, bool)> = None;
         let mut remove: Option<String> = None;
-        let base = "The base: every part as the root makes it; a change here reaches every variant";
+        let base = "The base: every part as the root makes it, the product shown whole; a change here reaches every variant";
         if ui.selectable_label(active.is_none(), "Base").on_hover_text(base).clicked() {
             go = Some(None);
+        }
+        // The product's variants (D169): each part's variant and what is hidden, by name.
+        let mut set_cmd: Option<(&str, String)> = None;
+        let current = m.inspect["set"].as_str();
+        ui.horizontal(|ui| {
+            ui.label("Set").on_hover_text("A product variant: the variant of each part and the parts hidden, switched at once");
+            egui::ComboBox::from_id_salt("datum_set").selected_text(current.unwrap_or("—")).show_ui(ui, |ui| {
+                for n in m.inspect["sets"].as_array().into_iter().flatten().filter_map(Json::as_str) {
+                    if ui.selectable_label(current == Some(n), n).clicked() {
+                        set_cmd = Some(("apply_set", n.to_string()));
+                    }
+                }
+                ui.separator();
+                if ui.button("Save as set…").on_hover_text("The product as it is now, under a name").clicked() {
+                    let taken: Vec<&str> = m.inspect["sets"].as_array().into_iter().flatten().filter_map(Json::as_str).collect();
+                    self.new_set = (1..).map(|k| format!("Set {k}")).find(|n| !taken.contains(&n.as_str()));
+                }
+            });
+            if let Some(c) = current
+                && crate::icons::button(ui, crate::icons::Icon::Remove, "Remove set", &format!("Remove set `{c}`: the product stays as it is"), true)
+                    .clicked()
+            {
+                set_cmd = Some(("remove_set", c.to_string()));
+            }
+        });
+        if let Some(name) = &mut self.new_set {
+            ui.horizontal(|ui| {
+                ui.label("New set:");
+                let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
+                r.request_focus();
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Save").clicked() || enter) && !name.trim().is_empty() {
+                    set_cmd = Some(("save_set", name.trim().to_string()));
+                }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    set_cmd = Some(("", String::new()));
+                }
+            });
         }
         for p in m.inspect["parts"].as_array().into_iter().flatten() {
             let (Some(part), Some(name)) = (p["part"].as_str(), p["name"].as_str()) else { continue };
@@ -1248,6 +1289,14 @@ impl Viewer {
             if !name.is_empty() {
                 self.send(Request::Command("add_level", json!({"name": name, "parent": parent, "part": part})));
                 self.send(Request::Command("choose", json!({ "level": name })));
+            }
+        }
+        if let Some((command, name)) = set_cmd {
+            if command == "save_set" || command.is_empty() {
+                self.new_set = None;
+            }
+            if !command.is_empty() {
+                self.send(Request::Command(command, json!({ "name": name })));
             }
         }
         if let Some((part, level)) = choose {
@@ -3420,6 +3469,7 @@ mod tests {
             dock: crate::dock::default_layout(),
             flat: crate::flat::FlatView::default(),
             new_level: None,
+            new_set: None,
             hold: None,
             quitting: None,
             worked_in: None,
@@ -4269,6 +4319,11 @@ mod tests {
         v.model.as_mut().unwrap().inspect["level"] = json!("2 м");
         click(&mut v, "Base");
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"].is_null())), "the base: the root");
+        // The product kept as a set, under the name typed.
+        v.new_set = Some("Шкаф 2 м".into());
+        click(&mut v, "Save");
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("save_set", p) if p["name"] == "Шкаф 2 м")));
+        assert_eq!(v.new_set, None);
         // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");

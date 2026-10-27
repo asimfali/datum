@@ -368,3 +368,45 @@ fn bodies_are_laid_flat_by_their_settings() {
     assert!(s.execute("set_flat", &json!({"feature": "nothing", "back": true})).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// Sets (D169): the product as it is kept under a name and brought back at once; the set the
+/// product is as now is told; a variant removed leaves the sets; sets are saved with the model.
+#[test]
+fn sets_switch_the_product() {
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
+    let mut s = Session::default();
+    run(&mut s, "open", json!({"path": model.display().to_string()}));
+    let chosen =
+        |s: &mut Session| -> Vec<Value> { run(s, "levels", json!({}))["parts"].as_array().unwrap().iter().map(|p| p["chosen"].clone()).collect() };
+    run(&mut s, "save_set", json!({"name": "Шкаф 2 м"}));
+    assert_eq!(run(&mut s, "levels", json!({}))["set"], "Шкаф 2 м");
+    run(&mut s, "choose", json!({"level": "2,5 м"}));
+    run(&mut s, "choose", json!({"part": "side"}));
+    run(&mut s, "show", json!({"part": "side", "visible": false}));
+    run(&mut s, "save_set", json!({"name": "Шкаф 2,5 м"}));
+    assert_eq!(chosen(&mut s), [Value::Null, json!("2,5 м")]);
+    let r = run(&mut s, "apply_set", json!({"name": "Шкаф 2 м"}));
+    assert_eq!((r["set"].as_str(), r["sets"].as_array().map(Vec::len)), (Some("Шкаф 2 м"), Some(2)));
+    assert_eq!(chosen(&mut s), [json!("Стенка боковая 2 м"), json!("2 м")]);
+    assert_eq!(run(&mut s, "levels", json!({}))["parts"][0]["visible"], true);
+    // Changed by hand: no set is as the product now.
+    run(&mut s, "choose", json!({"level": "1 м"}));
+    assert_eq!(run(&mut s, "levels", json!({}))["set"], Value::Null);
+    // A variant removed: gone from the sets too.
+    run(&mut s, "remove_level", json!({"name": "2,5 м"}));
+    run(&mut s, "apply_set", json!({"name": "Шкаф 2,5 м"}));
+    assert_eq!(chosen(&mut s), [Value::Null, Value::Null]);
+    assert!(s.execute("apply_set", &json!({"name": "nothing"})).is_err());
+    // Saved and opened.
+    let dir = std::env::temp_dir().join(format!("datum-sets-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sets.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    run(&mut t, "apply_set", json!({"name": "Шкаф 2 м"}));
+    assert_eq!(chosen(&mut t), [json!("Стенка боковая 2 м"), json!("2 м")]);
+    run(&mut t, "remove_set", json!({"name": "Шкаф 2 м"}));
+    assert_eq!(run(&mut t, "levels", json!({}))["sets"], json!(["Шкаф 2,5 м"]));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

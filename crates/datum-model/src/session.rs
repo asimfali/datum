@@ -440,7 +440,7 @@ const COMMANDS: &[Command] = &[
                       bodies are the parts, each keyed by the feature that began it (`parts`: key, name, variant chosen, visible). \
                       Variants are levels below the root, each of a part: with its parent, depth, part, what it sets otherwise; \
                       `active` the one worked in. A level holds only what differs from its parent; a change to the parent reaches \
-                      every level below.",
+                      every level below. `sets`: the product's variants by name, `set` the one the product is as now.",
         params: no_params,
         run: |s, _| Ok(s.levels()),
     },
@@ -566,6 +566,35 @@ const COMMANDS: &[Command] = &[
             } else {
                 s.doc.parts.insert(body.to_string(), entry);
             }
+            Ok(s.levels())
+        },
+    },
+    Command {
+        name: "save_set",
+        description: "The product as it is now (each part's variant chosen, the parts hidden) kept as set `name` (D169): a product \
+                      variant, switched to at once by `apply_set`. A set of that name is replaced. Saved with the model.",
+        params: name_param,
+        run: |s, p| {
+            s.doc.save_set(text(p, "name")?)?;
+            Ok(s.levels())
+        },
+    },
+    Command {
+        name: "apply_set",
+        description: "The product as set `name` has it: each part in the set's variant, the set's parts hidden.",
+        params: name_param,
+        run: |s, p| {
+            s.doc.apply_set(text(p, "name")?)?;
+            Ok(s.levels())
+        },
+    },
+    Command {
+        name: "remove_set",
+        description: "Remove set `name`; the product stays as it is.",
+        params: name_param,
+        run: |s, p| {
+            let name = text(p, "name")?;
+            s.doc.sets.remove(name).ok_or_else(|| format!("no set `{name}`"))?;
             Ok(s.levels())
         },
     },
@@ -994,7 +1023,8 @@ impl Session {
             .into_iter()
             .map(|p| json!({"part": p, "name": self.doc.part_name(&p), "chosen": self.doc.chosen(&p), "visible": !self.doc.hidden.contains(&p)}))
             .collect();
-        json!({"active": self.active, "parts": parts, "levels": list})
+        let sets: Vec<&String> = self.doc.sets.keys().collect();
+        json!({"active": self.active, "parts": parts, "levels": list, "sets": sets, "set": self.doc.current_set()})
     }
 
     /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
@@ -1254,7 +1284,7 @@ impl Session {
             })
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
-               "level": self.active, "levels": levels["levels"], "parts": levels["parts"],
+               "level": self.active, "levels": levels["levels"], "parts": levels["parts"], "sets": levels["sets"], "set": levels["set"],
                "flats": self.doc.flats,
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }
