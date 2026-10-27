@@ -50,6 +50,17 @@ pub struct PartInfo {
     pub name: Option<String>,
 }
 
+/// A product variant (D169): the variant of each part and the parts hidden, under a name, to
+/// switch the product at once.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Set {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub chosen: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub hidden: std::collections::BTreeSet<String>,
+}
+
 /// How a body is laid flat (D164): seen from its back side, at a K-factor.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,6 +99,8 @@ pub struct Doc {
     pub hidden: std::collections::BTreeSet<String>,
     /// How each body (by its feature) is laid flat, when not the default.
     pub flats: BTreeMap<String, FlatSettings>,
+    /// The product's variants by name.
+    pub sets: BTreeMap<String, Set>,
 }
 
 impl Doc {
@@ -177,6 +190,9 @@ impl Doc {
         }
         self.levels.remove(name);
         self.chosen.retain(|_, c| c != name);
+        for set in self.sets.values_mut() {
+            set.chosen.retain(|_, c| c != name);
+        }
         self.hidden.remove(name);
         Ok(())
     }
@@ -266,6 +282,27 @@ impl Doc {
             (None, None) => return Err("give `level`, or `part` for the root's own".into()),
         }
         Ok(())
+    }
+
+    /// The product as it is now (each part's variant, the parts hidden) kept as set `name`.
+    pub fn save_set(&mut self, name: &str) -> Result<(), String> {
+        if name.trim().is_empty() {
+            return Err("a set needs a name".into());
+        }
+        self.sets.insert(name.to_string(), Set { chosen: self.chosen.clone(), hidden: self.hidden.clone() });
+        Ok(())
+    }
+
+    /// The product as set `name` has it.
+    pub fn apply_set(&mut self, name: &str) -> Result<(), String> {
+        let set = self.sets.get(name).ok_or_else(|| format!("no set `{name}`"))?;
+        (self.chosen, self.hidden) = (set.chosen.clone(), set.hidden.clone());
+        Ok(())
+    }
+
+    /// The set the product is as now, if one.
+    pub fn current_set(&self) -> Option<&str> {
+        self.sets.iter().find(|(_, s)| s.chosen == self.chosen && s.hidden == self.hidden).map(|(n, _)| n.as_str())
     }
 
     /// Part `part` shown in the product, or not.
