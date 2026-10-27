@@ -3,8 +3,6 @@
 //! both faces of the sheet, the bends concentric arcs, so the body is an extrusion of plane and
 //! cylinder faces (M5a); its flat blank comes from `unfold`.
 
-use std::collections::BTreeMap;
-
 use datum_brep::{BrepError, ProfileArc, ProfileLoop, Region, TopoId, extrude};
 use datum_math::{Rigid, Sign, Vec2, orient2d};
 use schemars::JsonSchema;
@@ -60,36 +58,24 @@ pub fn sheet(feature: TopoId, s: &Placed, start: Option<&str>, sheet: Sheet, z0:
     }
 
     // The chain: points in order, and the line between each two.
-    let mut at: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
-    for (name, l) in s.lines.iter().filter(|(_, l)| !l.construction) {
-        at.entry(&l.from).or_default().push((name, &l.to));
-        at.entry(&l.to).or_default().push((name, &l.from));
-    }
-    if at.is_empty() {
-        return Err(bad("the sketch has no lines".into()));
-    }
-    if let Some((p, _)) = at.iter().find(|(_, ls)| ls.len() > 2) {
+    let found = datum_sketch::contours(&s.lines, &s.arcs, &|n, c| !c && s.lines.contains_key(n));
+    if let Some(p) = found.branches.first() {
         return Err(bad(format!("it branches at point `{p}`")));
     }
-    let ends: Vec<&str> = at.iter().filter(|(_, ls)| ls.len() == 1).map(|(p, _)| *p).collect();
-    if ends.is_empty() {
-        return Err(BrepError::Unsupported("sheet path: a closed path comes later".into()));
-    }
-    let first = match start {
-        Some(p) if ends.contains(&p) => p,
-        Some(p) => return Err(bad(format!("`{p}` is not an end of the path"))),
-        None => ends[0],
+    let chain = match (&found.paths[..], &found.loops[..]) {
+        ([], []) => return Err(bad("the sketch has no lines".into())),
+        ([], _) => return Err(BrepError::Unsupported("sheet path: a closed path comes later".into())),
+        ([path], []) => path,
+        _ => return Err(bad("its lines are not one chain".into())),
     };
-    let (mut names, mut lines) = (vec![first], Vec::new());
-    let mut prev = "";
-    while let Some(&(line, next)) = at[names[names.len() - 1]].iter().find(|(l, _)| *l != prev) {
-        lines.push(line);
-        names.push(next);
-        prev = line;
-    }
-    if lines.len() != at.values().map(Vec::len).sum::<usize>() / 2 {
-        return Err(bad("its lines are not one chain".into()));
-    }
+    let chain = match start {
+        None => chain.clone(),
+        Some(p) if p == chain[0].from => chain.clone(),
+        Some(p) if p == chain[chain.len() - 1].to => datum_sketch::reversed(chain),
+        Some(p) => return Err(bad(format!("`{p}` is not an end of the path"))),
+    };
+    let names: Vec<&str> = std::iter::once(chain[0].from).chain(chain.iter().map(|st| st.to)).collect();
+    let lines: Vec<&str> = chain.iter().map(|st| st.curve).collect();
     let p: Vec<Vec2> = names.iter().map(|n| s.solved.points[*n]).collect();
     let n = p.len() - 1;
 

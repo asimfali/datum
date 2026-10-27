@@ -37,6 +37,12 @@ pub enum Act {
     SideBarRight,
     FlatPane,
     ResetLayout,
+    Group,
+    Pattern,
+    Infer,
+    Badges,
+    Names,
+    Dimensions,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -80,7 +86,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 29] = [
+pub const ACTIONS: [Action; 35] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -107,7 +113,7 @@ pub const ACTIONS: [Action; 29] = [
     ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
-    action(Act::Arc, "sketch.arc", "Arc", "Centre, start, end", plain(Key::A), Sketch),
+    action(Act::Arc, "sketch.arc", "Arc", "Centre, start, end", None, Sketch),
     action(Act::Circle, "sketch.circle", "Circle", "Centre, then a point on it", plain(Key::C), Sketch),
     action(Act::Point, "sketch.point", "Point", "A point", plain(Key::P), Sketch),
     action(
@@ -160,6 +166,50 @@ pub const ACTIONS: [Action; 29] = [
         Anywhere,
     ),
     action(Act::ResetLayout, "view.reset_layout", "Reset layout", "The panes and the side bar back as a first run has them", None, Anywhere),
+    action(
+        Act::Group,
+        "sketch.group",
+        "Group",
+        "The selected points and curves as a group: its badge marks them, a click on it selects them",
+        plain(Key::G),
+        Sketch,
+    ),
+    action(
+        Act::Pattern,
+        "sketch.pattern",
+        "Pattern",
+        "Copies, by what is selected: a point or a circle — around it; one or two lines — a grid along them; \
+         lines and arcs closed into a contour, or a group — filling it or along its outline; an open chain — along it; \
+         nothing — a grid along the axes. Copies selected: shifted, left out, their pattern edited. \
+         Then pick what to copy. The right button held on the sketch does the same",
+        plain(Key::A),
+        Sketch,
+    ),
+    action(
+        Act::Infer,
+        "sketch.infer",
+        "Infer constraints",
+        "A line drawn takes the constraint it leans to (horizontal, vertical, parallel, perpendicular); off: it goes where you click",
+        plain(Key::F7),
+        Sketch,
+    ),
+    action(
+        Act::Badges,
+        "sketch.badges",
+        "Badges",
+        "Badges of the geometric constraints: click one to select it, Del removes it",
+        plain(Key::F8),
+        Sketch,
+    ),
+    action(Act::Names, "sketch.names", "Names", "The names of points, curves, groups and patterns", plain(Key::F9), Sketch),
+    action(
+        Act::Dimensions,
+        "sketch.dimensions",
+        "Dimensions",
+        "The dimensions' values; hidden, a crowded sketch reads (the dimension tool shows them)",
+        plain(Key::F10),
+        Sketch,
+    ),
 ];
 
 impl Act {

@@ -151,7 +151,7 @@ mod tests {
                 {"key": "Ctrl+S", "action": "sketch.line"},
                 {"key": "Ctrl+Q", "action": "file.quit"},
                 {"key": "Hyper+Q", "action": "file.exit"},
-                {"key": "F9", "action": null},
+                {"key": "F12", "action": null},
                 {"action": "file.exit"},
                 {"key": "Ctrl+Q", "action": "file.exit"}
             ],

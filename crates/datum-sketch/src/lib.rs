@@ -11,6 +11,7 @@
 //! points can still move. A sketch that cannot be solved is an error naming the constraints that
 //! conflict.
 
+mod contours;
 mod equations;
 mod solver;
 
@@ -23,6 +24,7 @@ use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub use contours::{Contours, Step, contours, reversed};
 use equations::{Equations, Group};
 
 /// A sketch in its own plane. In JSON:

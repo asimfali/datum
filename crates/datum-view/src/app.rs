@@ -365,10 +365,10 @@ struct Viewer {
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
-    /// The activity bar and side bar: which side, what it shows, folded sections (D162); the tab
-    /// of the sketch's section (D163).
+    /// The activity bar and side bar: which side, what it shows, folded sections (D162).
     side_bar: crate::sidebar::SideBar,
-    sketch_tab: SketchTab,
+    /// The sketch's modes the next sketch starts with: the last one's (D167).
+    modes: crate::sketch::Modes,
     /// The panes and where they are (D161); what the flat pattern pane looks at.
     dock: egui_dock::DockState<crate::dock::Pane>,
     flat: crate::flat::FlatView,
@@ -456,7 +456,7 @@ impl Viewer {
             keeping: None,
             menu: None,
             side_bar: crate::sidebar::SideBar::default(),
-            sketch_tab: SketchTab::Draw,
+            modes: crate::sketch::Modes::default(),
             dock: crate::dock::default_layout(),
             flat: crate::flat::FlatView::default(),
             new_level: None,
@@ -1005,6 +1005,9 @@ impl Viewer {
     fn leave(&mut self) {
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
+        if let Some(sk) = &self.sketch {
+            self.modes = sk.modes;
+        }
         if self.sketch.is_some() || self.entering.is_some() {
             self.sketch = None;
             self.entering = None;
@@ -1059,7 +1062,9 @@ impl Viewer {
                 Some(s) => s.refresh(context.clone(), json, params),
                 None => {
                     let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
-                    self.sketch = Some(SketchEdit::new(name, context.clone(), json, params, scene));
+                    let mut sk = SketchEdit::new(name, context.clone(), json, params, scene);
+                    sk.modes = self.modes;
+                    self.sketch = Some(sk);
                     // Its section under the part's, the library beside the 3D view (D163).
                     self.side_bar.visible = true;
                     crate::dock::open(&mut self.dock, crate::dock::Pane::Library);
@@ -1294,12 +1299,17 @@ impl Viewer {
     }
 
     /// The activity bar (D162): an icon for each set of sections; clicked, the side bar shows it,
-    /// or hides if it shows it already.
+    /// or hides if it shows it already. The bar dragged to the other half of the window takes the
+    /// side bar there; its menu (a right click) moves or hides it (D168).
     fn activity(&mut self, ui: &mut egui::Ui) {
         use crate::sidebar::Container;
+        // Under the icons: they take clicks, the bar drags.
+        let bar = ui.interact(ui.max_rect(), ui.id().with("datum_activity_bar"), egui::Sense::click_and_drag());
+        let mut menus = vec![bar.clone()];
         ui.add_space(6.0);
         for c in Container::ALL {
             let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
+            menus.push(r.clone());
             let on = self.side_bar.visible && self.side_bar.container == c;
             let visuals = ui.visuals();
             let colour = if on || r.hovered() { visuals.strong_text_color() } else { visuals.weak_text_color() };
@@ -1312,6 +1322,32 @@ impl Viewer {
             if r.on_hover_text(c.title()).clicked() {
                 self.side_bar.click(c);
             }
+        }
+        // Dragged: the edge it would go to, marked; let go, it goes there.
+        let screen = ui.ctx().content_rect();
+        let right = ui.ctx().pointer_latest_pos().map(|p| p.x > screen.center().x);
+        if bar.dragged()
+            && let Some(right) = right
+        {
+            let band = if right {
+                egui::Rect::from_min_max(egui::pos2(screen.right() - 60.0, screen.top()), screen.right_bottom())
+            } else {
+                egui::Rect::from_min_max(screen.left_top(), egui::pos2(screen.left() + 60.0, screen.bottom()))
+            };
+            let painter = ui.ctx().layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("datum_side_drop")));
+            painter.rect_filled(band, 0.0, ui.visuals().selection.bg_fill.gamma_multiply(0.5));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+        if bar.drag_stopped()
+            && let Some(right) = right
+        {
+            self.side_bar.right = right;
+        }
+        for r in menus {
+            r.context_menu(|ui| {
+                self.item(ui, Act::SideBarRight, false);
+                self.item(ui, Act::SideBar, false);
+            });
         }
     }
 
@@ -1342,7 +1378,7 @@ impl Viewer {
     /// The sketch being edited: its state, tools, constraints, groups, Done.
     fn sketch_section(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else { return };
-        let mut done = false;
+        let (mut done, mut pattern) = (false, false);
         let mut sent = Vec::new();
         if let Some(sk) = &mut self.sketch {
             ui.heading(format!("Sketch {}", sk.feature));
@@ -1359,97 +1395,98 @@ impl Viewer {
                     ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}: {e}"));
                 }
             }
-            // Tabs, as in Inventor's ribbon: what to draw, what to constrain, what to do with the
-            // selection (D163).
-            ui.horizontal(|ui| {
-                for (tab, label) in [(SketchTab::Draw, "Draw"), (SketchTab::Constrain, "Constrain"), (SketchTab::Selection, "Selection")] {
-                    if ui.selectable_label(self.sketch_tab == tab, label).clicked() {
-                        self.sketch_tab = tab;
+            // One under another (D166): what to draw, what to constrain, what to do with the
+            // selection.
+            ui.horizontal_wrapped(|ui| {
+                for act in TOOLS {
+                    let (a, tool) = (act.action(), tool(act));
+                    let icon = match act {
+                        Act::Line => crate::icons::Icon::Line,
+                        Act::Arc => crate::icons::Icon::Arc,
+                        Act::Circle => crate::icons::Icon::Circle,
+                        Act::Point => crate::icons::Icon::Point,
+                        Act::Dimension => crate::icons::Icon::Dimension,
+                        _ => crate::icons::Icon::Select,
+                    };
+                    let hint = self.keys.hint(ui.ctx(), act);
+                    let r =
+                        crate::icons::tile(ui, a.label, &hint, sk.draft.tool == tool, true, |p, c, colour| crate::icons::paint(p, c, icon, colour));
+                    if r.clicked() {
+                        sk.draft.press(tool);
+                    }
+                }
+                let hint = self.keys.hint(ui.ctx(), Act::Pattern);
+                let open = self.menu.is_some();
+                if crate::icons::tile(ui, Act::Pattern.action().label, &hint, open, true, |p, c, colour| {
+                    crate::sketch::paint_glyph(p, c, crate::sketch::Glyph::Pattern, colour)
+                })
+                .clicked()
+                {
+                    pattern = true;
+                }
+            });
+            // A mode as a checkbox, its key beside it (D167).
+            let check = |ui: &mut egui::Ui, on: &mut bool, act: Act| {
+                ui.checkbox(on, self.keys.labelled(ui.ctx(), act)).on_hover_text(self.keys.hint(ui.ctx(), act));
+            };
+            ui.horizontal_wrapped(|ui| {
+                ui.checkbox(&mut sk.draft.construction, "Construction");
+                check(ui, &mut sk.modes.infer, Act::Infer);
+                if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
+                    ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), Act::Tangent));
+                }
+                // The dimension tool's sub-mode, by the mouse too.
+                if sk.draft.tool == Tool::Dimension {
+                    for (axis, label, hint) in [
+                        (Axis::Horizontal, "Horizontal (H)", "A line's ends or two points: their horizontal distance"),
+                        (Axis::Vertical, "Vertical (V)", "A line's ends or two points: their vertical distance"),
+                    ] {
+                        if ui.selectable_label(sk.draft.axis == Some(axis), label).on_hover_text(hint).clicked() {
+                            sk.toggle_axis(axis);
+                        }
                     }
                 }
             });
-            match self.sketch_tab {
-                SketchTab::Draw => {
-                    ui.horizontal_wrapped(|ui| {
-                        for act in TOOLS {
-                            let (a, tool) = (act.action(), tool(act));
-                            let icon = match act {
-                                Act::Line => crate::icons::Icon::Line,
-                                Act::Arc => crate::icons::Icon::Arc,
-                                Act::Circle => crate::icons::Icon::Circle,
-                                Act::Point => crate::icons::Icon::Point,
-                                Act::Dimension => crate::icons::Icon::Dimension,
-                                _ => crate::icons::Icon::Select,
-                            };
-                            let hint = self.keys.hint(ui.ctx(), act);
-                            let r = crate::icons::tile(ui, a.label, &hint, sk.draft.tool == tool, true, |p, c, colour| {
-                                crate::icons::paint(p, c, icon, colour)
-                            });
-                            if r.clicked() {
-                                sk.draft.press(tool);
-                            }
-                        }
+            // Geometric constraints by hand: a kind, then a click on each thing it ties (D118).
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for (kind, glyph, name, what) in crate::constrain::KINDS {
+                    let on = sk.draft.tool == Tool::Constrain(kind);
+                    let r = crate::icons::tile(ui, name, &format!("{name}: {what}"), on, true, |p, c, colour| {
+                        crate::sketch::paint_glyph(p, c, glyph, colour)
                     });
-                    ui.horizontal_wrapped(|ui| {
-                        ui.checkbox(&mut sk.draft.construction, "Construction");
-                        if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
-                            ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), Act::Tangent));
-                        }
-                        // The dimension tool's sub-mode, by the mouse too.
-                        if sk.draft.tool == Tool::Dimension {
-                            for (axis, label, hint) in [
-                                (Axis::Horizontal, "Horizontal (H)", "A line's ends or two points: their horizontal distance"),
-                                (Axis::Vertical, "Vertical (V)", "A line's ends or two points: their vertical distance"),
-                            ] {
-                                if ui.selectable_label(sk.draft.axis == Some(axis), label).on_hover_text(hint).clicked() {
-                                    sk.toggle_axis(axis);
-                                }
-                            }
-                        }
-                    });
+                    if r.clicked() {
+                        sk.draft.press(Tool::Constrain(kind));
+                    }
                 }
-                // Geometric constraints by hand: a kind, then a click on each thing it ties (D118).
-                SketchTab::Constrain => {
-                    ui.horizontal_wrapped(|ui| {
-                        for (kind, glyph, name, what) in crate::constrain::KINDS {
-                            let on = sk.draft.tool == Tool::Constrain(kind);
-                            let r = crate::icons::tile(ui, name, &format!("{name}: {what}"), on, true, |p, c, colour| {
-                                crate::sketch::paint_glyph(p, c, glyph, colour)
-                            });
-                            if r.clicked() {
-                                sk.draft.press(Tool::Constrain(kind));
-                            }
-                        }
-                    });
-                    ui.checkbox(&mut sk.constraints, "Badges")
-                        .on_hover_text("Badges of the geometric constraints: click one to select it, Del removes it");
+            });
+            ui.horizontal_wrapped(|ui| {
+                check(ui, &mut sk.modes.badges, Act::Badges);
+                check(ui, &mut sk.modes.dimensions, Act::Dimensions);
+            });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let hint = "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside";
+                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
+                    self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
                 }
-                SketchTab::Selection => {
-                    ui.horizontal_wrapped(|ui| {
-                        let hint =
-                            "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside";
-                        if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
-                            self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
+                // Groups: a name for elements together (a pattern's cell, a path); its
+                // badge marks them, a click on it selects them.
+                match sk.selected_group() {
+                    Some(g) => {
+                        if ui.button("Ungroup").on_hover_text(format!("Take group `{g}` apart: its elements stay")).clicked() {
+                            sent.push(Request::Command("edit_sketch", sk.ungroup(&g)));
                         }
-                        // Groups: a name for elements together (a pattern's cell, a path); its
-                        // badge marks them, a click on it selects them.
-                        match sk.selected_group() {
-                            Some(g) => {
-                                if ui.button("Ungroup").on_hover_text(format!("Take group `{g}` apart: its elements stay")).clicked() {
-                                    sent.push(Request::Command("edit_sketch", sk.ungroup(&g)));
-                                }
-                            }
-                            None => {
-                                let hint = "The selected points and curves as a group: its badge marks them, a click on it selects them";
-                                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("Group")).on_hover_text(hint).clicked() {
-                                    sent.extend(sk.group_selection().map(|p| Request::Command("edit_sketch", p)));
-                                }
-                            }
+                    }
+                    None => {
+                        let hint = self.keys.hint(ui.ctx(), Act::Group);
+                        if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("Group")).on_hover_text(hint).clicked() {
+                            sent.extend(sk.group_selection().map(|p| Request::Command("edit_sketch", p)));
                         }
-                    });
-                    ui.checkbox(&mut sk.names, "Names");
+                    }
                 }
-            }
+            });
+            check(ui, &mut sk.modes.names, Act::Names);
             // A dimension that would over-constrain the sketch: as a reference one, or not at all.
             let (mut reference, mut dismiss) = (false, false);
             if let Some(c) = &sk.conflict {
@@ -1467,7 +1504,7 @@ impl Viewer {
             }
             let how = match sk.draft.tool {
                 Tool::Select => {
-                    "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, a group: along or filling it, nothing: the axes), or the copies selected shifted, left out, their pattern edited · a pattern's badge (squares): a click selects its copies, the right button held on it edits the pattern"
+                    "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, lines and arcs joined into a contour, or a group: along it, or filling it if it closes, nothing: the axes), or the copies selected shifted, left out, their pattern edited · a pattern's badge (squares): a click selects its copies, the right button held on it edits the pattern"
                 }
                 Tool::Dimension => {
                     "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes"
@@ -1489,6 +1526,9 @@ impl Viewer {
         }
         if done {
             self.leave();
+        }
+        if pattern {
+            self.run(ui, Act::Pattern);
         }
         for r in sent {
             self.send(r);
@@ -2114,7 +2154,10 @@ impl Viewer {
                         ui.horizontal(|ui| {
                             ui.label(row);
                             if let Some(i) = flip
-                                && ui.selectable_label(form.flip[i], "⇄").on_hover_text("The other way").clicked()
+                                && crate::icons::tile(ui, "The other way", "The other way", form.flip[i], true, |p, c, colour| {
+                                    crate::icons::paint(p, c, crate::icons::Icon::Flip, colour)
+                                })
+                                .clicked()
                             {
                                 form.flip[i] = !form.flip[i];
                             }
@@ -2720,14 +2763,6 @@ fn fresh(levels: &[(String, Option<String>, usize, Option<String>)], prefix: &st
     (1..).map(|k| format!("{prefix} {k}")).find(|n| !levels.iter().any(|l| &l.0 == n)).unwrap_or_default()
 }
 
-/// The tabs of the sketch's section (D163).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum SketchTab {
-    Draw,
-    Constrain,
-    Selection,
-}
-
 /// How long a right click is held still to open the menu, in seconds.
 const HOLD: f64 = 0.5;
 
@@ -2865,6 +2900,16 @@ fn definition(v: &Json) -> String {
 /// The sketch tools, as the side panel lists them.
 const TOOLS: [Act; 6] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Dimension];
 
+/// The sketch's mode action `act` turns on and off (D167).
+fn mode(m: &mut crate::sketch::Modes, act: Act) -> &mut bool {
+    match act {
+        Act::Infer => &mut m.infer,
+        Act::Badges => &mut m.badges,
+        Act::Names => &mut m.names,
+        _ => &mut m.dimensions,
+    }
+}
+
 /// The sketch tool action `act` takes up.
 fn tool(act: Act) -> Tool {
     match act {
@@ -2906,6 +2951,7 @@ impl Viewer {
             Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Rectangle => !self.library.is_empty(),
+            Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
             _ => true,
         }
@@ -2920,6 +2966,10 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
+            Act::Infer | Act::Badges | Act::Names | Act::Dimensions => {
+                let mut m = self.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
+                *mode(&mut m, act)
+            }
             Act::SideBar => self.side_bar.visible,
             Act::SideBarRight => self.side_bar.right,
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
@@ -2971,6 +3021,27 @@ impl Viewer {
             Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Dimension => {
                 if let Some(sk) = &mut self.sketch {
                     sk.draft.take_up(tool(act));
+                }
+            }
+            Act::Infer | Act::Badges | Act::Names | Act::Dimensions => {
+                if let Some(sk) = &mut self.sketch {
+                    let on = mode(&mut sk.modes, act);
+                    *on = !*on;
+                }
+            }
+            Act::Group => {
+                if let Some(p) = self.sketch.as_mut().and_then(SketchEdit::group_selection) {
+                    self.send(Request::Command("edit_sketch", p));
+                }
+            }
+            // The menu a held right click opens, at once, by the cursor.
+            Act::Pattern => {
+                if let Some(sk) = &mut self.sketch {
+                    if let Some(m) = self.menu.take() {
+                        m.cancel(sk);
+                    }
+                    let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                    self.menu = Some(Menu::open(sk, at));
                 }
             }
             Act::SideBar => self.side_bar.visible = !self.side_bar.visible,
@@ -3052,7 +3123,11 @@ impl Viewer {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::WorkPlane, true);
             ui.separator();
-            for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent]) {
+            for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group]) {
+                self.item(ui, act, true);
+            }
+            ui.separator();
+            for act in [Act::Infer, Act::Badges, Act::Names, Act::Dimensions] {
                 self.item(ui, act, true);
             }
         });
@@ -3336,7 +3411,7 @@ mod tests {
             keeping: None,
             menu: None,
             side_bar: crate::sidebar::SideBar::default(),
-            sketch_tab: SketchTab::Draw,
+            modes: crate::sketch::Modes::default(),
             dock: crate::dock::default_layout(),
             flat: crate::flat::FlatView::default(),
             new_level: None,
@@ -3636,6 +3711,44 @@ mod tests {
         let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern's menu") };
         assert_eq!((form.name.as_str(), form.fields["n"].as_str(), form.fields["angle"].as_str()), ("pattern1", "2", "90"));
         assert_eq!(form.of.as_deref(), Some("right_hole"));
+    }
+
+    /// A opens the pattern menu at once, as a held right click does; G groups the selection.
+    #[test]
+    fn keys_open_the_pattern_menu_and_group() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Point("o".into())];
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                v.sketch_menu(ui.ctx());
+            },
+            v,
+        );
+        h.run();
+        h.key_press(egui::Key::A);
+        h.step();
+        let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern menu") };
+        assert_eq!(form.base, crate::pattern::Base::Around("o".into()));
+        h.key_press(egui::Key::Escape);
+        h.step();
+        assert!(h.state().menu.is_none());
+        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve("right_hole".into())];
+        h.key_press(egui::Key::G);
+        h.step();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(
+            sent.iter().any(|r| matches!(r, Request::Command("edit_sketch", p) if p["groups"].as_object().is_some_and(|g| g.values().any(|m| m == &json!(["right_hole"]))))),
+            "the group sent"
+        );
     }
 
     /// In the dimension tool a click on a line opens its length at once; a click on a line
@@ -4008,9 +4121,6 @@ mod tests {
                 egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
             });
             h.run();
-            // The constraints are the sketch section's second tab (D163).
-            h.get_by_label("Constrain").click();
-            h.run();
             if let Some(path) = shot {
                 h.render().unwrap().save(path).unwrap();
             }
@@ -4197,6 +4307,30 @@ mod tests {
         drop(h);
         v.side_bar.click(crate::sidebar::Container::Part);
         assert!(!v.side_bar.visible, "its icon again: hidden");
+    }
+
+    /// The activity bar dragged to the window's right half takes the side bar there (D168).
+    #[test]
+    fn the_activity_bar_dragged_moves_the_side_bar() {
+        let (v, _inbox) = viewer("wall_variants.json");
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).with_pixels_per_point(1.0).build_ui_state(
+            |ui, v: &mut Viewer| {
+                egui::Panel::left("datum_activity").exact_size(44.0).resizable(false).show(ui, |ui| v.activity(ui));
+            },
+            v,
+        );
+        h.run();
+        let (from, to) = (egui::pos2(20.0, 300.0), egui::pos2(700.0, 300.0));
+        h.hover_at(from);
+        h.event(egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        for k in 1..=10 {
+            h.hover_at(from + (to - from) * (k as f32 / 10.0));
+            h.step();
+        }
+        h.event(egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        assert!(h.state().side_bar.right, "on the right");
     }
 
     /// The flat pattern pane (D164): a body's blank with its side box and DXF button; the box asks

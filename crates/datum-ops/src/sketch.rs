@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use datum_brep::{Body, BrepError, Curve, Cylinder, Development, Ix, ProfileArc, ProfileLoop, Region, Surface, TopoId, extrude};
 use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
-use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, solve};
+use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, Step, contours, solve};
 use rayon::prelude::*;
 
 use crate::copies::{Copies, moved, place_patterns};
@@ -640,55 +640,44 @@ pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, B
     Ok(out)
 }
 
-/// The closed loops of the curves `keep` keeps (construction ones too if `construction`): lines
-/// and arcs joined at their points, each loop starting at its lowest point; then circles, each a
-/// loop of three arcs from its own points at 0°, 120° and 240°.
+/// The closed loops of the curves `keep` keeps (construction ones too if `construction`), an
+/// error if a curve is on none: lines and arcs joined at their points, each loop starting at its
+/// lowest point (see [`contours`]); then circles, each a loop of three arcs from its own points at
+/// 0°, 120° and 240°.
 pub(crate) fn loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool, construction: bool) -> Result<Vec<Found>, BrepError> {
-    // Curves at each point: (curve, the other end, the arc's centre if an arc and whether it runs
-    // counterclockwise from this end).
-    type Via<'a> = (&'a str, &'a str, Option<(&'a str, bool)>);
-    let mut at: BTreeMap<&str, Vec<Via>> = BTreeMap::new();
     let keep = |name: &str, c: bool| keep(name) && (construction || !c);
-    for (name, l) in s.lines.iter().filter(|(n, l)| keep(n, l.construction)) {
-        at.entry(&l.from).or_default().push((name, &l.to, None));
-        at.entry(&l.to).or_default().push((name, &l.from, None));
-    }
-    for (name, a) in s.arcs.iter().filter(|(n, a)| keep(n, a.construction)) {
-        at.entry(&a.from).or_default().push((name, &a.to, Some((&a.center, true))));
-        at.entry(&a.to).or_default().push((name, &a.from, Some((&a.center, false))));
-    }
-    let circles: Vec<(&String, &Circle)> = s.circles.iter().filter(|(n, c)| keep(n, c.construction)).collect();
-    if let Some((p, _)) = at.iter().find(|(_, ls)| ls.len() != 2) {
+    let found = contours(&s.lines, &s.arcs, &keep);
+    if let Some(p) = found.odd() {
         return Err(BrepError::Sketch(format!("the profile is open or branches at point `{p}`")));
     }
+    Ok(rings(feature, s, &found.loops, &keep))
+}
+
+/// The closed loops of the profile curves `keep` keeps, open chains left out: a line not joined
+/// yet, a path, a sheet's profile bound nothing.
+pub(crate) fn closed_loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool) -> Vec<Found> {
+    let keep = |name: &str, c: bool| keep(name) && !c;
+    rings(feature, s, &contours(&s.lines, &s.arcs, &keep).loops, &keep)
+}
+
+/// Chains `chains` of `s` as profile loops, then the circles `keep` keeps.
+fn rings(feature: TopoId, s: &Placed, chains: &[Vec<Step>], keep: &dyn Fn(&str, bool) -> bool) -> Vec<Found> {
     let point = |p: &str| s.solved.points[p];
     let vertex = |name: &str| [0, 1].map(|layer| TopoId::derive("extrude.v").id(feature).index(layer).tag(name).finish());
     let side = |name: &str| TopoId::derive("extrude.side").id(feature).tag(name).finish();
-    let mut used: Vec<&str> = Vec::new();
-    let mut loops = Vec::new();
-    for (&start, curves) in &at {
-        if curves.iter().all(|(c, _, _)| used.contains(c)) {
-            continue;
-        }
-        let mut ring = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };
-        let (mut p, mut via) = (start, curves[0]);
-        loop {
-            used.push(via.0);
-            ring.points.push(point(p));
-            ring.vertices.push(vertex(p));
-            ring.sides.push(side(via.0));
-            ring.arcs.push(via.2.map(|(c, ccw)| ProfileArc { center: point(c), ccw }));
-            p = via.1;
-            if p == start {
-                break;
-            }
-            match at[p].iter().find(|(c, _, _)| !used.contains(c)) {
-                Some(&next) => via = next,
-                None => return Err(BrepError::Sketch(format!("the profile does not close at point `{p}`"))),
-            }
-        }
-        loops.push(Found { ring, name: start.to_string(), copy: None });
-    }
+    let mut loops: Vec<Found> = chains
+        .iter()
+        .map(|chain| {
+            let ring = ProfileLoop {
+                points: chain.iter().map(|st| point(st.from)).collect(),
+                vertices: chain.iter().map(|st| vertex(st.from)).collect(),
+                sides: chain.iter().map(|st| side(st.curve)).collect(),
+                arcs: chain.iter().map(|st| s.arcs.get(st.curve).map(|a| ProfileArc { center: point(&a.center), ccw: st.forward })).collect(),
+            };
+            Found { ring, name: chain[0].from.to_string(), copy: None }
+        })
+        .collect();
+    let circles = s.circles.iter().filter(|(n, c)| keep(n, c.construction));
     for (name, c) in circles {
         let (centre, r) = (point(&c.center), 0.5 * diameter(c));
         let ids = |tag: &str, layer: Option<u64>, k: usize| {
@@ -708,5 +697,5 @@ pub(crate) fn loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool, co
         };
         loops.push(Found { ring, name: format!("circle {name}"), copy: None });
     }
-    Ok(loops)
+    loops
 }
