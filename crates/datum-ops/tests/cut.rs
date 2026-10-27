@@ -86,6 +86,11 @@ fn what_a_cut_refuses() {
     let circle = |x: f64, y: f64, d: f64| serde_json::json!({"points": {"h": [x, y]}, "circles": {"hole": {"center": "h", "diameter": d}}});
     // Across the plate's edge.
     assert!(matches!(cut(&plate, &top, circle(3.0, 30.0, 10.0), serde_json::Value::Null), Err(BrepError::Unsupported(_))));
+    // Off the face altogether: said so, with where the face is in the sketch's axes (issue #100).
+    match cut(&plate, &top, circle(150.0, 30.0, 10.0), serde_json::Value::Null) {
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("lies off the sketch's face") && m.contains("x 0.000…100.000, y 0.000…60.000"), "{m}"),
+        r => panic!("{:?}", r.map(|b| b.volume())),
+    }
     // Copies that overlap.
     let tight = serde_json::json!({"count": [2, 1], "step": [[8, 0], [0, 10]]});
     assert!(matches!(cut(&plate, &top, circle(30.0, 30.0, 10.0), tight), Err(BrepError::Degenerate(_))));

@@ -21,6 +21,13 @@ pub struct SketchPlane {
     pub normal: Vec3,
 }
 
+impl SketchPlane {
+    /// The axes a sketch on it has: origin, X, Y and the normal, X and Y unit and across it.
+    pub fn axes(&self) -> Result<[Vec3; 4], BrepError> {
+        frame(self.origin, self.x_axis, self.normal)
+    }
+}
+
 /// The model's origin planes (D149, D150): XY, XZ seen from the front (its X along X, its Y
 /// along Z) and YZ seen from the right.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
