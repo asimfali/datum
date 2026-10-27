@@ -33,6 +33,8 @@ fn queries() {
     assert_eq!(top["count"].as_u64(), Some(1));
     assert_eq!(top["faces"][0]["offset"].as_f64(), Some(13.0));
     assert_eq!(top["faces"][0]["area"].as_f64(), Some(5000.0));
+    // A sketch on the top: (0, 0) over the model's origin, X and Y the model's.
+    assert_eq!(top["faces"][0]["sketch_axes"], json!({"origin": [0.0, 0.0, 13.0], "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0]}));
     assert_eq!(run(&mut s, "query_faces", json!({"name": "moved"}))["count"].as_u64(), Some(6));
 }
 

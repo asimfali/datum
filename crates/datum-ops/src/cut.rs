@@ -57,6 +57,17 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
         }
     }))?;
 
+    // A profile off the sketch's face (a sketch on a face has its own axes: the model's origin
+    // projected, a model axis): said so, with where the face is in those axes (issue #100).
+    let entry = outline(target, f as Ix, &frame)?;
+    if entry.iter().map(|l| l.winding(profiles[0].points[0])).sum::<i32>() == 0 {
+        let (lo, hi) = entry[0].bounds();
+        return Err(unsupported(format!(
+            "a profile lies off the sketch's face: in the sketch's axes the face spans x {:.3}…{:.3}, y {:.3}…{:.3}",
+            lo.x, hi.x, lo.y, hi.y
+        )));
+    }
+
     // The exit: on a plane, the nearest face below facing exactly the other way that holds the
     // first profile; on a cylinder, the face across the sheet.
     let exit = match &frame {

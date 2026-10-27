@@ -610,7 +610,9 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "query_faces",
-        description: "Faces of a feature's body with their stable IDs and areas: a plane face with its unit normal and offset, a \
+        description: "Faces of a feature's body with their stable IDs and areas: a plane face with its unit normal and offset and \
+                      the axes a sketch on it has (`sketch_axes`: its origin, X and Y in the model: a point (u, v) of the sketch is \
+                      origin + u·X + v·Y), a \
                       cylindrical one with its axis, radius and whether it is convex (a boss) or not (a hole). With `normal`, only \
                       plane faces facing that direction within `tolerance_deg` (default 0.01°).",
         params: || {
@@ -638,7 +640,10 @@ const COMMANDS: &[Command] = &[
                     match f.surface {
                         Surface::Plane(p) => {
                             let n = unit(p.normal);
-                            json!({"id": id, "normal": n, "offset": n.dot(p.origin), "area": area})
+                            // The axes of a sketch on it: where its (0, 0) is and where X and Y go.
+                            let axes = datum_ops::face_plane(b, &id).and_then(|q| q.axes()).ok();
+                            let sketch = axes.map(|[o, x, y, _]| json!({"origin": o, "x": x, "y": y}));
+                            json!({"id": id, "normal": n, "offset": n.dot(p.origin), "area": area, "sketch_axes": sketch})
                         }
                         Surface::Cylinder(c) => {
                             json!({"id": id, "cylinder": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "convex": c.convex}, "area": area})
