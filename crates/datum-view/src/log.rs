@@ -50,7 +50,14 @@ pub fn record(on: bool) {
 
 /// Journals command `command` run with `params`, while recording: refused, with `error`.
 pub fn action(command: &str, params: &serde_json::Value, error: Option<&str>) {
-    if !recording() {
+    journal(actions_path(), recording(), command, params, error);
+}
+
+/// [`action`] into the journal at `path`, if `on`. Apart from the switch, so a test of it leaves
+/// the window's alone: on, every side bar shows a line more, and a click in a window test
+/// running beside it would land a line off.
+fn journal(path: &std::path::Path, on: bool, command: &str, params: &serde_json::Value, error: Option<&str>) {
+    if !on {
         return;
     }
     let mut line = serde_json::json!({"command": command, "params": params});
@@ -59,7 +66,7 @@ pub fn action(command: &str, params: &serde_json::Value, error: Option<&str>) {
     }
     // A window without a console has no stdout: nothing to say there, and no harm.
     let _ = writeln!(std::io::stdout().lock(), "{line}");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(actions_path()) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -102,20 +109,23 @@ mod tests {
     use serde_json::{Value, json};
 
     /// A journaled action reads back as the agent's `execute` arguments; nothing is journaled
-    /// unless recording.
+    /// unless recording. In a file of its own, the window's switch left alone.
     #[test]
     fn actions_are_execute_calls() {
+        let path = std::env::temp_dir().join(format!("datum-actions-test-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
         let params = json!({"name": "s", "lines": {"l1": {"from": "p1", "to": "p2"}}});
-        super::action("add", &json!({"name": "secret"}), None);
-        super::record(true);
-        super::action("edit_sketch", &params, None);
-        super::action("remove", &json!({"name": "x"}), Some("no feature `x`"));
-        super::record(false);
-        super::action("add", &json!({"name": "secret"}), None);
-        let text = std::fs::read_to_string(super::actions_path()).unwrap();
+        super::journal(&path, false, "add", &json!({"name": "secret"}), None);
+        super::journal(&path, true, "edit_sketch", &params, None);
+        super::journal(&path, true, "remove", &json!({"name": "x"}), Some("no feature `x`"));
+        super::journal(&path, false, "add", &json!({"name": "secret"}), None);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
         assert!(!text.contains("secret"), "{text}");
         let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-        assert!(lines.contains(&json!({"command": "edit_sketch", "params": params})), "{text}");
-        assert!(lines.contains(&json!({"command": "remove", "params": {"name": "x"}, "error": "no feature `x`"})), "{text}");
+        assert_eq!(
+            lines,
+            [json!({"command": "edit_sketch", "params": params}), json!({"command": "remove", "params": {"name": "x"}, "error": "no feature `x`"})]
+        );
     }
 }
