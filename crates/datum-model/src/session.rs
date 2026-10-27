@@ -422,6 +422,9 @@ const COMMANDS: &[Command] = &[
                 return Err(format!("`{}` uses it: remove or change that first", user.name));
             }
             let mut g = Graph::default();
+            for (n, v) in s.graph.parameters() {
+                g.set_parameter(n, v.clone()).map_err(|e| e.to_string())?;
+            }
             for i in (0..s.graph.nodes().len() as NodeIx).filter(|&i| i != ix) {
                 add_feature(&mut g, feature_json(&s.graph, i))?;
             }

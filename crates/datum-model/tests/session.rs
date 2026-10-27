@@ -127,6 +127,10 @@ fn parameters_drive_the_model() {
     let _ = std::fs::remove_file(&path);
     assert_eq!(volume(&mut t, "row"), 3.0 * 40.0 * 40.0 * 6.0);
     assert_eq!(datum_model::to_json(t.graph()), datum_model::to_json(s.graph()));
+    // A feature removed: the parameters stay (they were lost with it).
+    run(&mut s, "remove", json!({"name": "row"}));
+    assert_eq!(volume(&mut s, "slab"), 40.0 * 40.0 * 6.0);
+    assert_eq!(run(&mut s, "inspect", json!({}))["parameters"]["n"]["value"], json!(3.0));
 }
 
 /// The flat blank of the rolled reference sheet goes out as DXF; a sheet body too, a sketch not.
