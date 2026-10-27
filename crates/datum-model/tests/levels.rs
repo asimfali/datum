@@ -1,5 +1,6 @@
-//! Levels of a model (D152): a frame, a part below it, variants below the part; each what differs
-//! from its parent, the parent's changes reaching every level below.
+//! Levels of a model (D152, D169): the root a multi-body part, its bodies the parts, variants of a
+//! part below it; each what differs from its parent, the parent's changes reaching every level
+//! below.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use datum_model::Session;
@@ -13,7 +14,7 @@ fn volume(s: &mut Session, name: &str) -> f64 {
     run(s, "mass_properties", json!({"name": name}))["volume"].as_f64().unwrap()
 }
 
-/// The frame: a plate `w` × 50 drawn in a sketch (its width a dimension), `t` thick.
+/// The root: a plate `w` × 50 drawn in a sketch (its width a dimension), `t` thick; its one part.
 fn frame(s: &mut Session) {
     run(s, "set_parameter", json!({"name": "w", "value": 100}));
     run(s, "set_parameter", json!({"name": "t", "value": 2}));
@@ -43,7 +44,7 @@ fn variants_follow_their_parent() {
     let mut s = Session::default();
     frame(&mut s);
     assert_eq!(volume(&mut s, "plate"), 10000.0);
-    run(&mut s, "add_level", json!({"name": "long"}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
     run(&mut s, "set_parameter", json!({"name": "w", "value": 200}));
     assert_eq!(volume(&mut s, "plate"), 20000.0);
     run(&mut s, "add_level", json!({"name": "long_holed", "parent": "long"}));
@@ -62,7 +63,8 @@ fn variants_follow_their_parent() {
     assert_eq!(volume(&mut s, "plate"), 18000.0);
     run(&mut s, "activate", json!({"level": "long"}));
     assert_eq!(volume(&mut s, "plate"), 36000.0);
-    run(&mut s, "activate", json!({"level": "long_holed"}));
+    let r = run(&mut s, "activate", json!({"level": "long_holed"}));
+    assert!(r.get("shape_changed").is_none(), "another level worked in is no edit: {r}");
     let holed = 36000.0 - 3.0 * 25.0 * std::f64::consts::PI;
     assert!((volume(&mut s, "plate") - holed).abs() < 1e-9, "the hole kept, the frame's height and thickness taken");
     // The level holds only what differs: the hole and its dimensions, not the frame's sketch.
@@ -72,9 +74,9 @@ fn variants_follow_their_parent() {
         levels["levels"],
         json!([
             {"name": "long", "parent": null, "depth": 0, "parameters": {"w": 200.0}, "features": [],
-             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": [], "output": []},
+             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": [], "part": "plate", "output": ["plate"]},
             {"name": "long_holed", "parent": "long", "depth": 1, "parameters": {}, "features": ["outline"],
-             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": [], "output": []}
+             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": [], "part": "plate", "output": ["plate"]}
         ])
     );
     // Back as the parent has it: the hole goes, then the length.
@@ -92,7 +94,7 @@ fn variants_follow_their_parent() {
 fn levels_are_worked_in_by_name_and_undone() {
     let mut s = Session::default();
     frame(&mut s);
-    run(&mut s, "add_level", json!({"name": "long"}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
     run(&mut s, "activate", json!({"level": null}));
     run(&mut s, "set_parameter", json!({"name": "w", "value": 300, "level": "long"}));
     assert_eq!(run(&mut s, "inspect", json!({}))["level"], Value::Null, "back in the root");
@@ -112,7 +114,7 @@ fn levels_are_worked_in_by_name_and_undone() {
     let e = s.execute("remove_level", &json!({"name": "nothing"})).unwrap_err();
     assert!(e.contains("no level"), "{e}");
     run(&mut s, "add_level", json!({"name": "longer", "parent": "long"}));
-    let e = s.execute("remove_level", &json!({"name": "long"})).unwrap_err();
+    let e = s.execute("remove_level", &json!({"name": "long", "part": "plate"})).unwrap_err();
     assert!(e.contains("below"), "{e}");
 }
 
@@ -121,7 +123,7 @@ fn levels_are_worked_in_by_name_and_undone() {
 fn a_rename_reaches_the_levels_below() {
     let mut s = Session::default();
     frame(&mut s);
-    run(&mut s, "add_level", json!({"name": "holed"}));
+    run(&mut s, "add_level", json!({"name": "holed", "part": "plate"}));
     run(&mut s, "edit_sketch", hole());
     run(&mut s, "activate", json!({"level": null}));
     run(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "a", "to": "corner"}));
@@ -137,7 +139,7 @@ fn a_rename_reaches_the_levels_below() {
 fn levels_are_saved_and_opened() {
     let mut s = Session::default();
     frame(&mut s);
-    run(&mut s, "add_level", json!({"name": "holed"}));
+    run(&mut s, "add_level", json!({"name": "holed", "part": "plate"}));
     run(&mut s, "edit_sketch", hole());
     run(&mut s, "add", json!({"name": "moved", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 10]}));
     let dir = std::env::temp_dir().join(format!("datum-levels-{}", std::process::id()));
@@ -169,7 +171,7 @@ fn a_variant_turns_a_parents_feature_off() {
     run(&mut s, "add", json!({"name": "drilled", "op": "boolean", "kind": "difference", "inputs": ["plate", "pin"]}));
     run(&mut s, "add", json!({"name": "moved", "op": "transform", "inputs": ["drilled"], "translate": [0, 0, 10]}));
     assert_eq!(volume(&mut s, "moved"), 10000.0 - 200.0);
-    run(&mut s, "add_level", json!({"name": "plain"}));
+    run(&mut s, "add_level", json!({"name": "plain", "part": "plate"}));
     run(&mut s, "edit", json!({"name": "drilled", "enabled": false}));
     assert_eq!(volume(&mut s, "moved"), 10000.0, "the plate passed on as it was");
     let levels = run(&mut s, "levels", json!({}));
@@ -190,8 +192,8 @@ fn a_variant_turns_a_parents_feature_off() {
     assert_eq!(f["enabled"], json!(0.0));
 }
 
-/// The product (D160): each part in its chosen variant, with the bodies it makes; the choice and
-/// a part's output are saved with the model.
+/// The product (D160, D169): each body of the root a part, in its chosen variant (none: the
+/// root's own); a helper body is no part; the choice, names and visibility are saved.
 #[test]
 fn the_product_is_each_part_in_its_chosen_variant() {
     let mut s = Session::default();
@@ -206,52 +208,110 @@ fn the_product_is_each_part_in_its_chosen_variant() {
                         {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
                         {"type": "length", "line": "bottom", "value": "w"}, {"type": "length", "line": "left", "value": 50}]}}),
     );
-    // Two parts on the frame's sketch: a plate, and a lid 10 above it with a helper body.
-    run(&mut s, "add_level", json!({"name": "plate"}));
+    // Two parts on one sketch, a plate and a lid 10 above it, and a helper body; the plate cut.
     run(&mut s, "add", json!({"name": "slab", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": 2}));
-    run(&mut s, "add_level", json!({"name": "long", "parent": "plate"}));
-    run(&mut s, "set_parameter", json!({"name": "w", "value": 200}));
-    run(&mut s, "add_level", json!({"name": "lid"}));
     run(&mut s, "add", json!({"name": "cover", "op": "extrude", "inputs": ["outline"], "z0": 10, "z1": 11}));
     run(&mut s, "add", json!({"name": "helper", "op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0, "z1": 1}));
-    let product = |s: &mut Session| -> Vec<(String, String, Vec<String>)> {
+    run(&mut s, "add", json!({"name": "pin", "op": "prism", "polygon": [[10, 10], [20, 10], [20, 20], [10, 20]], "z0": -1, "z1": 5}));
+    run(&mut s, "add", json!({"name": "drilled", "op": "boolean", "kind": "difference", "inputs": ["slab", "pin"]}));
+    let product = |s: &mut Session| -> Vec<(String, Option<String>, Vec<String>)> {
         run(s, "product", json!({}))["parts"]
             .as_array()
             .unwrap()
             .iter()
             .map(|p| {
                 let names = p["bodies"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap().to_string()).collect();
-                (p["part"].as_str().unwrap().into(), p["level"].as_str().unwrap().into(), names)
+                (p["part"].as_str().unwrap().into(), p["level"].as_str().map(String::from), names)
             })
             .collect()
     };
-    let owned = |v: &[(&str, &str, &[&str])]| -> Vec<(String, String, Vec<String>)> {
-        v.iter().map(|(p, l, b)| (p.to_string(), l.to_string(), b.iter().map(|n| n.to_string()).collect())).collect()
+    let owned = |v: &[(&str, Option<&str>, &str)]| -> Vec<(String, Option<String>, Vec<String>)> {
+        v.iter().map(|(p, l, b)| (p.to_string(), l.map(String::from), vec![b.to_string()])).collect()
     };
-    assert_eq!(product(&mut s), owned(&[("lid", "lid", &["cover", "helper"]), ("plate", "plate", &["slab"])]));
-    run(&mut s, "set_output", json!({"output": ["cover"]}));
+    // A part is named by the feature that began its body, its body the last of it.
+    assert_eq!(product(&mut s), owned(&[("slab", None, "drilled"), ("cover", None, "cover"), ("helper", None, "helper")]));
+    run(&mut s, "set_part", json!({"body": "helper", "part": false}));
+    run(&mut s, "set_part", json!({"body": "slab", "name": "Плита"}));
+    assert!(s.execute("set_part", &json!({"body": "drilled"})).is_err(), "a part is named by where its body begins");
+    // A longer plate: the plate's variant; `w` is shared, but the product takes only the plate from it.
+    run(&mut s, "add_level", json!({"name": "long", "part": "slab"}));
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 200}));
+    assert!(s.execute("add_level", &json!({"name": "loose"})).is_err(), "a variant is a part's");
     run(&mut s, "choose", json!({"level": "long"}));
-    assert_eq!(product(&mut s), owned(&[("lid", "lid", &["cover"]), ("plate", "long", &["slab"])]));
+    assert_eq!(product(&mut s), owned(&[("slab", Some("long"), "drilled"), ("cover", None, "cover")]));
     let r = run(&mut s, "product", json!({}));
-    assert_eq!(r["parts"][1]["bodies"][0]["volume"].as_f64(), Some(200.0 * 50.0 * 2.0), "the long plate");
-    assert!(s.execute("set_output", &json!({"output": ["nothing"]})).is_err());
+    assert_eq!(
+        r["parts"][0]["bodies"][0]["volume"].as_f64(),
+        Some(200.0 * 50.0 * 2.0 - 100.0 * 6.0 / 3.0 * 3.0 * 0.0 - 100.0 * 2.0),
+        "the long plate, drilled"
+    );
+    assert_eq!(r["parts"][0]["name"], "Плита");
+    assert_eq!(r["parts"][1]["bodies"][0]["volume"].as_f64(), Some(100.0 * 50.0), "the lid as the root has it");
     // The lid hidden in the product: listed, but not shown; kept in the file.
-    run(&mut s, "show", json!({"part": "lid", "visible": false}));
-    assert_eq!(run(&mut s, "product", json!({}))["parts"][0]["visible"], false);
+    run(&mut s, "show", json!({"part": "cover", "visible": false}));
+    assert_eq!(run(&mut s, "product", json!({}))["parts"][1]["visible"], false);
     assert!(s.execute("show", &json!({"part": "long", "visible": false})).is_err(), "a variant is no part");
-    // Saved and opened: the choice and the output kept.
+    // Saved and opened: the choice, names and visibility kept.
     let dir = std::env::temp_dir().join(format!("datum-product-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("product.json");
     run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(file["parts"], json!({"helper": null, "slab": {"name": "Плита"}}));
+    assert_eq!(file["levels"]["long"]["part"], "slab");
     let mut t = Session::default();
     run(&mut t, "open", json!({"path": path.display().to_string()}));
-    assert_eq!(product(&mut t), owned(&[("lid", "lid", &["cover"]), ("plate", "long", &["slab"])]));
-    assert_eq!(run(&mut t, "inspect", json!({}))["hidden"], json!(["lid"]));
+    assert_eq!(product(&mut t), owned(&[("slab", Some("long"), "drilled"), ("cover", None, "cover")]));
+    assert_eq!(run(&mut t, "inspect", json!({}))["parts"][1]["visible"], false);
     std::fs::remove_dir_all(&dir).unwrap();
-    // A level removed: its part goes back to itself.
+    // A variant removed: its part goes back to the root's own; back by `choose` too.
     run(&mut s, "remove_level", json!({"name": "long"}));
-    assert_eq!(product(&mut s)[1].1, "plate");
+    assert_eq!(product(&mut s)[0].1, None);
+}
+
+/// A file from before D169 (parts as levels below a frame) opens brought over: each part level's
+/// features in the root, its body a part named as the level; a part level that changed the frame
+/// stays as the part's variant; the variants and the choice as they were.
+#[test]
+fn a_file_with_parts_as_levels_is_brought_over() {
+    let mut s = Session::default();
+    frame(&mut s);
+    let dir = std::env::temp_dir().join(format!("datum-bring-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("old.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let mut file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    // The frame: the sketch alone.
+    file["features"].as_array_mut().unwrap().retain(|f| f["name"] != "plate");
+    file["levels"] = json!({
+        "Плита": {"features": [{"name": "plate", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": "t"}]},
+        "Длинная": {"parent": "Плита", "parameters": {"w": 200}},
+        "Крышка": {"parameters": {"t": 1}, "features": [{"name": "lid", "op": "extrude", "inputs": ["outline"], "z0": 10, "z1": "10 + t"}],
+                   "output": ["lid"]}
+    });
+    file["chosen"] = json!({"Плита": "Длинная"});
+    file["hidden"] = json!(["Крышка"]);
+    std::fs::write(&path, file.to_string()).unwrap();
+    run(&mut s, "open", json!({"path": path.display().to_string()}));
+    let levels = run(&mut s, "levels", json!({}));
+    assert_eq!(
+        levels["parts"],
+        json!([{"part": "lid", "name": "Крышка", "chosen": "Крышка", "visible": false},
+               {"part": "plate", "name": "Плита", "chosen": "Длинная", "visible": true}]),
+        "the part levels by name, each a body of the root"
+    );
+    let names: Vec<&str> = levels["levels"].as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Длинная", "Крышка"], "the plate's level changed nothing but its features: gone");
+    assert_eq!(volume(&mut s, "plate"), 10000.0);
+    assert_eq!(s.execute("mass_properties", &json!({"name": "plate", "level": "Длинная"})).unwrap()["volume"].as_f64(), Some(20000.0));
+    assert_eq!(s.execute("mass_properties", &json!({"name": "lid", "level": "Крышка"})).unwrap()["volume"].as_f64(), Some(5000.0));
+    // Two parts with a feature of one name cannot share the root: said, not renamed.
+    file["levels"]["Крышка"]["features"][0]["name"] = json!("plate");
+    file["levels"]["Крышка"]["output"] = json!(["plate"]);
+    std::fs::write(&path, file.to_string()).unwrap();
+    let e = s.execute("open", &json!({"path": path.display().to_string()})).unwrap_err();
+    assert!(e.contains("named as another part's"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A body is laid flat as its settings say (D164): the front as drawn, the back mirrored, a
@@ -268,7 +328,9 @@ fn bodies_are_laid_flat_by_their_settings() {
     assert_eq!((plate["width"].as_f64(), plate["height"].as_f64()), (Some(80.0), Some(40.0)));
     // A part's variant: the length and the row of holes of the 2.5 m wall.
     run(&mut s, "open", json!({"path": model.join("wall_variants.json").display().to_string()}));
-    assert_eq!(run(&mut s, "flats", json!({}))["flats"], json!([]), "the frame makes no part");
+    let r = run(&mut s, "flats", json!({}));
+    let all: Vec<&str> = r["flats"].as_array().unwrap().iter().map(|f| f["feature"].as_str().unwrap()).collect();
+    assert_eq!(all, ["side", "notched"], "the root: every part");
     run(&mut s, "activate", json!({"level": "2,5 м"}));
     let r = run(&mut s, "flats", json!({}));
     let wall = &r["flats"][0];

@@ -37,8 +37,13 @@ pub const FORMAT: &str = "datum/1";
 pub enum ModelError {
     Json(serde_json::Error),
     Format(String),
-    Feature { index: usize, msg: String },
+    Feature {
+        index: usize,
+        msg: String,
+    },
     Graph(GraphError),
+    /// The levels and parts, as a file before D169 had them, could not be brought over.
+    Levels(String),
 }
 
 impl fmt::Display for ModelError {
@@ -48,6 +53,7 @@ impl fmt::Display for ModelError {
             Self::Format(v) => write!(f, "format `{v}` is not supported (expected `{FORMAT}`)"),
             Self::Feature { index, msg } => write!(f, "feature #{index}: {msg}"),
             Self::Graph(e) => e.fmt(f),
+            Self::Levels(m) => write!(f, "levels: {m}"),
         }
     }
 }
@@ -62,10 +68,14 @@ struct File {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     parameters: BTreeMap<String, Num>,
     features: Vec<Map<String, Value>>,
-    /// Parts and variants (D152): each what differs from its parent.
+    /// The variants of parts (D152, D169): each what differs from its parent.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     levels: BTreeMap<String, levels::Level>,
-    /// The variant of each part in the product, when not the part itself.
+    /// The root's bodies as parts (D169), by the feature that began each: what each is (its
+    /// name), or `null` for a body that is no part.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    parts: BTreeMap<String, Option<levels::PartInfo>>,
+    /// The variant of each part in the product, when not the root's own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     chosen: BTreeMap<String, String>,
     /// Parts not shown in the product.
@@ -96,7 +106,9 @@ pub fn parse_doc(json: &str) -> Result<levels::Doc, ModelError> {
     for (index, fields) in features.into_iter().enumerate() {
         add_feature(&mut g, fields).map_err(|msg| ModelError::Feature { index, msg })?;
     }
-    Ok(levels::Doc { root: g, levels: file.levels, chosen: file.chosen, hidden: file.hidden, flats: file.flats })
+    let mut doc = levels::Doc { root: g, levels: file.levels, parts: file.parts, chosen: file.chosen, hidden: file.hidden, flats: file.flats };
+    doc.bring_over().map_err(ModelError::Levels)?;
+    Ok(doc)
 }
 
 /// Files from before patterns in sketches (D128) gave a cut a `pattern`: it becomes a pattern
@@ -270,6 +282,7 @@ pub fn to_json_doc(d: &levels::Doc) -> String {
         parameters: g.parameters().clone(),
         features,
         levels: d.levels.clone(),
+        parts: d.parts.clone(),
         chosen: d.chosen.clone(),
         hidden: d.hidden.clone(),
         flats: d.flats.clone(),

@@ -40,7 +40,9 @@ pub struct Session {
 
 /// A part of the product: its name, the variant chosen, and the bodies it makes by feature, or
 /// why it makes none.
-pub type Part = (String, String, Result<Vec<(String, datum_graph::ValueRef)>, String>);
+/// A part of the product: the feature that began its body, the variant chosen (none: the root's
+/// own), and its body by its final feature, or why not.
+pub type Part = (String, Option<String>, Result<Vec<(String, datum_graph::ValueRef)>, String>);
 
 /// Changes `undo` goes back through.
 const UNDO_DEPTH: usize = 100;
@@ -431,22 +433,27 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "levels",
-        description: "The model's levels (D152): the root (the frame: shared sketches, planes, parameters), parts below it, their \
-                      variants below them; each with its parent, depth, what it sets otherwise, and `active` the one worked in. \
-                      A level holds only what differs from its parent; a change to the parent reaches every level below.",
+        description: "The model's parts and their variants (D152, D169). The root is a multi-body part, the product's base: its \
+                      bodies are the parts, each keyed by the feature that began it (`parts`: key, name, variant chosen, visible). \
+                      Variants are levels below the root, each of a part: with its parent, depth, part, what it sets otherwise; \
+                      `active` the one worked in. A level holds only what differs from its parent; a change to the parent reaches \
+                      every level below.",
         params: no_params,
         run: |s, _| Ok(s.levels()),
     },
     Command {
         name: "add_level",
-        description: "Add level `name` below `parent` (a level's name; left out or null: the root), the same as it to begin with, \
-                      and work in it. Commands then change it: `set_parameter` gives a parameter another value, `edit` and \
+        description: "Add variant `name` of part `part` (the feature that began its body) below `parent` (a variant of that part; \
+                      left out or null: the root), the same as it to begin with, and work in it. Commands then change it: `set_parameter` gives a parameter another value, `edit` and \
                       `edit_sketch` change an inherited feature (sketch holes added, a size changed), `add` adds its own features. \
                       Inherited features and parameters cannot be removed in it.",
-        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "parent": {"type": ["string", "null"]}}, "required": ["name"]}),
+        params: || {
+            json!({"type": "object", "properties": {"name": {"type": "string"}, "parent": {"type": ["string", "null"]}, "part": {"type": "string"}},
+                   "required": ["name"]})
+        },
         run: |s, p| {
             let parent = p.get("parent").and_then(Value::as_str);
-            s.doc.add_level(text(p, "name")?, parent)?;
+            s.doc.add_level(text(p, "name")?, parent, p.get("part").and_then(Value::as_str))?;
             s.activate(Some(text(p, "name")?.to_string()))
         },
     },
@@ -471,7 +478,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "flats",
-        description: "The flat blanks of the bodies the level worked in makes (a model without levels: its final bodies): feature, side \
+        description: "The flat blanks of the parts the level worked in makes (the root: every part; a variant: its part): feature, side \
                       (`front`: seen from where a sketch on XY is, `back`), K-factor, and size, pieces and bend lines, or why the body \
                       is no sheet.",
         params: no_params,
@@ -508,17 +515,17 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "choose",
-        description: "Level `level` (a part, or a variant below it) is the one of its part that goes into the product: the view \
-                      of the whole model shows it, `product` lists it. Saved with the model.",
-        params: || json!({"type": "object", "properties": {"level": {"type": "string"}}, "required": ["level"]}),
+        description: "Variant `level` is the one of its part that goes into the product: the view of the whole model shows it, \
+                      `product` lists it; `part` with no `level`: the root's own. Saved with the model.",
+        params: || json!({"type": "object", "properties": {"level": {"type": ["string", "null"]}, "part": {"type": "string"}}}),
         run: |s, p| {
-            s.doc.choose(text(p, "level")?)?;
+            s.doc.choose(p.get("level").and_then(Value::as_str), p.get("part").and_then(Value::as_str))?;
             Ok(s.levels())
         },
     },
     Command {
         name: "show",
-        description: "Part `part` shown in the product (`visible`: true) or hidden: the view of the whole model and around a part \
+        description: "Part `part` (the feature that began its body) shown in the product (`visible`: true) or hidden: the view of the whole model and around a part \
                       leaves hidden parts out (the part worked in is always shown). Saved with the model.",
         params: || json!({"type": "object", "properties": {"part": {"type": "string"}, "visible": {"type": "boolean"}}, "required": ["part", "visible"]}),
         run: |s, p| {
@@ -528,28 +535,40 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
-        name: "set_output",
-        description: "The bodies the level worked in makes, by feature name (`output`: [names]); null: as its parent's, at the \
-                      top the final bodies that are not the frame's. A variant takes its part's.",
-        params: || json!({"type": "object", "properties": {"output": {"type": ["array", "null"], "items": {"type": "string"}}}, "required": ["output"]}),
+        name: "set_part",
+        description: "Body `body` (the feature that began it) as a part: `name` its name (null: the feature's), `part` false: no part \
+                      (an envelope, a surface to cut by; not in the product's list, no flat), true: a part again. Saved with the model.",
+        params: || {
+            json!({"type": "object", "properties": {"body": {"type": "string"}, "name": {"type": ["string", "null"]}, "part": {"type": "boolean"}},
+                   "required": ["body"]})
+        },
         run: |s, p| {
-            let level = s.active.clone().ok_or("the frame makes no part: work in a part")?;
-            let output: Option<Vec<String>> =
-                serde_json::from_value(p.get("output").cloned().unwrap_or(Value::Null)).map_err(|e| format!("output: {e}"))?;
-            if let Some(o) = &output
-                && let Some(n) = o.iter().find(|n| s.graph.find(n).is_none())
-            {
-                return Err(format!("no feature named `{n}`"));
+            let body = text(p, "body")?;
+            if !crate::levels::bodies(&s.doc.root).iter().any(|(b, _)| b == body) {
+                return Err(format!("no body begun by `{body}` in the root"));
             }
-            if let Some(l) = s.doc.levels.get_mut(&level) {
-                l.output = output;
+            let mut entry = s.doc.parts.get(body).cloned().unwrap_or(Some(crate::levels::PartInfo::default()));
+            if let Some(n) = p.get("name") {
+                let n = n.as_str().unwrap_or_default().trim();
+                let mut e = entry.unwrap_or_default();
+                e.name = (!n.is_empty()).then(|| n.to_string());
+                entry = Some(e);
+            }
+            if let Some(part) = p.get("part") {
+                let part = part.as_bool().ok_or("`part` must be true or false")?;
+                entry = if part { Some(entry.unwrap_or_default()) } else { None };
+            }
+            if entry == Some(crate::levels::PartInfo::default()) {
+                s.doc.parts.remove(body);
+            } else {
+                s.doc.parts.insert(body.to_string(), entry);
             }
             Ok(s.levels())
         },
     },
     Command {
         name: "product",
-        description: "The product: each part in its chosen variant (`choose`), with the bodies it makes (volume, centre of mass).",
+        description: "The product: each part in its chosen variant (`choose`; null: the root's own), with its body (volume, centre of mass).",
         params: no_params,
         run: |s, _| {
             let parts: Vec<Value> = s
@@ -564,7 +583,7 @@ const COMMANDS: &[Command] = &[
                             .collect(),
                         Err(e) => vec![json!({"error": e})],
                     };
-                    json!({"part": part, "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out})
+                    json!({"part": part, "name": s.doc.part_name(&part), "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out})
                 })
                 .collect();
             Ok(json!({ "parts": parts }))
@@ -795,7 +814,11 @@ impl Session {
         {
             result = Err(e);
         }
-        if let Ok(reply) = &mut result {
+        // Only an edit changes a shape: another level worked in, or another model, is not one.
+        if let Ok(reply) = &mut result
+            && self.active == active
+            && !matches!(c.name, "new" | "open")
+        {
             let changed = self.shape_changes(&graph, &results_before);
             if !changed.is_empty() {
                 reply["shape_changed"] = json!(changed);
@@ -834,31 +857,14 @@ impl Session {
         Ok(reply)
     }
 
-    /// The bodies level `name` (graph `g`) makes, by feature: its output as given, else the final
-    /// features that are not the frame's and make a body (no sketch, plane or blank).
-    fn output(&self, name: &str, g: &Graph) -> Vec<String> {
-        self.output_of(Some(name), g)
-    }
-
-    /// [`Self::output`] of a level, or of the root: a model with no levels is one part, whose
-    /// final bodies are its output; with levels, the root is the frame and makes none.
+    /// The parts level `level` (none: the root; graph `g`) makes, by their final features: the
+    /// root, every part; a variant, its part.
     fn output_of(&self, level: Option<&str>, g: &Graph) -> Vec<String> {
-        let given = level.and_then(|l| self.doc.output_given(l));
-        if let Some(o) = given {
-            return o;
-        }
-        if level.is_none() && !self.doc.levels.is_empty() {
-            return Vec::new();
-        }
-        g.finals()
-            .into_iter()
-            .map(|i| &g.nodes()[i as usize])
-            .filter(|n| {
-                !matches!(n.op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. })
-                    && (level.is_none() || self.doc.root.find(&n.name).is_none())
-            })
-            .map(|n| n.name.clone())
-            .collect()
+        let parts = match level {
+            None => self.doc.parts(),
+            Some(l) => self.doc.part_of(l).into_iter().collect(),
+        };
+        crate::levels::bodies(g).into_iter().filter(|(begun, _)| parts.contains(begun)).map(|(_, last)| last).collect()
     }
 
     /// The blank of feature `name` of the level worked in: an `unfold` feature's, or a sheet
@@ -920,18 +926,19 @@ impl Session {
         json!({ "flats": list })
     }
 
-    /// Each part in the variant chosen for the product, and the bodies it makes (or why not).
+    /// Each part in the variant chosen for the product, and its body (or why not).
     pub fn product(&self) -> Vec<Part> {
         self.doc
             .parts()
             .into_iter()
             .map(|part| {
                 let level = self.doc.chosen(&part);
-                let bodies = self.doc.graph(Some(&level)).map(|g| {
+                let bodies = self.doc.graph(level.as_deref()).map(|g| {
                     let e = self.evaluator.evaluate(&g);
-                    self.output(&level, &g)
+                    crate::levels::bodies(&g)
                         .into_iter()
-                        .filter_map(|n| Some((n.clone(), e.results[g.find(&n)? as usize].as_ref().ok()?.clone())))
+                        .filter(|(begun, _)| *begun == part)
+                        .filter_map(|(_, n)| Some((n.clone(), e.results[g.find(&n)? as usize].as_ref().ok()?.clone())))
                         .collect()
                 });
                 (part, level, bodies)
@@ -966,7 +973,8 @@ impl Session {
                                    "features": l.features.iter().filter_map(|f| f.get("name").cloned()).collect::<Vec<_>>()});
                 match self.doc.changes(&name).and_then(|c| self.doc.graph(Some(&name)).map(|g| (c, g))) {
                     Ok(([changed, own, set, new], g)) => {
-                        v["output"] = json!(self.output(&name, &g));
+                        v["part"] = json!(self.doc.part_of(&name).ok());
+                        v["output"] = json!(self.output_of(Some(&name), &g));
                         v["changed"] = json!(changed);
                         v["own"] = json!(own);
                         v["parameters_set"] = json!(set);
@@ -977,8 +985,13 @@ impl Session {
                 v
             })
             .collect();
-        let chosen: Map<String, Value> = self.doc.parts().into_iter().map(|p| (p.clone(), json!(self.doc.chosen(&p)))).collect();
-        json!({"active": self.active, "levels": list, "chosen": chosen, "hidden": self.doc.hidden})
+        let parts: Vec<Value> = self
+            .doc
+            .parts()
+            .into_iter()
+            .map(|p| json!({"part": p, "name": self.doc.part_name(&p), "chosen": self.doc.chosen(&p), "visible": !self.doc.hidden.contains(&p)}))
+            .collect();
+        json!({"active": self.active, "parts": parts, "levels": list})
     }
 
     /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
@@ -1238,7 +1251,7 @@ impl Session {
             })
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
-               "level": self.active, "levels": levels["levels"], "chosen": levels["chosen"], "hidden": levels["hidden"],
+               "level": self.active, "levels": levels["levels"], "parts": levels["parts"],
                "flats": self.doc.flats,
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }

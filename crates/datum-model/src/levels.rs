@@ -1,5 +1,7 @@
-//! Levels of a model (D152): a frame (the root: the file's own `parameters` and `features`), parts
-//! below it, their variants below them. A level holds only what differs from its parent:
+//! Levels of a model (D152, D169): the root (the file's own `parameters` and `features`) is a
+//! multi-body part, the product's base variant; its parts are its bodies, each named by the
+//! feature that began it; the variants of a part are levels below the root, each marked with its
+//! part. A level holds only what differs from its parent:
 //! parameters, the parent's features changed (by name, merged as JSON merge patches: a sketch
 //! gains holes, a size changes, the rest is inherited) and features of its own. A level is
 //! evaluated as an ordinary graph made of all that: inherited features keep their names, so their
@@ -12,6 +14,8 @@ use datum_math::expr::Num;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use datum_ops::Op;
+
 use crate::{add_feature, feature_json};
 
 /// A level, as the file has it.
@@ -21,6 +25,10 @@ pub struct Level {
     /// The level it differs from; none: the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// The part it is a variant of (by the feature that began its body), on a level right below
+    /// the root; the levels below it are of its part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<String>,
     /// Parameters it sets: the parent's given other values, or its own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, Num>,
@@ -28,10 +36,18 @@ pub struct Level {
     /// and its own features, whole.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub features: Vec<Map<String, Value>>,
-    /// The bodies the level makes, by feature; none: as its parent's, and at the top the final
-    /// bodies not of the frame.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Files before D169: the bodies a part level made. Read to bring them over, never written.
+    #[serde(default, skip_serializing)]
     pub output: Option<Vec<String>>,
+}
+
+/// What a body is as a part (D169): its name (none: the feature that began it). Its sheet metal
+/// rule, material and designation come here.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PartInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 /// How a body is laid flat (D164): seen from its back side, at a K-factor.
@@ -58,12 +74,15 @@ impl Default for FlatSettings {
     }
 }
 
-/// A whole model: the root's graph, the levels by name, and the variant of each part that goes
-/// into the product (none: the part itself).
+/// A whole model: the root's graph, the levels by name, the parts' names, and the variant of each
+/// part that goes into the product (none: the root's own). Parts are keyed by the feature that
+/// began their body.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Doc {
     pub root: Graph,
     pub levels: BTreeMap<String, Level>,
+    /// What a body is as a part; none: not a part (an envelope, a surface to cut by).
+    pub parts: BTreeMap<String, Option<PartInfo>>,
     pub chosen: BTreeMap<String, String>,
     /// Parts not shown in the product.
     pub hidden: std::collections::BTreeSet<String>,
@@ -122,15 +141,29 @@ impl Doc {
         Ok(())
     }
 
-    /// A new level `name` below `parent` (none: the root), the same as it to begin with.
-    pub fn add_level(&mut self, name: &str, parent: Option<&str>) -> Result<(), String> {
+    /// A new variant `name` of part `part` below `parent` (none: the root), the same as it to
+    /// begin with. Below a variant, the part is that variant's (`part` may be left out).
+    pub fn add_level(&mut self, name: &str, parent: Option<&str>, part: Option<&str>) -> Result<(), String> {
         if name.trim().is_empty() || self.levels.contains_key(name) {
             return Err(format!("a level needs a name of its own: `{name}`"));
         }
-        if let Some(p) = parent.filter(|p| !self.levels.contains_key(*p)) {
-            return Err(format!("no level `{p}`"));
-        }
-        self.levels.insert(name.to_string(), Level { parent: parent.map(String::from), ..Level::default() });
+        let part = match parent {
+            Some(p) => {
+                let of = self.part_of(p)?;
+                if part.is_some_and(|q| q != of) {
+                    return Err(format!("`{p}` is a variant of `{of}`, not of `{}`", part.unwrap_or_default()));
+                }
+                None
+            }
+            None => {
+                let part = part.ok_or("a variant below the root needs `part`: the body it varies")?;
+                if !self.parts().iter().any(|p| p == part) {
+                    return Err(format!("no part `{part}`: a part is a body of the root, named by the feature that begins it"));
+                }
+                Some(part.to_string())
+            }
+        };
+        self.levels.insert(name.to_string(), Level { parent: parent.map(String::from), part, ..Level::default() });
         Ok(())
     }
 
@@ -195,33 +228,42 @@ impl Doc {
         Ok(())
     }
 
-    /// The parts: the levels right below the root.
+    /// The parts: the root's bodies (by the feature that began each), but those marked as none.
     pub fn parts(&self) -> Vec<String> {
-        self.levels.iter().filter(|(_, l)| l.parent.is_none()).map(|(n, _)| n.clone()).collect()
+        bodies(&self.root).into_iter().map(|(begun, _)| begun).filter(|b| !matches!(self.parts.get(b), Some(None))).collect()
     }
 
-    /// The part level `name` is of: itself, or the level at the top of its parents.
+    /// Part `part`'s name: as given, else the feature that began it.
+    pub fn part_name(&self, part: &str) -> String {
+        self.parts.get(part).cloned().flatten().and_then(|p| p.name).unwrap_or_else(|| part.to_string())
+    }
+
+    /// The part level `name` is a variant of.
     pub fn part_of(&self, name: &str) -> Result<String, String> {
         self.chain_check(name)?;
         let mut at = name.to_string();
         while let Some(p) = self.levels.get(&at).and_then(|l| l.parent.clone()) {
             at = p;
         }
-        Ok(at)
+        self.levels.get(&at).and_then(|l| l.part.clone()).ok_or_else(|| format!("level `{at}` is no part's variant"))
     }
 
-    /// The level of part `part` that goes into the product.
-    pub fn chosen(&self, part: &str) -> String {
-        self.chosen.get(part).filter(|c| self.levels.contains_key(*c)).cloned().unwrap_or_else(|| part.to_string())
+    /// The variant of part `part` that goes into the product; none: the root's own.
+    pub fn chosen(&self, part: &str) -> Option<String> {
+        self.chosen.get(part).filter(|c| self.part_of(c).is_ok_and(|p| p == part)).cloned()
     }
 
-    /// Level `level` (the part itself, or below it) goes into the product for its part.
-    pub fn choose(&mut self, level: &str) -> Result<(), String> {
-        let part = self.part_of(level)?;
-        if part == level {
-            self.chosen.remove(&part);
-        } else {
-            self.chosen.insert(part, level.to_string());
+    /// Variant `level` of its part goes into the product; for part `part`, none: the root's own.
+    pub fn choose(&mut self, level: Option<&str>, part: Option<&str>) -> Result<(), String> {
+        match (level, part) {
+            (Some(l), _) => {
+                let of = self.part_of(l)?;
+                self.chosen.insert(of, l.to_string());
+            }
+            (None, Some(p)) => {
+                self.chosen.remove(p);
+            }
+            (None, None) => return Err("give `level`, or `part` for the root's own".into()),
         }
         Ok(())
     }
@@ -237,19 +279,6 @@ impl Doc {
             self.hidden.insert(part.to_string());
         }
         Ok(())
-    }
-
-    /// The output given to level `name` or to the nearest of its parents, if one was.
-    pub fn output_given(&self, name: &str) -> Option<Vec<String>> {
-        let mut at = Some(name.to_string());
-        while let Some(n) = at {
-            let l = self.levels.get(&n)?;
-            if let Some(o) = &l.output {
-                return Some(o.clone());
-            }
-            at = l.parent.clone();
-        }
-        None
     }
 
     /// The levels below `level` (none: the root), however deep.
@@ -277,6 +306,89 @@ impl Doc {
                 f(p);
             }
         }
+    }
+}
+
+/// Whether feature `op` makes a body (not a sketch, a plane or a blank).
+fn makes_body(op: &Op) -> bool {
+    !matches!(op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. })
+}
+
+/// The bodies of graph `g`, in the order they were begun: for each final body feature, the
+/// feature that began its body (down its first inputs while they make bodies: a cut's body, a
+/// boolean's first) and itself.
+pub fn bodies(g: &Graph) -> Vec<(String, String)> {
+    let nodes = g.nodes();
+    let mut out: Vec<(NodeIx, NodeIx)> = g
+        .finals()
+        .into_iter()
+        .filter(|&i| makes_body(&nodes[i as usize].op))
+        .map(|i| {
+            let mut at = i;
+            while let Some(&j) = nodes[at as usize].inputs.first().filter(|&&j| makes_body(&nodes[j as usize].op)) {
+                at = j;
+            }
+            (at, i)
+        })
+        .collect();
+    out.sort_unstable();
+    out.into_iter().map(|(a, i)| (nodes[a as usize].name.clone(), nodes[i as usize].name.clone())).collect()
+}
+
+impl Doc {
+    /// A file from before D169, its parts levels right below the root, brought over: each part
+    /// level's own features go into the root, its body becomes a part named as the level; what
+    /// else it changed (a parameter, a root feature) stays as a level marked with that part, the
+    /// variants below it as they were. Two parts with a feature of one name cannot share a root.
+    pub fn bring_over(&mut self) -> Result<(), String> {
+        let old: Vec<String> = self.levels.iter().filter(|(_, l)| l.parent.is_none() && l.part.is_none()).map(|(n, _)| n.clone()).collect();
+        // A part level's own features: those the frame had not.
+        let frame = self.root.clone();
+        for name in old {
+            let level = self.levels[&name].clone();
+            let (own, changed): (Vec<_>, Vec<_>) =
+                level.features.into_iter().partition(|f| f.get("name").and_then(Value::as_str).is_some_and(|n| frame.find(n).is_none()));
+            let before = bodies(&self.root);
+            for f in in_order(own)? {
+                let n = f.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+                add_feature(&mut self.root, f).map_err(|e| {
+                    format!("part `{name}`: its feature `{n}` is named as another part's: rename one of them in the version it was made in ({e})")
+                })?;
+            }
+            // Its body: the one it named, else the new one; more than one, each a part of its own.
+            let made: Vec<String> = bodies(&self.root).into_iter().filter(|b| !before.contains(b)).map(|(begun, _)| begun).collect();
+            let given: Option<Vec<String>> =
+                level.output.as_ref().map(|o| bodies(&self.root).into_iter().filter(|(_, last)| o.contains(last)).map(|(begun, _)| begun).collect());
+            let made = given.unwrap_or(made);
+            let Some(first) = made.first().cloned() else { return Err(format!("part `{name}` makes no body")) };
+            for (k, b) in made.iter().enumerate() {
+                let named = if k == 0 { name.clone() } else { format!("{name} {}", k + 1) };
+                self.parts.insert(b.clone(), Some(PartInfo { name: Some(named) }));
+            }
+            let keep = !changed.is_empty() || !level.parameters.is_empty();
+            if keep {
+                let l = self.levels.get_mut(&name).ok_or("a level gone")?;
+                (l.features, l.part, l.output) = (changed, Some(first.clone()), None);
+            } else {
+                self.levels.remove(&name);
+                for l in self.levels.values_mut().filter(|l| l.parent.as_deref() == Some(name.as_str())) {
+                    (l.parent, l.part) = (None, Some(first.clone()));
+                }
+            }
+            match self.chosen.remove(&name) {
+                Some(c) if c != name || keep => {
+                    self.chosen.insert(first.clone(), c);
+                }
+                _ if keep => {
+                    self.chosen.insert(first.clone(), name.clone());
+                }
+                _ => {}
+            }
+            if self.hidden.remove(&name) {
+                self.hidden.insert(first);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -355,7 +467,7 @@ fn differ(base: &Graph, child: &Graph) -> Result<Level, String> {
             }
         }
     }
-    Ok(Level { parent: None, parameters, features, output: None })
+    Ok(Level { parameters, features, ..Level::default() })
 }
 
 /// JSON merge patch (RFC 7386): objects merged key by key, `null` removes, anything else replaces;

@@ -31,7 +31,7 @@ const USAGE: &str = "usage:
   datum bench-view <model.json> [--size WxH] [--frames N] [--set name=value]...
                                                         GPU time per frame, whole model and close up
   datum mcp                                             MCP server on stdin/stdout
---level <name>: build, dxf, snapshot and bench-view take that part or variant of the model
+--level <name>: build, dxf, snapshot and bench-view take that variant of a part (D169)
 threads: RAYON_NUM_THREADS (default: all cores)";
 
 fn main() -> ExitCode {
@@ -75,7 +75,7 @@ fn let_go_of_own_console() {
 }
 
 fn run(args: &[String]) -> Result<(), String> {
-    // `--level <name>`: a part or variant of the model (D152), wherever it is given.
+    // `--level <name>`: a variant of a part (D152, D169), wherever it is given.
     let mut args = args.to_vec();
     let level = match args.iter().position(|a| a == "--level") {
         Some(k) if k + 1 < args.len() => {

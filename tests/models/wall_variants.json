@@ -1,7 +1,11 @@
 {
-  "chosen": {
-    "Стенка боковая": "Стенка боковая 2 м",
-    "Стенка верхняя": "2 м"
+  "format": "datum/1",
+  "parameters": {
+    "H": 100.0,
+    "L": 1000.0,
+    "W": 300.0,
+    "hole": 6.0,
+    "t": 1.5
   },
   "features": [
     {
@@ -60,20 +64,20 @@
         },
         "points": {
           "a": [
-            0,
-            0
+            0.0,
+            0.0
           ],
           "b": [
-            1000,
-            0
+            1000.0,
+            0.0
           ],
           "c": [
-            1000,
-            300
+            1000.0,
+            300.0
           ],
           "d": [
-            0,
-            300
+            0.0,
+            300.0
           ]
         }
       }
@@ -81,7 +85,7 @@
     {
       "base": "xz",
       "name": "front",
-      "offset": 0,
+      "offset": 0.0,
       "op": "plane"
     },
     {
@@ -143,43 +147,97 @@
         },
         "points": {
           "s1": [
-            0,
-            0
+            0.0,
+            0.0
           ],
           "s2": [
-            1000,
-            0
+            1000.0,
+            0.0
           ],
           "s3": [
-            1000,
-            100
+            1000.0,
+            100.0
           ],
           "s4": [
-            0,
-            100
+            0.0,
+            100.0
           ]
         }
       }
+    },
+    {
+      "inputs": [
+        "side_profile"
+      ],
+      "name": "side",
+      "op": "extrude",
+      "z0": 0.0,
+      "z1": "t"
+    },
+    {
+      "inputs": [
+        "outline"
+      ],
+      "name": "wall",
+      "op": "extrude",
+      "z0": 0.0,
+      "z1": "t"
+    },
+    {
+      "name": "corner",
+      "op": "prism",
+      "polygon": [
+        [
+          -1.0,
+          -1.0
+        ],
+        [
+          20.0,
+          -1.0
+        ],
+        [
+          20.0,
+          20.0
+        ],
+        [
+          -1.0,
+          20.0
+        ]
+      ],
+      "z0": -1.0,
+      "z1": 5.0
+    },
+    {
+      "inputs": [
+        "wall",
+        "corner"
+      ],
+      "kind": "difference",
+      "name": "notched",
+      "op": "boolean"
     }
   ],
-  "format": "datum/1",
   "levels": {
     "1 м": {
-      "parent": "Стенка верхняя"
+      "part": "wall"
     },
     "2 м": {
+      "part": "wall",
+      "parameters": {
+        "L": 2000.0
+      },
       "features": [
         {
           "enabled": 0,
           "name": "notched"
         }
-      ],
-      "parameters": {
-        "L": 2000
-      },
-      "parent": "Стенка верхняя"
+      ]
     },
     "2,5 м": {
+      "part": "wall",
+      "parameters": {
+        "L": 2500.0
+      },
       "features": [
         {
           "name": "outline",
@@ -241,83 +299,25 @@
           "enabled": 0,
           "name": "notched"
         }
-      ],
-      "parameters": {
-        "L": 2500
-      },
-      "parent": "Стенка верхняя"
-    },
-    "Стенка боковая": {
-      "features": [
-        {
-          "inputs": [
-            "side_profile"
-          ],
-          "name": "side",
-          "op": "extrude",
-          "z0": 0,
-          "z1": "t"
-        }
       ]
     },
     "Стенка боковая 2 м": {
+      "part": "side",
       "parameters": {
-        "L": 2000
-      },
-      "parent": "Стенка боковая"
-    },
-    "Стенка верхняя": {
-      "features": [
-        {
-          "inputs": [
-            "outline"
-          ],
-          "name": "wall",
-          "op": "extrude",
-          "z0": 0,
-          "z1": "t"
-        },
-        {
-          "name": "corner",
-          "op": "prism",
-          "polygon": [
-            [
-              -1,
-              -1
-            ],
-            [
-              20,
-              -1
-            ],
-            [
-              20,
-              20
-            ],
-            [
-              -1,
-              20
-            ]
-          ],
-          "z0": -1,
-          "z1": 5
-        },
-        {
-          "inputs": [
-            "wall",
-            "corner"
-          ],
-          "kind": "difference",
-          "name": "notched",
-          "op": "boolean"
-        }
-      ]
+        "L": 2000.0
+      }
     }
   },
-  "parameters": {
-    "H": 100,
-    "L": 1000,
-    "W": 300,
-    "hole": 6,
-    "t": 1.5
+  "parts": {
+    "side": {
+      "name": "Стенка боковая"
+    },
+    "wall": {
+      "name": "Стенка верхняя"
+    }
+  },
+  "chosen": {
+    "side": "Стенка боковая 2 м",
+    "wall": "2 м"
   }
 }

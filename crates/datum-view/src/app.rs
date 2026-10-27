@@ -221,7 +221,12 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let mut note = |reply: &Json| {
             for c in reply["shape_changed"].as_array().into_iter().flatten() {
                 let says = |s: &Json| format!("{} piece(s), {} through hole(s)", s["pieces"], s["through_holes"]);
-                notes.push(format!("{} changed shape: {} → {}", c["feature"].as_str().unwrap_or_default(), says(&c["before"]), says(&c["after"])));
+                notes.push(format!(
+                    "{} changed shape: was {}, now {}",
+                    c["feature"].as_str().unwrap_or_default(),
+                    says(&c["before"]),
+                    says(&c["after"])
+                ));
             }
         };
         for r in pending {
@@ -261,17 +266,29 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let flats = session.flats();
         let (graph, evaluation) = (session.graph(), session.evaluation());
+        // In a variant, its part alone, the other parts as the product has them faded around it;
+        // in the base, the product whole: every part in its chosen variant (D160, D169). The
+        // graph's own bodies of the parts are left out, the rest of it (sketches, a body no part)
+        // shown as it is.
+        let mine = session.active().and_then(|a| session.part_of(a));
+        let product = session.product();
+        let skip: Vec<String> = datum_model::levels::bodies(graph)
+            .into_iter()
+            .filter(|(begun, _)| match &mine {
+                Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
+                None => product.iter().any(|(q, _, _)| q == begun),
+            })
+            .map(|(_, last)| last)
+            .collect();
         let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing.as_deref())
             .into_iter()
-            .filter_map(|i| Some((graph.nodes()[i as usize].name.as_str(), evaluation.results[i as usize].as_deref().ok()?)))
+            .map(|i| (graph.nodes()[i as usize].name.as_str(), i))
+            .filter(|(n, _)| !skip.iter().any(|s| s == n))
+            .filter_map(|(n, i)| Some((n, evaluation.results[i as usize].as_deref().ok()?)))
             .collect();
         let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
         let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
-        // The rest of the product (D160): in the frame, every part in its chosen variant, whole; in a
-        // part, the other parts, faded.
-        let mine = session.active().and_then(|a| session.part_of(a));
-        let around: Vec<datum_graph::ValueRef> = session
-            .product()
+        let around: Vec<datum_graph::ValueRef> = product
             .into_iter()
             .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
             .filter_map(|(_, _, bodies)| bodies.ok())
@@ -372,9 +389,9 @@ struct Viewer {
     /// The panes and where they are (D161); what the flat pattern pane looks at.
     dock: egui_dock::DockState<crate::dock::Pane>,
     flat: crate::flat::FlatView,
-    /// A part or variant being named: below which level (none: a part, below the frame), and the
-    /// name typed.
-    new_level: Option<(Option<String>, String)>,
+    /// A variant being named: below which variant (none: the base), of which part, and the name
+    /// typed.
+    new_level: Option<(Option<String>, String, String)>,
     hold: Option<(f64, egui::Pos2, bool)>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
@@ -1137,65 +1154,63 @@ impl Viewer {
         }
     }
 
-    /// The frame and its parts (D152), each part a list of itself and its variants, one chosen:
-    /// a click works in it; a new part or variant is named here.
+    /// The base and its parts (D152, D169): the root makes every part; each part a list of the
+    /// base and its variants, one chosen for the product; a click works in it; a new variant is
+    /// named here.
     fn levels_panel(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else { return };
         let active = m.inspect["level"].as_str().map(String::from);
-        // (name, parent, depth), depth first: a part, then its variants.
-        let levels: Vec<(String, Option<String>, usize, Option<String>)> = m.inspect["levels"]
+        // Depth first: a variant, then those below it.
+        let levels: Vec<LevelRow> = m.inspect["levels"]
             .as_array()
             .into_iter()
             .flatten()
             .map(|l| {
                 let s = |k: &str| l[k].as_str().map(String::from);
-                (s("name").unwrap_or_default(), s("parent"), l["depth"].as_u64().unwrap_or(0) as usize, s("error"))
+                (s("name").unwrap_or_default(), s("parent"), l["depth"].as_u64().unwrap_or(0) as usize, s("part"), s("error"))
             })
             .collect();
-        // The variant of each part in the product: the model's (D160).
-        let chosen_of = |part: &str| m.inspect["chosen"][part].as_str().unwrap_or(part).to_string();
         let mut go: Option<Option<String>> = None;
-        let mut choose: Option<String> = None;
+        let mut choose: Option<(String, Option<String>)> = None;
         let mut show: Option<(String, bool)> = None;
         let mut remove: Option<String> = None;
-        let frame = "The frame: the shared sketches, planes and parameters every part and variant takes";
-        if ui.selectable_label(active.is_none(), "Frame").on_hover_text(frame).clicked() {
+        let base = "The base: every part as the root makes it; a change here reaches every variant";
+        if ui.selectable_label(active.is_none(), "Base").on_hover_text(base).clicked() {
             go = Some(None);
         }
-        for (k, (part, _, depth, _)) in levels.iter().enumerate() {
-            if *depth > 0 {
-                continue;
-            }
-            // The part and what is below it, up to the next part.
-            let family: Vec<&(String, Option<String>, usize, Option<String>)> =
-                std::iter::once(&levels[k]).chain(levels[k + 1..].iter().take_while(|l| l.2 > 0)).collect();
-            let chosen = chosen_of(part);
-            let here = family.iter().any(|l| Some(&l.0) == active.as_ref());
+        for p in m.inspect["parts"].as_array().into_iter().flatten() {
+            let (Some(part), Some(name)) = (p["part"].as_str(), p["name"].as_str()) else { continue };
+            let chosen = p["chosen"].as_str().map(String::from);
+            let family: Vec<_> = levels.iter().filter(|l| l.3.as_deref() == Some(part)).collect();
+            let here = active.as_ref().is_some_and(|a| family.iter().any(|l| &l.0 == a));
             ui.horizontal(|ui| {
-                let mut visible = !m.inspect["hidden"].as_array().is_some_and(|h| h.iter().any(|p| p == part.as_str()));
-                if ui.checkbox(&mut visible, "").on_hover_text("Shown in the product: in the frame, and faint around another part").changed() {
-                    show = Some((part.clone(), visible));
+                let mut visible = p["visible"].as_bool().unwrap_or(true);
+                if ui.checkbox(&mut visible, "").on_hover_text("Shown in the product: in the base, and faint around another part").changed() {
+                    show = Some((part.to_string(), visible));
                 }
-                if ui.selectable_label(here, part.as_str()).on_hover_text("Work in this part, in the variant chosen beside it").clicked() {
-                    go = Some(Some(chosen.clone()));
+                if ui.selectable_label(here, name).on_hover_text("Work in this part, in the variant chosen beside it").clicked() {
+                    go = Some(chosen.clone());
                 }
-                let shown = if &chosen == part { "shared".to_string() } else { chosen.clone() };
-                egui::ComboBox::from_id_salt(("datum_part", part)).selected_text(shown).show_ui(ui, |ui| {
-                    for (n, _, d, err) in &family {
-                        let label = if n == part { format!("{part} (shared)") } else { format!("{}{n}", "   ".repeat(*d)) };
-                        let r = ui.selectable_label(&chosen == n, label);
+                egui::ComboBox::from_id_salt(("datum_part", part)).selected_text(chosen.clone().unwrap_or_else(|| "base".into())).show_ui(ui, |ui| {
+                    if ui.selectable_label(chosen.is_none(), "base").clicked() {
+                        choose = Some((part.to_string(), None));
+                        go = Some(None);
+                    }
+                    for (n, _, d, _, err) in &family {
+                        let r = ui.selectable_label(chosen.as_ref() == Some(n), format!("{}{n}", "   ".repeat(*d + 1)));
                         let r = match err {
                             Some(e) => r.on_hover_text(format!("✖ {e}")),
                             None => r,
                         };
                         if r.clicked() {
-                            choose = Some(n.clone());
+                            choose = Some((part.to_string(), Some(n.clone())));
                             go = Some(Some(n.clone()));
                         }
                     }
                     ui.separator();
-                    if ui.button("+ New variant").on_hover_text(format!("Below `{chosen}`: it differs only where you change it")).clicked() {
-                        self.new_level = Some((Some(chosen.clone()), fresh(&levels, "Variant")));
+                    let below = chosen.clone().unwrap_or_else(|| "the base".into());
+                    if ui.button("+ New variant").on_hover_text(format!("Below {below}: it differs only where you change it")).clicked() {
+                        self.new_level = Some((chosen.clone(), part.to_string(), fresh(&levels, "Variant")));
                     }
                 });
                 if here
@@ -1206,50 +1221,37 @@ impl Viewer {
                     remove = Some(a.clone());
                 }
             });
-            for (n, _, _, err) in &family {
+            for (n, _, _, _, err) in &family {
                 if let Some(e) = err {
                     ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {n}: {e}"));
                 }
             }
         }
-        let mut add: Option<(Option<String>, String)> = None;
-        match &mut self.new_level {
-            Some((parent, name)) => {
-                ui.horizontal(|ui| {
-                    ui.label(match parent {
-                        Some(p) => format!("New variant of {p}:"),
-                        None => "New part:".to_string(),
-                    });
-                    let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
-                    r.request_focus();
-                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if (ui.button("Create").clicked() || enter) && !name.trim().is_empty() {
-                        add = Some((parent.clone(), name.trim().to_string()));
-                    }
-                    if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                        add = Some((None, String::new()));
-                    }
-                });
-            }
-            None => {
-                if ui.button("+ Part").on_hover_text("A part below the frame: its own features on the frame's sketches").clicked() {
-                    self.new_level = Some((None, fresh(&levels, "Part")));
+        let mut add: Option<(Option<String>, String, String)> = None;
+        if let Some((parent, part, name)) = &mut self.new_level {
+            ui.horizontal(|ui| {
+                ui.label(format!("New variant of {}:", parent.as_deref().unwrap_or("the base")));
+                let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
+                r.request_focus();
+                let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Create").clicked() || enter) && !name.trim().is_empty() {
+                    add = Some((parent.clone(), part.clone(), name.trim().to_string()));
                 }
-            }
+                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    add = Some((None, String::new(), String::new()));
+                }
+            });
         }
-        if let Some((parent, name)) = add {
+        if let Some((parent, part, name)) = add {
             self.new_level = None;
+            // A new variant is the one its part shows in the product.
             if !name.is_empty() {
-                // A new variant is the one its part shows in the product.
-                let variant = parent.is_some();
-                self.send(Request::Command("add_level", json!({"name": name, "parent": parent})));
-                if variant {
-                    self.send(Request::Command("choose", json!({ "level": name })));
-                }
+                self.send(Request::Command("add_level", json!({"name": name, "parent": parent, "part": part})));
+                self.send(Request::Command("choose", json!({ "level": name })));
             }
         }
-        if let Some(level) = choose {
-            self.send(Request::Command("choose", json!({ "level": level })));
+        if let Some((part, level)) = choose {
+            self.send(Request::Command("choose", json!({ "level": level, "part": part })));
         }
         if let Some((part, visible)) = show {
             self.send(Request::Command("show", json!({ "part": part, "visible": visible })));
@@ -2754,12 +2756,15 @@ fn marks(inspect: &Json) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>)
 }
 
 /// What parts and variants are, for the hint over them (D152).
-const LEVELS: &str = "A part takes the frame's sketches and adds its own features; a variant takes its part and changes only what \
-                      differs (a length, a few holes): a change to the frame or the part reaches every variant. A dot: changed here, \
+const LEVELS: &str = "A part is a body of the base; a variant takes its part and changes only what differs (a length, a few \
+                      holes): a change to the base reaches every variant. A dot: changed here, \
                       ↺ back as the parent has it, + its own";
 
 /// `prefix k`, the first not a level's name yet.
-fn fresh(levels: &[(String, Option<String>, usize, Option<String>)], prefix: &str) -> String {
+/// A variant as the panel lists it: name, parent, depth, part, error.
+type LevelRow = (String, Option<String>, usize, Option<String>, Option<String>);
+
+fn fresh(levels: &[LevelRow], prefix: &str) -> String {
     (1..).map(|k| format!("{prefix} {k}")).find(|n| !levels.iter().any(|l| &l.0 == n)).unwrap_or_default()
 }
 
@@ -4239,8 +4244,9 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::Command("remove_parameter", p) if p["name"] == "h")), "the first row's");
     }
 
-    /// The frame and its part in the panel (D152): a click on the part works in it, in the variant
-    /// the product has of it (D160); + Part names a new one; in a variant, the sketch it changes has ↺, which takes it back.
+    /// The base and its parts in the panel (D152, D169): a click on a part works in it, in the
+    /// variant the product has of it (D160); the base works in the root; a new variant is made of
+    /// its part below the one chosen; in a variant, the sketch it changes has ↺, which takes it back.
     #[test]
     fn parts_and_variants_in_the_panel() {
         let (mut v, inbox) = viewer("wall_variants.json");
@@ -4251,12 +4257,18 @@ mod tests {
             h.run();
         };
         click(&mut v, "Стенка верхняя");
-        click(&mut v, "+ Part");
-        assert_eq!(v.new_level, Some((None, "Part 1".to_string())));
+        v.new_level = Some((Some("2 м".into()), "wall".into(), "Variant 1".into()));
         click(&mut v, "Create");
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "2 м")));
-        assert!(sent.iter().any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Part 1" && p["parent"].is_null())));
+        assert!(
+            sent.iter()
+                .any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Variant 1" && p["parent"] == "2 м" && p["part"] == "wall"))
+        );
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("choose", p) if p["level"] == "Variant 1")), "the new one chosen");
+        v.model.as_mut().unwrap().inspect["level"] = json!("2 м");
+        click(&mut v, "Base");
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"].is_null())), "the base: the root");
         // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
