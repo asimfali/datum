@@ -92,6 +92,25 @@ fn bad_patterns_are_refused() {
     assert!(placed(s).unwrap_err().to_string().contains("along one line"));
 }
 
+/// Lines not closed (a profile being drawn, a tail off a square) bound nothing: copies beside
+/// them are placed; a copy touching the square is still refused.
+#[test]
+fn open_lines_bound_nothing() {
+    let sketch = |step: f64| {
+        serde_json::json!({
+            "points": {"h": [0, 0], "p": [-10, -10], "q": [-10, 10], "r": [-5, 15],
+                       "a": [20, -5], "b": [30, -5], "c": [30, 5], "d": [20, 5], "t": [40, 0]},
+            "lines": {"l1": {"from": "p", "to": "q"}, "l2": {"from": "q", "to": "r"},
+                      "s1": {"from": "a", "to": "b"}, "s2": {"from": "b", "to": "c"}, "s3": {"from": "c", "to": "d"}, "s4": {"from": "d", "to": "a"},
+                      "tail": {"from": "b", "to": "t"}},
+            "circles": {"hole": {"center": "h", "diameter": 4}},
+            "patterns": {"row": {"of": "hole", "count": [2, 1], "step": [[step, 0], [0, 1]]}}
+        })
+    };
+    assert_eq!(copies(&placed(sketch(5.0)).unwrap()).patterns[0].at.len(), 2);
+    assert!(placed(sketch(18.0)).unwrap_err().to_string().contains("touch or hold one another"));
+}
+
 /// The same pattern placed twice is the same, bit for bit (on any number of threads: the copies
 /// are found in parallel and kept in grid order).
 #[test]

@@ -15,6 +15,8 @@ pub enum Icon {
     Remove,
     /// A house: the home view.
     Home,
+    /// Two arrows opposite: the other way.
+    Flip,
     /// Sketch tools: the cursor, a line, an arc, a circle, a point, a dimension.
     Select,
     Line,
@@ -89,6 +91,12 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
         Icon::Home => {
             let house = [at(-6.0, 0.0), at(0.0, -6.0), at(6.0, 0.0), at(4.0, 0.0), at(4.0, 6.0), at(-4.0, 6.0), at(-4.0, 0.0), at(-6.0, 0.0)];
             painter.add(egui::Shape::line(house.to_vec(), stroke));
+        }
+        Icon::Flip => {
+            painter.line_segment([at(-6.0, -2.5), at(6.0, -2.5)], stroke);
+            painter.line_segment([at(-6.0, 2.5), at(6.0, 2.5)], stroke);
+            painter.add(egui::Shape::line(vec![at(3.0, -5.5), at(6.0, -2.5), at(3.0, 0.5)], stroke));
+            painter.add(egui::Shape::line(vec![at(-3.0, -0.5), at(-6.0, 2.5), at(-3.0, 5.5)], stroke));
         }
         Icon::Select => {
             let arrow = vec![at(-4.0, -7.0), at(-4.0, 5.0), at(-1.0, 2.0), at(2.0, 7.0), at(4.0, 6.0), at(1.0, 1.0), at(5.0, 1.0)];

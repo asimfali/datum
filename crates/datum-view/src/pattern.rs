@@ -1,6 +1,7 @@
 //! A pattern made in the window (D155): what is selected first says the kind (a point or a
-//! circle: around its centre; one or two lines: along them; a group: along it, or filling it if
-//! it is closed; nothing: along the sketch's axes); a held right click opens the menu with its
+//! circle: around its centre; one or two lines: along them; a group, or lines and arcs joined
+//! into one chain (D165): along it, or filling it if it is closed; nothing: along the sketch's
+//! axes); a held right click opens the menu with its
 //! numbers; the elements to copy are picked next, the copies previewed as they change. The same
 //! menu shifts, leaves out and edits the copies selected. Everything goes as one `edit_sketch`.
 
@@ -17,8 +18,9 @@ pub enum Base {
     Grid([[f64; 2]; 2]),
     /// A point (a circle's or arc's centre): around it.
     Around(String),
-    /// A group: along it; or, closed, filling it.
-    Along { group: String, closed: bool },
+    /// A group: along it; or, closed, filling it. `new`: the lines and arcs selected, a group
+    /// made of them with the pattern (a contour picked as it is).
+    Along { group: String, closed: bool, new: Vec<String> },
 }
 
 /// The fields of each kind, by key: a number or a formula, empty when not given.
@@ -68,65 +70,67 @@ fn lay(sk: &mut SketchEdit, before: &Json, patch: Option<&Map<String, Json>>) ->
     Ok(())
 }
 
-/// The first selection as what the copies follow, or why it cannot be.
+/// The first selection as what the copies follow, or why it cannot be. Points picked with
+/// curves (a frame takes both) are their ends: only the curves count.
 pub fn base_of(sk: &SketchEdit) -> Result<Base, String> {
     let sketch = &sk.json["sketch"];
     let picks: Vec<&Pick> = sk.selected.iter().filter(|p| !matches!(p, Pick::Constraint(_) | Pick::Measure(_))).collect();
     if picks.is_empty() {
         return Ok(Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
     }
+    let placed = sk.placed.as_ref().map_err(Clone::clone)?;
     if let Some(g) = sk.selected_group() {
         let curves = &sk.groups()[&g];
-        return Ok(Base::Along { closed: closed(sketch, curves), group: g });
+        let circles = curves.iter().all(|n| placed.circles.contains_key(n));
+        return Ok(Base::Along { closed: circles || chain(placed, curves) == Some(true), group: g, new: Vec::new() });
     }
-    let placed = sk.placed.as_ref().map_err(Clone::clone)?;
+    let curves: Vec<String> = picks.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n.clone()) } else { None }).collect();
     let at = |n: &str| placed.solved.points.get(n).map(|v| [v.x, v.y]);
-    match picks[..] {
-        [Pick::Point(n)] => return Ok(Base::Around(n.clone())),
-        [Pick::Curve(n)] if sketch["circles"].get(n).is_some() || sketch["arcs"].get(n).is_some() => {
+    match (&picks[..], &curves[..]) {
+        ([Pick::Point(n)], _) => return Ok(Base::Around(n.clone())),
+        (_, [n]) if placed.circles.contains_key(n) || placed.arcs.contains_key(n) => {
             let c = if sketch["circles"].get(n).is_some() { &sketch["circles"][n] } else { &sketch["arcs"][n] };
             return Ok(Base::Around(c["center"].as_str().unwrap_or_default().to_string()));
         }
         _ => {}
     }
-    let lines: Vec<[f64; 2]> = picks
+    let lines: Vec<[f64; 2]> = curves
         .iter()
-        .filter_map(|p| match p {
-            Pick::Curve(n) => {
-                let l = placed.lines.get(n)?;
-                let (a, b) = (at(&l.from)?, at(&l.to)?);
-                let len = libm::hypot(b[0] - a[0], b[1] - a[1]);
-                (len > 0.0).then(|| [(b[0] - a[0]) / len, (b[1] - a[1]) / len])
-            }
-            _ => None,
+        .filter_map(|n| {
+            let l = placed.lines.get(n)?;
+            let (a, b) = (at(&l.from)?, at(&l.to)?);
+            let len = libm::hypot(b[0] - a[0], b[1] - a[1]);
+            (len > 0.0).then(|| [(b[0] - a[0]) / len, (b[1] - a[1]) / len])
         })
         .collect();
-    match lines[..] {
-        [d] if picks.len() == 1 => Ok(Base::Grid([d, [-d[1], d[0]]])),
-        [d, e] if picks.len() == 2 => Ok(Base::Grid([d, e])),
-        _ => Err("Select what the copies follow: a point, a circle, one or two lines, a group, or nothing for the axes".into()),
+    match (&lines[..], curves.len()) {
+        ([d], 1) => return Ok(Base::Grid([*d, [-d[1], d[0]]])),
+        ([d, e], 2) => return Ok(Base::Grid([*d, *e])),
+        _ => {}
     }
+    // Lines and arcs joined into one chain: as a group made of them, or the group they are.
+    let why = "Select what the copies follow: a point, a circle, one or two lines, a contour or a group, or nothing for the axes";
+    let closed = chain(placed, &curves).ok_or(why)?;
+    let same = |held: &Vec<String>| {
+        let held: Vec<&String> = held.iter().filter(|n| !placed.solved.points.contains_key(n.as_str())).collect();
+        held.len() == curves.len() && curves.iter().all(|c| held.contains(&c))
+    };
+    if let Some((g, _)) = sk.groups().into_iter().find(|(_, held)| same(held)) {
+        return Ok(Base::Along { group: g, closed, new: Vec::new() });
+    }
+    let group = datum_model::SketchPatch::new(&sk.json).fresh(if closed { "contour" } else { "path" });
+    Ok(Base::Along { group, closed, new: curves })
 }
 
-/// Whether `curves` close: every end of their lines and arcs is shared, or they are circles.
-fn closed(sketch: &Json, curves: &[String]) -> bool {
-    let mut ends: BTreeMap<&str, usize> = BTreeMap::new();
-    let mut any = false;
-    for n in curves {
-        if sketch["circles"].get(n).is_some() {
-            any = true;
-            continue;
-        }
-        for key in ["lines", "arcs"] {
-            if let Some(c) = sketch[key].get(n) {
-                any = true;
-                for e in ["from", "to"] {
-                    *ends.entry(c[e].as_str().unwrap_or_default()).or_default() += 1;
-                }
-            }
-        }
+/// Lines and arcs `curves`, all of them, as one chain: closed or not; None if they are not one.
+fn chain(placed: &datum_ops::Placed, curves: &[String]) -> Option<bool> {
+    let c = datum_sketch::contours(&placed.lines, &placed.arcs, &|n, _| curves.iter().any(|m| m == n));
+    let all = c.loops.iter().chain(&c.paths).map(Vec::len).sum::<usize>() == curves.len();
+    match (&c.loops[..], &c.paths[..]) {
+        ([_], []) if all && c.ends.is_empty() && c.branches.is_empty() => Some(true),
+        ([], [_]) if all && c.branches.is_empty() => Some(false),
+        _ => None,
     }
-    any && ends.values().all(|&k| k == 2)
 }
 
 /// A field's text as JSON: a number, a formula, or nothing.
@@ -195,9 +199,9 @@ impl PatternForm {
             Base::Around(a["center"].as_str().unwrap_or_default().to_string())
         } else if let Some(a) = p.get("along") {
             let group = a["path"].as_str().unwrap_or_default().to_string();
-            Base::Along { closed: false, group }
+            Base::Along { closed: false, group, new: Vec::new() }
         } else if let Some(f) = p.get("fill").and_then(Json::as_str) {
-            Base::Along { closed: true, group: f.to_string() }
+            Base::Along { closed: true, group: f.to_string(), new: Vec::new() }
         } else {
             Base::Grid([[1.0, 0.0], [0.0, 1.0]])
         };
@@ -266,7 +270,7 @@ impl PatternForm {
         }
     }
 
-    /// The fields the kind asks, by row: each row's keys, and whether it has a ⇄ (which way).
+    /// The fields the kind asks, by row: each row's keys, and whether it has a flip (which way).
     pub fn rows(&self) -> Vec<(&'static str, Vec<&'static str>, Option<usize>)> {
         match &self.base {
             Base::Grid(_) => vec![("First direction", vec!["n1", "s1", "g1"], Some(0)), ("Second direction", vec!["n2", "s2", "g2"], Some(1))],
@@ -358,6 +362,12 @@ impl PatternForm {
     /// the pattern. None until there is something to copy.
     pub fn patch(&self) -> Result<Option<Map<String, Json>>, String> {
         let mut patch = datum_model::SketchPatch::new(&self.before);
+        if let Base::Along { group, new, .. } = &self.base
+            && !new.is_empty()
+        {
+            patch.claim(group)?;
+            patch.set("groups", group, json!(new));
+        }
         let of = match (&self.cell[..], &self.of) {
             ([], None) => return Ok(None),
             ([], Some(of)) => of.clone(),
@@ -555,12 +565,34 @@ mod tests {
         assert_eq!(base_of(&sk), Ok(Base::Grid([[1.0, 0.0], [0.0, 1.0]])));
         let g = sk.group_picks("guide");
         select(&mut sk, g);
-        assert_eq!(base_of(&sk), Ok(Base::Along { group: "guide".into(), closed: false }));
+        assert_eq!(base_of(&sk), Ok(Base::Along { group: "guide".into(), closed: false, new: Vec::new() }));
         let g = sk.group_picks("panel");
         select(&mut sk, g);
-        assert_eq!(base_of(&sk), Ok(Base::Along { group: "panel".into(), closed: true }));
+        assert_eq!(base_of(&sk), Ok(Base::Along { group: "panel".into(), closed: true, new: Vec::new() }));
         select(&mut sk, vec![Pick::Point("o".into()), Pick::Point("h".into())]);
         assert!(base_of(&sk).is_err());
+        // A contour as it is, points framed with it: the group it is, or one made with the pattern.
+        let sides = ["bottom", "right", "top", "left"].map(|n| Pick::Curve(n.into()));
+        select(&mut sk, [&sides[..], &[Pick::Point("a".into())]].concat());
+        assert_eq!(base_of(&sk), Ok(Base::Along { group: "panel".into(), closed: true, new: Vec::new() }));
+        sk.json["sketch"]["groups"] = json!({});
+        let new: Vec<String> = ["bottom", "right", "top", "left"].map(String::from).into();
+        assert_eq!(base_of(&sk), Ok(Base::Along { group: "contour1".into(), closed: true, new: new.clone() }));
+        select(&mut sk, sides[..3].to_vec());
+        assert_eq!(base_of(&sk), Ok(Base::Along { group: "path1".into(), closed: false, new: new[..3].to_vec() }));
+        select(&mut sk, vec![sides[0].clone(), sides[2].clone(), Pick::Curve("rail".into())]);
+        assert!(base_of(&sk).is_err(), "not one chain");
+        // Filling it: the group goes with the pattern.
+        select(&mut sk, sides.to_vec());
+        let mut form = PatternForm::new(&sk, base_of(&sk).unwrap());
+        form.cell = vec!["hole".into()];
+        form.fields.insert("s1", "10".into());
+        form.fields.insert("s2", "10".into());
+        let patch = Json::Object(form.patch().unwrap().unwrap());
+        assert_eq!(patch["groups"]["contour1"], json!(new));
+        assert_eq!(patch["patterns"]["pattern1"]["fill"], json!("contour1"));
+        form.preview(&mut sk).unwrap();
+        assert!(sk.placed.as_ref().unwrap().patterns[0].at.len() > 1);
     }
 
     /// A grid along the axes: the hole picked becomes a group, the copies seen before Done,
@@ -605,11 +637,11 @@ mod tests {
             json!({"of": "hole", "around": {"center": "o", "count": 3.0, "angle": -90.0}})
         );
         assert_eq!(
-            form(Base::Along { group: "guide".into(), closed: false }, &[("s1", "w / 4")], true),
+            form(Base::Along { group: "guide".into(), closed: false, new: Vec::new() }, &[("s1", "w / 4")], true),
             json!({"of": "hole", "along": {"path": "guide", "count": 5.0, "step": "-(w / 4)"}})
         );
         assert_eq!(
-            form(Base::Along { group: "panel".into(), closed: true }, &[("s1", "10"), ("s2", "12"), ("clearance", "3")], false),
+            form(Base::Along { group: "panel".into(), closed: true, new: Vec::new() }, &[("s1", "10"), ("s2", "12"), ("clearance", "3")], false),
             json!({"of": "hole", "step": [[10.0, 0.0], [0.0, 12.0]], "fill": "panel", "clearance": 3.0})
         );
         let r = std::f64::consts::FRAC_1_SQRT_2;

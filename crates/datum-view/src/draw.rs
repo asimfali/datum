@@ -420,6 +420,8 @@ impl Draft {
         let leaning = !free && spot.snap == Snap::Free;
         let found = match (self.tool, &self.chain, &self.clicks[..]) {
             _ if !leaning => None,
+            // Inferring off: no constraint but the tangent asked for.
+            _ if !edit.modes.infer && !self.tangent => None,
             (Tool::Line, Some(c), _) if !self.tangent => self.lean(edit, c.at, spot.at, c.last.as_ref()),
             (Tool::Line, Some(c @ Chain { last: Some(h), .. }), _) => match tangent_arc(c.at, h, spot.at) {
                 Some(_) => tangent_lean(c.at, h, spot.at),
@@ -952,6 +954,19 @@ mod tests {
     fn rectangle() -> Json {
         json!({"points": {"a": [0, 0], "b": [20, 0], "c": [20, 10], "d": [0, 10]},
                "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}}})
+    }
+
+    /// Inferring off (F7): a line goes where it is clicked and takes no constraint.
+    #[test]
+    fn inferring_off_constrains_nothing() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.modes.infer = false;
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false).unwrap();
+        let p = click_at(&mut e, [10.0, 0.3], false).unwrap();
+        let y = p["points"]["p2"][1].as_f64().unwrap();
+        assert!((y - 0.3).abs() < 1e-9, "not levelled: {p}");
+        assert!(p.get("add_constraints").is_none(), "{p}");
     }
 
     /// Lines leaning horizontal and vertical take those constraints; a tangent arc continues.

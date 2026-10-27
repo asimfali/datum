@@ -44,6 +44,27 @@ pub enum Pick {
     Pattern(String),
 }
 
+/// What a sketch shows and does while drawn, turned on and off by keys (D167); kept from one
+/// sketch to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Modes {
+    /// Element names.
+    pub names: bool,
+    /// The badges of geometric constraints.
+    pub badges: bool,
+    /// The dimensions' labels (the dimension tool shows them anyway).
+    pub dimensions: bool,
+    /// A line drawn takes the constraint it leans to: horizontal, vertical, parallel,
+    /// perpendicular.
+    pub infer: bool,
+}
+
+impl Default for Modes {
+    fn default() -> Self {
+        Self { names: true, badges: true, dimensions: true, infer: true }
+    }
+}
+
 pub struct SketchEdit {
     pub feature: String,
     pub context: Context,
@@ -62,10 +83,7 @@ pub struct SketchEdit {
     pub drag: Option<Drag>,
     /// The selection frame being dragged.
     pub frame: Option<SelectFrame>,
-    /// Show element names.
-    pub names: bool,
-    /// Show the badges of geometric constraints.
-    pub constraints: bool,
+    pub modes: Modes,
     /// The drawing tool and what it has drawn so far.
     pub draft: Draft,
     /// The field by the cursor (a value typed while drawing, a dimension's value), and a new
@@ -356,8 +374,7 @@ impl SketchEdit {
             selected: Vec::new(),
             drag: None,
             frame: None,
-            names: true,
-            constraints: true,
+            modes: Modes::default(),
             draft: Draft::default(),
             field: None,
             conflict: None,
@@ -878,6 +895,9 @@ impl SketchEdit {
     /// down until it does not: two dimensions between the same points both read.
     pub fn laid_out(&self, height: f64, size: impl Fn(&str) -> (f64, f64)) -> Vec<Laid> {
         let mut placed: Vec<Laid> = Vec::new();
+        if !self.modes.dimensions && self.draft.tool != crate::draw::Tool::Dimension {
+            return placed;
+        }
         for l in self.labels() {
             let (w, h) = size(&l.text);
             let w = if l.sign.is_some() { w + SIGN } else { w };
@@ -1025,7 +1045,7 @@ impl SketchEdit {
             }
             out.push(Badge { pick: Pick::Pattern(c.name.clone()), glyph: Glyph::Pattern, at });
         }
-        if !self.constraints {
+        if !self.modes.badges {
             return out;
         }
         let mut taken: BTreeMap<String, f64> = BTreeMap::new();
@@ -1170,7 +1190,7 @@ impl SketchEdit {
                 painter.add(egui::Shape::line(pts, stroke));
             }
             // A name beside the middle of its curve, off to its left: the middle is a dimension's.
-            if self.names
+            if self.modes.names
                 && let (Some(m), Some(v)) = (Self::middle(p, n), Self::curve_points(p, n))
             {
                 // Beside a line; outside an arc's middle, or a circle at the upper right.
@@ -1227,7 +1247,7 @@ impl SketchEdit {
             let r = if marked(&pick) { 4.5 } else { 3.0 };
             let at = screen([v.x, v.y]);
             painter.rect_filled(egui::Rect::from_center_size(at, egui::vec2(2.0 * r, 2.0 * r)), 0.0, c);
-            if self.names && self.drawn().contains_key(n) {
+            if self.modes.names && self.drawn().contains_key(n) {
                 painter.text(at + egui::vec2(5.0, 5.0), egui::Align2::LEFT_TOP, n, egui::FontId::proportional(11.0), NAME);
             }
         }
@@ -1237,7 +1257,7 @@ impl SketchEdit {
             painter.rect_filled(r, 2.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 220));
             painter.rect_stroke(r, 2.0, egui::Stroke::new(1.0, c), egui::StrokeKind::Inside);
             paint_glyph(painter, r.center(), b.glyph, c);
-            if let (Pick::Group(g) | Pick::Pattern(g), true) = (&b.pick, self.names) {
+            if let (Pick::Group(g) | Pick::Pattern(g), true) = (&b.pick, self.modes.names) {
                 painter.text(r.right_center() + egui::vec2(3.0, 0.0), egui::Align2::LEFT_CENTER, g, egui::FontId::proportional(11.0), c);
             }
         }

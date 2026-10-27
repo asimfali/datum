@@ -10,7 +10,7 @@ use datum_math::Vec2;
 use datum_sketch::{Along, Around, Pattern, Sketch};
 use rayon::prelude::*;
 
-use crate::sketch::{Found, Placed, loops};
+use crate::sketch::{Found, Placed, closed_loops, loops};
 
 /// A pattern of a sketch, placed: the curves it copies and each copy, by its place on the grid
 /// (along a path or around a point, `(i, 0)`) and where it goes; what the sketch's status reports
@@ -143,7 +143,7 @@ pub(crate) fn place_patterns(sketch: &Sketch, s: &Placed) -> Result<Vec<Copies>,
                             .map_err(|e| bad(format!("its region: {e}")))?;
                         let [ring] = &ring[..] else { return Err(bad(format!("`{fill}` must bound one region"))) };
                         let others =
-                            loops(TopoId::derive("sketch.others").finish(), s, &|n| !copied.contains(&n.to_string()) && !region.contains(n), false)?;
+                            closed_loops(TopoId::derive("sketch.others").finish(), s, &|n| !copied.contains(&n.to_string()) && !region.contains(n));
                         let clearance =
                             p.clearance.value().filter(|c| c.is_finite() && *c >= 0.0).ok_or_else(|| bad("`clearance` must be 0 or more".into()))?;
                         let at = fill_region(&base, &ring.ring, &others, step, clearance).map_err(bad)?;
@@ -273,63 +273,43 @@ impl Piece {
 impl Path {
     fn new(s: &Placed, curves: &[String]) -> Result<Path, String> {
         let pt = |n: &str| s.solved.points.get(n).copied().ok_or_else(|| format!("no point `{n}`"));
-        // Each curve as (start, end, piece forward, piece back).
-        let mut ends: Vec<(&str, &str, Piece, Piece)> = Vec::new();
-        for n in curves {
-            if let Some(l) = s.lines.get(n) {
-                let (a, b) = (pt(&l.from)?, pt(&l.to)?);
-                ends.push((&l.from, &l.to, Piece::Line { a, b }, Piece::Line { a: b, b: a }));
-            } else if let Some(arc) = s.arcs.get(n) {
-                let (c, a, b) = (pt(&arc.center)?, pt(&arc.from)?, pt(&arc.to)?);
-                let sweep = datum_brep::ProfileArc { center: c, ccw: true }.turn(a, b);
-                let (r, from, to) = (libm::hypot(a.x - c.x, a.y - c.y), libm::atan2(a.y - c.y, a.x - c.x), libm::atan2(b.y - c.y, b.x - c.x));
-                ends.push((&arc.from, &arc.to, Piece::Arc { c, r, from, sweep }, Piece::Arc { c, r, from: to, sweep: -sweep }));
-            } else if s.circles.contains_key(n) {
-                return Err(format!("the path takes lines and arcs; round a circle, copy `around` its centre: `{n}`"));
-            }
+        if let Some(n) = curves.iter().find(|n| s.circles.contains_key(*n)) {
+            return Err(format!("the path takes lines and arcs; round a circle, copy `around` its centre: `{n}`"));
         }
-        let Some(&(start, end, first, _)) = ends.first() else { return Err("the path has no line or arc".into()) };
-        let mut used = vec![false; ends.len()];
-        used[0] = true;
-        let mut pieces = std::collections::VecDeque::from([first]);
-        // On from the end, then back from the start.
-        let mut take = |at: &str, forward: bool, pieces: &mut std::collections::VecDeque<Piece>| -> Result<Option<String>, String> {
-            let next: Vec<usize> = (0..ends.len()).filter(|&k| !used[k] && (ends[k].0 == at || ends[k].1 == at)).collect();
-            match next[..] {
-                [] => Ok(None),
-                [k] => {
-                    used[k] = true;
-                    let (a, b, f, r) = ends[k];
-                    // Forward, a piece starting here runs on as it is; back, one ending here does.
-                    let (piece, other) = if (a == at) == forward { (f, if forward { b } else { a }) } else { (r, if forward { a } else { b }) };
-                    if forward {
-                        pieces.push_back(piece)
-                    } else {
-                        pieces.push_front(piece)
-                    }
-                    Ok(Some(other.to_string()))
-                }
-                _ => Err(format!("the path branches at `{at}`")),
-            }
+        let found = datum_sketch::contours(&s.lines, &s.arcs, &|n, _| curves.iter().any(|c| c == n));
+        if let Some(p) = found.branches.first() {
+            return Err(format!("the path branches at `{p}`"));
+        }
+        let (chain, closed) = match (&found.paths[..], &found.loops[..]) {
+            ([], []) => return Err("the path has no line or arc".into()),
+            ([path], []) => (path, false),
+            ([], [ring]) => (ring, true),
+            _ => return Err("the path's lines and arcs are not one chain".into()),
         };
-        let mut at = end.to_string();
-        while at != start {
-            match take(&at, true, &mut pieces)? {
-                Some(next) => at = next,
-                None => break,
-            }
+        // The way the first curve named runs, from it if the path closes.
+        let first = curves.iter().find_map(|n| chain.iter().find(|st| st.curve == n)).unwrap_or(&chain[0]);
+        let mut chain = if first.forward { chain.clone() } else { datum_sketch::reversed(chain) };
+        if closed && let Some(k) = chain.iter().position(|st| st.curve == first.curve) {
+            chain.rotate_left(k);
         }
-        let closed = at == start && pieces.len() > 1 || (pieces.len() == 1 && start == end);
-        if !closed {
-            let mut at = start.to_string();
-            while let Some(next) = take(&at, false, &mut pieces)? {
-                at = next;
-            }
+        let mut pieces = Vec::with_capacity(chain.len());
+        for st in &chain {
+            let (a, b) = (pt(st.from)?, pt(st.to)?);
+            pieces.push(match s.arcs.get(st.curve) {
+                None => Piece::Line { a, b },
+                Some(arc) => {
+                    let c = pt(&arc.center)?;
+                    let (p0, p1) = if st.forward { (a, b) } else { (b, a) };
+                    let sweep = datum_brep::ProfileArc { center: c, ccw: true }.turn(p0, p1);
+                    Piece::Arc {
+                        c,
+                        r: libm::hypot(p0.x - c.x, p0.y - c.y),
+                        from: libm::atan2(a.y - c.y, a.x - c.x),
+                        sweep: if st.forward { sweep } else { -sweep },
+                    }
+                }
+            });
         }
-        if used.iter().any(|u| !u) {
-            return Err("the path's lines and arcs are not one chain".into());
-        }
-        let pieces: Vec<Piece> = pieces.into();
         let mut starts = Vec::with_capacity(pieces.len() + 1);
         let mut l = 0.0;
         for p in &pieces {
@@ -576,7 +556,7 @@ pub(crate) fn aside(patterns: &[Copies]) -> BTreeSet<&String> {
 fn keep_apart(s: &Placed, patterns: &[Copies]) -> Result<(), BrepError> {
     let id = TopoId::derive("sketch.check").finish();
     let aside = aside(patterns);
-    let own = loops(id, s, &|n| !aside.contains(&n.to_string()), false)?;
+    let own = closed_loops(id, s, &|n| !aside.contains(&n.to_string()));
     let mut all: Vec<(Option<usize>, ProfileLoop)> = own.into_iter().map(|l| (None, l.ring)).collect();
     for (k, p) in patterns.iter().enumerate() {
         let base = loops(id, s, &|n| p.cell.contains(n), false)?;
