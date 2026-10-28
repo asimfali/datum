@@ -165,7 +165,14 @@ pub const ACTIONS: [Action; 35] = [
         None,
         Anywhere,
     ),
-    action(Act::ResetLayout, "view.reset_layout", "Reset layout", "The panes and the side bar back as a first run has them", None, Anywhere),
+    action(
+        Act::ResetLayout,
+        "view.reset_layout",
+        "Reset layout",
+        "The panes, the side bar and the window back as a first run has them",
+        None,
+        Anywhere,
+    ),
     action(
         Act::Group,
         "sketch.group",
