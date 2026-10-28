@@ -1664,7 +1664,7 @@ impl Viewer {
             self.busy = true;
         }
         for (name, text) in send {
-            let _ = self.requests.send(Request::SetParameter(name, typed(&text)));
+            let _ = self.requests.send(Request::SetParameter(name, value_of(&text)));
             self.busy = true;
         }
         if let Some(r) = revert {
@@ -1731,7 +1731,7 @@ impl Viewer {
                             let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text("offset")).on_hover_text(FORMULAS);
                             // Applied when the field is left changed, as a parameter's value is.
                             if r.lost_focus() && *text != definition(&f["offset"]) {
-                                edit = Some((bare.to_string(), json!({"offset": typed(text)})));
+                                edit = Some((bare.to_string(), json!({"offset": value_of(text)})));
                             }
                         });
                     }
@@ -2077,7 +2077,7 @@ impl Viewer {
             self.plane_draft = None;
         } else if add {
             let mut fields = from.clone();
-            fields["offset"] = typed(offset);
+            fields["offset"] = value_of(offset);
             fields["op"] = json!("plane");
             let taken: Vec<String> = self.work_planes().into_iter().map(|(n, _)| n).collect();
             let features: Vec<&str> = self
@@ -2240,7 +2240,8 @@ impl Viewer {
                     if !form.picking || !form.cell.is_empty() || form.of.is_some() {
                         *error = form.preview(sk).err().or_else(|| sk.placed.as_ref().err().cloned());
                     }
-                    if let Some(e) = error {
+                    // Not while a number is being typed: `0` on its way to `0.5` is no mistake yet.
+                    if let Some(e) = error.as_ref().filter(|_| !ui.ctx().text_edit_focused()) {
                         ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e.as_str());
                     }
                     let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
@@ -2924,14 +2925,6 @@ const FORMULAS: &str = "A parameter is a number or a formula of other parameters
                         Operators + - * / and parentheses, pi, sqrt abs min max sin cos tan (degrees). A sketch dimension \
                         or a feature's number (a depth, an angle) takes a parameter's name or a formula too: type it in the field";
 
-/// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
-/// expression as is.
-/// A value as typed: a plain number stays a number, anything else is an expression.
-fn typed(text: &str) -> Json {
-    let text = text.trim();
-    text.parse::<f64>().map_or_else(|_| json!(text), |v| json!(v))
-}
-
 /// The offsets of `inspect`'s work planes as their rows show them, by feature.
 fn offsets(inspect: &Json) -> BTreeMap<String, String> {
     inspect["features"]
@@ -2943,6 +2936,8 @@ fn offsets(inspect: &Json) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
+/// expression as is.
 fn definition(v: &Json) -> String {
     match (v.as_str(), v.as_f64()) {
         (Some(e), _) => e.to_string(),
@@ -3766,6 +3761,81 @@ mod tests {
         let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern's menu") };
         assert_eq!((form.name.as_str(), form.fields["n"].as_str(), form.fields["angle"].as_str()), ("pattern1", "2", "90"));
         assert_eq!(form.of.as_deref(), Some("right_hole"));
+    }
+
+    /// A step typed as 0 on its way to 0.5: no error says so while the field is being typed in; it
+    /// does once the field is left.
+    #[test]
+    fn a_pattern_field_is_not_blamed_while_typed_in() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.selected = vec![Pick::Curve("right_hole".into())];
+        let mut form = crate::pattern::PatternForm::new(sk, crate::pattern::Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
+        form.picking = true;
+        form.fields.insert("n1", "3".into());
+        v.menu = Some(Menu::Pattern { at: egui::pos2(20.0, 20.0), form, error: None });
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                v.sketch_input(ui, rect, &r, None);
+                v.sketch_menu(ui.ctx());
+            },
+            v,
+        );
+        h.run();
+        h.get_all_by_value("18").next().unwrap().click();
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.event(egui::Event::Text("0".into()));
+        h.run();
+        let Some(Menu::Pattern { error, .. }) = &h.state().menu else { panic!("the pattern menu") };
+        assert!(error.as_deref().is_some_and(|e| e.contains("degenerate")), "the pattern is degenerate, as it was");
+        assert!(h.query_by_label_contains("degenerate").is_none(), "but not said while the field is typed in");
+        h.get_by_label("Pattern on a grid").click();
+        h.run();
+        assert!(h.query_by_label_contains("degenerate").is_some(), "said once the field is left");
+    }
+
+    /// 0,5 with a comma is 0.5; a step that does not place leaves the sketch on the screen.
+    #[test]
+    fn a_pattern_preview_that_fails_keeps_the_picture() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.selected = vec![Pick::Curve("right_hole".into())];
+        let mut form = crate::pattern::PatternForm::new(sk, crate::pattern::Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
+        form.take_cell(sk);
+        form.fields.insert("n1", "3".into());
+        form.fields.insert("s1", "18".into());
+        form.fields.insert("n2", "1".into());
+        form.fields.insert("s2", "18".into());
+        form.fields.insert("s1", "10".into());
+        form.fields.insert("s2", "10".into());
+        assert_eq!(form.preview(sk), Ok(()));
+        let placed = sk.json.clone();
+        for broken in ["0", "max(1,", "(1,5", "2"] {
+            form.fields.insert("s1", broken.into());
+            assert!(form.preview(sk).is_err(), "{broken}");
+            assert!(sk.placed.is_ok() && sk.json == placed, "`{broken}` keeps the sketch as it was");
+        }
+        form.fields.insert("s1", "10,5".into());
+        assert_eq!(form.patch().unwrap().unwrap()["patterns"]["pattern1"]["step"][0][0], json!(10.5), "a comma is a decimal point");
     }
 
     /// A opens the pattern menu at once, as a held right click does; G groups the selection.
