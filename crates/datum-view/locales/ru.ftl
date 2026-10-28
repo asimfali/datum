@@ -78,3 +78,15 @@ act-sketch-names = Имена
 act-sketch-names-about = Имена точек, кривых, групп и массивов
 act-sketch-dimensions = Размеры
 act-sketch-dimensions-about = Значения размеров; скрытые — на плотном эскизе читается легче (инструмент размера их показывает)
+
+container-part = Деталь: её части, параметры, операции и редактируемый эскиз
+section-parts = ДЕТАЛИ
+section-parameters = ПАРАМЕТРЫ
+section-features = ОПЕРАЦИИ
+section-sketch = ЭСКИЗ
+pane-flat = Развёртка
+pane-library = Библиотека
+opening = Открывается…
+no-model = Модель не открыта.
+search = Поиск
+library-hint = Двойной щелчок — поставить · перетащите на эскиз

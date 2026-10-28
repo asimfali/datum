@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::I18n;
+
 /// A set of sections, by its icon: the environments, as in Inventor (a part; drawings and
 /// assemblies come with their content).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,9 +18,9 @@ pub enum Container {
 impl Container {
     pub const ALL: [Container; 1] = [Container::Part];
 
-    pub fn title(self) -> &'static str {
+    pub fn title(self, i18n: &I18n) -> &str {
         match self {
-            Container::Part => "Part: its parts, parameters, features and the sketch being edited",
+            Container::Part => i18n.t("container-part", "Part: its parts, parameters, features and the sketch being edited"),
         }
     }
 
@@ -39,12 +41,12 @@ pub enum Section {
 }
 
 impl Section {
-    pub fn title(self) -> &'static str {
+    pub fn title(self, i18n: &I18n) -> &str {
         match self {
-            Section::Parts => "PARTS",
-            Section::Parameters => "PARAMETERS",
-            Section::Features => "FEATURES",
-            Section::Sketch => "SKETCH",
+            Section::Parts => i18n.t("section-parts", "PARTS"),
+            Section::Parameters => i18n.t("section-parameters", "PARAMETERS"),
+            Section::Features => i18n.t("section-features", "FEATURES"),
+            Section::Sketch => i18n.t("section-sketch", "SKETCH"),
         }
     }
 }
@@ -101,9 +103,9 @@ impl SideBar {
 }
 
 /// A section's title row: a fold arrow and the title, the hint on hover; clicked, true.
-pub fn header(ui: &mut egui::Ui, s: Section, open: bool, hint: &str) -> bool {
+pub fn header(ui: &mut egui::Ui, title: &str, open: bool, hint: &str) -> bool {
     let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), HEADER), egui::Sense::click());
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, s.title()));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::CollapsingHeader, true, title));
     let visuals = ui.visuals();
     let fill = if r.hovered() { visuals.widgets.hovered.weak_bg_fill } else { visuals.faint_bg_color };
     let colour = visuals.strong_text_color();
@@ -117,7 +119,7 @@ pub fn header(ui: &mut egui::Ui, s: Section, open: bool, hint: &str) -> bool {
         vec![c + egui::vec2(-2.0, -4.0), c + egui::vec2(3.0, 0.0), c + egui::vec2(-2.0, 4.0)]
     };
     painter.add(egui::Shape::convex_polygon(arrow, colour, egui::Stroke::NONE));
-    painter.text(egui::pos2(rect.left() + 22.0, rect.center().y), egui::Align2::LEFT_CENTER, s.title(), egui::FontId::proportional(11.5), colour);
+    painter.text(egui::pos2(rect.left() + 22.0, rect.center().y), egui::Align2::LEFT_CENTER, title, egui::FontId::proportional(11.5), colour);
     let r = if hint.is_empty() { r } else { r.on_hover_text(hint) };
     r.clicked()
 }
@@ -139,6 +141,16 @@ pub fn icon(painter: &egui::Painter, c: egui::Pos2, container: Container, colour
 
 #[cfg(test)]
 mod tests {
+    /// Every section has a title in Russian, and English where there is no catalog.
+    #[test]
+    fn sections_are_titled_in_the_language() {
+        let (ru, en) = (I18n::of("ru"), I18n::default());
+        for s in Container::Part.sections() {
+            assert_ne!(s.title(&ru), s.title(&en), "{s:?}");
+        }
+        assert_eq!((Section::Parts.title(&en), Section::Parts.title(&ru)), ("PARTS", "ДЕТАЛИ"));
+    }
+
     use super::*;
 
     #[test]
