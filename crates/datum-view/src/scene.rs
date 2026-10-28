@@ -12,6 +12,8 @@ use datum_graph::Value;
 use datum_math::{Vec2, Vec3};
 use rayon::prelude::*;
 
+use crate::sketch::SketchEdit;
+
 /// Cosine of the smallest angle between face normals at an edge drawn as a line (20°).
 const SHARP: f64 = 0.939_692_620_785_908_4;
 
@@ -113,32 +115,29 @@ impl Scene {
                         None => o + x * q.x + y * q.y,
                         Some(d) => d.point(q, d.radius),
                     };
-                    let pts = &p.solved.points;
-                    // On a cylinder face a line bends with the face: 64 chords a turn.
-                    for l in p.lines.values() {
-                        let (Some(&a), Some(&b)) = (pts.get(&l.from), pts.get(&l.to)) else { continue };
-                        let n = p.developed.as_ref().map_or(1, |d| ((b.x - a.x).abs() / d.dev.neutral / TAU * 64.0).ceil().max(1.0) as usize);
-                        let at = |k: usize| {
-                            let t = k as f64 / n as f64;
-                            place(Vec2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
-                        };
-                        s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
+                    // Each chord of a curve; on a cylinder face it bends with the face: 64 chords a turn.
+                    let mut chords = |pts: Vec<[f64; 2]>| {
+                        for w in pts.windows(2) {
+                            let (a, b) = (w[0], w[1]);
+                            let n = p.developed.as_ref().map_or(1, |d| ((b[0] - a[0]).abs() / d.dev.neutral / TAU * 64.0).ceil().max(1.0) as usize);
+                            let at = |k: usize| {
+                                let t = k as f64 / n as f64;
+                                place(Vec2::new(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+                            };
+                            s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
+                        }
+                    };
+                    let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys());
+                    for pts in curves.filter_map(|n| SketchEdit::curve_points(p, n)) {
+                        chords(pts);
                     }
-                    // Arcs and circles as chords.
-                    let arcs = p.arcs.values().filter_map(|a| {
-                        let (c, f, t) = (*pts.get(&a.center)?, *pts.get(&a.from)?, *pts.get(&a.to)?);
-                        let start = libm::atan2(f.y - c.y, f.x - c.x);
-                        let sweep = (libm::atan2(t.y - c.y, t.x - c.x) - start).rem_euclid(TAU);
-                        Some((c, libm::hypot(f.x - c.x, f.y - c.y), start, if sweep == 0.0 { TAU } else { sweep }))
-                    });
-                    let circles = p.circles.values().filter_map(|k| Some((*pts.get(&k.center)?, 0.5 * k.diameter.value()?, 0.0, TAU)));
-                    for (c, r, start, sweep) in arcs.chain(circles) {
-                        let n = (sweep / TAU * 64.0).ceil().max(1.0) as usize;
-                        let at = |k: usize| {
-                            let (sn, cs) = libm::sincos(start + sweep * k as f64 / n as f64);
-                            place(Vec2::new(c.x + r * cs, c.y + r * sn))
-                        };
-                        s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
+                    // The copies of patterns, as the profiles they make (the cell itself is drawn above).
+                    for c in &p.patterns {
+                        for (k, at) in &c.at {
+                            if !(c.source && *k == [0, 0]) {
+                                SketchEdit::copy_outline(p, c, at).into_iter().for_each(&mut chords);
+                            }
+                        }
                     }
                 }
             }

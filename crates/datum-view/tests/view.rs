@@ -15,6 +15,21 @@ fn scene(model: &str) -> Scene {
     Scene::new(&e.final_values(&g), &mut Default::default())
 }
 
+/// #119: a pattern's copies are drawn with their sketch outside it too, as the profiles they make.
+#[test]
+fn pattern_copies_are_drawn_with_the_sketch() {
+    let model = r#"{"format": "datum/1", "features": [{"name": "s", "op": "sketch", "sketch": {
+        "points": {"o": [0, 0]}, "circles": {"hole": {"center": "o", "diameter": 4}},
+        "patterns": {"row": {"of": "hole", "count": [3, 1], "step": [[10, 0], [0, 10]]}}}}]}"#;
+    let g = datum_model::parse(model).unwrap();
+    let e = Evaluator::default().evaluate(&g);
+    let s = Scene::new(&e.final_values(&g), &mut Default::default());
+    // The circle and its two copies, 64 chords each; the last copy's centre at x = 20.
+    assert_eq!(s.sketch_lines.len(), 3 * 64);
+    let right = s.sketch_lines.iter().flatten().map(|p| p.x).fold(f64::NEG_INFINITY, f64::max);
+    assert!((right - 22.0).abs() < 1e-9, "{right}");
+}
+
 /// Clip coordinates of `p` (relative to the anchor) under the column-major matrix `m`.
 fn project(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     let c = |r: usize| m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r];

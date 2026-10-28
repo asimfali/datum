@@ -756,7 +756,7 @@ impl SketchEdit {
     }
 
     /// The outline of copy `k` of pattern `c`: its cell's curves moved there.
-    fn copy_outline(p: &Placed, c: &datum_ops::Copies, place: &datum_ops::Place) -> Vec<Vec<[f64; 2]>> {
+    pub(crate) fn copy_outline(p: &Placed, c: &datum_ops::Copies, place: &datum_ops::Place) -> Vec<Vec<[f64; 2]>> {
         c.cell
             .iter()
             .filter_map(|n| Self::curve_points(p, n))
