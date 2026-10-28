@@ -53,6 +53,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
                 viewer.dock = crate::dock::from_text(&layout);
             }
             viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
+            // What the menu chose last wins over the settings file's.
+            viewer.set_language(&kept(LANGUAGE));
             // The project left open opens again, if it is still one (D142).
             if let Some(p) = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p)) {
                 viewer.set_project(Some(p));
@@ -68,6 +70,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
 const MAXIMIZED: &str = "datum_maximized";
 /// Where the panes are (D161).
 const LAYOUT: &str = "datum_layout";
+/// The language the menu chose (D174).
+const LANGUAGE: &str = "datum_language";
 /// The side bar's side, set and sections (D162).
 const SIDE_BAR: &str = "datum_side_bar";
 
@@ -409,6 +413,11 @@ struct Viewer {
     /// The keys in force, the settings file they come from, and what in it could not be
     /// applied, shown until dismissed.
     keys: Keys,
+    /// The language in force: a code, or `system`; `i18n` is what it says. Kept between runs only
+    /// once the menu chose it (`language_chosen`): until then the settings file's word stands.
+    language: String,
+    language_chosen: bool,
+    i18n: crate::i18n::I18n,
     settings: Option<PathBuf>,
     settings_problems: Vec<String>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
@@ -433,7 +442,7 @@ impl Viewer {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let settings = crate::settings::path();
-        let (keys, settings_problems) = crate::settings::load(settings.as_deref());
+        let crate::settings::Settings { keys, language, problems: settings_problems } = crate::settings::load(settings.as_deref());
         for p in &settings_problems {
             crate::log::write(&format!("settings: {p}"));
         }
@@ -488,6 +497,9 @@ impl Viewer {
             recent_projects: Vec::new(),
             titled: String::new(),
             keys,
+            i18n: crate::i18n::I18n::chosen(language.as_deref()),
+            language: language.unwrap_or_else(|| "system".into()),
+            language_chosen: false,
             settings,
             settings_problems,
             shown: 0,
@@ -1120,7 +1132,7 @@ impl Viewer {
             use crate::icons::{Icon, button};
             for (act, icon) in [(Act::Undo, Icon::Undo), (Act::Redo, Icon::Redo)] {
                 let a = act.action();
-                if button(ui, icon, a.label, &self.keys.hint(ui.ctx(), act), self.available(a)).clicked() {
+                if button(ui, icon, self.i18n.label(act), &self.keys.hint(ui.ctx(), &self.i18n, act), self.available(a)).clicked() {
                     self.run(ui, act);
                 }
             }
@@ -1450,7 +1462,7 @@ impl Viewer {
             // selection.
             ui.horizontal_wrapped(|ui| {
                 for act in TOOLS {
-                    let (a, tool) = (act.action(), tool(act));
+                    let tool = tool(act);
                     let icon = match act {
                         Act::Line => crate::icons::Icon::Line,
                         Act::Arc => crate::icons::Icon::Arc,
@@ -1459,16 +1471,17 @@ impl Viewer {
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
-                    let hint = self.keys.hint(ui.ctx(), act);
-                    let r =
-                        crate::icons::tile(ui, a.label, &hint, sk.draft.tool == tool, true, |p, c, colour| crate::icons::paint(p, c, icon, colour));
+                    let hint = self.keys.hint(ui.ctx(), &self.i18n, act);
+                    let r = crate::icons::tile(ui, self.i18n.label(act), &hint, sk.draft.tool == tool, true, |p, c, colour| {
+                        crate::icons::paint(p, c, icon, colour)
+                    });
                     if r.clicked() {
                         sk.draft.press(tool);
                     }
                 }
-                let hint = self.keys.hint(ui.ctx(), Act::Pattern);
+                let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Pattern);
                 let open = self.menu.is_some();
-                if crate::icons::tile(ui, Act::Pattern.action().label, &hint, open, true, |p, c, colour| {
+                if crate::icons::tile(ui, self.i18n.label(Act::Pattern), &hint, open, true, |p, c, colour| {
                     crate::sketch::paint_glyph(p, c, crate::sketch::Glyph::Pattern, colour)
                 })
                 .clicked()
@@ -1478,13 +1491,13 @@ impl Viewer {
             });
             // A mode as a checkbox, its key beside it (D167).
             let check = |ui: &mut egui::Ui, on: &mut bool, act: Act| {
-                ui.checkbox(on, self.keys.labelled(ui.ctx(), act)).on_hover_text(self.keys.hint(ui.ctx(), act));
+                ui.checkbox(on, self.keys.labelled(ui.ctx(), &self.i18n, act)).on_hover_text(self.keys.hint(ui.ctx(), &self.i18n, act));
             };
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut sk.draft.construction, "Construction");
                 check(ui, &mut sk.modes.infer, Act::Infer);
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
-                    ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), Act::Tangent));
+                    ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), &self.i18n, Act::Tangent));
                 }
                 // The dimension tool's sub-mode, by the mouse too.
                 if sk.draft.tool == Tool::Dimension {
@@ -1530,7 +1543,7 @@ impl Viewer {
                         }
                     }
                     None => {
-                        let hint = self.keys.hint(ui.ctx(), Act::Group);
+                        let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Group);
                         if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("Group")).on_hover_text(hint).clicked() {
                             sent.extend(sk.group_selection().map(|p| Request::Command("edit_sketch", p)));
                         }
@@ -3122,22 +3135,31 @@ impl Viewer {
     /// `act` as a button: in the menu with its key beside it, on the toolbar with it in the hint.
     fn item(&mut self, ui: &mut egui::Ui, act: Act, menu: bool) {
         let a = act.action();
-        let mut button = egui::Button::new(a.label).selected(self.checked(act));
+        let mut button = egui::Button::new(self.i18n.label(act)).selected(self.checked(act));
         if menu && let Some(k) = self.keys.get(act) {
             button = button.shortcut_text(ui.ctx().format_shortcut(k));
         }
-        if ui.add_enabled(self.available(a), button).on_hover_text(self.keys.hint(ui.ctx(), act)).clicked() {
+        if ui.add_enabled(self.available(a), button).on_hover_text(self.keys.hint(ui.ctx(), &self.i18n, act)).clicked() {
             self.run(ui, act);
+        }
+    }
+
+    /// The language chosen is `code`, if it is one the window has; at once, no restart.
+    fn set_language(&mut self, code: &str) {
+        if crate::i18n::known(code) {
+            self.language = code.to_string();
+            self.language_chosen = true;
+            self.i18n = crate::i18n::I18n::chosen(Some(code));
         }
     }
 
     /// The menu (D131): every action, grouped as in other programs.
     fn menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("File", |ui| {
+        ui.menu_button(self.i18n.t("menu-file", "File").to_string(), |ui| {
             self.item(ui, Act::New, true);
             self.item(ui, Act::Open, true);
             ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
-                ui.menu_button("Open recent", |ui| {
+                ui.menu_button(self.i18n.t("menu-open-recent", "Open recent").to_string(), |ui| {
                     if let Some(p) = recent_menu(ui, &self.recent, std::path::Path::exists) {
                         self.open_recent(p);
                     }
@@ -3147,7 +3169,7 @@ impl Viewer {
             self.item(ui, Act::NewProject, true);
             self.item(ui, Act::OpenProject, true);
             ui.add_enabled_ui(!self.recent_projects.is_empty(), |ui| {
-                ui.menu_button("Recent projects", |ui| {
+                ui.menu_button(self.i18n.t("menu-recent-projects", "Recent projects").to_string(), |ui| {
                     if let Some(p) = recent_menu(ui, &self.recent_projects, is_project) {
                         self.open_recent_project(p);
                     }
@@ -3163,11 +3185,11 @@ impl Viewer {
             ui.separator();
             self.item(ui, Act::Exit, true);
         });
-        ui.menu_button("Edit", |ui| {
+        ui.menu_button(self.i18n.t("menu-edit", "Edit").to_string(), |ui| {
             self.item(ui, Act::Undo, true);
             self.item(ui, Act::Redo, true);
         });
-        ui.menu_button("View", |ui| {
+        ui.menu_button(self.i18n.t("menu-view", "View").to_string(), |ui| {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
             self.item(ui, Act::SmoothEdges, true);
@@ -3176,8 +3198,16 @@ impl Viewer {
                 self.item(ui, act, true);
             }
             self.item(ui, Act::ResetLayout, true);
+            ui.menu_button(self.i18n.t("menu-language", "Language").to_string(), |ui| {
+                for (code, name) in crate::i18n::languages() {
+                    let name = name.unwrap_or_else(|| self.i18n.t("language-system", "System"));
+                    if ui.radio(self.language == code, name).clicked() {
+                        self.set_language(code);
+                    }
+                }
+            });
         });
-        ui.menu_button("Sketch", |ui| {
+        ui.menu_button(self.i18n.t("menu-sketch", "Sketch").to_string(), |ui| {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::WorkPlane, true);
             ui.separator();
@@ -3189,11 +3219,11 @@ impl Viewer {
                 self.item(ui, act, true);
             }
         });
-        ui.menu_button("Help", |ui| {
+        ui.menu_button(self.i18n.t("menu-help", "Help").to_string(), |ui| {
             ui.hyperlink_to(format!("Datum {}", env!("CARGO_PKG_VERSION")), env!("CARGO_PKG_REPOSITORY"));
-            ui.weak(format!("Problems are logged to {}", crate::log::path().display()));
+            ui.weak(self.i18n.f("help-log", "Problems are logged to { $path }", &[("path", &crate::log::path().display().to_string())]));
             if let Some(p) = &self.settings {
-                ui.weak(format!("Keys and other settings: {}", p.display()));
+                ui.weak(self.i18n.f("help-settings", "Keys and other settings: { $path }", &[("path", &p.display().to_string())]));
             }
         });
     }
@@ -3402,6 +3432,9 @@ impl eframe::App for Viewer {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
+        if self.language_chosen {
+            storage.set_string(LANGUAGE, self.language.clone());
+        }
         storage.set_string(RECENT, json!(self.recent).to_string());
         storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
         storage.set_string(PROJECT, json!(self.project).to_string());
@@ -3482,6 +3515,9 @@ mod tests {
             recent_projects: Vec::new(),
             titled: String::new(),
             keys: Keys::default(),
+            language: "en".into(),
+            language_chosen: false,
+            i18n: crate::i18n::I18n::default(),
             settings: None,
             settings_problems: Vec::new(),
             shown: 0,
@@ -3782,6 +3818,48 @@ mod tests {
         let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern's menu") };
         assert_eq!((form.name.as_str(), form.fields["n"].as_str(), form.fields["angle"].as_str()), ("pattern1", "2", "90"));
         assert_eq!(form.of.as_deref(), Some("right_hole"));
+    }
+
+    /// The menu in Russian: its titles and an action's label come from the catalog.
+    #[test]
+    fn the_menu_speaks_the_language_chosen() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        v.i18n = crate::i18n::I18n::of("ru");
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 200.0]).build_ui(|ui| {
+            egui::Panel::top("menu").show(ui, |ui| egui::MenuBar::new().ui(ui, |ui| v.menu(ui)));
+        });
+        h.run();
+        for title in ["Файл", "Правка", "Вид", "Эскиз", "Справка"] {
+            assert!(h.query_by_label(title).is_some(), "{title}");
+        }
+        assert!(h.query_by_label("File").is_none());
+        h.get_by_label("Файл").click();
+        h.run();
+        assert!(h.query_all_by_label_contains("Сохранить как").count() == 1, "an action's label");
+    }
+
+    /// The language menu changes the menu at once, and what it chose is what is kept.
+    #[test]
+    fn the_language_menu_switches_at_once() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        assert!(!v.language_chosen, "nothing chosen yet: the settings file's word stands");
+        v.set_language("ru");
+        assert!(v.language_chosen && v.i18n.t("menu-file", "File") == "Файл");
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 300.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                egui::Panel::top("menu").show(ui, |ui| egui::MenuBar::new().ui(ui, |ui| v.menu(ui)));
+            },
+            v,
+        );
+        h.run();
+        h.get_by_label("Вид").click();
+        h.run();
+        h.get_by_label_contains("Язык").click();
+        h.run();
+        h.get_by_label("English").click();
+        h.run();
+        assert_eq!(h.state().language, "en");
+        assert!(h.query_by_label("File").is_some() && h.query_by_label("Файл").is_none());
     }
 
     /// A step typed as 0 on its way to 0.5: no error says so while the field is being typed in; it

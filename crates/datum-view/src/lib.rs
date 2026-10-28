@@ -11,6 +11,7 @@ mod dims;
 mod dock;
 mod draw;
 mod flat;
+mod i18n;
 mod icons;
 pub mod log;
 mod origin;

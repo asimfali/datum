@@ -24,6 +24,7 @@ eframe = { workspace = true, features = ["default_fonts", "persistence", "wgpu",
 egui-wgpu = { workspace = true }
 egui_dock = { workspace = true }
 serde = { workspace = true }
+sys-locale = { workspace = true }
 pollster = { workspace = true }
 png = { workspace = true }
 rfd = { workspace = true }

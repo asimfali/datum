@@ -261,8 +261,8 @@ impl Keys {
     }
 
     /// The label with its key, as a checkbox shows it: "Tangent arc (T)".
-    pub fn labelled(&self, ctx: &egui::Context, act: Act) -> String {
-        let label = act.action().label;
+    pub fn labelled(&self, ctx: &egui::Context, i18n: &crate::i18n::I18n, act: Act) -> String {
+        let label = i18n.label(act);
         match self.get(act) {
             Some(k) => format!("{label} ({})", ctx.format_shortcut(k)),
             None => label.to_string(),
@@ -270,9 +270,9 @@ impl Keys {
     }
 
     /// The hover text: what it does, its key and its name.
-    pub fn hint(&self, ctx: &egui::Context, act: Act) -> String {
+    pub fn hint(&self, ctx: &egui::Context, i18n: &crate::i18n::I18n, act: Act) -> String {
         let a = act.action();
-        let about = if a.about.is_empty() { a.label } else { a.about };
+        let about = if a.about.is_empty() { i18n.label(act) } else { i18n.about(act) };
         match self.get(act) {
             Some(k) => format!("{about} ({})\n{}", ctx.format_shortcut(k), a.name),
             None => format!("{about}\n{}", a.name),

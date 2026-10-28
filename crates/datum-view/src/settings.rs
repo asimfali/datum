@@ -12,7 +12,8 @@
 //! ```
 //!
 //! An action gets the key given instead of its own, and the key leaves an action it would run
-//! with too; `null` takes the key from whoever has it. What cannot be applied is said, never
+//! with too; `null` takes the key from whoever has it. Section `language` (`system`, `en`, `ru`)
+//! is the interface language; not given, the system's. What cannot be applied is said, never
 //! dropped silently.
 
 use std::path::PathBuf;
@@ -39,31 +40,50 @@ pub fn path() -> Option<PathBuf> {
     folder.map(|d| d.join(FILE))
 }
 
-/// The keys in force and what could not be applied, read from `path` (none there: the defaults).
-pub fn load(path: Option<&std::path::Path>) -> (Keys, Vec<String>) {
-    let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return (Keys::default(), Vec::new()) };
+/// What the file says, and what could not be applied.
+#[derive(Default)]
+pub struct Settings {
+    pub keys: Keys,
+    /// The interface language's code, or `system`; none: the file says nothing.
+    pub language: Option<String>,
+    pub problems: Vec<String>,
+}
+
+/// The settings read from `path` (none there: the defaults).
+pub fn load(path: Option<&std::path::Path>) -> Settings {
+    let Some(text) = path.and_then(|p| std::fs::read_to_string(p).ok()) else { return Settings::default() };
     parse(&text)
 }
 
-fn parse(text: &str) -> (Keys, Vec<String>) {
-    let mut keys = Keys::default();
-    let settings: Json = match serde_json::from_str(text) {
+fn parse(text: &str) -> Settings {
+    let mut settings = Settings::default();
+    let json: Json = match serde_json::from_str(text) {
         Ok(s) => s,
-        Err(e) => return (keys, vec![format!("not read, the defaults stand: {e}")]),
+        Err(e) => return Settings { problems: vec![format!("not read, the defaults stand: {e}")], ..settings },
     };
-    let Some(sections) = settings.as_object() else { return (keys, vec!["not read, the defaults stand: not a JSON object".into()]) };
-    let mut problems: Vec<String> = sections.keys().filter(|k| *k != "keys").map(|k| format!("`{k}`: no such section")).collect();
+    let Some(sections) = json.as_object() else {
+        return Settings { problems: vec!["not read, the defaults stand: not a JSON object".into()], ..settings };
+    };
+    settings.problems = sections.keys().filter(|k| !["keys", "language"].contains(&k.as_str())).map(|k| format!("`{k}`: no such section")).collect();
+    match sections.get("language").map(|l| l.as_str().filter(|c| crate::i18n::known(c))) {
+        None => {}
+        Some(Some(code)) => settings.language = Some(code.to_string()),
+        Some(None) => settings.problems.push(format!("`language`: one of {} (the system's language stands)", crate::i18n::codes())),
+    }
     let entries = match sections.get("keys") {
         None => &Vec::new(),
         Some(Json::Array(e)) => e,
-        Some(_) => return (keys, vec!["`keys`: not a list, the default keys stand".into()]),
+        Some(_) => {
+            settings.problems.push("`keys`: not a list, the default keys stand".into());
+            return settings;
+        }
     };
     for (k, entry) in entries.iter().enumerate() {
-        if let Err(why) = apply(&mut keys, entry, &mut problems) {
-            problems.push(format!("keys[{k}]: {why} (in {entry})"));
+        if let Err(why) = apply(&mut settings.keys, entry, &mut settings.problems) {
+            settings.problems.push(format!("keys[{k}]: {why} (in {entry})"));
         }
     }
-    (keys, problems)
+    settings
 }
 
 /// Applies one entry of `keys`; an action losing its key to it is said in `problems`.
@@ -135,7 +155,7 @@ mod tests {
     #[test]
     fn differences_from_the_defaults() {
         let text = json!({"keys": [{"key": "Ctrl+Shift+Z", "action": "edit.redo"}, {"key": "Ctrl+W", "action": null}]}).to_string();
-        let (keys, problems) = parse(&text);
+        let Settings { keys, problems, .. } = parse(&text);
         assert!(problems.is_empty(), "{problems:?}");
         assert_eq!(keys.get(Act::Redo), Some(&KeyboardShortcut::new(Modifiers::COMMAND | Modifiers::SHIFT, Key::Z)));
         assert_eq!(keys.get(Act::Close), None);
@@ -158,7 +178,7 @@ mod tests {
             "layuot": {}
         })
         .to_string();
-        let (keys, problems) = parse(&text);
+        let Settings { keys, problems, .. } = parse(&text);
         assert_eq!(keys.get(Act::Line), Some(&ctrl(Key::S)));
         assert_eq!(keys.get(Act::Save), None);
         assert_eq!(keys.get(Act::Exit), Some(&ctrl(Key::Q)));
@@ -176,9 +196,19 @@ mod tests {
         assert_eq!(problems.len(), 6, "{said}");
     }
 
+    /// The language is a code the window has, or `system`; anything else is said.
+    #[test]
+    fn the_language_is_one_the_window_has() {
+        assert_eq!(parse(&json!({"language": "ru"}).to_string()).language.as_deref(), Some("ru"));
+        assert_eq!(parse("{}").language, None);
+        let Settings { language, problems, .. } = parse(&json!({"language": "klingon"}).to_string());
+        assert_eq!(language, None);
+        assert!(problems.join("\n").contains("`language`: one of system, en, ru"), "{problems:?}");
+    }
+
     #[test]
     fn a_broken_file_keeps_the_defaults() {
-        let (keys, problems) = parse("{\"keys\": [");
+        let Settings { keys, problems, .. } = parse("{\"keys\": [");
         assert_eq!(keys.get(Act::Save), Some(&ctrl(Key::S)));
         assert!(problems[0].starts_with("not read"), "{problems:?}");
     }
