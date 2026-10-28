@@ -64,8 +64,16 @@ fn lay(sk: &mut SketchEdit, before: &Json, patch: Option<&Map<String, Json>>) ->
         datum_model::patch_sketch(fields, p)?;
     }
     if sk.json != json {
-        sk.json = json;
+        let good = std::mem::replace(&mut sk.json, json);
         sk.solve();
+        // A preview that does not place (a step of 0, a formula half typed) keeps the picture it
+        // had, and says why.
+        if let Err(why) = &sk.placed {
+            let why = why.clone();
+            sk.json = good;
+            sk.solve();
+            return Err(why);
+        }
     }
     Ok(())
 }
@@ -139,7 +147,7 @@ fn num(text: &str) -> Option<Json> {
     if t.is_empty() {
         return None;
     }
-    Some(t.parse::<f64>().map_or_else(|_| json!(t), |v| json!(v)))
+    Some(crate::dims::value_of(t))
 }
 
 /// `text` times `k` (a direction's component, or −1): a number, or the formula so multiplied.
@@ -148,12 +156,12 @@ fn times(text: &str, k: f64) -> Option<Json> {
     if t.is_empty() {
         return None;
     }
-    Some(match t.parse::<f64>() {
-        Ok(v) => json!(v * k),
-        Err(_) if k == 0.0 => json!(0.0),
-        Err(_) if k == 1.0 => json!(t),
-        Err(_) if k == -1.0 => json!(format!("-({t})")),
-        Err(_) => json!(format!("({t}) * {k}")),
+    Some(match crate::dims::value_of(t).as_f64() {
+        Some(v) => json!(v * k),
+        None if k == 0.0 => json!(0.0),
+        None if k == 1.0 => json!(t),
+        None if k == -1.0 => json!(format!("-({t})")),
+        None => json!(format!("({t}) * {k}")),
     })
 }
 
