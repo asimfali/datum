@@ -7,6 +7,8 @@
 use egui_dock::DockState;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::I18n;
+
 /// A pane of the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Pane {
@@ -19,11 +21,11 @@ pub enum Pane {
 }
 
 impl Pane {
-    pub fn title(self) -> &'static str {
+    pub fn title(self, i18n: &I18n) -> &str {
         match self {
             Pane::Model => "3D",
-            Pane::Flat => "Flat pattern",
-            Pane::Library => "Library",
+            Pane::Flat => i18n.t("pane-flat", "Flat pattern"),
+            Pane::Library => i18n.t("pane-library", "Library"),
         }
     }
 }

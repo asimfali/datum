@@ -745,9 +745,9 @@ impl Viewer {
     /// from; a double click places one (asking its parameters, then its sockets), a drag onto
     /// the sketch puts its first anchor where it is let go.
     fn palette(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Library");
-        ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text("Search"));
-        ui.weak("Double-click to place · drag onto the sketch");
+        ui.heading(self.i18n.t("pane-library", "Library"));
+        ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text(self.i18n.t("search", "Search")));
+        ui.weak(self.i18n.t("library-hint", "Double-click to place · drag onto the sketch"));
         let current =
             self.sketch.as_ref().filter(|s| s.draft.tool == Tool::Template).and_then(|s| s.draft.template.as_ref()).map(|t| t["name"].clone());
         let filter = self.library_filter.trim().to_lowercase();
@@ -1341,7 +1341,7 @@ impl Viewer {
                 Section::Parameters => FORMULAS,
                 _ => "",
             };
-            if header(ui, *s, self.side_bar.is_open(*s), hint) {
+            if header(ui, s.title(&self.i18n), self.side_bar.is_open(*s), hint) {
                 self.side_bar.toggle(*s);
             }
             if !self.side_bar.is_open(*s) {
@@ -1382,7 +1382,7 @@ impl Viewer {
                 let x = if self.side_bar.right { rect.left() + 1.0 } else { rect.right() - 1.0 };
                 ui.painter().vline(x, rect.y_range(), egui::Stroke::new(2.0, visuals.strong_text_color()));
             }
-            if r.on_hover_text(c.title()).clicked() {
+            if r.on_hover_text(c.title(&self.i18n)).clicked() {
                 self.side_bar.click(c);
             }
         }
@@ -1418,7 +1418,7 @@ impl Viewer {
     /// and what the last commands changed beyond what they asked.
     fn status(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
-            ui.label(if self.busy { "Opening…" } else { "No model open." });
+            ui.label(if self.busy { self.i18n.t("opening", "Opening…") } else { self.i18n.t("no-model", "No model open.") });
             return;
         };
         ui.weak(format!("Datum {} · problems are logged to {}", env!("CARGO_PKG_VERSION"), crate::log::path().display()));
@@ -3278,7 +3278,7 @@ impl egui_dock::TabViewer for Tabs<'_> {
     }
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
-        tab.title().into()
+        tab.title(&self.v.i18n).into()
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
@@ -3319,7 +3319,7 @@ impl Viewer {
     /// lines as guides.
     fn flat_pane(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
-            ui.weak("No model open.");
+            ui.weak(self.i18n.t("no-model", "No model open."));
             return;
         };
         if m.flats.is_empty() {
