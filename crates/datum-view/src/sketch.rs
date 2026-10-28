@@ -57,11 +57,13 @@ pub struct Modes {
     /// A line drawn takes the constraint it leans to: horizontal, vertical, parallel,
     /// perpendicular.
     pub infer: bool,
+    /// A library element with presets is placed by one of them, picked from a list (D176).
+    pub presets: bool,
 }
 
 impl Default for Modes {
     fn default() -> Self {
-        Self { names: true, badges: true, dimensions: true, infer: true }
+        Self { names: true, badges: true, dimensions: true, infer: true, presets: false }
     }
 }
 

@@ -327,6 +327,7 @@ const COMMANDS: &[Command] = &[
                       by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
                       sketch's axes, or with `fit: align` turn it toward the second. `names`: element names that take the given \
                       free names (a section put in place of one removed keeps its name, and so what referred to it downstream). \
+                      With a `preset`, the placed geometry is a sketch group named after it. \
                       `links`: the element's sockets (constraints reaching out of it, `perpendicular l5 ?`, as `library` lists \
                       them) completed by a point, line or curve of the sketch. The reply has the edit's result, `names`: each \
                       element name with the name it got, and `open_links`: the sockets left open.",
@@ -379,7 +380,15 @@ const COMMANDS: &[Command] = &[
             let feature = serde_json::to_value(&s.graph.nodes()[s.find(name)? as usize].op).map_err(|e| e.to_string())?;
             let mut patch = SketchPatch::new(&feature);
             let construction = p.get("construction").and_then(Value::as_bool).unwrap_or(false);
-            let renamed = library::place(&mut patch, &element, &values, &at, &names, construction, &lookup)?;
+            let renamed = library::place(
+                &mut patch,
+                &element,
+                &values,
+                &at,
+                &names,
+                library::Put { construction, group: p.get("preset").and_then(Value::as_str) },
+                &lookup,
+            )?;
             // Sockets completed now, by the names given; the rest stay open, listed in the reply.
             let mut open = Vec::new();
             let given = p.get("links").and_then(Value::as_object);

@@ -426,6 +426,16 @@ pub fn shape(
     Ok(sketch)
 }
 
+/// How [`place`] puts an element in.
+#[derive(Clone, Copy, Default)]
+pub struct Put<'a> {
+    /// Its lines, arcs and circles are construction geometry.
+    pub construction: bool,
+    /// The name of the sketch group its points and curves make, a preset's (D176): the name
+    /// itself, or the first free `name (2)`, `name (3)`, …
+    pub group: Option<&'a str>,
+}
+
 /// Places element `e` into `patch` with parameter values `values` (see [`answers`]) by `at`, a
 /// spot for its first anchor or for each. Its points start where [`shape`] puts them (where
 /// the element alone does not solve, where the spots put them). Its elements take the names
@@ -437,7 +447,7 @@ pub fn place(
     values: &BTreeMap<String, Value>,
     at: &[Anchor],
     names: &BTreeMap<String, String>,
-    construction: bool,
+    put: Put,
     lookup: &impl Fn(&str) -> Result<f64, ExprError>,
 ) -> Result<BTreeMap<String, String>, String> {
     let anchor_names = anchors(e);
@@ -483,7 +493,7 @@ pub fn place(
     }
     for key in ["lines", "arcs", "circles"] {
         for (n, v) in sketch[key].as_object().into_iter().flatten() {
-            patch.add(key, &renamed[n], rename(v), construction);
+            patch.add(key, &renamed[n], rename(v), put.construction);
         }
     }
     for (n, v) in sketch["measures"].as_object().into_iter().flatten() {
@@ -491,6 +501,15 @@ pub fn place(
     }
     for c in sketch["constraints"].as_array().into_iter().flatten() {
         patch.constrain(rename(c));
+    }
+    if let Some(group) = put.group {
+        let members: Vec<&String> = ["points", "lines", "arcs", "circles"]
+            .iter()
+            .flat_map(|k| sketch[*k].as_object().into_iter().flat_map(|m| m.keys()))
+            .map(|n| &renamed[n])
+            .collect();
+        let group = patch.claim_free(group);
+        patch.set("groups", &group, json!(members));
     }
     Ok(renamed)
 }
@@ -757,7 +776,7 @@ pub fn parametrize(e: &mut Value, label: &str, name: &str) -> Result<(), String>
 }
 
 /// Parameter `from` of element `e` renamed `to`, in the dimensions that use it and in its place
-/// among the questions.
+/// among the questions and the presets.
 pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), String> {
     if !valid_name(to) {
         return Err(format!("`{to}` is not a name: a letter or _, then letters, digits or _"));
@@ -770,6 +789,11 @@ pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), Strin
     }
     let p = e["parameters"].as_array_mut().and_then(|l| l.iter_mut().find(|p| p["name"] == from)).ok_or_else(|| format!("no parameter `{from}`"))?;
     p["name"] = json!(to);
+    for values in e["presets"].as_object_mut().into_iter().flat_map(|m| m.values_mut()).filter_map(Value::as_object_mut) {
+        if let Some(v) = values.remove(from) {
+            values.insert(to.to_string(), v);
+        }
+    }
     for (_, v) in dimension_slots(e) {
         if let Some(t) = v.as_str() {
             *v = json!(substitute(t, &|n: &str| (n == from).then(|| to.to_string())).map_err(|err| err.to_string())?.replace(&format!("({to})"), to));
@@ -779,7 +803,7 @@ pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), Strin
 }
 
 /// Parameter `name` of element `e` taken back: the dimensions it alone gives get its value as a
-/// number. An error if another dimension uses it within an expression.
+/// number, and the presets drop it. An error if another dimension uses it within an expression.
 pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
     let list = e["parameters"].as_array().ok_or("the element has no parameters")?;
     let value = list.iter().find(|p| p["name"] == name).map(|p| p["value"].clone()).ok_or_else(|| format!("no parameter `{name}`"))?;
@@ -793,12 +817,16 @@ pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
             *v = value.clone();
         }
     }
+    for values in e["presets"].as_object_mut().into_iter().flat_map(|m| m.values_mut()).filter_map(Value::as_object_mut) {
+        values.remove(name);
+    }
     let none_left = e["parameters"].as_array_mut().is_some_and(|list| {
         list.retain(|p| p["name"] != name);
         list.is_empty()
     });
     if none_left && let Some(o) = e.as_object_mut() {
         o.remove("parameters");
+        o.remove("presets");
     }
     Ok(())
 }
@@ -848,6 +876,24 @@ mod tests {
     }
 
     #[test]
+    fn presets_follow_their_parameters() {
+        let mut e = element();
+        e["presets"]["short"]["half"] = json!(3);
+        rename_parameter(&mut e, "len", "length").unwrap();
+        assert_eq!(e["presets"]["short"], json!({"length": 10, "half": 3}));
+        assert!(check("sketch", &e).is_ok());
+        let mut e = json!({"name": "Bar", "anchors": ["a"], "parameters": [{"name": "d1", "value": 4}, {"name": "d2", "value": 5}],
+                           "presets": {"A": {"d1": 1, "d2": 2}},
+                           "sketch": {"points": {"a": [0, 0], "b": [1, 0]}, "lines": {"l": {"from": "a", "to": "b"}},
+                                      "constraints": [{"type": "length", "line": "l", "value": "d1"}, {"type": "distance", "points": ["a", "b"], "value": "d2"}]}});
+        unparametrize(&mut e, "d1").unwrap();
+        assert_eq!(e["presets"]["A"], json!({"d2": 2}));
+        assert!(check("sketch", &e).is_ok());
+        unparametrize(&mut e, "d2").unwrap();
+        assert!(e.get("presets").is_none() && e.get("parameters").is_none());
+    }
+
+    #[test]
     fn answers_go_into_the_dimensions() {
         let e = element();
         let v = answers(&e, None, &Map::new(), &[], &none).unwrap();
@@ -875,7 +921,7 @@ mod tests {
         let v = answers(&e, None, &Map::new(), &[], &none).unwrap();
         let at = [Anchor { at: [0.0, 10.0], point: Some("p2".into()) }, Anchor { at: [6.0, 18.0], point: Some("p4".into()) }];
         let names = BTreeMap::from([("bar".to_string(), "l3".to_string())]);
-        let renamed = place(&mut patch, &e, &v, &at, &names, false, &none).unwrap();
+        let renamed = place(&mut patch, &e, &v, &at, &names, Put::default(), &none).unwrap();
         assert_eq!(renamed["bar"], "l3", "named as asked");
         assert_eq!((renamed["a"].as_str(), renamed["b"].as_str(), renamed["m"].as_str()), ("p5", "p6", "p7"));
         let p = Value::Object(patch.done().unwrap());
@@ -886,7 +932,27 @@ mod tests {
         assert!(c.contains(&json!({"type": "coincident", "points": ["p5", "p2"]})), "{p}");
         assert!(c.contains(&json!({"type": "length", "line": "l3", "value": 40.0})), "{p}");
         let mut again = SketchPatch::new(&json!({"sketch": {"points": {"p1": [0, 0]}, "lines": {"l3": {"from": "p1", "to": "p1"}}}}));
-        assert!(place(&mut again, &e, &v, &at, &names, false, &none).unwrap_err().contains("`l3` is taken"));
+        assert!(place(&mut again, &e, &v, &at, &names, Put::default(), &none).unwrap_err().contains("`l3` is taken"));
+    }
+
+    /// A preset placed makes a group of its name, of the points and curves placed; the name
+    /// taken, the next free one; no preset, no group.
+    #[test]
+    fn a_preset_placed_is_a_group() {
+        let e = element();
+        let v = answers(&e, Some("short"), &Map::new(), &[], &none).unwrap();
+        let at = [Anchor { at: [0.0, 0.0], point: None }];
+        let mut patch = SketchPatch::new(&json!({"sketch": {"points": {"Плита": [0, 0]}}}));
+        let renamed = place(&mut patch, &e, &v, &at, &BTreeMap::new(), Put { group: Some("Плита"), ..Put::default() }, &none).unwrap();
+        place(&mut patch, &e, &v, &at, &BTreeMap::new(), Put { group: Some("Плита"), ..Put::default() }, &none).unwrap();
+        let p = Value::Object(patch.done().unwrap());
+        assert_eq!(p["groups"]["Плита (2)"].as_array().unwrap().len(), 4, "{p}");
+        assert_eq!(p["groups"]["Плита (3)"].as_array().unwrap().len(), 4, "{p}");
+        assert!(p["groups"].get("Плита").is_none(), "taken by a point: {p}");
+        assert!(p["groups"]["Плита (2)"].as_array().unwrap().contains(&json!(renamed["bar"])), "{p}");
+        let mut plain = SketchPatch::new(&json!({"sketch": {}}));
+        place(&mut plain, &e, &v, &at, &BTreeMap::new(), Put::default(), &none).unwrap();
+        assert!(plain.done().unwrap().get("groups").is_none());
     }
 
     /// A dimension given as a number made a parameter and taken back.

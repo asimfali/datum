@@ -116,7 +116,7 @@ pub fn place(
             },
         })
         .collect();
-    let renamed = library::place(patch, t, &values, &anchors, &BTreeMap::new(), construction, &lookup).ok()?;
+    let renamed = library::place(patch, t, &values, &anchors, &BTreeMap::new(), library::Put { construction, group: preset }, &lookup).ok()?;
     for (a, s) in library::anchors(t).iter().zip(spots) {
         patch.tie(&renamed[a], s);
     }
@@ -305,6 +305,23 @@ mod tests {
         assert!(e.draft.answers.contains_key("height"), "the values stay for the next one");
         let placed = e.placed.as_ref().unwrap();
         assert_eq!(placed.solved.dof, 2, "sized, free to move: {:?}", placed.solved.free);
+    }
+
+    /// By presets (F4, D176): one click puts the plate of the preset's size, a group of its name.
+    #[test]
+    fn by_presets_one_click() {
+        let mut e = editor(json!({"points": {}}));
+        e.modes.presets = true;
+        e.draft.choose(plate());
+        e.draft.preset = Some("Small".into());
+        assert!(e.draft.by_presets(&e.modes));
+        e.draft.cursor = Some(free([3.0, 4.0]));
+        let mut d = std::mem::take(&mut e.draft);
+        let patch = d.click(&e).expect("placed by the first click");
+        e.draft = d;
+        let p = e.apply(patch);
+        assert_eq!(lengths(&p), [json!(20.0), json!(10.0)], "{p}");
+        assert_eq!(p["groups"]["Small"].as_array().unwrap().len(), 8, "four corners, four sides: {p}");
     }
 
     /// Two clicks answer what is not typed: the width between them, the height as typed.
