@@ -3111,6 +3111,15 @@ impl Viewer {
             Act::ResetLayout => {
                 self.dock = crate::dock::default_layout();
                 self.side_bar = crate::sidebar::SideBar::default();
+                // What egui keeps apart from ours: the side bar's width, floating panes' places.
+                // The window as a first run has it: 1280 × 800 restored, then maximized.
+                ui.ctx().memory_mut(|m| {
+                    m.data.remove_by_type::<egui::containers::panel::PanelState>();
+                    m.reset_areas();
+                });
+                ui.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
+                ui.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 800.0)));
+                ui.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             }
         }
     }
@@ -3487,6 +3496,18 @@ mod tests {
             plane_draft: None,
         };
         (v, inbox)
+    }
+
+    /// Reset layout also forgets what egui keeps: a side bar dragged wide is not remembered.
+    #[test]
+    fn reset_layout_forgets_the_side_bar_width() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        let id = egui::Id::new("datum_side");
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui(|ui| v.run(ui, Act::ResetLayout));
+        let wide = egui::containers::panel::PanelState { outer_rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(700.0, 400.0)) };
+        h.ctx.data_mut(|d| d.insert_persisted(id, wide));
+        h.step();
+        assert!(egui::containers::panel::PanelState::load(&h.ctx, id).is_none());
     }
 
     /// The side panel of a real model: every parameter's definition shows whole in its field.
