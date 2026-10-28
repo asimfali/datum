@@ -42,6 +42,14 @@ impl SketchPatch {
         Ok(())
     }
 
+    /// `name` claimed, or `name (2)`, `name (3)`, … if it is taken: the first free.
+    pub fn claim_free(&mut self, name: &str) -> String {
+        let free =
+            std::iter::once(name.to_string()).chain((2..).map(|k| format!("{name} ({k})"))).find(|n| !self.taken.contains(n)).unwrap_or_default();
+        self.taken.push(free.clone());
+        free
+    }
+
     /// Entry `name` of map `key` (`points`, `lines`, …, `project`) of the patch.
     pub fn set(&mut self, key: &str, name: &str, value: Value) {
         self.params.entry(key).or_insert_with(|| json!({}))[name] = value;

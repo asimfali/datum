@@ -426,6 +426,16 @@ pub fn shape(
     Ok(sketch)
 }
 
+/// How [`place`] puts an element in.
+#[derive(Clone, Copy, Default)]
+pub struct Put<'a> {
+    /// Its lines, arcs and circles are construction geometry.
+    pub construction: bool,
+    /// The name of the sketch group its points and curves make, a preset's (D176): the name
+    /// itself, or the first free `name (2)`, `name (3)`, …
+    pub group: Option<&'a str>,
+}
+
 /// Places element `e` into `patch` with parameter values `values` (see [`answers`]) by `at`, a
 /// spot for its first anchor or for each. Its points start where [`shape`] puts them (where
 /// the element alone does not solve, where the spots put them). Its elements take the names
@@ -437,7 +447,7 @@ pub fn place(
     values: &BTreeMap<String, Value>,
     at: &[Anchor],
     names: &BTreeMap<String, String>,
-    construction: bool,
+    put: Put,
     lookup: &impl Fn(&str) -> Result<f64, ExprError>,
 ) -> Result<BTreeMap<String, String>, String> {
     let anchor_names = anchors(e);
@@ -483,7 +493,7 @@ pub fn place(
     }
     for key in ["lines", "arcs", "circles"] {
         for (n, v) in sketch[key].as_object().into_iter().flatten() {
-            patch.add(key, &renamed[n], rename(v), construction);
+            patch.add(key, &renamed[n], rename(v), put.construction);
         }
     }
     for (n, v) in sketch["measures"].as_object().into_iter().flatten() {
@@ -491,6 +501,15 @@ pub fn place(
     }
     for c in sketch["constraints"].as_array().into_iter().flatten() {
         patch.constrain(rename(c));
+    }
+    if let Some(group) = put.group {
+        let members: Vec<&String> = ["points", "lines", "arcs", "circles"]
+            .iter()
+            .flat_map(|k| sketch[*k].as_object().into_iter().flat_map(|m| m.keys()))
+            .map(|n| &renamed[n])
+            .collect();
+        let group = patch.claim_free(group);
+        patch.set("groups", &group, json!(members));
     }
     Ok(renamed)
 }
@@ -875,7 +894,7 @@ mod tests {
         let v = answers(&e, None, &Map::new(), &[], &none).unwrap();
         let at = [Anchor { at: [0.0, 10.0], point: Some("p2".into()) }, Anchor { at: [6.0, 18.0], point: Some("p4".into()) }];
         let names = BTreeMap::from([("bar".to_string(), "l3".to_string())]);
-        let renamed = place(&mut patch, &e, &v, &at, &names, false, &none).unwrap();
+        let renamed = place(&mut patch, &e, &v, &at, &names, Put::default(), &none).unwrap();
         assert_eq!(renamed["bar"], "l3", "named as asked");
         assert_eq!((renamed["a"].as_str(), renamed["b"].as_str(), renamed["m"].as_str()), ("p5", "p6", "p7"));
         let p = Value::Object(patch.done().unwrap());
@@ -886,7 +905,27 @@ mod tests {
         assert!(c.contains(&json!({"type": "coincident", "points": ["p5", "p2"]})), "{p}");
         assert!(c.contains(&json!({"type": "length", "line": "l3", "value": 40.0})), "{p}");
         let mut again = SketchPatch::new(&json!({"sketch": {"points": {"p1": [0, 0]}, "lines": {"l3": {"from": "p1", "to": "p1"}}}}));
-        assert!(place(&mut again, &e, &v, &at, &names, false, &none).unwrap_err().contains("`l3` is taken"));
+        assert!(place(&mut again, &e, &v, &at, &names, Put::default(), &none).unwrap_err().contains("`l3` is taken"));
+    }
+
+    /// A preset placed makes a group of its name, of the points and curves placed; the name
+    /// taken, the next free one; no preset, no group.
+    #[test]
+    fn a_preset_placed_is_a_group() {
+        let e = element();
+        let v = answers(&e, Some("short"), &Map::new(), &[], &none).unwrap();
+        let at = [Anchor { at: [0.0, 0.0], point: None }];
+        let mut patch = SketchPatch::new(&json!({"sketch": {"points": {"Плита": [0, 0]}}}));
+        let renamed = place(&mut patch, &e, &v, &at, &BTreeMap::new(), Put { group: Some("Плита"), ..Put::default() }, &none).unwrap();
+        place(&mut patch, &e, &v, &at, &BTreeMap::new(), Put { group: Some("Плита"), ..Put::default() }, &none).unwrap();
+        let p = Value::Object(patch.done().unwrap());
+        assert_eq!(p["groups"]["Плита (2)"].as_array().unwrap().len(), 4, "{p}");
+        assert_eq!(p["groups"]["Плита (3)"].as_array().unwrap().len(), 4, "{p}");
+        assert!(p["groups"].get("Плита").is_none(), "taken by a point: {p}");
+        assert!(p["groups"]["Плита (2)"].as_array().unwrap().contains(&json!(renamed["bar"])), "{p}");
+        let mut plain = SketchPatch::new(&json!({"sketch": {}}));
+        place(&mut plain, &e, &v, &at, &BTreeMap::new(), Put::default(), &none).unwrap();
+        assert!(plain.done().unwrap().get("groups").is_none());
     }
 
     /// A dimension given as a number made a parameter and taken back.

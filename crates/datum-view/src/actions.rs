@@ -40,6 +40,7 @@ pub enum Act {
     Group,
     Pattern,
     Infer,
+    Presets,
     Badges,
     Names,
     Dimensions,
@@ -86,7 +87,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 35] = [
+pub const ACTIONS: [Action; 36] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -198,6 +199,14 @@ pub const ACTIONS: [Action; 35] = [
         "Infer constraints",
         "A line drawn takes the constraint it leans to (horizontal, vertical, parallel, perpendicular); off: it goes where you click",
         plain(Key::F7),
+        Sketch,
+    ),
+    action(
+        Act::Presets,
+        "sketch.presets",
+        "By presets",
+        "A library element with presets is placed by one of them: ↑ ↓ pick it from the list by the cursor, a click puts it",
+        plain(Key::F4),
         Sketch,
     ),
     action(

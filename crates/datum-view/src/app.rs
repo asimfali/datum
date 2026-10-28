@@ -1541,6 +1541,7 @@ impl Viewer {
             ui.horizontal_wrapped(|ui| {
                 ui.checkbox(&mut sk.draft.construction, self.i18n.t("construction", "Construction"));
                 check(ui, &mut sk.modes.infer, Act::Infer);
+                check(ui, &mut sk.modes.presets, Act::Presets);
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                     ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), &self.i18n, Act::Tangent));
                 }
@@ -1633,7 +1634,7 @@ impl Viewer {
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
-                     parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · Enter puts it at the cursor · Esc or a right click ends"
+                     parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · F4: by presets, ↑ ↓ pick one, a click puts it · Enter puts it at the cursor · Esc or a right click ends"
                 }
                 _ => {
                     "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command"
@@ -2479,13 +2480,50 @@ impl Viewer {
                 sk.field = None;
             }
         }
+        // Placing a library element by presets (F4, D176): one of them is always chosen, ↑ ↓ go
+        // through the list by the cursor; nothing is asked.
+        let presets: Vec<String> = sk
+            .draft
+            .template
+            .as_ref()
+            .filter(|_| sk.draft.by_presets(&sk.modes))
+            .and_then(|t| t["presets"].as_object())
+            .map(|p| p.keys().cloned().collect())
+            .unwrap_or_default();
+        if !presets.is_empty() {
+            let at = sk.draft.preset.as_ref().and_then(|p| presets.iter().position(|n| n == p));
+            let (up, down) = ui.input_mut(|i| {
+                (i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+            });
+            let k = match at {
+                Some(k) if up => (k + presets.len() - 1) % presets.len(),
+                Some(k) if down => (k + 1) % presets.len(),
+                Some(k) => k,
+                None => 0,
+            };
+            sk.draft.preset = Some(presets[k].clone());
+            sk.draft.answers.clear();
+            if let Some(spot) = &sk.draft.cursor {
+                let (x, y) = sk.camera.offset(spot.at, h);
+                let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
+                egui::Area::new(egui::Id::new("datum_sketch_presets")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        for (i, name) in presets.iter().enumerate() {
+                            if ui.selectable_label(i == k, name).clicked() {
+                                sk.draft.preset = Some(name.clone());
+                            }
+                        }
+                    });
+                });
+            }
+        }
         // Placing a library element with parameters: the field by the cursor asks them, one by
         // one, Tab to the next; a preset fills them all (D98).
         let names = sk
             .draft
             .template
             .as_ref()
-            .filter(|_| sk.draft.tool == Tool::Template && sk.draft.linking.is_empty())
+            .filter(|_| sk.draft.tool == Tool::Template && sk.draft.linking.is_empty() && presets.is_empty())
             .and_then(|t| datum_model::library::parameter_names(t).ok())
             .unwrap_or_default();
         // Its sockets next, one by one: what the one asked takes, by the cursor (D116).
@@ -2723,7 +2761,7 @@ impl Viewer {
                 }
             }
             // Enter while placing an element: it goes where the cursor is; on a socket, skips it.
-            let skip = !draft.linking.is_empty() && !typing && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let skip = (!draft.linking.is_empty() || draft.by_presets(&sk.modes)) && !typing && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (field_done.0 || skip)
                 && draft.tool == Tool::Template
                 && let Some(patch) = draft.enter(sk)
@@ -3053,12 +3091,16 @@ fn definition(v: &Json) -> String {
 /// The sketch tools, as the side panel lists them.
 const TOOLS: [Act; 6] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Dimension];
 
+/// The sketch's modes, as the menu lists them (D167).
+const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
+
 /// The sketch's mode action `act` turns on and off (D167).
 fn mode(m: &mut crate::sketch::Modes, act: Act) -> &mut bool {
     match act {
         Act::Infer => &mut m.infer,
         Act::Badges => &mut m.badges,
         Act::Names => &mut m.names,
+        Act::Presets => &mut m.presets,
         _ => &mut m.dimensions,
     }
 }
@@ -3119,7 +3161,7 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
-            Act::Infer | Act::Badges | Act::Names | Act::Dimensions => {
+            Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
                 let mut m = self.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
                 *mode(&mut m, act)
             }
@@ -3176,7 +3218,7 @@ impl Viewer {
                     sk.draft.take_up(tool(act));
                 }
             }
-            Act::Infer | Act::Badges | Act::Names | Act::Dimensions => {
+            Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
                 if let Some(sk) = &mut self.sketch {
                     let on = mode(&mut sk.modes, act);
                     *on = !*on;
@@ -3306,7 +3348,7 @@ impl Viewer {
                 self.item(ui, act, true);
             }
             ui.separator();
-            for act in [Act::Infer, Act::Badges, Act::Names, Act::Dimensions] {
+            for act in MODES {
                 self.item(ui, act, true);
             }
         });

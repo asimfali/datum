@@ -238,6 +238,14 @@ impl Draft {
         self.asking = 0;
     }
 
+    /// Whether the element placed goes by its presets (F4, D176): it has some, the mode is on.
+    pub fn by_presets(&self, modes: &crate::sketch::Modes) -> bool {
+        modes.presets
+            && self.tool == Tool::Template
+            && self.linking.is_empty()
+            && self.template.as_ref().and_then(|t| t["presets"].as_object()).is_some_and(|p| !p.is_empty())
+    }
+
     /// Enter while placing an element: it goes where the cursor is, with the anchors clicked so
     /// far; the size its other anchors would give, its parameters give.
     pub fn enter(&mut self, edit: &SketchEdit) -> Option<Map<String, Json>> {
@@ -466,7 +474,8 @@ impl Draft {
             Tool::Select | Tool::Dimension | Tool::Constrain(_) => return None,
             Tool::Template if !self.linking.is_empty() => return self.link(edit, &spot),
             Tool::Template => {
-                if self.clicks.len() + 1 < datum_model::library::anchors(self.template.as_ref()?).len() {
+                // By a preset its size is given: the first anchor's click puts it.
+                if self.clicks.len() + 1 < datum_model::library::anchors(self.template.as_ref()?).len() && !self.by_presets(&edit.modes) {
                     self.clicks.push(spot);
                     return None;
                 }

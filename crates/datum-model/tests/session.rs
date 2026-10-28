@@ -237,6 +237,11 @@ fn an_element_between_two_points_of_a_chain() {
     assert!(c.contains(&json!({"type": "coincident", "points": [start, "p2"]})), "{sketch}");
     assert!(c.contains(&json!({"type": "distance", "points": [r["names"]["a"], r["names"]["b"]], "value": 15.0})), "{sketch}");
     assert!(sketch["points"].get("s").is_none(), "new names, not the element's");
+    assert!(sketch.get("groups").is_none_or(|g| g.as_object().unwrap().is_empty()), "no preset, no group: {sketch}");
+    let notch = json!({"name": "Notch", "parameters": [{"name": "width", "value": 15}], "presets": {"Deep": {"width": 20}}, "anchors": ["s"], "sketch": {"points": {"s": [0, 0], "t": [1, 0]}, "lines": {"in": {"from": "s", "to": "t"}}}});
+    let r = run(&mut s, "insert_element", json!({"name": "path", "element": notch, "preset": "Deep", "at": ["p2"]}));
+    let sketch = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"];
+    assert_eq!(sketch["groups"]["Deep"], json!([r["names"]["s"], r["names"]["t"], r["names"]["in"]]), "{sketch}");
     // Unknown elements and spots are refused, the model left as it was.
     assert!(s.execute("insert_element", &json!({"name": "path", "element": "Nothing", "at": ["p2"]})).unwrap_err().contains("no element"));
     assert!(s.execute("insert_element", &json!({"name": "path", "element": "Rectangle", "at": ["q"]})).unwrap_err().contains("no point `q`"));
