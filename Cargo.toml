@@ -36,6 +36,7 @@ egui_dock = { version = "0.21", features = ["serde"] }
 pollster = "0.4"
 png = "0.18"
 rfd = "0.17"
+sys-locale = "0.3"
 egui_kittest = "0.36"
 
 [workspace.lints.rust]
