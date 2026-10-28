@@ -147,11 +147,80 @@ struct Keep {
     naming: BTreeMap<String, String>,
     /// The sockets (by place in `links`) left out: not asked when placing.
     unlinked: std::collections::BTreeSet<usize>,
+    /// The cells of the presets table as typed, by preset and parameter (the name: parameter ""):
+    /// a number half typed ("1.") is not rewritten meanwhile.
+    typed: BTreeMap<(String, String), String>,
+    /// An element of the library being edited, not a selection of the sketch: its points cannot
+    /// be picked. The file it is read from, if it is not a built-in one.
+    of_library: bool,
+    file: Option<PathBuf>,
 }
 
 impl Keep {
     fn new(element: Json) -> Self {
-        Self { element, error: None, picking: None, naming: BTreeMap::new(), unlinked: std::collections::BTreeSet::new() }
+        Self {
+            element,
+            error: None,
+            picking: None,
+            naming: BTreeMap::new(),
+            unlinked: std::collections::BTreeSet::new(),
+            typed: BTreeMap::new(),
+            of_library: false,
+            file: None,
+        }
+    }
+
+    /// Library element `entry` to edit.
+    fn of(entry: &datum_model::library::Entry) -> Self {
+        Self { of_library: true, file: entry.file.clone(), ..Self::new(entry.element.clone()) }
+    }
+
+    /// A preset named "Preset", "Preset 2"… (the first free), all values the element's own.
+    fn add_preset(&mut self) {
+        let taken = |n: &str| self.element["presets"].get(n).is_some();
+        let name = (1..).map(|i| if i == 1 { "Preset".to_string() } else { format!("Preset {i}") }).find(|n| !taken(n)).unwrap_or_default();
+        self.element["presets"][name] = json!({});
+    }
+
+    /// Preset `from` renamed `to`, if that is a name and not another's.
+    fn rename_preset(&mut self, from: &str, to: &str) {
+        let to = to.trim();
+        if to == from {
+            return;
+        }
+        let Some(presets) = self.element["presets"].as_object_mut() else { return };
+        if to.is_empty() {
+            self.error = Some("a preset needs a name".into());
+        } else if presets.contains_key(to) {
+            self.error = Some(format!("there is a preset `{to}` already"));
+        } else if let Some(values) = presets.remove(from) {
+            presets.insert(to.to_string(), values);
+            self.typed.retain(|(p, _), _| p != from);
+            self.error = None;
+        }
+    }
+
+    /// Parameter `param` of preset `preset` as typed: empty is the element's own value.
+    fn set_preset_value(&mut self, preset: &str, param: &str, text: &str) {
+        if let Some(values) = self.element["presets"][preset].as_object_mut() {
+            if text.trim().is_empty() {
+                values.remove(param);
+            } else {
+                values.insert(param.to_string(), value_of(text));
+            }
+        }
+    }
+
+    fn remove_preset(&mut self, preset: &str) {
+        if let Some(presets) = self.element["presets"].as_object_mut() {
+            presets.remove(preset);
+            self.typed.retain(|(p, _), _| p != preset);
+        }
+        if self.element["presets"].as_object().is_some_and(|m| m.is_empty())
+            && let Some(o) = self.element.as_object_mut()
+        {
+            o.remove("presets");
+        }
     }
 
     /// Insertion point `k` (0: the first, 1: the second, if any) is point `p` of the piece, or
@@ -752,6 +821,7 @@ impl Viewer {
             self.sketch.as_ref().filter(|s| s.draft.tool == Tool::Template).and_then(|s| s.draft.template.as_ref()).map(|t| t["name"].clone());
         let filter = self.library_filter.trim().to_lowercase();
         let mut chosen = None;
+        let mut edit = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
             for item in &self.library {
                 let e = &item.entry.element;
@@ -786,6 +856,12 @@ impl Viewer {
                     visuals.weak_text_color(),
                 );
                 let r = if description.is_empty() { r } else { r.on_hover_text(description) };
+                r.context_menu(|ui| {
+                    if ui.button("Edit element…").clicked() {
+                        edit = Some(Keep::of(&item.entry));
+                        ui.close();
+                    }
+                });
                 if r.double_clicked() {
                     chosen = Some(e.clone());
                 }
@@ -806,6 +882,9 @@ impl Viewer {
         if let (Some(t), Some(sk)) = (chosen, &mut self.sketch) {
             sk.draft.choose(t);
             sk.field = None;
+        }
+        if edit.is_some() {
+            self.keeping = edit;
         }
     }
 
@@ -844,7 +923,11 @@ impl Viewer {
                     ui.strong(anchors.get(i).map_or("—", String::as_str));
                     ui.horizontal(|ui| {
                         let hint = "Click a point of the selection in the sketch";
-                        if ui.add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i))).on_hover_text(hint).clicked()
+                        if !k.of_library
+                            && ui
+                                .add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i)))
+                                .on_hover_text(hint)
+                                .clicked()
                         {
                             k.picking = if k.picking == Some(i) { None } else { Some(i) };
                         }
@@ -964,6 +1047,54 @@ impl Viewer {
                     list.swap(i - 1, i);
                 }
             }
+            // The presets: a row each, the parameters they give in the columns (D176).
+            let names = parameter_names(&k.element).unwrap_or_default();
+            if names.is_empty() {
+                ui.weak("Presets need parameters: tick dimensions above.");
+            } else {
+                ui.label("Presets — a value left empty is the element's own:");
+                let presets: Vec<String> = k.element["presets"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+                let (mut rename, mut remove) = (None, None);
+                egui::Grid::new("datum_keep_presets").num_columns(names.len() + 2).show(ui, |ui| {
+                    ui.label("");
+                    for n in &names {
+                        ui.strong(n);
+                    }
+                    ui.label("");
+                    ui.end_row();
+                    for preset in &presets {
+                        let text = k.typed.entry((preset.clone(), String::new())).or_insert_with(|| preset.clone());
+                        let r = ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
+                        if r.lost_focus() {
+                            rename = Some((preset.clone(), text.clone()));
+                        }
+                        for n in &names {
+                            let own = k.element["parameters"].as_array().and_then(|l| l.iter().find(|p| p["name"] == n.as_str()));
+                            let own = own.map(|p| crate::dims::text_of(&p["value"])).unwrap_or_default();
+                            let given = k.element["presets"][preset][n].clone();
+                            let text = k.typed.entry((preset.clone(), n.clone())).or_insert_with(|| crate::dims::text_of(&given));
+                            if ui.add(egui::TextEdit::singleline(text).desired_width(60.0).hint_text(own)).changed() {
+                                let text = text.clone();
+                                k.set_preset_value(preset, n, &text);
+                            }
+                        }
+                        if crate::icons::button(ui, crate::icons::Icon::Remove, "Remove preset", "Remove this preset", true).clicked() {
+                            remove = Some(preset.clone());
+                        }
+                        ui.end_row();
+                    }
+                });
+                if let Some((from, to)) = rename {
+                    k.rename_preset(&from, &to);
+                    k.typed.remove(&(from, String::new()));
+                }
+                if let Some(p) = remove {
+                    k.remove_preset(&p);
+                }
+                if ui.button("+ Preset").clicked() {
+                    k.add_preset();
+                }
+            }
             if let Some(e) = &k.error {
                 ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
             }
@@ -987,8 +1118,17 @@ impl Viewer {
                 }
             }
             let name = element["name"].as_str().unwrap_or_default().to_string();
-            let folder = kept_in(project.as_deref(), "library").map(|l| l.join("sketch"));
-            let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(datum_model::library::file_name(&name));
+            let folder = k
+                .file
+                .as_ref()
+                .and_then(|f| f.parent().map(PathBuf::from))
+                .or_else(|| kept_in(project.as_deref(), "library").map(|l| l.join("sketch")));
+            let file_name = k
+                .file
+                .as_ref()
+                .and_then(|f| f.file_name())
+                .map_or_else(|| datum_model::library::file_name(&name), |f| f.to_string_lossy().to_string());
+            let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(file_name);
             if let Some(f) = folder.filter(|f| std::fs::create_dir_all(f).is_ok()) {
                 dialog = dialog.set_directory(f);
             }
@@ -1988,7 +2128,7 @@ impl Viewer {
             sk.paint(&painter, rect);
             sk.draft.paint(sk, &painter, rect);
             sk.paint_frame(&painter, rect);
-            if let Some(k) = &self.keeping {
+            if let Some(k) = self.keeping.as_ref().filter(|k| !k.of_library) {
                 sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
             }
         }
@@ -4321,6 +4461,28 @@ mod tests {
         assert_eq!(e["parameters"], json!([{"name": "d1x", "value": 8.900914}]), "{e}");
         assert_eq!(e["sketch"]["constraints"][1]["value"], "d1x");
         assert!(datum_model::library::check("sketch", e).is_ok());
+    }
+
+    /// The presets table's edits: names, values (empty is the element's own), removal.
+    #[test]
+    fn presets_are_edited() {
+        let mut k = Keep::new(json!({"name": "Plate", "parameters": [{"name": "w", "value": 100}, {"name": "h", "value": 50}]}));
+        k.add_preset();
+        k.add_preset();
+        assert_eq!(k.element["presets"], json!({"Preset": {}, "Preset 2": {}}));
+        k.rename_preset("Preset", "Плита 200×200");
+        k.set_preset_value("Плита 200×200", "w", "200");
+        k.set_preset_value("Плита 200×200", "h", "w / 2");
+        assert_eq!(k.element["presets"]["Плита 200×200"], json!({"w": 200.0, "h": "w / 2"}));
+        k.set_preset_value("Плита 200×200", "h", " ");
+        assert_eq!(k.element["presets"]["Плита 200×200"], json!({"w": 200.0}));
+        k.rename_preset("Preset 2", "Плита 200×200");
+        assert!(k.error.is_some() && k.element["presets"].get("Preset 2").is_some(), "a taken name is refused");
+        k.rename_preset("Preset 2", " ");
+        assert!(k.element["presets"].get("Preset 2").is_some(), "so is an empty one");
+        k.remove_preset("Preset 2");
+        k.remove_preset("Плита 200×200");
+        assert!(k.element.get("presets").is_none());
     }
 
     /// The library palette: a double click on an element starts placing it, a drag onto the

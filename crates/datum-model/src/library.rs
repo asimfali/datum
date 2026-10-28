@@ -776,7 +776,7 @@ pub fn parametrize(e: &mut Value, label: &str, name: &str) -> Result<(), String>
 }
 
 /// Parameter `from` of element `e` renamed `to`, in the dimensions that use it and in its place
-/// among the questions.
+/// among the questions and the presets.
 pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), String> {
     if !valid_name(to) {
         return Err(format!("`{to}` is not a name: a letter or _, then letters, digits or _"));
@@ -789,6 +789,11 @@ pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), Strin
     }
     let p = e["parameters"].as_array_mut().and_then(|l| l.iter_mut().find(|p| p["name"] == from)).ok_or_else(|| format!("no parameter `{from}`"))?;
     p["name"] = json!(to);
+    for values in e["presets"].as_object_mut().into_iter().flat_map(|m| m.values_mut()).filter_map(Value::as_object_mut) {
+        if let Some(v) = values.remove(from) {
+            values.insert(to.to_string(), v);
+        }
+    }
     for (_, v) in dimension_slots(e) {
         if let Some(t) = v.as_str() {
             *v = json!(substitute(t, &|n: &str| (n == from).then(|| to.to_string())).map_err(|err| err.to_string())?.replace(&format!("({to})"), to));
@@ -798,7 +803,7 @@ pub fn rename_parameter(e: &mut Value, from: &str, to: &str) -> Result<(), Strin
 }
 
 /// Parameter `name` of element `e` taken back: the dimensions it alone gives get its value as a
-/// number. An error if another dimension uses it within an expression.
+/// number, and the presets drop it. An error if another dimension uses it within an expression.
 pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
     let list = e["parameters"].as_array().ok_or("the element has no parameters")?;
     let value = list.iter().find(|p| p["name"] == name).map(|p| p["value"].clone()).ok_or_else(|| format!("no parameter `{name}`"))?;
@@ -812,12 +817,16 @@ pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
             *v = value.clone();
         }
     }
+    for values in e["presets"].as_object_mut().into_iter().flat_map(|m| m.values_mut()).filter_map(Value::as_object_mut) {
+        values.remove(name);
+    }
     let none_left = e["parameters"].as_array_mut().is_some_and(|list| {
         list.retain(|p| p["name"] != name);
         list.is_empty()
     });
     if none_left && let Some(o) = e.as_object_mut() {
         o.remove("parameters");
+        o.remove("presets");
     }
     Ok(())
 }
@@ -864,6 +873,24 @@ mod tests {
         let mut bad = element();
         bad["presets"]["short"]["width"] = json!(3);
         assert!(check("sketch", &bad).unwrap_err().contains("no parameter `width`"));
+    }
+
+    #[test]
+    fn presets_follow_their_parameters() {
+        let mut e = element();
+        e["presets"]["short"]["half"] = json!(3);
+        rename_parameter(&mut e, "len", "length").unwrap();
+        assert_eq!(e["presets"]["short"], json!({"length": 10, "half": 3}));
+        assert!(check("sketch", &e).is_ok());
+        let mut e = json!({"name": "Bar", "anchors": ["a"], "parameters": [{"name": "d1", "value": 4}, {"name": "d2", "value": 5}],
+                           "presets": {"A": {"d1": 1, "d2": 2}},
+                           "sketch": {"points": {"a": [0, 0], "b": [1, 0]}, "lines": {"l": {"from": "a", "to": "b"}},
+                                      "constraints": [{"type": "length", "line": "l", "value": "d1"}, {"type": "distance", "points": ["a", "b"], "value": "d2"}]}});
+        unparametrize(&mut e, "d1").unwrap();
+        assert_eq!(e["presets"]["A"], json!({"d2": 2}));
+        assert!(check("sketch", &e).is_ok());
+        unparametrize(&mut e, "d2").unwrap();
+        assert!(e.get("presets").is_none() && e.get("parameters").is_none());
     }
 
     #[test]
