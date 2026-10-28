@@ -120,8 +120,8 @@ mod tests {
         let sources = [include_str!("app.rs"), include_str!("sidebar.rs"), include_str!("dock.rs")];
         let mut asked: Vec<&str> = sources
             .iter()
-            .flat_map(|source| source.split(".t(\"").skip(1).chain(source.split(".f(\"").skip(1)))
-            .filter_map(|rest| rest.split('"').next())
+            .flat_map(|source| source.split(".t(").skip(1).chain(source.split(".f(").skip(1)))
+            .filter_map(|rest| rest.trim_start().strip_prefix('"')?.split('"').next())
             .collect();
         asked.sort_unstable();
         asked.dedup();

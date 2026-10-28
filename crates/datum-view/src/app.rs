@@ -1189,15 +1189,19 @@ impl Viewer {
         let mut choose: Option<(String, Option<String>)> = None;
         let mut show: Option<(String, bool)> = None;
         let mut remove: Option<String> = None;
-        let base = "The base: every part as the root makes it, the product shown whole; a change here reaches every variant";
-        if ui.selectable_label(active.is_none(), "Base").on_hover_text(base).clicked() {
+        let base = self
+            .i18n
+            .t("set-base-hint", "The base: every part as the root makes it, the product shown whole; a change here reaches every variant")
+            .to_string();
+        if ui.selectable_label(active.is_none(), self.i18n.t("set-base", "Base")).on_hover_text(base).clicked() {
             go = Some(None);
         }
         // The product's variants (D169): each part's variant and what is hidden, by name.
         let mut set_cmd: Option<(&str, String)> = None;
         let current = m.inspect["set"].as_str();
         ui.horizontal(|ui| {
-            ui.label("Set").on_hover_text("A product variant: the variant of each part and the parts hidden, switched at once");
+            ui.label(self.i18n.t("set", "Set"))
+                .on_hover_text(self.i18n.t("set-hint", "A product variant: the variant of each part and the parts hidden, switched at once"));
             egui::ComboBox::from_id_salt("datum_set").selected_text(current.unwrap_or("—")).show_ui(ui, |ui| {
                 for n in m.inspect["sets"].as_array().into_iter().flatten().filter_map(Json::as_str) {
                     if ui.selectable_label(current == Some(n), n).clicked() {
@@ -1205,28 +1209,38 @@ impl Viewer {
                     }
                 }
                 ui.separator();
-                if ui.button("Save as set…").on_hover_text("The product as it is now, under a name").clicked() {
+                if ui
+                    .button(self.i18n.t("set-save-as", "Save as set…"))
+                    .on_hover_text(self.i18n.t("set-save-as-hint", "The product as it is now, under a name"))
+                    .clicked()
+                {
                     let taken: Vec<&str> = m.inspect["sets"].as_array().into_iter().flatten().filter_map(Json::as_str).collect();
                     self.new_set = (1..).map(|k| format!("Set {k}")).find(|n| !taken.contains(&n.as_str()));
                 }
             });
             if let Some(c) = current
-                && crate::icons::button(ui, crate::icons::Icon::Remove, "Remove set", &format!("Remove set `{c}`: the product stays as it is"), true)
-                    .clicked()
+                && crate::icons::button(
+                    ui,
+                    crate::icons::Icon::Remove,
+                    self.i18n.t("set-remove", "Remove set"),
+                    &self.i18n.f("set-remove-hint", "Remove set `{ $name }`: the product stays as it is", &[("name", c)]),
+                    true,
+                )
+                .clicked()
             {
                 set_cmd = Some(("remove_set", c.to_string()));
             }
         });
         if let Some(name) = &mut self.new_set {
             ui.horizontal(|ui| {
-                ui.label("New set:");
+                ui.label(self.i18n.t("set-new", "New set:"));
                 let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
                 r.request_focus();
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Save").clicked() || enter) && !name.trim().is_empty() {
+                if (ui.button(self.i18n.t("save", "Save")).clicked() || enter) && !name.trim().is_empty() {
                     set_cmd = Some(("save_set", name.trim().to_string()));
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button(self.i18n.t("cancel", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     set_cmd = Some(("", String::new()));
                 }
             });
@@ -1238,14 +1252,22 @@ impl Viewer {
             let here = active.as_ref().is_some_and(|a| family.iter().any(|l| &l.0 == a));
             ui.horizontal(|ui| {
                 let mut visible = p["visible"].as_bool().unwrap_or(true);
-                if ui.checkbox(&mut visible, "").on_hover_text("Shown in the product: in the base, and faint around another part").changed() {
+                if ui
+                    .checkbox(&mut visible, "")
+                    .on_hover_text(self.i18n.t("part-visible-hint", "Shown in the product: in the base, and faint around another part"))
+                    .changed()
+                {
                     show = Some((part.to_string(), visible));
                 }
-                if ui.selectable_label(here, name).on_hover_text("Work in this part, in the variant chosen beside it").clicked() {
+                if ui
+                    .selectable_label(here, name)
+                    .on_hover_text(self.i18n.t("part-work-hint", "Work in this part, in the variant chosen beside it"))
+                    .clicked()
+                {
                     go = Some(chosen.clone());
                 }
                 egui::ComboBox::from_id_salt(("datum_part", part)).selected_text(chosen.clone().unwrap_or_else(|| "base".into())).show_ui(ui, |ui| {
-                    if ui.selectable_label(chosen.is_none(), "base").clicked() {
+                    if ui.selectable_label(chosen.is_none(), self.i18n.t("variant-none", "base")).clicked() {
                         choose = Some((part.to_string(), None));
                         go = Some(None);
                     }
@@ -1261,15 +1283,25 @@ impl Viewer {
                         }
                     }
                     ui.separator();
-                    let below = chosen.clone().unwrap_or_else(|| "the base".into());
-                    if ui.button("+ New variant").on_hover_text(format!("Below {below}: it differs only where you change it")).clicked() {
+                    let below = chosen.clone().unwrap_or_else(|| self.i18n.t("variant-none", "base").to_string());
+                    if ui
+                        .button(self.i18n.t("variant-new", "+ New variant"))
+                        .on_hover_text(self.i18n.f("variant-new-hint", "Below { $below }: it differs only where you change it", &[("below", &below)]))
+                        .clicked()
+                    {
                         self.new_level = Some((chosen.clone(), part.to_string(), fresh(&levels, "Variant")));
                     }
                 });
                 if here
                     && let Some(a) = &active
-                    && crate::icons::button(ui, crate::icons::Icon::Remove, "Remove", &format!("Remove `{a}` (if nothing is below it)"), true)
-                        .clicked()
+                    && crate::icons::button(
+                        ui,
+                        crate::icons::Icon::Remove,
+                        self.i18n.t("variant-remove", "Remove"),
+                        &self.i18n.f("variant-remove-hint", "Remove `{ $name }` (if nothing is below it)", &[("name", a)]),
+                        true,
+                    )
+                    .clicked()
                 {
                     remove = Some(a.clone());
                 }
@@ -1283,14 +1315,18 @@ impl Viewer {
         let mut add: Option<(Option<String>, String, String)> = None;
         if let Some((parent, part, name)) = &mut self.new_level {
             ui.horizontal(|ui| {
-                ui.label(format!("New variant of {}:", parent.as_deref().unwrap_or("the base")));
+                ui.label(self.i18n.f(
+                    "variant-of",
+                    "New variant of { $parent }:",
+                    &[("parent", parent.as_deref().unwrap_or_else(|| self.i18n.t("variant-none", "base")))],
+                ));
                 let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
                 r.request_focus();
                 let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Create").clicked() || enter) && !name.trim().is_empty() {
+                if (ui.button(self.i18n.t("create", "Create")).clicked() || enter) && !name.trim().is_empty() {
                     add = Some((parent.clone(), part.clone(), name.trim().to_string()));
                 }
-                if ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                if ui.button(self.i18n.t("cancel", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                     add = Some((None, String::new(), String::new()));
                 }
             });
@@ -1337,8 +1373,8 @@ impl Viewer {
             self.side_bar.container.sections().iter().copied().filter(|s| *s != Section::Sketch || self.sketch.is_some()).collect();
         for (k, s) in list.iter().enumerate() {
             let hint = match s {
-                Section::Parts => LEVELS,
-                Section::Parameters => FORMULAS,
+                Section::Parts => self.i18n.t("levels-hint", LEVELS),
+                Section::Parameters => self.i18n.t("formulas-hint", FORMULAS),
                 _ => "",
             };
             if header(ui, s.title(&self.i18n), self.side_bar.is_open(*s), hint) {
@@ -1352,7 +1388,9 @@ impl Viewer {
             egui::ScrollArea::vertical().id_salt(("datum_section", *s)).auto_shrink([false, true]).max_height(room).show(ui, |ui| match s {
                 Section::Parts => {
                     let editing = self.sketch.is_some();
-                    ui.add_enabled_ui(!editing, |ui| self.levels_panel(ui)).response.on_disabled_hover_text("Done with the sketch first");
+                    ui.add_enabled_ui(!editing, |ui| self.levels_panel(ui))
+                        .response
+                        .on_disabled_hover_text(self.i18n.t("levels-sketch-first", "Done with the sketch first"));
                 }
                 Section::Parameters => self.parameters_section(ui),
                 Section::Features => self.features_section(ui),
@@ -1421,14 +1459,21 @@ impl Viewer {
             ui.label(if self.busy { self.i18n.t("opening", "Opening…") } else { self.i18n.t("no-model", "No model open.") });
             return;
         };
-        ui.weak(format!("Datum {} · problems are logged to {}", env!("CARGO_PKG_VERSION"), crate::log::path().display()));
+        ui.weak(self.i18n.f(
+            "status-log",
+            "Datum { $version } · problems are logged to { $path }",
+            &[("version", env!("CARGO_PKG_VERSION")), ("path", &crate::log::path().display().to_string())],
+        ));
         let mut on = crate::log::recording();
-        let hint = "Every command you run, as a line an agent can read and repeat; begun anew each time. Off by default: models may be confidential";
-        if ui.checkbox(&mut on, "Record actions for an agent").on_hover_text(hint).changed() {
+        let hint = self.i18n.t(
+            "record-hint",
+            "Every command you run, as a line an agent can read and repeat; begun anew each time. Off by default: models may be confidential",
+        );
+        if ui.checkbox(&mut on, self.i18n.t("record", "Record actions for an agent")).on_hover_text(hint).changed() {
             crate::log::record(on);
         }
         if on {
-            ui.weak(format!("Recording to {}", crate::log::actions_path().display()));
+            ui.weak(self.i18n.f("recording-to", "Recording to { $path }", &[("path", &crate::log::actions_path().display().to_string())]));
         }
         if let Some(e) = &m.error {
             ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
@@ -1444,9 +1489,9 @@ impl Viewer {
         let (mut done, mut pattern) = (false, false);
         let mut sent = Vec::new();
         if let Some(sk) = &mut self.sketch {
-            ui.heading(format!("Sketch {}", sk.feature));
+            ui.heading(self.i18n.f("sketch-heading", "Sketch { $name }", &[("name", &sk.feature)]));
             match &sk.placed {
-                Ok(p) if p.solved.dof == 0 => ui.label("Fully defined"),
+                Ok(p) if p.solved.dof == 0 => ui.label(self.i18n.t("fully-defined", "Fully defined")),
                 Ok(p) => {
                     ui.colored_label(egui::Color32::from_rgb(30, 90, 210), format!("{} degrees of freedom: blue points can still move", p.solved.dof))
                 }
@@ -1494,7 +1539,7 @@ impl Viewer {
                 ui.checkbox(on, self.keys.labelled(ui.ctx(), &self.i18n, act)).on_hover_text(self.keys.hint(ui.ctx(), &self.i18n, act));
             };
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut sk.draft.construction, "Construction");
+                ui.checkbox(&mut sk.draft.construction, self.i18n.t("construction", "Construction"));
                 check(ui, &mut sk.modes.infer, Act::Infer);
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
                     ui.checkbox(&mut sk.draft.tangent, self.keys.labelled(ui.ctx(), &self.i18n, Act::Tangent));
@@ -1530,15 +1575,23 @@ impl Viewer {
             });
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                let hint = "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside";
-                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("To library…")).on_hover_text(hint).clicked() {
+                let hint = self.i18n.t(
+                    "to-library-hint",
+                    "The selection as a library element: you choose where it is put, which dimensions it asks and what it ties to outside",
+                );
+                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new(self.i18n.t("to-library", "To library…"))).on_hover_text(hint).clicked()
+                {
                     self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
                 }
                 // Groups: a name for elements together (a pattern's cell, a path); its
                 // badge marks them, a click on it selects them.
                 match sk.selected_group() {
                     Some(g) => {
-                        if ui.button("Ungroup").on_hover_text(format!("Take group `{g}` apart: its elements stay")).clicked() {
+                        if ui
+                            .button(self.i18n.t("ungroup", "Ungroup"))
+                            .on_hover_text(self.i18n.f("ungroup-hint", "Take group `{ $name }` apart: its elements stay", &[("name", &g)]))
+                            .clicked()
+                        {
                             sent.push(Request::Command("edit_sketch", sk.ungroup(&g)));
                         }
                     }
@@ -1556,8 +1609,12 @@ impl Viewer {
             if let Some(c) = &sk.conflict {
                 ui.colored_label(egui::Color32::from_rgb(190, 40, 40), &c.why);
                 ui.horizontal(|ui| {
-                    reference = !c.constraint.is_null() && ui.button("Add as reference").on_hover_text("Measured, holding nothing").clicked();
-                    dismiss = ui.button("Dismiss").clicked();
+                    reference = !c.constraint.is_null()
+                        && ui
+                            .button(self.i18n.t("add-reference", "Add as reference"))
+                            .on_hover_text(self.i18n.t("add-reference-hint", "Measured, holding nothing"))
+                            .clicked();
+                    dismiss = ui.button(self.i18n.t("dismiss", "Dismiss")).clicked();
                 });
             }
             if dismiss {
@@ -1583,8 +1640,8 @@ impl Viewer {
                 }
             };
             ui.horizontal(|ui| {
-                done = ui.button("Done").clicked();
-                ui.weak("How?").on_hover_text(how);
+                done = ui.button(self.i18n.t("done", "Done")).clicked();
+                ui.weak(self.i18n.t("how", "How?")).on_hover_text(how);
             });
             ui.separator();
         }
@@ -1630,34 +1687,36 @@ impl Viewer {
                 };
                 // In a level: one it sets otherwise goes back to the parent's; one it inherits stays.
                 if set.contains(name) {
-                    if ui.button("↺").on_hover_text("Set in this variant: back to the parent's value").clicked() {
+                    if ui.button("↺").on_hover_text(self.i18n.t("param-reset-hint", "Set in this variant: back to the parent's value")).clicked() {
                         revert = Some(json!({"parameter": name}));
                     }
                 } else if (level.is_none() || own_parameters.contains(name))
                     && crate::icons::button(
                         ui,
                         crate::icons::Icon::Remove,
-                        "Remove the parameter",
-                        "Remove the parameter: what uses it then fails and says so",
+                        self.i18n.t("param-remove", "Remove the parameter"),
+                        self.i18n.t("param-remove-hint", "Remove the parameter: what uses it then fails and says so"),
                         true,
                     )
                     .clicked()
                 {
                     removed = Some(name.clone());
                 } else if level.is_some() && !own_parameters.contains(name) {
-                    ui.weak("·").on_hover_text("From the parent: type another value to set it in this variant");
+                    ui.weak("·").on_hover_text(self.i18n.t("param-inherited-hint", "From the parent: type another value to set it in this variant"));
                 }
                 ui.end_row();
             }
             // A new parameter: its name, then its value; Enter in the value or Add adds it.
             let (name, value) = &mut self.new_parameter;
-            ui.add_sized([60.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(name).hint_text("name"));
-            let r = field(ui, value, "value or formula");
+            ui.add_sized([60.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(name).hint_text(self.i18n.t("param-name", "name")));
+            let r = field(ui, value, self.i18n.t("param-value", "value or formula"));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            added = (ui.button("Add").on_hover_text(FORMULAS).clicked() || enter) && !name.trim().is_empty();
+            added = (ui.button(self.i18n.t("add", "Add")).on_hover_text(self.i18n.t("formulas-hint", FORMULAS)).clicked() || enter)
+                && !name.trim().is_empty();
             ui.end_row();
         });
-        ui.weak("A value may be a formula: w / 2 - gap. Sketch dimensions and depths take parameters too").on_hover_text(FORMULAS);
+        ui.weak(self.i18n.t("param-formula-note", "A value may be a formula: w / 2 - gap. Sketch dimensions and depths take parameters too"))
+            .on_hover_text(self.i18n.t("formulas-hint", FORMULAS));
         if added {
             let (name, value) = std::mem::take(&mut self.new_parameter);
             let name = name.trim().to_string();
@@ -1710,7 +1769,11 @@ impl Viewer {
                         ui.horizontal(|ui| {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
                             ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
-                            if ui.button("Show").on_hover_text("In the flat pattern pane").clicked() {
+                            if ui
+                                .button(self.i18n.t("feature-show", "Show"))
+                                .on_hover_text(self.i18n.t("feature-show-hint", "In the flat pattern pane"))
+                                .clicked()
+                            {
                                 show_flat = Some(bare.to_string());
                             }
                             if ui.button("DXF…").clicked()
@@ -1726,7 +1789,17 @@ impl Viewer {
                             ui.label(format!("✔ {name}  ·  {op}"));
                             let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
                             let label = serde_json::to_value(side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
-                            if ui.button(format!("Side: {label}")).on_hover_text("Thickness side of the path: left, right, middle").clicked() {
+                            let side_name = match label.as_str() {
+                                "left" => self.i18n.t("side-left", "left"),
+                                "right" => self.i18n.t("side-right", "right"),
+                                "middle" => self.i18n.t("side-middle", "middle"),
+                                other => other,
+                            };
+                            if ui
+                                .button(self.i18n.f("side", "Side: { $side }", &[("side", side_name)]))
+                                .on_hover_text(self.i18n.t("side-hint", "Thickness side of the path: left, right, middle"))
+                                .clicked()
+                            {
                                 edit = Some((bare.to_string(), json!({"side": side.next()})));
                             }
                         });
@@ -1735,13 +1808,15 @@ impl Viewer {
                     None if op == "plane" => {
                         ui.horizontal(|ui| {
                             let from = match (f["inputs"][0].as_str(), f["face"].is_string()) {
-                                (Some(body), true) => format!("a face of {body}"),
+                                (Some(body), true) => self.i18n.f("face-of", "a face of { $body }", &[("body", body)]),
                                 (Some(plane), false) => plane.to_string(),
                                 (None, _) => f["base"].as_str().unwrap_or("xy").to_uppercase(),
                             };
                             ui.label(format!("✔ {name}  ·  {from} +"));
                             let text = offsets.entry(bare.to_string()).or_default();
-                            let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text("offset")).on_hover_text(FORMULAS);
+                            let r = ui
+                                .add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text(self.i18n.t("offset", "offset")))
+                                .on_hover_text(self.i18n.t("formulas-hint", FORMULAS));
                             // Applied when the field is left changed, as a parameter's value is.
                             if r.lost_focus() && *text != definition(&f["offset"]) {
                                 edit = Some((bare.to_string(), json!({"offset": value_of(text)})));
@@ -1751,7 +1826,15 @@ impl Viewer {
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
                             ui.label(format!("✔ {name}  ·  {op}"));
-                            if crate::icons::button(ui, crate::icons::Icon::Edit, "Edit the sketch", "Edit the sketch", true).clicked() {
+                            if crate::icons::button(
+                                ui,
+                                crate::icons::Icon::Edit,
+                                self.i18n.t("edit-sketch", "Edit the sketch"),
+                                self.i18n.t("edit-sketch", "Edit the sketch"),
+                                true,
+                            )
+                            .clicked()
+                            {
                                 enter = Some(bare.to_string());
                             }
                         });
@@ -1765,17 +1848,25 @@ impl Viewer {
                     }
                 };
                 ui.horizontal(|ui| {
-                    if is_changed && ui.button("↺").on_hover_text("Changed in this variant: back as the parent has it").clicked() {
+                    if is_changed
+                        && ui
+                            .button("↺")
+                            .on_hover_text(self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"))
+                            .clicked()
+                    {
                         revert = Some(json!({"feature": bare}));
                     }
                     // On or off (D159); by a formula, it says which and is changed in the JSON.
                     match &f["enabled"] {
                         Json::String(formula) => {
-                            ui.weak("ƒ").on_hover_text(format!("On while {formula} is not 0"));
+                            ui.weak("ƒ").on_hover_text(self.i18n.f("feature-on-hint", "On while { $formula } is not 0", &[("formula", formula)]));
                         }
                         e => {
                             let mut on = e.as_f64().is_none_or(|v| v != 0.0);
-                            let hint = "Off: the feature passes its input on unchanged — a variant does without a parent's feature so";
+                            let hint = self.i18n.t(
+                                "feature-off-hint",
+                                "Off: the feature passes its input on unchanged — a variant does without a parent's feature so",
+                            );
                             if ui.checkbox(&mut on, "").on_hover_text(hint).changed() {
                                 toggle = Some((bare.to_string(), json!({ "enabled": on })));
                             }
@@ -1786,13 +1877,13 @@ impl Viewer {
                     let colour = ui.visuals().widgets.active.fg_stroke.color;
                     if is_changed {
                         painter.circle_filled(r.rect.center(), 3.5, colour);
-                        r.on_hover_text("Changed in this variant");
+                        r.on_hover_text(self.i18n.t("changed-here", "Changed in this variant"));
                     } else if is_own {
                         let c = r.rect.center();
                         let stroke = egui::Stroke::new(1.5, colour);
                         painter.line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], stroke);
                         painter.line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], stroke);
-                        r.on_hover_text("This variant's own");
+                        r.on_hover_text(self.i18n.t("own-here", "This variant's own"));
                     }
                     ui.vertical(|ui| row(ui));
                 });
@@ -2083,7 +2174,7 @@ impl Viewer {
             });
             ui.horizontal(|ui| {
                 add |= ui.button("OK").clicked();
-                cancel = ui.button("Cancel").clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+                cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
             });
         });
         if cancel {
@@ -3836,6 +3927,24 @@ mod tests {
         h.get_by_label("Файл").click();
         h.run();
         assert!(h.query_all_by_label_contains("Сохранить как").count() == 1, "an action's label");
+    }
+
+    /// The side bar in Russian: sections, buttons, fields' hints and the status line.
+    #[test]
+    fn the_side_bar_speaks_the_language_chosen() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        v.i18n = crate::i18n::I18n::of("ru");
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| {
+            egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+        });
+        h.run();
+        for text in ["ДЕТАЛИ", "ПАРАМЕТРЫ", "ОПЕРАЦИИ", "Добавить", "Записывать действия для агента"]
+        {
+            assert!(h.query_by_label_contains(text).is_some(), "{text}");
+        }
+        for text in ["PARAMETERS", "Add", "Record actions"] {
+            assert!(h.query_by_label_contains(text).is_none(), "{text} stays English");
+        }
     }
 
     /// The language menu changes the menu at once, and what it chose is what is kept.
