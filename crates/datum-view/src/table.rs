@@ -529,14 +529,14 @@ fn new_rows(pending: &Pending, first_new: usize, columns: usize, edits: &[Edit])
 /// and an unnamed row waits. A name in `names` is an error (`taken` says it) and the row stays;
 /// otherwise `request` makes the request of the row, or says why not, and the row stays. A row
 /// sent takes its name; the first is cleared from `pending`. The second is the last error.
-fn finish_new_rows(
+fn finish_new_rows<T>(
     new: BTreeMap<usize, Pending>,
     first_new: usize,
     pending: &mut Pending,
     names: &mut Vec<String>,
     taken: impl Fn(&str) -> String,
-    mut request: impl FnMut(&Pending) -> Result<Request, String>,
-) -> (Vec<Request>, Option<String>) {
+    mut request: impl FnMut(&Pending) -> Result<T, String>,
+) -> (Vec<T>, Option<String>) {
     let (mut sent, mut error) = (Vec::new(), None);
     for (r, mut row) in new {
         row[0] = row[0].trim().to_string();
@@ -612,6 +612,8 @@ pub enum Source {
     Parameters,
     Materials,
     Rules,
+    /// The presets of the element being kept in the library.
+    Presets,
 }
 
 /// A library level shown as a table: its `keys` are the columns, `widths` in millimetres.
@@ -814,6 +816,123 @@ pub fn remove_record_requests(rec: &Records, elements: &[Json], rows: &[usize]) 
         .collect()
 }
 
+/// The columns of the presets table: the name, then one for each parameter, in millimetres.
+const PRESET_NAME_WIDTH: f64 = 35.0;
+const PRESET_VALUE_WIDTH: f64 = 25.0;
+
+/// The names of the presets of `element`, in their order, and of its parameters.
+fn preset_names(element: &Json) -> (Vec<String>, Vec<String>) {
+    let presets = element["presets"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    (presets, datum_model::library::parameter_names(element).unwrap_or_default())
+}
+
+/// The presets of library `element` as a table: a header of the parameters, the element's own
+/// values, a row for each preset (an empty cell is the element's own value) and a last, empty
+/// row for a new one, which shows what was typed in it so far (`pending`).
+pub fn presets(element: &Json, pending: &Pending, i18n: &I18n) -> Table {
+    let (presets, names) = preset_names(element);
+    let mut t = Table::new(std::iter::once(PRESET_NAME_WIDTH).chain(names.iter().map(|_| PRESET_VALUE_WIDTH)).collect(), presets.len() + 3);
+    t.set(0, 0, i18n.t("table-preset", "Preset"));
+    t.set(1, 0, i18n.t("table-own", "Own values"));
+    for (c, name) in names.iter().enumerate() {
+        t.set(0, c + 1, name.as_str());
+        t.set(1, c + 1, own_text(element, name));
+    }
+    for (k, preset) in presets.iter().enumerate() {
+        t.set(k + 2, 0, preset.as_str());
+        for (c, name) in names.iter().enumerate() {
+            t.set(k + 2, c + 1, crate::dims::text_of(&element["presets"][preset][name]));
+        }
+    }
+    show_pending(&mut t, pending, names.len() + 1);
+    t
+}
+
+/// Parameter `name`'s own value as its cell shows it: a number short (D177), a formula as it is.
+fn own_text(element: &Json, name: &str) -> String {
+    let p = element["parameters"].as_array().and_then(|l| l.iter().find(|p| p["name"] == name));
+    p.map(|p| p["value"].as_f64().map_or_else(|| crate::dims::text_of(&p["value"]), number)).unwrap_or_default()
+}
+
+/// The cells of a presets table that can be edited: all but the header's and the name of the
+/// own values' row.
+pub fn editable_presets(r: usize, c: usize) -> bool {
+    r >= 2 || (r == 1 && c > 0)
+}
+
+/// Applies the edits to the presets of `element`: an own value changed (one emptied or as shown
+/// is kept), a value set or, emptied, left to the element's own, a preset renamed, and a new one
+/// added once its row has a name (the new row's cells wait in `pending` until then). Returns the
+/// last error: a name emptied or taken.
+pub fn preset_edits(element: &mut Json, pending: &mut Pending, edits: &[Edit], i18n: &I18n) -> Option<String> {
+    let (mut presets, names) = preset_names(element);
+    let (columns, first_new) = (names.len() + 1, presets.len() + 2);
+    let mut error = None;
+    for (_, c, text) in edits.iter().filter(|(r, c, _)| *r == 1 && (1..columns).contains(c)) {
+        let name = &names[c - 1];
+        if text.trim().is_empty() || text.trim() == own_text(element, name) {
+            continue;
+        }
+        let p = element["parameters"].as_array_mut().and_then(|l| l.iter_mut().find(|p| p["name"] == name.as_str()));
+        if let Some(p) = p {
+            p["value"] = value_of(text);
+        }
+    }
+    for (r, c, text) in edits.iter().filter(|(r, c, _)| (2..first_new).contains(r) && *c < columns) {
+        let preset = presets[r - 2].clone();
+        if *c > 0 {
+            let Some(values) = element["presets"][&preset].as_object_mut() else { continue };
+            if text.trim().is_empty() {
+                values.remove(&names[c - 1]);
+            } else {
+                values.insert(names[c - 1].clone(), value_of(text));
+            }
+            continue;
+        }
+        let to = text.trim();
+        if to == preset {
+            continue;
+        }
+        if to.is_empty() {
+            error = Some(i18n.t("table-preset-nameless", "A preset needs a name").to_string());
+        } else if presets.iter().any(|p| p == to) {
+            error = Some(i18n.f("table-preset-taken", "`{ $name }` is a preset already", &[("name", to)]));
+        } else if let Some(values) = element["presets"].as_object_mut().and_then(|m| m.remove(&preset)) {
+            element["presets"][to] = values;
+            presets[r - 2] = to.to_string();
+        }
+    }
+    let (added, why) = finish_new_rows(
+        new_rows(pending, first_new, columns, edits),
+        first_new,
+        pending,
+        &mut presets,
+        |name| i18n.f("table-preset-taken", "`{ $name }` is a preset already", &[("name", name)]),
+        |row| {
+            let values =
+                names.iter().zip(&row[1..]).filter(|(_, text)| !text.trim().is_empty()).map(|(n, text)| (n.clone(), value_of(text))).collect();
+            Ok((row[0].clone(), Json::Object(values)))
+        },
+    );
+    for (name, values) in added {
+        element["presets"][name] = values;
+    }
+    why.or(error)
+}
+
+/// Removes the presets in `rows` of the table; the element keeps no `presets` once it has none.
+pub fn remove_presets(element: &mut Json, rows: &[usize]) {
+    let (presets, _) = preset_names(element);
+    for preset in rows.iter().filter_map(|r| presets.get(r.checked_sub(2)?)) {
+        element["presets"].as_object_mut().map(|m| m.remove(preset));
+    }
+    if element["presets"].as_object().is_some_and(|m| m.is_empty())
+        && let Some(o) = element.as_object_mut()
+    {
+        o.remove("presets");
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -847,6 +966,92 @@ mod tests {
 
     fn fraction(over: &str, under: &str) -> Piece {
         Piece::Fraction { over: over.into(), under: under.into() }
+    }
+
+    fn plate() -> Json {
+        json!({"name": "Plate", "parameters": [{"name": "w", "value": 100}, {"name": "h", "value": "w / 2"}],
+               "presets": {"big": {"w": 200.0}, "small": {"w": 50.0, "h": 20.0}}})
+    }
+
+    fn preset_run(element: &mut Json, pending: &mut Pending, edits: &[(usize, usize, &str)]) -> Option<String> {
+        let edits: Vec<Edit> = edits.iter().map(|&(r, c, t)| (r, c, t.to_string())).collect();
+        preset_edits(element, pending, &edits, &I18n::default())
+    }
+
+    #[test]
+    fn the_presets_are_a_table() {
+        let pending = vec!["mid".to_string(), "70".to_string()];
+        let t = presets(&plate(), &pending, &I18n::default());
+        let row = |r: usize| (0..3).map(|c| t.cell(r, c).to_string()).collect::<Vec<_>>();
+        assert_eq!(t.rows().len(), 5);
+        assert_eq!(row(0), ["Preset", "w", "h"]);
+        assert_eq!(row(1), ["Own values", "100", "w / 2"]);
+        let mut e = plate();
+        e["parameters"][0]["value"] = json!(1.843658);
+        assert_eq!(presets(&e, &pending, &I18n::default()).cell(1, 1), "1.844", "short, as measured");
+        assert_eq!(row(2), ["big", "200", ""]);
+        assert_eq!(row(3), ["small", "50", "20"]);
+        assert_eq!(row(4), ["mid", "70", ""]);
+        assert!(!editable_presets(1, 0) && !editable_presets(0, 1) && editable_presets(1, 1) && editable_presets(2, 0) && editable_presets(4, 2));
+    }
+
+    /// An own value is the element's default: changed in its row, kept if emptied or entered as
+    /// shown (the short form must not round it).
+    #[test]
+    fn an_own_value_is_changed_but_not_rounded() {
+        let (mut e, mut pending) = (plate(), Pending::default());
+        e["parameters"][0]["value"] = json!(1.843658);
+        assert_eq!(preset_run(&mut e, &mut pending, &[(1, 1, "1.844"), (1, 2, " ")]), None);
+        assert_eq!(e["parameters"], json!([{"name": "w", "value": 1.843658}, {"name": "h", "value": "w / 2"}]));
+        preset_run(&mut e, &mut pending, &[(1, 1, "120"), (1, 2, "w / 3")]);
+        assert_eq!(e["parameters"], json!([{"name": "w", "value": 120.0}, {"name": "h", "value": "w / 3"}]));
+    }
+
+    #[test]
+    fn a_preset_value_is_set_and_cleared() {
+        let (mut e, mut pending) = (plate(), Pending::default());
+        assert_eq!(preset_run(&mut e, &mut pending, &[(2, 2, "w / 4"), (3, 1, " ")]), None);
+        assert_eq!(e["presets"], json!({"big": {"w": 200.0, "h": "w / 4"}, "small": {"h": 20.0}}));
+    }
+
+    #[test]
+    fn a_preset_is_renamed_unless_nameless_or_taken() {
+        let (mut e, mut pending) = (plate(), Pending::default());
+        assert_eq!(preset_run(&mut e, &mut pending, &[(2, 0, " huge ")]), None);
+        assert_eq!(e["presets"]["huge"], json!({"w": 200.0}));
+        assert_eq!(preset_run(&mut e, &mut pending, &[(3, 0, "huge")]).as_deref(), Some("`huge` is a preset already"));
+        assert_eq!(preset_run(&mut e, &mut pending, &[(3, 0, " ")]).as_deref(), Some("A preset needs a name"));
+        assert!(e["presets"].get("small").is_some() && e["presets"].get("big").is_none());
+    }
+
+    #[test]
+    fn a_new_preset_waits_for_its_name() {
+        let (mut e, mut pending) = (plate(), Pending::default());
+        assert_eq!(preset_run(&mut e, &mut pending, &[(4, 2, "30")]), None);
+        assert_eq!(pending, ["", "", "30"].map(String::from));
+        assert_eq!(e["presets"].as_object().unwrap().len(), 2);
+        assert_eq!(preset_run(&mut e, &mut pending, &[(4, 0, "mid")]), None);
+        assert!(pending.is_empty());
+        assert_eq!(e["presets"]["mid"], json!({"h": 30.0}));
+        assert_eq!(preset_run(&mut e, &mut pending, &[(5, 0, "mid")]).as_deref(), Some("`mid` is a preset already"));
+        assert_eq!(pending[0], "mid", "kept to be renamed");
+    }
+
+    #[test]
+    fn a_pasted_block_adds_presets() {
+        let (mut e, mut pending) = (plate(), Pending::default());
+        let why = preset_run(&mut e, &mut pending, &[(4, 0, "a"), (4, 1, "1"), (5, 0, "b"), (5, 2, "h"), (6, 0, "a")]);
+        assert_eq!(why.as_deref(), Some("`a` is a preset already"));
+        assert_eq!((&e["presets"]["a"], &e["presets"]["b"]), (&json!({"w": 1.0}), &json!({"h": "h"})));
+    }
+
+    #[test]
+    fn presets_are_removed_and_the_key_dropped_when_none_is_left() {
+        let mut e = plate();
+        remove_presets(&mut e, &[0, 1, 2, 9]);
+        assert_eq!(e["presets"], json!({"small": {"w": 50.0, "h": 20.0}}));
+        remove_presets(&mut e, &[2]);
+        assert!(e.get("presets").is_none());
     }
 
     #[test]
