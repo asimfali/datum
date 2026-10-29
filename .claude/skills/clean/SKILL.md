@@ -10,6 +10,7 @@ Run from the repository root. Report sizes before and after.
 3. Remove stale artifacts of old builds: `cargo sweep --time 3` (artifacts not used for 3 days). If `cargo sweep` is missing, say so and suggest `cargo install cargo-sweep`; do not install it without the user's word.
 4. Keep `target/criterion`: it holds benchmark baselines for regression checks.
 5. `du -sh target` — size after.
+6. If the local `.claude/CLAUDE.md` names a Windows copy of the sources, repeat steps 1–5 in it (`cargo sweep --time 3 <path>` works on it from Linux).
 
 A full `cargo clean` only on the user's explicit request: the next `scripts/check.sh` then rebuilds everything from scratch.
 
