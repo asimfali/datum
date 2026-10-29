@@ -154,9 +154,6 @@ struct Keep {
     naming: BTreeMap<String, String>,
     /// The sockets (by place in `links`) left out: not asked when placing.
     unlinked: std::collections::BTreeSet<usize>,
-    /// The cells of the presets table as typed, by preset and parameter (the name: parameter ""):
-    /// a number half typed ("1.") is not rewritten meanwhile.
-    typed: BTreeMap<(String, String), String>,
     /// An element of the library being edited, not a selection of the sketch: its points cannot
     /// be picked. The file it is read from, if it is not a built-in one.
     of_library: bool,
@@ -171,7 +168,6 @@ impl Keep {
             picking: None,
             naming: BTreeMap::new(),
             unlinked: std::collections::BTreeSet::new(),
-            typed: BTreeMap::new(),
             of_library: false,
             file: None,
         }
@@ -180,54 +176,6 @@ impl Keep {
     /// Library element `entry` to edit.
     fn of(entry: &datum_model::library::Entry) -> Self {
         Self { of_library: true, file: entry.file.clone(), ..Self::new(entry.element.clone()) }
-    }
-
-    /// A preset named "Preset", "Preset 2"… (the first free), all values the element's own.
-    fn add_preset(&mut self) {
-        let taken = |n: &str| self.element["presets"].get(n).is_some();
-        let name = (1..).map(|i| if i == 1 { "Preset".to_string() } else { format!("Preset {i}") }).find(|n| !taken(n)).unwrap_or_default();
-        self.element["presets"][name] = json!({});
-    }
-
-    /// Preset `from` renamed `to`, if that is a name and not another's.
-    fn rename_preset(&mut self, from: &str, to: &str) {
-        let to = to.trim();
-        if to == from {
-            return;
-        }
-        let Some(presets) = self.element["presets"].as_object_mut() else { return };
-        if to.is_empty() {
-            self.error = Some("a preset needs a name".into());
-        } else if presets.contains_key(to) {
-            self.error = Some(format!("there is a preset `{to}` already"));
-        } else if let Some(values) = presets.remove(from) {
-            presets.insert(to.to_string(), values);
-            self.typed.retain(|(p, _), _| p != from);
-            self.error = None;
-        }
-    }
-
-    /// Parameter `param` of preset `preset` as typed: empty is the element's own value.
-    fn set_preset_value(&mut self, preset: &str, param: &str, text: &str) {
-        if let Some(values) = self.element["presets"][preset].as_object_mut() {
-            if text.trim().is_empty() {
-                values.remove(param);
-            } else {
-                values.insert(param.to_string(), value_of(text));
-            }
-        }
-    }
-
-    fn remove_preset(&mut self, preset: &str) {
-        if let Some(presets) = self.element["presets"].as_object_mut() {
-            presets.remove(preset);
-            self.typed.retain(|(p, _), _| p != preset);
-        }
-        if self.element["presets"].as_object().is_some_and(|m| m.is_empty())
-            && let Some(o) = self.element.as_object_mut()
-        {
-            o.remove("presets");
-        }
     }
 
     /// Insertion point `k` (0: the first, 1: the second, if any) is point `p` of the piece, or
@@ -455,6 +403,7 @@ struct Viewer {
     rule_material: Option<String>,
     new_material: crate::table::Pending,
     new_rule: crate::table::Pending,
+    new_preset: crate::table::Pending,
     /// A library command was sent: the materials and rules are read again with the model it brings.
     library_due: bool,
     /// The file the model was opened from or saved to.
@@ -574,6 +523,7 @@ impl Viewer {
             rule_material: None,
             new_material: Default::default(),
             new_rule: Default::default(),
+            new_preset: Default::default(),
             library_due: false,
             path: None,
             update,
@@ -669,6 +619,7 @@ impl Viewer {
             self.table = None;
         } else {
             self.table = Some((source, Default::default()));
+            self.new_preset.clear();
             self.reload_library_records();
         }
     }
@@ -948,7 +899,7 @@ impl Viewer {
         }
         let project = self.current_project();
         let Some(k) = &mut self.keeping else { return };
-        let (mut save, mut close) = (false, false);
+        let (mut save, mut close, mut presets) = (false, false, false);
         egui::Window::new("To library").collapsible(false).resizable(false).show(ctx, |ui| {
             egui::Grid::new("datum_keep").num_columns(2).show(ui, |ui| {
                 for (key, label) in [("name", "Name"), ("description", "Description")] {
@@ -1099,53 +1050,14 @@ impl Viewer {
                     list.swap(i - 1, i);
                 }
             }
-            // The presets: a row each, the parameters they give in the columns (D176).
-            let names = parameter_names(&k.element).unwrap_or_default();
-            if names.is_empty() {
+            // The presets, edited in the table window (D176).
+            if parameter_names(&k.element).unwrap_or_default().is_empty() {
                 ui.weak("Presets need parameters: tick dimensions above.");
             } else {
-                ui.label("Presets — a value left empty is the element's own:");
-                let presets: Vec<String> = k.element["presets"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
-                let (mut rename, mut remove) = (None, None);
-                egui::Grid::new("datum_keep_presets").num_columns(names.len() + 2).show(ui, |ui| {
-                    ui.label("");
-                    for n in &names {
-                        ui.strong(n);
-                    }
-                    ui.label("");
-                    ui.end_row();
-                    for preset in &presets {
-                        let text = k.typed.entry((preset.clone(), String::new())).or_insert_with(|| preset.clone());
-                        let r = ui.add(egui::TextEdit::singleline(text).desired_width(120.0));
-                        if r.lost_focus() {
-                            rename = Some((preset.clone(), text.clone()));
-                        }
-                        for n in &names {
-                            let own = k.element["parameters"].as_array().and_then(|l| l.iter().find(|p| p["name"] == n.as_str()));
-                            let own = own.map(|p| crate::dims::text_of(&p["value"])).unwrap_or_default();
-                            let given = k.element["presets"][preset][n].clone();
-                            let text = k.typed.entry((preset.clone(), n.clone())).or_insert_with(|| crate::dims::text_of(&given));
-                            if ui.add(egui::TextEdit::singleline(text).desired_width(60.0).hint_text(own)).changed() {
-                                let text = text.clone();
-                                k.set_preset_value(preset, n, &text);
-                            }
-                        }
-                        if crate::icons::button(ui, crate::icons::Icon::Remove, "Remove preset", "Remove this preset", true).clicked() {
-                            remove = Some(preset.clone());
-                        }
-                        ui.end_row();
-                    }
+                ui.horizontal(|ui| {
+                    ui.label(format!("Presets: {}", k.element["presets"].as_object().map_or(0, |m| m.len())));
+                    presets = ui.button("Presets…").clicked();
                 });
-                if let Some((from, to)) = rename {
-                    k.rename_preset(&from, &to);
-                    k.typed.remove(&(from, String::new()));
-                }
-                if let Some(p) = remove {
-                    k.remove_preset(&p);
-                }
-                if ui.button("+ Preset").clicked() {
-                    k.add_preset();
-                }
             }
             if let Some(e) = &k.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
@@ -1210,6 +1122,9 @@ impl Viewer {
         }
         if close {
             self.keeping = None;
+        }
+        if presets {
+            self.toggle_table(crate::table::Source::Presets);
         }
     }
 
@@ -2392,7 +2307,13 @@ impl Viewer {
     fn table_window(&mut self, ctx: &egui::Context) {
         use crate::table::{MATERIALS, RULES, Source};
         let Some((source, mut editor)) = self.table.take() else { return };
-        let Some(m) = &self.model else { return };
+        // The presets are those of the element being kept; the others are the model's or the library's.
+        if source == Source::Presets && self.keeping.is_none() || source != Source::Presets && self.model.is_none() {
+            return;
+        }
+        let null = Json::Null;
+        let inspect = self.model.as_ref().map_or(&null, |m| &m.inspect);
+        let element = self.keeping.as_ref().map_or(&null, |k| &k.element);
         let materials: Vec<String> = self.materials.iter().filter_map(|e| e["name"].as_str().map(String::from)).collect();
         if source == Source::Rules && !self.rule_material.as_ref().is_some_and(|s| materials.contains(s)) {
             self.rule_material = materials.first().cloned();
@@ -2400,17 +2321,19 @@ impl Viewer {
         let selected = self.rule_material.clone();
         let rules: Vec<Json> = self.rules.iter().filter(|r| selected.as_ref().is_some_and(|s| r["material"] == *s)).cloned().collect();
         let (table, title) = match source {
-            Source::Parameters => (crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
+            Source::Parameters => (crate::table::parameters(inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
             Source::Materials => (
                 crate::table::records(&MATERIALS, &self.materials, &self.new_material, &self.i18n),
                 self.i18n.t("table-materials-title", "Materials"),
             ),
             Source::Rules => (crate::table::records(&RULES, &rules, &self.new_rule, &self.i18n), self.i18n.t("table-rules-title", "Rules")),
+            Source::Presets => (crate::table::presets(element, &self.new_preset, &self.i18n), self.i18n.t("table-presets-title", "Presets")),
         };
         let rows = table.rows().len();
         let editable: Box<dyn Fn(usize, usize) -> bool> = match source {
             Source::Parameters => Box::new(crate::table::editable(rows)),
             Source::Materials | Source::Rules => Box::new(crate::table::editable_records),
+            Source::Presets => Box::new(crate::table::editable_presets),
         };
         let (mut out, mut closed, mut picked) = (Default::default(), false, None);
         // As wide as the table, when it opens.
@@ -2418,22 +2341,25 @@ impl Viewer {
         let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size([width, 400.0]);
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
             closed = ui.input(|i| i.viewport().close_requested());
-            if source == Source::Rules {
-                if materials.is_empty() {
-                    ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in View → Materials"));
-                    return;
-                }
-                let rows = 6.0 * ui.spacing().interact_size.y;
-                egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
-                    for name in &materials {
-                        if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
-                            picked = Some(name.clone());
-                        }
+            // The viewport's root draws nothing under its widgets: the theme's panel is its background.
+            egui::CentralPanel::default().show(ui, |ui| {
+                if source == Source::Rules {
+                    if materials.is_empty() {
+                        ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in View → Materials"));
+                        return;
                     }
-                });
-                ui.separator();
-            }
-            out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
+                    let rows = 6.0 * ui.spacing().interact_size.y;
+                    egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
+                        for name in &materials {
+                            if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
+                                picked = Some(name.clone());
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
+                out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
+            });
         });
         if let Some(name) = picked.filter(|n| selected.as_ref() != Some(n)) {
             self.rule_material = Some(name);
@@ -2447,9 +2373,15 @@ impl Viewer {
         };
         let (mut sent, error) = match (source, &selected) {
             (Source::Parameters, _) => {
-                let (mut sent, error) = crate::table::parameter_requests(&m.inspect, &mut self.new_parameter, &out.edits, i18n);
-                sent.extend(crate::table::remove_requests(&m.inspect, &out.delete));
+                let (mut sent, error) = crate::table::parameter_requests(inspect, &mut self.new_parameter, &out.edits, i18n);
+                sent.extend(crate::table::remove_requests(inspect, &out.delete));
                 (sent, error)
+            }
+            (Source::Presets, _) => {
+                let Some(k) = &mut self.keeping else { return };
+                let error = crate::table::preset_edits(&mut k.element, &mut self.new_preset, &out.edits, i18n);
+                crate::table::remove_presets(&mut k.element, &out.delete);
+                (Vec::new(), error)
             }
             (Source::Materials, _) => library(&MATERIALS, &self.materials, json!({}), &mut self.new_material),
             (Source::Rules, Some(material)) => library(&RULES, &rules, json!({"material": material}), &mut self.new_rule),
@@ -2458,7 +2390,7 @@ impl Viewer {
         if !out.edits.is_empty() {
             editor.error = error;
         }
-        self.library_due |= source != Source::Parameters && !sent.is_empty();
+        self.library_due |= matches!(source, Source::Materials | Source::Rules) && !sent.is_empty();
         for r in sent.drain(..) {
             self.send(r);
         }
@@ -4001,6 +3933,7 @@ mod tests {
             rule_material: None,
             new_material: Default::default(),
             new_rule: Default::default(),
+            new_preset: Default::default(),
             library_due: false,
             path: None,
             update: channel().1,
@@ -4725,26 +4658,18 @@ mod tests {
         assert!(datum_model::library::check("sketch", e).is_ok());
     }
 
-    /// The presets table's edits: names, values (empty is the element's own), removal.
+    /// The "Presets…" button of the keep dialog opens the presets in the table window, and closes it.
     #[test]
-    fn presets_are_edited() {
-        let mut k = Keep::new(json!({"name": "Plate", "parameters": [{"name": "w", "value": 100}, {"name": "h", "value": 50}]}));
-        k.add_preset();
-        k.add_preset();
-        assert_eq!(k.element["presets"], json!({"Preset": {}, "Preset 2": {}}));
-        k.rename_preset("Preset", "Плита 200×200");
-        k.set_preset_value("Плита 200×200", "w", "200");
-        k.set_preset_value("Плита 200×200", "h", "w / 2");
-        assert_eq!(k.element["presets"]["Плита 200×200"], json!({"w": 200.0, "h": "w / 2"}));
-        k.set_preset_value("Плита 200×200", "h", " ");
-        assert_eq!(k.element["presets"]["Плита 200×200"], json!({"w": 200.0}));
-        k.rename_preset("Preset 2", "Плита 200×200");
-        assert!(k.error.is_some() && k.element["presets"].get("Preset 2").is_some(), "a taken name is refused");
-        k.rename_preset("Preset 2", " ");
-        assert!(k.element["presets"].get("Preset 2").is_some(), "so is an empty one");
-        k.remove_preset("Preset 2");
-        k.remove_preset("Плита 200×200");
-        assert!(k.element.get("presets").is_none());
+    fn the_keep_dialog_opens_the_presets_table() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.keeping = Some(Keep::new(json!({"name": "Plate", "parameters": [{"name": "w", "value": 100}], "presets": {"big": {"w": 200}}})));
+        let mut h = egui_kittest::Harness::builder().with_size([560.0, 360.0]).build_ui(|ui| v.keep(ui.ctx()));
+        h.run();
+        h.get_by_label("Presets: 1");
+        h.get_by_label("Presets…").click();
+        h.run();
+        drop(h);
+        assert_eq!(v.table.as_ref().map(|t| t.0), Some(crate::table::Source::Presets));
     }
 
     /// The library palette: a double click on an element starts placing it, a drag onto the
