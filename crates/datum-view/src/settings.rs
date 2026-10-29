@@ -13,7 +13,8 @@
 //!
 //! An action gets the key given instead of its own, and the key leaves an action it would run
 //! with too; `null` takes the key from whoever has it. Section `language` (`system`, `en`, `ru`)
-//! is the interface language; not given, the system's. Section `table` holds `zoom`, how large
+//! is the interface language; not given, the system's. Section `theme` (`system`, `light`, `dark`)
+//! is the panels' colours; not given, the system's. Section `table` holds `zoom`, how large
 //! the table editor draws (1 by default, 1.5 half as large again). What cannot be applied is
 //! said, never dropped silently.
 
@@ -41,11 +42,22 @@ pub fn path() -> Option<PathBuf> {
     folder.map(|d| d.join(FILE))
 }
 
+/// The themes the window has, by the word the settings file and the kept choice use.
+pub const THEMES: [(&str, egui::ThemePreference); 3] =
+    [("system", egui::ThemePreference::System), ("light", egui::ThemePreference::Light), ("dark", egui::ThemePreference::Dark)];
+
+/// The theme `word` names.
+pub fn theme(word: &str) -> Option<egui::ThemePreference> {
+    THEMES.iter().find(|(w, _)| *w == word).map(|(_, pref)| *pref)
+}
+
 /// What the file says, and what could not be applied.
 pub struct Settings {
     pub keys: Keys,
     /// The interface language's code, or `system`; none: the file says nothing.
     pub language: Option<String>,
+    /// The panels' theme; none: the file says nothing.
+    pub theme: Option<egui::ThemePreference>,
     /// The table editor's zoom.
     pub table_zoom: f32,
     pub problems: Vec<String>,
@@ -53,7 +65,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { keys: Keys::default(), language: None, table_zoom: 1.0, problems: Vec::new() }
+        Self { keys: Keys::default(), language: None, theme: None, table_zoom: 1.0, problems: Vec::new() }
     }
 }
 
@@ -72,12 +84,20 @@ fn parse(text: &str) -> Settings {
     let Some(sections) = json.as_object() else {
         return Settings { problems: vec!["not read, the defaults stand: not a JSON object".into()], ..settings };
     };
-    settings.problems =
-        sections.keys().filter(|k| !["keys", "language", "table"].contains(&k.as_str())).map(|k| format!("`{k}`: no such section")).collect();
+    settings.problems = sections
+        .keys()
+        .filter(|k| !["keys", "language", "theme", "table"].contains(&k.as_str()))
+        .map(|k| format!("`{k}`: no such section"))
+        .collect();
     match sections.get("language").map(|l| l.as_str().filter(|c| crate::i18n::known(c))) {
         None => {}
         Some(Some(code)) => settings.language = Some(code.to_string()),
         Some(None) => settings.problems.push(format!("`language`: one of {} (the system's language stands)", crate::i18n::codes())),
+    }
+    match sections.get("theme").map(|t| t.as_str().and_then(theme)) {
+        None => {}
+        Some(Some(pref)) => settings.theme = Some(pref),
+        Some(None) => settings.problems.push("`theme`: system, light or dark (the system's stands)".into()),
     }
     match sections.get("table").map(|t| t["zoom"].as_f64().filter(|z| (0.5..=4.0).contains(z))) {
         None => {}
@@ -208,6 +228,16 @@ mod tests {
             assert!(said.contains(part), "{part}:\n{said}");
         }
         assert_eq!(problems.len(), 6, "{said}");
+    }
+
+    /// The theme is one of the three words; anything else is said.
+    #[test]
+    fn the_theme_is_one_of_the_three() {
+        assert_eq!(parse(&json!({"theme": "dark"}).to_string()).theme, Some(egui::ThemePreference::Dark));
+        assert_eq!(parse("{}").theme, None);
+        let Settings { theme, problems, .. } = parse(&json!({"theme": "blue"}).to_string());
+        assert_eq!(theme, None);
+        assert!(problems.join("\n").contains("`theme`: system, light or dark"), "{problems:?}");
     }
 
     /// The language is a code the window has, or `system`; anything else is said.

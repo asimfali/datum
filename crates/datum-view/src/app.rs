@@ -55,6 +55,10 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
             // What the menu chose last wins over the settings file's.
             viewer.set_language(&kept(LANGUAGE));
+            match crate::settings::theme(&kept(THEME)) {
+                Some(pref) => viewer.set_theme(&cc.egui_ctx, pref),
+                None => cc.egui_ctx.set_theme(viewer.theme),
+            }
             // The project left open opens again, if it is still one (D142).
             if let Some(p) = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p)) {
                 viewer.set_project(Some(p));
@@ -72,6 +76,8 @@ const MAXIMIZED: &str = "datum_maximized";
 const LAYOUT: &str = "datum_layout";
 /// The language the menu chose (D174).
 const LANGUAGE: &str = "datum_language";
+/// The theme the menu chose.
+const THEME: &str = "datum_theme";
 /// The side bar's side, set and sections (D162).
 const SIDE_BAR: &str = "datum_side_bar";
 
@@ -499,6 +505,10 @@ struct Viewer {
     /// once the menu chose it (`language_chosen`): until then the settings file's word stands.
     language: String,
     language_chosen: bool,
+    /// The panels' theme; kept between runs only once the menu chose it (`theme_chosen`), like the
+    /// language.
+    theme: egui::ThemePreference,
+    theme_chosen: bool,
     i18n: crate::i18n::I18n,
     settings: Option<PathBuf>,
     settings_problems: Vec<String>,
@@ -526,7 +536,7 @@ impl Viewer {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let settings = crate::settings::path();
-        let crate::settings::Settings { keys, language, table_zoom, problems: settings_problems } = crate::settings::load(settings.as_deref());
+        let crate::settings::Settings { keys, language, theme, table_zoom, problems: settings_problems } = crate::settings::load(settings.as_deref());
         for p in &settings_problems {
             crate::log::write(&format!("settings: {p}"));
         }
@@ -591,6 +601,8 @@ impl Viewer {
             i18n: crate::i18n::I18n::chosen(language.as_deref()),
             language: language.unwrap_or_else(|| "system".into()),
             language_chosen: false,
+            theme: theme.unwrap_or_default(),
+            theme_chosen: false,
             settings,
             settings_problems,
             table_zoom,
@@ -989,7 +1001,7 @@ impl Viewer {
                 }
             });
             if k.picking.is_some() {
-                ui.colored_label(egui::Color32::from_rgb(230, 120, 20), "Click a point of the selection in the sketch · Esc cancels");
+                ui.colored_label(ui.visuals().warn_fg_color, "Click a point of the selection in the sketch · Esc cancels");
             }
             if anchors.len() > 1 {
                 let mut fit = k.element["fit"].as_str().unwrap_or("stretch").to_string();
@@ -1136,7 +1148,7 @@ impl Viewer {
                 }
             }
             if let Some(e) = &k.error {
-                ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+                ui.colored_label(ui.visuals().error_fg_color, e);
             }
             ui.horizontal(|ui| {
                 save = ui.button("Save…").clicked();
@@ -1505,7 +1517,7 @@ impl Viewer {
             });
             for (n, _, _, _, err) in &family {
                 if let Some(e) = err {
-                    ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {n}: {e}"));
+                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {n}: {e}"));
                 }
             }
         }
@@ -1673,10 +1685,10 @@ impl Viewer {
             ui.weak(self.i18n.f("recording-to", "Recording to { $path }", &[("path", &crate::log::actions_path().display().to_string())]));
         }
         if let Some(e) = &m.error {
-            ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+            ui.colored_label(ui.visuals().error_fg_color, e);
         }
         for n in &m.notes {
-            ui.colored_label(egui::Color32::from_rgb(190, 120, 0), format!("⚠ {n}"));
+            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {n}"));
         }
     }
 
@@ -1689,15 +1701,13 @@ impl Viewer {
             ui.heading(self.i18n.f("sketch-heading", "Sketch { $name }", &[("name", &sk.feature)]));
             match &sk.placed {
                 Ok(p) if p.solved.dof == 0 => ui.label(self.i18n.t("fully-defined", "Fully defined")),
-                Ok(p) => {
-                    ui.colored_label(egui::Color32::from_rgb(30, 90, 210), format!("{} degrees of freedom: blue points can still move", p.solved.dof))
-                }
-                Err(e) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
+                Ok(p) => ui.colored_label(crate::sketch::free_text(ui), format!("{} degrees of freedom: blue points can still move", p.solved.dof)),
+                Err(e) => ui.colored_label(ui.visuals().error_fg_color, e),
             };
             // What the sketch breaks downstream: why the model behind did not change.
             for f in m.inspect["features"].as_array().into_iter().flatten().filter(|f| f["name"] != sk.feature.as_str()) {
                 if let (Some(name), Some(e)) = (f["name"].as_str(), f["error"].as_str()) {
-                    ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}: {e}"));
+                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {name}: {e}"));
                 }
             }
             // One under another (D166): what to draw, what to constrain, what to do with the
@@ -1805,7 +1815,7 @@ impl Viewer {
             // A dimension that would over-constrain the sketch: as a reference one, or not at all.
             let (mut reference, mut dismiss) = (false, false);
             if let Some(c) = &sk.conflict {
-                ui.colored_label(egui::Color32::from_rgb(190, 40, 40), &c.why);
+                ui.colored_label(ui.visuals().error_fg_color, &c.why);
                 ui.horizontal(|ui| {
                     reference = !c.constraint.is_null()
                         && ui
@@ -1883,7 +1893,7 @@ impl Viewer {
                 }
                 match (p["value"].as_f64(), p["error"].as_str()) {
                     (Some(v), _) => ui.weak(format!("= {v}")),
-                    (_, Some(e)) => ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e),
+                    (_, Some(e)) => ui.colored_label(ui.visuals().error_fg_color, e),
                     _ => ui.label(""),
                 };
                 // In a level: one it sets otherwise goes back to the parent's; one it inherits stays.
@@ -1936,7 +1946,7 @@ impl Viewer {
             }
         }
         if let Some(e) = &self.local_error {
-            ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e);
+            ui.colored_label(ui.visuals().error_fg_color, e);
         }
         if let Some(name) = removed {
             let _ = self.requests.send(Request::Command("remove_parameter", json!({"name": name})));
@@ -2050,7 +2060,7 @@ impl Viewer {
                         ui.label(format!("✔ {name}  ·  {op}"));
                     }
                     Some(e) => {
-                        ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("✖ {name}  ·  {op}"));
+                        ui.colored_label(ui.visuals().error_fg_color, format!("✖ {name}  ·  {op}"));
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
@@ -2644,7 +2654,7 @@ impl Viewer {
                     }
                     // Not while a number is being typed: `0` on its way to `0.5` is no mistake yet.
                     if let Some(e) = error.as_ref().filter(|_| !ui.ctx().text_edit_focused()) {
-                        ui.colored_label(egui::Color32::from_rgb(190, 40, 40), e.as_str());
+                        ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
                     let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
                     ui.horizontal(|ui| {
@@ -3617,6 +3627,13 @@ impl Viewer {
         }
     }
 
+    /// The theme chosen is `pref`; at once.
+    fn set_theme(&mut self, ctx: &egui::Context, pref: egui::ThemePreference) {
+        self.theme = pref;
+        self.theme_chosen = true;
+        ctx.set_theme(pref);
+    }
+
     /// The menu (D131): every action, grouped as in other programs.
     fn menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button(self.i18n.t("menu-file", "File").to_string(), |ui| {
@@ -3671,6 +3688,18 @@ impl Viewer {
                     let name = name.unwrap_or_else(|| self.i18n.t("language-system", "System"));
                     if ui.radio(self.language == code, name).clicked() {
                         self.set_language(code);
+                    }
+                }
+            });
+            ui.menu_button(self.i18n.t("menu-theme", "Theme").to_string(), |ui| {
+                for (word, pref) in crate::settings::THEMES {
+                    let name = match word {
+                        "light" => self.i18n.t("theme-light", "Light"),
+                        "dark" => self.i18n.t("theme-dark", "Dark"),
+                        _ => self.i18n.t("language-system", "System"),
+                    };
+                    if ui.radio(self.theme == pref, name).clicked() {
+                        self.set_theme(ui.ctx(), pref);
                     }
                 }
             });
@@ -3828,7 +3857,7 @@ impl Viewer {
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
             Some(Ok(f)) => self.flat.show(ui, f),
             Some(Err(e)) => {
-                ui.colored_label(egui::Color32::from_rgb(190, 40, 40), format!("No blank for {chosen}: {e}"));
+                ui.colored_label(ui.visuals().error_fg_color, format!("No blank for {chosen}: {e}"));
             }
             None => {}
         }
@@ -3903,6 +3932,11 @@ impl eframe::App for Viewer {
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
         if self.language_chosen {
             storage.set_string(LANGUAGE, self.language.clone());
+        }
+        if self.theme_chosen
+            && let Some((word, _)) = crate::settings::THEMES.iter().find(|(_, pref)| *pref == self.theme)
+        {
+            storage.set_string(THEME, word.to_string());
         }
         storage.set_string(RECENT, json!(self.recent).to_string());
         storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
@@ -3993,6 +4027,8 @@ mod tests {
             keys: Keys::default(),
             language: "en".into(),
             language_chosen: false,
+            theme: egui::ThemePreference::default(),
+            theme_chosen: false,
             i18n: crate::i18n::I18n::default(),
             settings: None,
             settings_problems: Vec::new(),
@@ -4355,6 +4391,28 @@ mod tests {
         h.run();
         assert_eq!(h.state().language, "en");
         assert!(h.query_by_label("File").is_some() && h.query_by_label("Файл").is_none());
+    }
+
+    /// The theme menu changes the theme at once, and what it chose is what is kept.
+    #[test]
+    fn the_theme_menu_switches_at_once() {
+        let (v, _inbox) = viewer("parametric.json");
+        assert!(!v.theme_chosen, "nothing chosen yet: the settings file's word stands");
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 300.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                egui::Panel::top("menu").show(ui, |ui| egui::MenuBar::new().ui(ui, |ui| v.menu(ui)));
+            },
+            v,
+        );
+        h.run();
+        h.get_by_label("View").click();
+        h.run();
+        h.get_by_label_contains("Theme").click();
+        h.run();
+        h.get_by_label("Dark").click();
+        h.run();
+        assert!(h.state().theme_chosen && h.state().theme == egui::ThemePreference::Dark);
+        assert_eq!(h.ctx.options(|o| o.theme_preference), egui::ThemePreference::Dark);
     }
 
     /// A step typed as 0 on its way to 0.5: no error says so while the field is being typed in; it

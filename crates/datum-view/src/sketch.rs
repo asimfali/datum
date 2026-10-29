@@ -269,6 +269,10 @@ const NEAR_CURVE: f64 = 6.0;
 
 const DEFINED: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
 const FREE: egui::Color32 = egui::Color32::from_rgb(30, 90, 210);
+/// `FREE` as panel text: lighter on the dark theme, where `FREE` is too dim to read.
+pub fn free_text(ui: &egui::Ui) -> egui::Color32 {
+    if ui.visuals().dark_mode { egui::Color32::from_rgb(110, 160, 255) } else { FREE }
+}
 const PROJECTED: egui::Color32 = egui::Color32::from_rgb(150, 110, 20);
 const SELECTED: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 const DIMENSION: egui::Color32 = egui::Color32::from_rgb(20, 120, 60);
