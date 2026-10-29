@@ -6,7 +6,9 @@
 use datum_math::Vec3;
 use egui::{Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 
+use crate::actions::Act;
 use crate::camera::Camera;
+use crate::i18n::I18n;
 use crate::icons::Icon;
 
 /// Side of the square the cube is drawn in, and its margin from the corner of the view.
@@ -26,15 +28,27 @@ const TURN: f64 = 0.35;
 /// The directions along the axes.
 const AXES: [[f64; 3]; 6] = [[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, -1.0]];
 
-/// The faces: outward normal, the direction their label reads up and its text.
-const FACES: [([f64; 3], [f64; 3], &str); 6] = [
-    ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0], "TOP"),
-    ([0.0, 0.0, -1.0], [0.0, -1.0, 0.0], "BOTTOM"),
-    ([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], "FRONT"),
-    ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0], "BACK"),
-    ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0], "LEFT"),
-    ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0], "RIGHT"),
+/// The faces: outward normal and the direction their label reads up.
+const FACES: [([f64; 3], [f64; 3]); 6] = [
+    ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
+    ([0.0, 0.0, -1.0], [0.0, -1.0, 0.0]),
+    ([0.0, -1.0, 0.0], [0.0, 0.0, 1.0]),
+    ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+    ([-1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+    ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
 ];
+
+/// The label of face `i` of [`FACES`].
+fn face_label(i18n: &I18n, i: usize) -> &str {
+    match i {
+        0 => i18n.t("cube-top", "TOP"),
+        1 => i18n.t("cube-bottom", "BOTTOM"),
+        2 => i18n.t("cube-front", "FRONT"),
+        3 => i18n.t("cube-back", "BACK"),
+        4 => i18n.t("cube-left", "LEFT"),
+        _ => i18n.t("cube-right", "RIGHT"),
+    }
+}
 
 /// What the cube asks of the view.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -93,7 +107,7 @@ struct Cell {
 fn cells(towards_eye: Vec3) -> Vec<Cell> {
     let ranges = [(-1.0, -BAND), (-BAND, BAND), (BAND, 1.0)];
     let mut out = Vec::with_capacity(27);
-    for (n, up, _) in FACES {
+    for (n, up) in FACES {
         let (n, b) = (Vec3::from(n), Vec3::from(up));
         if n.dot(towards_eye) <= 0.0 {
             continue;
@@ -183,10 +197,10 @@ fn label_face(painter: &egui::Painter, screen: &impl Fn(Vec3) -> Pos2, n: Vec3, 
 
 /// Draws the cube in the top right corner of `view` as `camera` sees the model, and says what a
 /// click or a drag on it asks.
-pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
+pub fn show(ui: &mut Ui, view: Rect, camera: &Camera, i18n: &I18n) -> Option<Ask> {
     let (area, home) = place(view);
     let r = ui.interact(area, ui.id().with("view cube"), Sense::click_and_drag());
-    let h = ui.interact(home, ui.id().with("view cube home"), Sense::click()).on_hover_text("Home view");
+    let h = ui.interact(home, ui.id().with("view cube home"), Sense::click()).on_hover_text(i18n.label(Act::Home));
     let forward = camera.axes().2;
     let screen = projector(camera, area);
     let cells = cells(-forward);
@@ -207,10 +221,12 @@ pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
             .collect()
     });
     let rolls = face_on.map(|_| {
-        [(1, Icon::Undo, "Turn a quarter left"), (-1, Icon::Redo, "Turn a quarter right")].map(|(dir, icon, hint)| {
-            let at = Rect::from_center_size(pos2(area.right() - 30.0 + 18.0 * f32::from(u8::from(dir < 0)), area.top() + 8.0), vec2(16.0, 16.0));
-            (dir, icon, ui.interact(at, ui.id().with(("view cube roll", dir)), Sense::click()).on_hover_text(hint))
-        })
+        [(1, Icon::Undo, i18n.t("cube-roll-left", "Turn a quarter left")), (-1, Icon::Redo, i18n.t("cube-roll-right", "Turn a quarter right"))].map(
+            |(dir, icon, hint)| {
+                let at = Rect::from_center_size(pos2(area.right() - 30.0 + 18.0 * f32::from(u8::from(dir < 0)), area.top() + 8.0), vec2(16.0, 16.0));
+                (dir, icon, ui.interact(at, ui.id().with(("view cube roll", dir)), Sense::click()).on_hover_text(hint))
+            },
+        )
     });
     let pointer = r.hover_pos();
     let arrow = pointer.and_then(|p| arrows.iter().find(|(_, t)| inside(p, t)));
@@ -227,7 +243,7 @@ pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
         painter.add(egui::Shape::convex_polygon(cell.corners.map(&screen).to_vec(), colour, Stroke::NONE));
     }
     // The outline of each face, then its label, turned with it; hidden when seen edge-on.
-    for (n, b, label) in FACES {
+    for (i, (n, b)) in FACES.into_iter().enumerate() {
         let (n, b) = (Vec3::from(n), Vec3::from(b));
         let facing = n.dot(-forward);
         if facing <= 0.0 {
@@ -237,7 +253,7 @@ pub fn show(ui: &mut Ui, view: Rect, camera: &Camera) -> Option<Ask> {
         let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].map(|(x, y)| screen(n + a * x + b * y));
         painter.add(egui::Shape::closed_line(corners.to_vec(), Stroke::new(1.0, line)));
         if facing > EDGE_ON {
-            label_face(&painter, &screen, n, [a, b], label, text);
+            label_face(&painter, &screen, n, [a, b], face_label(i18n, i), text);
         }
     }
     for (look, t) in &arrows {
@@ -273,7 +289,7 @@ mod tests {
     #[test]
     fn every_direction_has_its_cells() {
         let mut all = std::collections::BTreeMap::<[i8; 3], usize>::new();
-        for (n, _, _) in FACES {
+        for (n, _) in FACES {
             for cell in cells(Vec3::from(n)) {
                 *all.entry(cell.look).or_default() += 1;
             }
@@ -301,7 +317,7 @@ mod tests {
         let view = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
         let mut h = egui_kittest::Harness::builder().with_size([400.0, 300.0]).build_ui_state(
             move |ui, asked: &mut Vec<Ask>| {
-                if let Some(a) = show(ui, view, &camera) {
+                if let Some(a) = show(ui, view, &camera, &I18n::default()) {
                     asked.push(a);
                 }
             },
@@ -333,7 +349,7 @@ mod tests {
         let view = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 300.0));
         let mut h = egui_kittest::Harness::builder().with_size([400.0, 300.0]).build_ui_state(
             move |ui, asked: &mut Vec<Ask>| {
-                if let Some(a) = show(ui, view, &camera) {
+                if let Some(a) = show(ui, view, &camera, &I18n::default()) {
                     asked.push(a);
                 }
             },

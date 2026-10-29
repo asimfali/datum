@@ -662,13 +662,21 @@ impl Viewer {
         });
         let approximate = !inexact.is_empty();
         if approximate {
-            let question = format!(
-                "{} cut(s) through a rolled sheet along circles or oblique lines of its development: STEP has no exact type for them.\n\n\
-                 Write them as B-splines within {:e} mm? The receiving CAD cannot tell them from exact, and a note beside the file \
-                 (.step.txt) says what was approximated.\n\nNo: nothing is written.",
-                inexact.join(", "),
-                datum_brep::DEVIATION
-            );
+            let (cuts, deviation) = (inexact.join(", "), format!("{:e}", datum_brep::DEVIATION));
+            let question = [
+                self.i18n.f(
+                    "step-inexact",
+                    "{ $cuts } cut(s) through a rolled sheet along circles or oblique lines of its development: STEP has no exact type for them.",
+                    &[("cuts", &cuts)],
+                ),
+                self.i18n.f(
+                    "step-inexact-ask",
+                    "Write them as B-splines within { $deviation } mm? The receiving CAD cannot tell them from exact, and a note beside the file (.step.txt) says what was approximated.",
+                    &[("deviation", &deviation)],
+                ),
+                self.i18n.t("step-inexact-no", "No: nothing is written.").to_string(),
+            ]
+            .join("\n\n");
             let answer = rfd::MessageDialog::new().set_title("Datum").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show();
             if answer != rfd::MessageDialogResult::Yes {
                 return;
@@ -705,7 +713,7 @@ impl Viewer {
 
     /// A recent model chosen: opened once what is not saved is asked about.
     fn open_recent(&mut self, path: PathBuf) {
-        if still_there(&mut self.recent, &path, path.exists(), "recent files") && self.may_leave() {
+        if still_there(&self.i18n, &mut self.recent, &path, path.exists(), self.i18n.t("menu-open-recent", "Open recent")) && self.may_leave() {
             self.open(path);
         }
     }
@@ -713,7 +721,8 @@ impl Viewer {
     /// A project chosen in the dialog: a new one in any folder (an empty one, made there), or
     /// one to open; a folder that is not a project yet is asked about.
     fn project_by_dialog(&mut self, new: bool) {
-        let what = if new { "New project: a folder for it" } else { "Open project" };
+        let what =
+            if new { self.i18n.t("project-new-title", "New project: a folder for it") } else { self.i18n.t("project-open-title", "Open project") };
         let start = self.project.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf);
         let dialog = rfd::FileDialog::new().set_title(what);
         let dialog = match start {
@@ -728,7 +737,8 @@ impl Viewer {
     /// Opens project `folder`; one without a project file becomes a project, asked first if `ask`.
     fn open_project(&mut self, folder: PathBuf, ask: bool) {
         if !is_project(&folder) {
-            let question = format!("{} is not a Datum project yet. Make it one?", folder.display());
+            let question =
+                self.i18n.f("project-ask", "{ $folder } is not a Datum project yet. Make it one?", &[("folder", &folder.display().to_string())]);
             if ask
                 && rfd::MessageDialog::new().set_title("Datum").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show()
                     != rfd::MessageDialogResult::Yes
@@ -745,7 +755,7 @@ impl Viewer {
 
     /// A recent project chosen: one that is no longer a project leaves the list, saying so.
     fn open_recent_project(&mut self, folder: PathBuf) {
-        if still_there(&mut self.recent_projects, &folder, is_project(&folder), "recent projects") {
+        if still_there(&self.i18n, &mut self.recent_projects, &folder, is_project(&folder), self.i18n.t("menu-recent-projects", "Recent projects")) {
             self.set_project(Some(folder));
         }
     }
@@ -780,10 +790,14 @@ impl Viewer {
     /// Asks whether to save the changes: `Some(true)` saved (sent to be written), `Some(false)`
     /// dropped, `None` kept open.
     fn ask_to_save(&mut self) -> Option<bool> {
-        let file = self.path.as_ref().and_then(|p| p.file_name()).map_or_else(|| "the new model".to_string(), |f| f.to_string_lossy().to_string());
+        let file = self
+            .path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map_or_else(|| self.i18n.t("save-changes-new", "the new model").to_string(), |f| f.to_string_lossy().to_string());
         let answer = rfd::MessageDialog::new()
             .set_title("Datum")
-            .set_description(format!("Save the changes to {file}?"))
+            .set_description(self.i18n.f("save-changes", "Save the changes to { $file }?", &[("file", &file)]))
             .set_buttons(rfd::MessageButtons::YesNoCancel)
             .show();
         match answer {
@@ -848,8 +862,8 @@ impl Viewer {
                 let twin = self.library.iter().filter(|o| o.entry.name() == name).count() > 1;
                 let file = item.entry.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().to_string()).filter(|_| twin);
                 let from = match file {
-                    Some(f) => format!("{} · {f}", crate::templates::source(&item.entry)),
-                    None => crate::templates::source(&item.entry).to_string(),
+                    Some(f) => format!("{} · {f}", crate::templates::source(&item.entry, &self.i18n)),
+                    None => crate::templates::source(&item.entry, &self.i18n).to_string(),
                 };
                 ui.painter().text(
                     text + egui::vec2(0.0, 20.0),
@@ -860,7 +874,7 @@ impl Viewer {
                 );
                 let r = if description.is_empty() { r } else { r.on_hover_text(description) };
                 r.context_menu(|ui| {
-                    if ui.button("Edit element…").clicked() {
+                    if ui.button(self.i18n.t("library-edit", "Edit element…")).clicked() {
                         edit = Some(Keep::of(&item.entry));
                         ui.close();
                     }
@@ -900,9 +914,9 @@ impl Viewer {
         let project = self.current_project();
         let Some(k) = &mut self.keeping else { return };
         let (mut save, mut close, mut presets) = (false, false, false);
-        egui::Window::new("To library").collapsible(false).resizable(false).show(ctx, |ui| {
+        egui::Window::new(self.i18n.t("keep-title", "To library")).collapsible(false).resizable(false).show(ctx, |ui| {
             egui::Grid::new("datum_keep").num_columns(2).show(ui, |ui| {
-                for (key, label) in [("name", "Name"), ("description", "Description")] {
+                for (key, label) in [("name", self.i18n.t("table-name", "Name")), ("description", self.i18n.t("table-description", "Description"))] {
                     ui.label(label);
                     let mut text = k.element[key].as_str().unwrap_or_default().to_string();
                     if ui.text_edit_singleline(&mut text).changed() {
@@ -915,20 +929,27 @@ impl Viewer {
             let anchors = datum_model::library::anchors(&k.element);
             egui::Grid::new("datum_keep_anchors").num_columns(3).show(ui, |ui| {
                 for (i, label, hint) in [
-                    (0, "Insertion point", "The point of the element that goes where the first click is"),
+                    (
+                        0,
+                        self.i18n.t("keep-insertion", "Insertion point"),
+                        self.i18n.t("keep-insertion-hint", "The point of the element that goes where the first click is"),
+                    ),
                     (
                         1,
-                        "Second point",
-                        "Only for an element put by two clicks: a rectangle by its corners, or a section between two points of a chain",
+                        self.i18n.t("keep-second", "Second point"),
+                        self.i18n.t(
+                            "keep-second-hint",
+                            "Only for an element put by two clicks: a rectangle by its corners, or a section between two points of a chain",
+                        ),
                     ),
                 ] {
                     ui.label(label).on_hover_text(hint);
                     ui.strong(anchors.get(i).map_or("—", String::as_str));
                     ui.horizontal(|ui| {
-                        let hint = "Click a point of the selection in the sketch";
+                        let hint = self.i18n.t("keep-pick-hint", "Click a point of the selection in the sketch");
                         if !k.of_library
                             && ui
-                                .add_enabled(i <= anchors.len(), egui::Button::new("Pick").selected(k.picking == Some(i)))
+                                .add_enabled(i <= anchors.len(), egui::Button::new(self.i18n.t("keep-pick", "Pick")).selected(k.picking == Some(i)))
                                 .on_hover_text(hint)
                                 .clicked()
                         {
@@ -939,8 +960,8 @@ impl Viewer {
                             && crate::icons::button(
                                 ui,
                                 crate::icons::Icon::Remove,
-                                "No second point",
-                                "No second point: the element is moved as it is",
+                                self.i18n.t("keep-no-second", "No second point"),
+                                self.i18n.t("keep-no-second-hint", "No second point: the element is moved as it is"),
                                 true,
                             )
                             .clicked()
@@ -952,21 +973,26 @@ impl Viewer {
                 }
             });
             if k.picking.is_some() {
-                ui.colored_label(ui.visuals().warn_fg_color, "Click a point of the selection in the sketch · Esc cancels");
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    self.i18n.t("keep-picking", "Click a point of the selection in the sketch · Esc cancels"),
+                );
             }
             if anchors.len() > 1 {
                 let mut fit = k.element["fit"].as_str().unwrap_or("stretch").to_string();
-                ui.radio_value(&mut fit, "stretch".into(), "Stretch along the axes to the second point (a rectangle by its corners)");
-                ui.radio_value(&mut fit, "align".into(), "Turn toward the second point (a section between two points of a chain)");
+                let stretch = self.i18n.t("keep-stretch", "Stretch along the axes to the second point (a rectangle by its corners)");
+                ui.radio_value(&mut fit, "stretch".into(), stretch);
+                let align = self.i18n.t("keep-align", "Turn toward the second point (a section between two points of a chain)");
+                ui.radio_value(&mut fit, "align".into(), align);
                 k.element["fit"] = json!(fit);
             }
             // The dimensions: a tick makes one a question of the element, under the name beside it.
             use datum_model::library::{dimensions, parameter_names, parametrize, rename_parameter, unparametrize};
             let dims = dimensions(&k.element);
             if dims.is_empty() {
-                ui.weak("The selection has no dimensions: the element goes in as it is.");
+                ui.weak(self.i18n.t("keep-no-dims", "The selection has no dimensions: the element goes in as it is."));
             } else {
-                ui.label("Dimensions — ticked ones are asked when the element is placed:");
+                ui.label(self.i18n.t("keep-dims", "Dimensions — ticked ones are asked when the element is placed:"));
             }
             let names = parameter_names(&k.element).unwrap_or_default();
             let mut change: Option<Result<(), String>> = None;
@@ -1015,15 +1041,18 @@ impl Viewer {
             // Constraints reaching out of the selection: asked to be completed when placing (D116).
             let links = k.element["links"].as_array().cloned().unwrap_or_default();
             if !links.is_empty() {
-                ui.label("Constraints to what is outside — ticked ones are completed by a click when placing:");
+                ui.label(self.i18n.t("keep-links", "Constraints to what is outside — ticked ones are completed by a click when placing:"));
                 for (i, l) in links.iter().enumerate() {
                     let mut names = Vec::new();
                     datum_model::visit_names(&mut l["constraint"].clone(), &mut |n| names.push(n.clone()));
-                    let label = format!(
-                        "{} {} (? a {})",
-                        l["constraint"]["type"].as_str().unwrap_or_default(),
-                        names.join(" "),
-                        l["kind"].as_str().unwrap_or_default()
+                    let label = self.i18n.f(
+                        "keep-link",
+                        "{ $type } { $names } (? a { $kind })",
+                        &[
+                            ("type", l["constraint"]["type"].as_str().unwrap_or_default()),
+                            ("names", &names.join(" ")),
+                            ("kind", l["kind"].as_str().unwrap_or_default()),
+                        ],
                     );
                     let mut on = !k.unlinked.contains(&i);
                     if ui.checkbox(&mut on, label).changed() {
@@ -1036,11 +1065,19 @@ impl Viewer {
                 }
             }
             if let Some(list) = k.element.get_mut("parameters").and_then(Json::as_array_mut) {
-                ui.label("Asked in this order:");
+                ui.label(self.i18n.t("keep-order", "Asked in this order:"));
                 let mut up = None;
                 for (i, p) in list.iter().enumerate() {
                     ui.horizontal(|ui| {
-                        if crate::icons::button(ui, crate::icons::Icon::Up, "Up", "Ask it earlier", i > 0).clicked() {
+                        if crate::icons::button(
+                            ui,
+                            crate::icons::Icon::Up,
+                            self.i18n.t("keep-up", "Up"),
+                            self.i18n.t("keep-up-hint", "Ask it earlier"),
+                            i > 0,
+                        )
+                        .clicked()
+                        {
                             up = Some(i);
                         }
                         ui.label(format!("{} = {}", p["name"].as_str().unwrap_or_default(), crate::dims::text_of(&p["value"])));
@@ -1052,19 +1089,20 @@ impl Viewer {
             }
             // The presets, edited in the table window (D176).
             if parameter_names(&k.element).unwrap_or_default().is_empty() {
-                ui.weak("Presets need parameters: tick dimensions above.");
+                ui.weak(self.i18n.t("keep-no-presets", "Presets need parameters: tick dimensions above."));
             } else {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Presets: {}", k.element["presets"].as_object().map_or(0, |m| m.len())));
-                    presets = ui.button("Presets…").clicked();
+                    let count = k.element["presets"].as_object().map_or(0, |m| m.len()).to_string();
+                    ui.label(self.i18n.f("keep-presets-count", "Presets: { $n }", &[("n", &count)]));
+                    presets = ui.button(self.i18n.t("keep-presets", "Presets…")).clicked();
                 });
             }
             if let Some(e) = &k.error {
                 ui.colored_label(ui.visuals().error_fg_color, e);
             }
             ui.horizontal(|ui| {
-                save = ui.button("Save…").clicked();
-                close = ui.button("Cancel").clicked();
+                save = ui.button(self.i18n.t("keep-save", "Save…")).clicked();
+                close = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
             });
         });
         if save {
@@ -1092,7 +1130,7 @@ impl Viewer {
                 .as_ref()
                 .and_then(|f| f.file_name())
                 .map_or_else(|| datum_model::library::file_name(&name), |f| f.to_string_lossy().to_string());
-            let mut dialog = rfd::FileDialog::new().add_filter("Datum element", &["json"]).set_file_name(file_name);
+            let mut dialog = rfd::FileDialog::new().add_filter(self.i18n.t("keep-filter", "Datum element"), &["json"]).set_file_name(file_name);
             if let Some(f) = folder.filter(|f| std::fs::create_dir_all(f).is_ok()) {
                 dialog = dialog.set_directory(f);
             }
@@ -1233,7 +1271,8 @@ impl Viewer {
                 self.newer = Some(n);
             }
             if let Some((version, url)) = &self.newer {
-                ui.hyperlink_to(format!("⬆ Datum {version} is out"), url).on_hover_text("Its page: what is new, and the download");
+                ui.hyperlink_to(self.i18n.f("update-out", "⬆ Datum { $version } is out", &[("version", version)]), url)
+                    .on_hover_text(self.i18n.t("update-hint", "Its page: what is new, and the download"));
                 ui.separator();
             }
             use crate::icons::{Icon, button};
@@ -1616,7 +1655,10 @@ impl Viewer {
             ui.heading(self.i18n.f("sketch-heading", "Sketch { $name }", &[("name", &sk.feature)]));
             match &sk.placed {
                 Ok(p) if p.solved.dof == 0 => ui.label(self.i18n.t("fully-defined", "Fully defined")),
-                Ok(p) => ui.colored_label(crate::sketch::free_text(ui), format!("{} degrees of freedom: blue points can still move", p.solved.dof)),
+                Ok(p) => ui.colored_label(
+                    crate::sketch::free_text(ui),
+                    self.i18n.f("sketch-dof", "{ $n } degrees of freedom: blue points can still move", &[("n", &p.solved.dof.to_string())]),
+                ),
                 Err(e) => ui.colored_label(ui.visuals().error_fg_color, e),
             };
             // What the sketch breaks downstream: why the model behind did not change.
@@ -1670,8 +1712,16 @@ impl Viewer {
                 // The dimension tool's sub-mode, by the mouse too.
                 if sk.draft.tool == Tool::Dimension {
                     for (axis, label, hint) in [
-                        (Axis::Horizontal, "Horizontal (H)", "A line's ends or two points: their horizontal distance"),
-                        (Axis::Vertical, "Vertical (V)", "A line's ends or two points: their vertical distance"),
+                        (
+                            Axis::Horizontal,
+                            self.i18n.t("dim-horizontal", "Horizontal (H)"),
+                            self.i18n.t("dim-horizontal-hint", "A line's ends or two points: their horizontal distance"),
+                        ),
+                        (
+                            Axis::Vertical,
+                            self.i18n.t("dim-vertical", "Vertical (V)"),
+                            self.i18n.t("dim-vertical-hint", "A line's ends or two points: their vertical distance"),
+                        ),
                     ] {
                         if ui.selectable_label(sk.draft.axis == Some(axis), label).on_hover_text(hint).clicked() {
                             sk.toggle_axis(axis);
@@ -1682,7 +1732,8 @@ impl Viewer {
             // Geometric constraints by hand: a kind, then a click on each thing it ties (D118).
             ui.add_space(4.0);
             ui.horizontal_wrapped(|ui| {
-                for (kind, glyph, name, what) in crate::constrain::KINDS {
+                for (kind, glyph) in crate::constrain::KINDS {
+                    let (name, what) = crate::constrain::text(&self.i18n, kind);
                     let on = sk.draft.tool == Tool::Constrain(kind);
                     let r = crate::icons::tile(ui, name, &format!("{name}: {what}"), on, true, |p, c, colour| {
                         crate::sketch::paint_glyph(p, c, glyph, colour)
@@ -1704,7 +1755,7 @@ impl Viewer {
                 );
                 if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new(self.i18n.t("to-library", "To library…"))).on_hover_text(hint).clicked()
                 {
-                    self.keeping = sk.extract("New element", Some(&sk.params)).map(Keep::new);
+                    self.keeping = sk.extract(self.i18n.t("keep-new", "New element"), Some(&sk.params)).map(Keep::new);
                 }
                 // Groups: a name for elements together (a pattern's cell, a path); its
                 // badge marks them, a click on it selects them.
@@ -1720,7 +1771,7 @@ impl Viewer {
                     }
                     None => {
                         let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Group);
-                        if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new("Group")).on_hover_text(hint).clicked() {
+                        if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new(self.i18n.label(Act::Group))).on_hover_text(hint).clicked() {
                             sent.extend(sk.group_selection().map(|p| Request::Command("edit_sketch", p)));
                         }
                     }
@@ -1747,23 +1798,31 @@ impl Viewer {
                 sent.push(Request::Command("edit_sketch", p));
             }
             let how = match sk.draft.tool {
-                Tool::Select => {
-                    "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, lines and arcs joined into a contour, or a group: along it, or filling it if it closes, nothing: the axes), or the copies selected shifted, left out, their pattern edited · a pattern's badge (squares): a click selects its copies, the right button held on it edits the pattern"
-                }
-                Tool::Dimension => {
-                    "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes"
-                }
-                Tool::Measure => {
-                    "Click a point, a curve or a pattern's copy: its size · then another: the distance, the angle, the gap between circles · a click inside a closed region: its area, holes taken away · Shift: regions added up · Ctrl+C copies the values · Esc or F3 ends"
-                }
-                Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
-                Tool::Template => {
+                Tool::Select => self.i18n.t(
+                    "how-select",
+                    "Drag a blue point, a curve or the selection · double-click a dimension to change it · click to select, Shift or Ctrl to add or take away · frame: to the right what is inside, to the left what it touches (Shift or Ctrl: added) · Ctrl+C, Ctrl+V · Del removes · Esc clears, then leaves · Enter or a right click: the last command again · the right button held half a second: the menu — a pattern by what is selected (a point or circle: around it, one or two lines: along them, lines and arcs joined into a contour, or a group: along it, or filling it if it closes, nothing: the axes), or the copies selected shifted, left out, their pattern edited · a pattern's badge (squares): a click selects its copies, the right button held on it edits the pattern",
+                ),
+                Tool::Dimension => self.i18n.t(
+                    "how-dimension",
+                    "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes",
+                ),
+                Tool::Measure => self.i18n.t(
+                    "how-measure",
+                    "Click a point, a curve or a pattern's copy: its size · then another: the distance, the angle, the gap between circles · a click inside a closed region: its area, holes taken away · Shift: regions added up · Ctrl+C copies the values · Esc or F3 ends",
+                ),
+                Tool::Constrain(_) => self.i18n.t(
+                    "how-constrain",
+                    "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
+                ),
+                Tool::Template => self.i18n.t(
+                    "how-template",
                     "Click the base point (a rectangle: a corner, then the other; from its centre: the centre, then a corner), then its sockets (Enter skips one), \
-                     then the sizes: Tab to the next · F4: a preset from the list · Enter puts it · Esc or a right click cancels"
-                }
-                _ => {
-                    "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command"
-                }
+                     then the sizes: Tab to the next · F4: a preset from the list · Enter puts it · Esc or a right click cancels",
+                ),
+                _ => self.i18n.t(
+                    "how-draw",
+                    "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command",
+                ),
             };
             ui.horizontal(|ui| {
                 done = ui.button(self.i18n.t("done", "Done")).clicked();
@@ -1853,7 +1912,8 @@ impl Viewer {
             cells.resize(2, String::new());
             let (name, value) = (cells[0].trim().to_string(), std::mem::take(&mut cells[1]));
             if params.contains_key(&name) {
-                self.local_error = Some(format!("`{name}` is a parameter already: change its value in its row"));
+                self.local_error =
+                    Some(self.i18n.f("param-taken", "`{ $name }` is a parameter already: change its value in its row", &[("name", &name)]));
                 self.new_parameter = vec![name, value];
             } else {
                 self.local_error = None;
@@ -2117,7 +2177,7 @@ impl Viewer {
         let painter = ui.painter().with_clip_rect(rect);
         if let Some(sk) = &self.sketch {
             sk.paint(&painter, rect);
-            sk.draft.paint(sk, &painter, rect);
+            sk.draft.paint(sk, &painter, rect, &self.i18n);
             let measured = crate::measure::lines(&sk.draft.measured, &self.i18n);
             sk.paint_measure(&painter, rect, &measured);
             sk.paint_frame(&painter, rect);
@@ -2402,21 +2462,27 @@ impl Viewer {
     fn plane_window(&mut self, ctx: &egui::Context) {
         let Some((from, offset)) = &mut self.plane_draft else { return };
         let (mut add, mut cancel) = (false, false);
-        egui::Window::new("Plane").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0)).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("Offset");
-                let r = ui.add(egui::TextEdit::singleline(offset).desired_width(120.0).hint_text("number or formula"));
-                add = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                // Typed at once, as a sketch's dimension is.
-                if !add && !r.has_focus() {
-                    r.request_focus();
-                }
+        egui::Window::new(self.i18n.label(Act::WorkPlane))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("plane-offset", "Offset"));
+                    let r = ui.add(
+                        egui::TextEdit::singleline(offset).desired_width(120.0).hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
+                    );
+                    add = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    // Typed at once, as a sketch's dimension is.
+                    if !add && !r.has_focus() {
+                        r.request_focus();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    add |= ui.button(self.i18n.t("ok", "OK")).clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
+                });
             });
-            ui.horizontal(|ui| {
-                add |= ui.button("OK").clicked();
-                cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
-            });
-        });
         if cancel {
             self.plane_draft = None;
         } else if add {
@@ -2470,7 +2536,7 @@ impl Viewer {
             return;
         }
         let now = ui.input(|i| i.time);
-        match crate::cube::show(ui, rect, &self.camera) {
+        match crate::cube::show(ui, rect, &self.camera, &self.i18n) {
             Some(crate::cube::Ask::Look(d)) => {
                 let d = datum_math::Vec3::new(d[0].into(), d[1].into(), d[2].into());
                 self.turn = Some(crate::cube::Turn::toward(&self.camera, d, now, false));
@@ -2533,25 +2599,30 @@ impl Viewer {
             egui::Frame::popup(ui.style()).show(ui, |ui| match menu {
                 Menu::Note { why, .. } => {
                     ui.label(why.as_str());
-                    if ui.button("OK").clicked() || esc || enter {
+                    if ui.button(self.i18n.t("ok", "OK")).clicked() || esc || enter {
                         end = End::Cancel;
                     }
                 }
                 Menu::Pattern { form, error, .. } => {
-                    ui.strong(form.title());
+                    ui.strong(form.title(&self.i18n));
                     if matches!(form.base, crate::pattern::Base::Along { closed: true, .. }) {
                         ui.horizontal(|ui| {
-                            ui.radio_value(&mut form.fill, true, "Fill it");
-                            ui.radio_value(&mut form.fill, false, "Along its outline");
+                            ui.radio_value(&mut form.fill, true, self.i18n.t("pattern-fill", "Fill it"));
+                            ui.radio_value(&mut form.fill, false, self.i18n.t("pattern-outline", "Along its outline"));
                         });
                     }
-                    for (row, keys, flip) in form.rows() {
+                    for (row, keys, flip) in form.rows(&self.i18n) {
                         ui.horizontal(|ui| {
                             ui.label(row);
                             if let Some(i) = flip
-                                && crate::icons::tile(ui, "The other way", "The other way", form.flip[i], true, |p, c, colour| {
-                                    crate::icons::paint(p, c, crate::icons::Icon::Flip, colour)
-                                })
+                                && crate::icons::tile(
+                                    ui,
+                                    self.i18n.t("pattern-flip", "The other way"),
+                                    self.i18n.t("pattern-flip", "The other way"),
+                                    form.flip[i],
+                                    true,
+                                    |p, c, colour| crate::icons::paint(p, c, crate::icons::Icon::Flip, colour),
+                                )
                                 .clicked()
                             {
                                 form.flip[i] = !form.flip[i];
@@ -2559,7 +2630,7 @@ impl Viewer {
                         });
                         egui::Grid::new(("datum_pattern_row", row)).num_columns(2).show(ui, |ui| {
                             for k in keys {
-                                ui.label(crate::pattern::PatternForm::label(k));
+                                ui.label(crate::pattern::PatternForm::label(&self.i18n, k));
                                 if let Some(t) = form.fields.get_mut(k) {
                                     ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(t).hint_text("—"));
                                 }
@@ -2568,17 +2639,19 @@ impl Viewer {
                         });
                     }
                     if matches!(form.base, crate::pattern::Base::Along { .. }) && !form.fill {
-                        ui.checkbox(&mut form.rotate, "Turn with the path");
+                        ui.checkbox(&mut form.rotate, self.i18n.t("pattern-rotate", "Turn with the path"));
                     }
                     ui.horizontal(|ui| {
-                        let hint = "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away";
-                        if ui.selectable_label(form.picking, "Select elements").on_hover_text(hint).clicked() && !form.picking {
+                        let hint =
+                            self.i18n.t("pattern-select-hint", "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away");
+                        let select = ui.selectable_label(form.picking, self.i18n.t("pattern-select", "Select elements"));
+                        if select.on_hover_text(hint).clicked() && !form.picking {
                             form.picking = true;
                             sk.selected.clear();
                         }
                         match (form.cell.len(), &form.of) {
-                            (0, Some(of)) => ui.weak(format!("copies `{of}`")),
-                            (n, _) => ui.weak(format!("{n} picked")),
+                            (0, Some(of)) => ui.weak(self.i18n.f("pattern-copies-of", "copies `{ $of }`", &[("of", of)])),
+                            (n, _) => ui.weak(self.i18n.f("pattern-picked", "{ $n } picked", &[("n", &n.to_string())])),
                         };
                     });
                     if !form.picking || !form.cell.is_empty() || form.of.is_some() {
@@ -2590,23 +2663,25 @@ impl Viewer {
                     }
                     let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
                     ui.horizontal(|ui| {
-                        if (ui.add_enabled(ready, egui::Button::new("Done")).clicked() || (enter && ready))
+                        if (ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done"))).clicked() || (enter && ready))
                             && let Ok(Some(p)) = form.patch()
                         {
                             end = End::Send(p);
                         }
-                        if ui.button("Cancel").clicked() || esc {
+                        if ui.button(self.i18n.t("cancel", "Cancel")).clicked() || esc {
                             end = End::Cancel;
                         }
                     });
                 }
                 Menu::Copies { form, .. } => {
                     let n = form.copies.len();
+                    let count = n.to_string();
                     match form.pattern() {
-                        Some(p) => ui.strong(format!("{n} {} of `{p}`", if n == 1 { "copy" } else { "copies" })),
-                        None => ui.strong(format!("{n} copies")),
+                        Some(p) if n == 1 => ui.strong(self.i18n.f("pattern-copy-of", "{ $n } copy of `{ $name }`", &[("n", &count), ("name", p)])),
+                        Some(p) => ui.strong(self.i18n.f("pattern-copies-of-name", "{ $n } copies of `{ $name }`", &[("n", &count), ("name", p)])),
+                        None => ui.strong(self.i18n.f("pattern-copies", "{ $n } copies", &[("n", &count)])),
                     };
-                    let axes = form.axes(sk);
+                    let axes = form.axes(sk, &self.i18n);
                     egui::Grid::new("datum_copies_shift").num_columns(2).show(ui, |ui| {
                         for (axis, shift) in axes.iter().zip(&mut form.shift) {
                             ui.label(*axis);
@@ -2617,27 +2692,29 @@ impl Viewer {
                     let shifted = form.shifted(sk);
                     form.preview(sk, &shifted);
                     ui.horizontal(|ui| {
-                        if ui.button("Shift").on_hover_text("Move them by these numbers; both empty: back where the pattern puts them").clicked()
-                            || enter
-                        {
+                        let shift = ui.button(self.i18n.t("pattern-shift", "Shift"));
+                        let hint = self.i18n.t("pattern-shift-hint", "Move them by these numbers; both empty: back where the pattern puts them");
+                        if shift.on_hover_text(hint).clicked() || enter {
                             end = End::Send(shifted);
                         }
-                        if ui.button("Leave out").on_hover_text("No copy there (Del does it too)").clicked() {
+                        let leave = ui.button(self.i18n.t("pattern-leave", "Leave out"));
+                        if leave.on_hover_text(self.i18n.t("pattern-leave-hint", "No copy there (Del does it too)")).clicked() {
                             end = End::Send(form.removed(sk));
                         }
                     });
                     ui.horizontal(|ui| {
                         if let Some(p) = form.pattern().map(String::from) {
-                            if ui.button("Edit pattern…").clicked() {
+                            if ui.button(self.i18n.t("pattern-edit", "Edit pattern…")).clicked() {
                                 end = End::Edit(p.clone());
                             }
-                            if ui.button("Delete pattern").on_hover_text("The copies go; the elements copied stay").clicked() {
+                            let delete = ui.button(self.i18n.t("pattern-delete", "Delete pattern"));
+                            if delete.on_hover_text(self.i18n.t("pattern-delete-hint", "The copies go; the elements copied stay")).clicked() {
                                 let mut m = serde_json::Map::new();
                                 m.insert("patterns".into(), json!({ p: null }));
                                 end = End::Send(m);
                             }
                         }
-                        if ui.button("Cancel").clicked() || esc {
+                        if ui.button(self.i18n.t("cancel", "Cancel")).clicked() || esc {
                             end = End::Cancel;
                         }
                     });
@@ -2806,7 +2883,19 @@ impl Viewer {
             if let Some((label, kind)) = all.get(sk.draft.sockets.len()) {
                 let (x, y) = sk.camera.offset(spot.at, h);
                 let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
-                let text = format!("{label} — click a {kind} · Enter skips ({} left)", all.len() - sk.draft.sockets.len());
+                let kind = match kind.as_str() {
+                    "line" => self.i18n.t("socket-line", "line"),
+                    "point" => self.i18n.t("socket-point", "point"),
+                    "curve" => self.i18n.t("socket-curve", "curve"),
+                    "circle" => self.i18n.t("socket-circle", "circle"),
+                    other => other,
+                };
+                let left = (all.len() - sk.draft.sockets.len()).to_string();
+                let text = self.i18n.f(
+                    "socket-ask",
+                    "{ $label } — click a { $kind } · Enter skips ({ $left } left)",
+                    &[("label", label), ("kind", kind), ("left", &left)],
+                );
                 egui::Area::new(egui::Id::new("datum_sketch_link")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text));
                 });
@@ -2857,10 +2946,11 @@ impl Viewer {
                             };
                         }
                         if let Some(presets) = asking.and(draft.template.as_ref()).and_then(|t| t["presets"].as_object()).filter(|p| !p.is_empty()) {
-                            let shown = draft.preset.clone().unwrap_or_else(|| "Element's values".into());
+                            let own = self.i18n.t("place-own-values", "Element's values");
+                            let shown = draft.preset.clone().unwrap_or_else(|| own.into());
                             egui::ComboBox::from_id_salt("datum_sketch_preset").selected_text(shown).show_ui(ui, |ui| {
                                 for name in std::iter::once(None).chain(presets.keys().map(Some)) {
-                                    let label = name.map_or("Element's values", String::as_str);
+                                    let label = name.map_or(own, String::as_str);
                                     if ui.selectable_label(draft.preset.as_ref() == name, label).clicked() {
                                         draft.preset = name.cloned();
                                         draft.answers.clear();
@@ -3023,7 +3113,10 @@ impl Viewer {
                                 patch.insert("add_constraints".into(), json!([c]));
                                 sk.try_apply(patch, points).map(Some)
                             }
-                            Step::Wrong(why) => Err(why),
+                            Step::Wrong(kind) => {
+                                let (name, what) = crate::constrain::text(&self.i18n, kind);
+                                Err(format!("{name}: {what}"))
+                            }
                         };
                         match tried {
                             Ok(Some(p)) => {
@@ -3135,7 +3228,7 @@ impl Viewer {
                         k.picking = None;
                         k.error = None;
                     }
-                    None => k.error = Some("Not a point of the selection: pick one of its own".into()),
+                    None => k.error = Some(self.i18n.t("keep-not-own", "Not a point of the selection: pick one of its own").into()),
                 }
             }
         } else if r.clicked() {
@@ -3316,10 +3409,12 @@ fn paint_outline(painter: &egui::Painter, rect: egui::Rect, outline: &[Vec<[f64;
 /// goes beside it.
 /// Whether `path`, chosen from `list` (named `what` in the message), is still `there`: one that
 /// is not leaves the list, saying so.
-fn still_there(list: &mut Vec<PathBuf>, path: &std::path::Path, there: bool, what: &str) -> bool {
+fn still_there(i18n: &crate::i18n::I18n, list: &mut Vec<PathBuf>, path: &std::path::Path, there: bool, what: &str) -> bool {
     if !there {
         list.retain(|p| p != path);
-        rfd::MessageDialog::new().set_title("Datum").set_description(format!("{} is no longer there: it leaves the {what}.", path.display())).show();
+        let said =
+            i18n.f("gone", "{ $path } is no longer there: it leaves the list “{ $what }”.", &[("path", &path.display().to_string()), ("what", what)]);
+        rfd::MessageDialog::new().set_title("Datum").set_description(said).show();
     }
     there
 }
@@ -3756,7 +3851,7 @@ impl egui_dock::TabViewer for Tabs<'_> {
                 egui::ScrollArea::vertical().show(ui, |ui| self.v.palette(ui));
             }
             Pane::Library => {
-                ui.weak("Sketch elements to place: open a sketch.");
+                ui.weak(self.v.i18n.t("library-closed", "Sketch elements to place: open a sketch."));
             }
         }
     }
@@ -3783,7 +3878,7 @@ impl Viewer {
             return;
         };
         if m.flats.is_empty() {
-            ui.weak("No flat pattern here: work in a part that makes a sheet or a plate (a body's blank comes by itself).");
+            ui.weak(self.i18n.t("flat-none", "No flat pattern here: work in a part that makes a sheet or a plate (a body's blank comes by itself)."));
             return;
         }
         let chosen = self.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
@@ -3805,12 +3900,14 @@ impl Viewer {
             // A body's two sides; an unfold feature names its face itself.
             if !by_hand {
                 let mut on = back;
-                if ui.checkbox(&mut on, "Back side").on_hover_text("Seen from the other side of the sheet: the mirror image").changed() {
+                let side = ui.checkbox(&mut on, self.i18n.t("flat-back", "Back side"));
+                if side.on_hover_text(self.i18n.t("flat-back-hint", "Seen from the other side of the sheet: the mirror image")).changed() {
                     set_back = Some(on);
                 }
             }
             if matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_)))) {
-                export = ui.button("DXF…").on_hover_text("The blank for the turret press: R12, lines, arcs and circles, no bend lines").clicked();
+                let hint = self.i18n.t("flat-dxf-hint", "The blank for the turret press: R12, lines, arcs and circles, no bend lines");
+                export = ui.button("DXF…").on_hover_text(hint).clicked();
             }
         });
         if export && let Some(p) = self.exported("dxf", &chosen).save_file() {
@@ -3820,7 +3917,10 @@ impl Viewer {
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
             Some(Ok(f)) => self.flat.show(ui, f),
             Some(Err(e)) => {
-                ui.colored_label(ui.visuals().error_fg_color, format!("No blank for {chosen}: {e}"));
+                ui.colored_label(
+                    ui.visuals().error_fg_color,
+                    self.i18n.f("flat-error", "No blank for { $name }: { $why }", &[("name", &chosen), ("why", e)]),
+                );
             }
             None => {}
         }
@@ -4581,7 +4681,7 @@ mod tests {
             if let Some(sk) = &v.sketch {
                 let painter = ui.painter().with_clip_rect(rect);
                 sk.paint(&painter, rect);
-                sk.draft.paint(sk, &painter, rect);
+                sk.draft.paint(sk, &painter, rect, &crate::i18n::I18n::default());
             }
         });
         // The two anchors are clicked first, then the sizes are asked by the first.
