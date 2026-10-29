@@ -694,4 +694,32 @@ mod tests {
         let (x, y) = sk.camera.offset([12.0, 10.0], h);
         assert_eq!(sk.copy_at(x, y, h), None, "the cell is the hole itself");
     }
+
+    /// The measure tool takes a copy as the circle it is, there; inside the plate, the plate
+    /// with its holes, copies too (D177).
+    #[test]
+    fn measuring_reaches_copies_and_regions() {
+        use crate::measure::{Quantity, Shape, Taken, readings, take};
+        let mut sk = plate();
+        sk.json["sketch"]["patterns"] = json!({"row": {"of": "hole", "count": [3, 1], "step": [[10, 0], [0, 10]]}});
+        sk.solve();
+        let h = 600.0;
+        let at = |q: [f64; 2]| sk.camera.offset(q, h);
+        let mut m = Vec::new();
+        let (x, y) = at([12.0, 10.0]);
+        take(&mut m, sk.measure_at(x, y, h), false);
+        let (x, y) = at([22.0, 10.0]);
+        take(&mut m, sk.measure_at(x, y, h), false);
+        assert!(matches!(m[1], Taken::Shape(Shape::Circle { center: [20.0, 10.0], radius: 2.0 })));
+        assert_eq!(readings(&m), [(Quantity::Centres, 10.0), (Quantity::Gap, 6.0)]);
+        let (x, y) = at([50.0, 50.0]);
+        take(&mut m, sk.measure_at(x, y, h), false);
+        let r = readings(&m);
+        assert!((r[0].1 - (6000.0 - 12.0 * std::f64::consts::PI)).abs() < 1e-9, "{r:?}");
+        assert_eq!(r[1..], [(Quantity::Perimeter, 320.0), (Quantity::Holes, 3.0)]);
+        let (x, y) = at([10.0, 10.0]);
+        assert!(sk.measure_at(x, y, h).is_some_and(|t| matches!(t, Taken::Shape(Shape::Point([10.0, 10.0])))), "the hole's centre");
+        let (x, y) = at([150.0, 30.0]);
+        assert!(sk.measure_at(x, y, h).is_none(), "outside everything");
+    }
 }

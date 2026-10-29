@@ -24,6 +24,12 @@ pub enum Icon {
     Circle,
     Point,
     Dimension,
+    /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
+    /// a ruler.
+    NewSketch,
+    WorkPlane,
+    LookAt,
+    Measure,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -71,6 +77,8 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
         painter.add(egui::Shape::line(pts, stroke));
         painter.add(egui::Shape::line(vec![end + Vec2::new(-3.0, -3.0), end, end + Vec2::new(3.0, -3.0)], stroke));
     };
+    // A plane seen aslant, low in the icon.
+    let plane = || vec![at(-7.0, 6.5), at(3.0, 6.5), at(7.0, 1.5), at(-3.0, 1.5)];
     match icon {
         Icon::Undo => turn(1.0),
         Icon::Redo => turn(-1.0),
@@ -133,6 +141,37 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             painter.line_segment([at(-6.0, 0.0), at(6.0, 0.0)], stroke);
             painter.add(egui::Shape::convex_polygon(vec![at(-6.0, 0.0), at(-3.0, -2.0), at(-3.0, 2.0)], colour, Stroke::NONE));
             painter.add(egui::Shape::convex_polygon(vec![at(6.0, 0.0), at(3.0, 2.0), at(3.0, -2.0)], colour, Stroke::NONE));
+        }
+        Icon::NewSketch => {
+            painter.add(egui::Shape::closed_line(plane(), stroke));
+            // A pencil down to the plane, its point at the lower left.
+            let body = [at(-1.0, 3.0), at(-1.5, 1.0), at(5.0, -5.5), at(6.5, -4.0), at(0.0, 2.5), at(-1.0, 3.0)];
+            painter.add(egui::Shape::line(body.to_vec(), stroke));
+        }
+        Icon::WorkPlane => {
+            painter.add(egui::Shape::closed_line(plane(), stroke));
+            painter.line_segment([at(0.0, 3.5), at(0.0, -6.0)], stroke);
+            painter.add(egui::Shape::line(vec![at(-2.5, -3.5), at(0.0, -6.0), at(2.5, -3.5)], stroke));
+        }
+        Icon::LookAt => {
+            let lid = |sign: f32| -> Vec<Pos2> {
+                (0..=16)
+                    .map(|k| {
+                        let a = (180.0 * k as f32 / 16.0).to_radians();
+                        at(-7.0 * a.cos(), sign * 4.5 * a.sin())
+                    })
+                    .collect()
+            };
+            painter.add(egui::Shape::line(lid(1.0), stroke));
+            painter.add(egui::Shape::line(lid(-1.0), stroke));
+            painter.circle_filled(c, 2.3, colour);
+        }
+        Icon::Measure => {
+            // A ruler laid aslant, its ticks.
+            painter.add(egui::Shape::closed_line(vec![at(-7.0, 3.0), at(3.0, -7.0), at(7.0, -3.0), at(-3.0, 7.0)], stroke));
+            for t in [2.5, 5.0, 7.5] {
+                painter.line_segment([at(-7.0 + t, 3.0 - t), at(-5.0 + t, 5.0 - t)], stroke);
+            }
         }
     }
 }

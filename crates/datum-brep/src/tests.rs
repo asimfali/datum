@@ -298,3 +298,13 @@ fn arcs_far_away_and_turned() {
     assert_eq!(rebuilt.hash(), far.hash());
     assert!(far.mapped(|p| p, |n| n).is_err(), "an affine map of arcs is refused");
 }
+
+#[test]
+fn loop_perimeter_counts_chords_and_arcs() {
+    assert_eq!(square("p", 10.0).perimeter(), 40.0);
+    // A semicircle of radius 1 and its diameter.
+    let pts = vec![Vec2::new(0.0, 0.0), Vec2::new(2.0, 0.0)];
+    let arcs = vec![Some(ProfileArc { center: Vec2::new(1.0, 0.0), ccw: true }), None];
+    assert!(close(ring("half", pts, arcs).perimeter(), 2.0 + std::f64::consts::PI));
+    assert!(close(circle("c", Vec2::new(3.0, 1.0), 2.0).perimeter(), 2.0 * std::f64::consts::TAU));
+}

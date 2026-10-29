@@ -91,6 +91,21 @@ impl ProfileLoop {
             .sum()
     }
 
+    /// The length of the loop's boundary: chords and arcs, in `f64` and in a fixed order.
+    pub fn perimeter(&self) -> f64 {
+        let p = &self.points;
+        let n = p.len();
+        (0..n)
+            .map(|k| {
+                let (a, b) = (p[k], p[(k + 1) % n]);
+                match self.arc(k) {
+                    None => libm::hypot(b.x - a.x, b.y - a.y),
+                    Some(arc) => libm::hypot(a.x - arc.center.x, a.y - arc.center.y) * arc.turn(a, b).abs(),
+                }
+            })
+            .sum()
+    }
+
     /// Edge `k` for the touch checks.
     pub(crate) fn piece(&self, k: usize) -> Piece {
         let n = self.points.len();

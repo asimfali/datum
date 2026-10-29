@@ -1277,8 +1277,19 @@ impl Viewer {
                 }
             }
             ui.separator();
-            for act in [Act::NewSketch, Act::WorkPlane, Act::LookAt] {
-                self.item(ui, act, false);
+            // Icons, as undo and redo: the name and what it does on hover.
+            for (act, icon) in
+                [(Act::NewSketch, Icon::NewSketch), (Act::WorkPlane, Icon::WorkPlane), (Act::LookAt, Icon::LookAt), (Act::Measure, Icon::Measure)]
+            {
+                if act == Act::Measure {
+                    ui.separator();
+                }
+                let hint = format!("{}\n{}", self.i18n.label(act), self.keys.hint(ui.ctx(), &self.i18n, act));
+                let (on, enabled) = (self.checked(act), self.available(act.action()));
+                if crate::icons::tile(ui, self.i18n.label(act), &hint, on, enabled, |p, c, colour| crate::icons::paint(p, c, icon, colour)).clicked()
+                {
+                    self.run(ui, act);
+                }
             }
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
@@ -1771,6 +1782,9 @@ impl Viewer {
                 Tool::Dimension => {
                     "Click a line, arc or circle and type the value, Enter · then a point or a parallel line: the distance to it, another line: the angle · an arc's two ends: its length, the arc again: its angle · H, V: horizontal, vertical · two points: then click where it goes"
                 }
+                Tool::Measure => {
+                    "Click a point, a curve or a pattern's copy: its size · then another: the distance, the angle, the gap between circles · a click inside a closed region: its area, holes taken away · Shift: regions added up · Ctrl+C copies the values · Esc or F3 ends"
+                }
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
                     "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
@@ -2127,7 +2141,19 @@ impl Viewer {
         if let Some(sk) = &self.sketch {
             sk.paint(&painter, rect);
             sk.draft.paint(sk, &painter, rect);
+            let measured = crate::measure::lines(&sk.draft.measured, &self.i18n);
+            sk.paint_measure(&painter, rect, &measured);
             sk.paint_frame(&painter, rect);
+            // The values along the bottom too, as a status line: Ctrl+C copies them (D177).
+            if !measured.is_empty() {
+                painter.text(
+                    rect.center_bottom() - egui::vec2(0.0, 12.0),
+                    egui::Align2::CENTER_BOTTOM,
+                    measured.join(" · "),
+                    egui::FontId::proportional(13.0),
+                    egui::Color32::from_rgb(60, 65, 75),
+                );
+            }
             if let Some(k) = self.keeping.as_ref().filter(|k| !k.of_library) {
                 sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
             }
@@ -2612,7 +2638,10 @@ impl Viewer {
                 let paste = i.events.iter().find_map(|e| if let egui::Event::Paste(t) = e { Some(t.clone()) } else { None });
                 (copy, paste)
             });
-            if copy && let Some(t) = sk.copy() {
+            // Measuring, the values are copied instead (D177).
+            if copy && sk.draft.tool == Tool::Measure {
+                ui.ctx().copy_text(crate::measure::lines(&sk.draft.measured, &self.i18n).join("\n"));
+            } else if copy && let Some(t) = sk.copy() {
                 ui.ctx().copy_text(serde_json::to_string_pretty(&t).unwrap_or_default());
             }
             if let Some(t) = paste.and_then(|p| serde_json::from_str::<Json>(&p).ok()).filter(|t| datum_model::library::check("sketch", t).is_ok()) {
@@ -2804,7 +2833,14 @@ impl Viewer {
             }
             let placing =
                 r.clicked() || (draft.tangent && r.drag_stopped_by(egui::PointerButton::Primary)) || (field_done.0 && draft.typed.is_some());
-            if draft.tool == Tool::Dimension {
+            if draft.tool == Tool::Measure {
+                if r.clicked()
+                    && let Some((x, y)) = offset
+                {
+                    crate::measure::take(&mut draft.measured, sk.measure_at(x, y, h), free);
+                    draft.measured_at = sk.camera.at(x, y, h);
+                }
+            } else if draft.tool == Tool::Dimension {
                 // A frame from an empty place, either way, picks what it touches to dimension: two
                 // lines, their angle.
                 if r.drag_started_by(egui::PointerButton::Primary)
@@ -3285,6 +3321,8 @@ impl Viewer {
         here && match a.act {
             Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
+            // A command of the whole window; for now it measures in a sketch only (D177).
+            Act::Measure => self.sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
@@ -3301,6 +3339,7 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
+            Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
                 let mut m = self.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
                 *mode(&mut m, act)
@@ -3356,6 +3395,12 @@ impl Viewer {
             Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Dimension => {
                 if let Some(sk) = &mut self.sketch {
                     sk.draft.take_up(tool(act));
+                }
+            }
+            // F3 again ends measuring, as Esc does (D177).
+            Act::Measure => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.draft.press(Tool::Measure);
                 }
             }
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
@@ -3465,6 +3510,7 @@ impl Viewer {
         ui.menu_button(self.i18n.t("menu-view", "View").to_string(), |ui| {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
+            self.item(ui, Act::Measure, true);
             self.item(ui, Act::SmoothEdges, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {

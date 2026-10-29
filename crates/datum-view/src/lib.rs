@@ -14,6 +14,7 @@ mod flat;
 mod i18n;
 mod icons;
 pub mod log;
+mod measure;
 mod origin;
 mod pattern;
 pub mod render;

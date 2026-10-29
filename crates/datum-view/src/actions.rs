@@ -24,6 +24,7 @@ pub enum Act {
     Circle,
     Point,
     Dimension,
+    Measure,
     Rectangle,
     Tangent,
     NewProject,
@@ -87,7 +88,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 36] = [
+pub const ACTIONS: [Action; 37] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -124,6 +125,14 @@ pub const ACTIONS: [Action; 36] = [
         "Click a line, an arc or a circle; a point, then a line; two points, then where it goes. Frame two lines: their angle",
         plain(Key::D),
         Sketch,
+    ),
+    action(
+        Act::Measure,
+        "tools.measure",
+        "Measure",
+        "For now in a sketch: click a point, a curve or a pattern's copy, then another: the distance or the angle; a click inside a closed region: its area; Shift adds to it; Esc or F3 ends",
+        plain(Key::F3),
+        Anywhere,
     ),
     action(Act::Rectangle, "sketch.library_first", "Rectangle", "The first element of the library", plain(Key::R), Sketch),
     action(Act::Tangent, "sketch.tangent_arc", "Tangent arc", "The next segment of the line: an arc tangent to the last one", plain(Key::T), Sketch),
