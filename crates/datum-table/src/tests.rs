@@ -62,3 +62,56 @@ fn excel_s_clipboard_is_read() {
     assert!(parse_tsv("").is_empty());
     assert_eq!(to_tsv(&[vec!["x\"y"]]), "\"x\"\"y\"");
 }
+
+fn text(t: &str) -> Piece {
+    Piece::Text(t.into())
+}
+
+fn fraction(over: &str, under: &str) -> Piece {
+    Piece::Fraction { over: over.into(), under: under.into() }
+}
+
+#[test]
+fn a_material_is_a_word_and_a_fraction() {
+    let cell = "Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс ГОСТ 16523-97]";
+    let p = pieces(cell);
+    assert_eq!(p, [text("Лист "), fraction("Б-ПН-{t} ГОСТ 19903-2015", "08пс ГОСТ 16523-97")]);
+    assert_eq!(text_of(&p), cell);
+    assert_eq!(pieces("[a|b]x[ | ]"), [fraction("a", "b"), text("x"), fraction("", "")]);
+    assert_eq!(text_of(&[fraction("a | b", "[c]")]), "[a  b | c]", "what would end a fraction is left out");
+}
+
+#[test]
+fn brackets_without_a_fraction_are_text() {
+    for t in ["[a]", "a [b", "a ] b", "[a | b | c]", "[[a | b]", "[a | b"] {
+        let p = pieces(t);
+        assert_eq!(text_of(&p), t, "{t}");
+    }
+    assert_eq!(pieces("[[a | b]"), [text("["), fraction("a", "b")]);
+    assert_eq!(pieces("[a | b | c]"), [text("[a | b | c]")]);
+    assert!(pieces("").is_empty());
+}
+
+#[test]
+fn a_fraction_is_stacked_on_the_middle_line() {
+    // 1 mm a character at any height: widths are easy to follow.
+    let width = |t: &str, _: f64| t.chars().count() as f64;
+    let cell = Rect { x: 10.0, y: 8.0, w: 60.0, h: 8.0 };
+    let line = place(&[text("ab"), fraction("xyz", ""), text("c")], cell, 4.0, &width);
+    let rect = |k: usize| line.boxes[k].rect;
+    assert_eq!(
+        line.boxes.iter().map(|b| (b.piece, b.slot)).collect::<Vec<_>>(),
+        [(0, Slot::Text), (1, Slot::Over), (1, Slot::Under), (2, Slot::Text)]
+    );
+    assert_eq!(rect(0), Rect { x: 10.0 + PAD, y: 10.0, w: 2.0, h: 4.0 });
+    let small = 4.0 * STACK;
+    // As wide as its wider line; the bar on the middle line, between them.
+    assert_eq!((rect(1).x, rect(1).w, rect(2).w), (13.0, 4.0, 4.0), "no narrower than the text is high");
+    assert_eq!(rect(1).h, small);
+    assert!(rect(1).y + rect(1).h < 12.0 && rect(2).y > 12.0 && rect(1).y > 8.0 && rect(2).y + rect(2).h < 16.0, "within the row");
+    assert_eq!(line.bars, [[[13.0, 12.0], [17.0, 12.0]]]);
+    assert_eq!(rect(3).x, 17.0);
+    assert_eq!(line.at([14.0, 11.0]).map(|b| (b.piece, b.slot)), Some((1, Slot::Over)));
+    assert_eq!(line.at([14.0, 13.0]).map(|b| (b.piece, b.slot)), Some((1, Slot::Under)));
+    assert_eq!(line.at([40.0, 12.0]), None);
+}
