@@ -217,11 +217,12 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "library",
-        description: "The library's elements of a `level` (VISION §10; `sketch` or `material`): built in, then from `library/<level>` \
+        description: "The library's elements of a `level` (VISION §10; `sketch`, `material` or `rule`): built in, then from `library/<level>` \
                       beside the program, then from `library/<level>` of the model's project (the nearest folder above the model \
                       file with `datum-project.json`); one of a name already listed takes its place. Each with its `source` and \
                       all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
-                      by name) and `anchors`; a material's `designation` and `density`. `skipped`: files that are not elements, \
+                      by name) and `anchors`; a material's `designation` and `density`; a rule's `kind`, `material`, `thickness` and \
+                      `radius`. `skipped`: files that are not elements, \
                       with why.",
         params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
@@ -321,7 +322,12 @@ const COMMANDS: &[Command] = &[
                       standards. A material: `name` (as the engineer calls it: `08пс`, `Ст3 лист`), `designation` as written in \
                       the title block — a word, then a fraction `[over | under]`: the gauge and its standard over the bar, the \
                       grade and its standard under it, `{t}` where a part's thickness goes (`Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс \
-                      ГОСТ 16523-97]`), `density` in kg/m³ (for masses), `description`. The reply says where it went.",
+                      ГОСТ 16523-97]`), `density` in kg/m³ (for masses), `description`. Renamed, its rules follow. A rule (D179) is \
+                      what a part is made by — every part has one: `name` (as the engineer calls it: `08пс 2 мм`), `material` \
+                      (a material's name in the library), `kind`: `sheet` for sheet metal, with `thickness` in mm (what a part \
+                      takes unless it gives its own) and bend `radius` in mm or as a formula of the thickness `t` (`t`, `1.5 * t`: \
+                      one rule serves every thickness), or `part` for an ordinary part (neither of them); `description`. The \
+                      reply says where it went.",
         params: || {
             json!({"type": "object", "properties": {
                 "level": {"type": "string", "enum": library::LEVELS},
@@ -331,15 +337,14 @@ const COMMANDS: &[Command] = &[
         },
         run: |s, p| {
             let level = text(p, "level")?;
-            let lib = library::load(level, s.project().as_deref());
-            let path = library::save(level, &p["element"], p.get("was").and_then(Value::as_str), s.path.as_deref(), &lib)?;
+            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.path.as_deref(), s.project().as_deref())?;
             Ok(json!({"saved": path.display().to_string()}))
         },
     },
     Command {
         name: "remove_library",
         description: "Remove library element `name` of `level`: its file, the most specific one (one of the same name from a less \
-                      specific place shows again); a built-in element stays.",
+                      specific place shows again); a built-in element stays, and so does a material with rules.",
         params: || {
             json!({"type": "object", "properties": {
                 "level": {"type": "string", "enum": library::LEVELS},
@@ -348,7 +353,7 @@ const COMMANDS: &[Command] = &[
         },
         run: |s, p| {
             let level = text(p, "level")?;
-            let path = library::remove(text(p, "name")?, &library::load(level, s.project().as_deref()))?;
+            let path = library::delete(level, text(p, "name")?, s.project().as_deref())?;
             Ok(json!({"removed": path.display().to_string()}))
         },
     },

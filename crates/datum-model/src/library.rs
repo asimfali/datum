@@ -27,8 +27,8 @@ use crate::patch::SketchPatch;
 use crate::workspace;
 
 /// The levels with elements so far: a library folder's subfolders by the same names.
-/// A material (D178) is the enterprise's own: none is built in.
-pub const LEVELS: [&str; 2] = ["sketch", "material"];
+/// A material (D178) and a rule (D179) are the enterprise's own: none is built in.
+pub const LEVELS: [&str; 3] = ["sketch", "material", "rule"];
 
 const BUILT_IN_SKETCH: [&str; 2] =
     [include_str!("../../../library/sketch/rectangle.json"), include_str!("../../../library/sketch/center_rectangle.json")];
@@ -139,8 +139,10 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
     if !e["name"].as_str().is_some_and(|n| !n.trim().is_empty()) {
         return Err("an element needs a `name`".into());
     }
-    if level == "material" {
-        return check_material(e);
+    match level {
+        "material" => return check_material(e),
+        "rule" => return check_rule(e),
+        _ => {}
     }
     let sketch: Sketch = serde_json::from_value(e["sketch"].clone()).map_err(|err| format!("`sketch`: {err}"))?;
     let anchors = anchors(e);
@@ -183,19 +185,63 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
 /// cell's text form: `Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс ГОСТ 16523-97]`, `{t}` where a
 /// part's thickness goes), its `density` in kg/m³ and a `description`; nothing else.
 fn check_material(e: &Value) -> Result<(), String> {
-    let o = e.as_object().ok_or("a material is an object")?;
-    if let Some(k) = o.keys().find(|k| !["name", "designation", "density", "description"].contains(&k.as_str())) {
-        return Err(format!("a material has no `{k}`: `name`, `designation`, `density`, `description`"));
-    }
-    for k in ["designation", "description"] {
-        if o.get(k).is_some_and(|v| !v.is_string()) {
-            return Err(format!("`{k}` is text"));
-        }
-    }
+    let o = fields("material", e, &["name", "designation", "density", "description"], &["designation", "description"])?;
     if o.get("density").is_some_and(|d| !d.as_f64().is_some_and(|d| d > 0.0)) {
         return Err("`density`: kg/m³, above zero".into());
     }
     Ok(())
+}
+
+/// A rule (D179, D180): its `name`, `kind` (`sheet` or `part`), the `material` it is of (by
+/// name; a rule is never without one) and a `description`; a sheet rule's `thickness` in mm
+/// (what a part takes unless it gives its own) and bend `radius`: mm, or a formula of the
+/// part's thickness `t` (`t`, `1.5 * t`), as one rule serves every thickness.
+fn check_rule(e: &Value) -> Result<(), String> {
+    let o = fields("rule", e, &["name", "kind", "material", "thickness", "radius", "description"], &["kind", "material", "description"])?;
+    if !o.get("material").and_then(Value::as_str).is_some_and(|m| !m.trim().is_empty()) {
+        return Err("a rule needs the `material` it is of".into());
+    }
+    match o.get("kind").and_then(Value::as_str) {
+        Some("sheet") => {}
+        Some("part") => {
+            if let Some(k) = ["thickness", "radius"].into_iter().find(|k| o.contains_key(*k)) {
+                return Err(format!("a part's rule has no `{k}`: that of a `sheet` rule"));
+            }
+            return Ok(());
+        }
+        _ => return Err("`kind`: `sheet` or `part`".into()),
+    }
+    if o.get("thickness").is_some_and(|t| !t.as_f64().is_some_and(|t| t > 0.0)) {
+        return Err("`thickness`: mm, above zero".into());
+    }
+    match o.get("radius") {
+        None => Ok(()),
+        Some(r) => match bend_radius(r, 1.0) {
+            Ok(r) if r >= 0.0 => Ok(()),
+            _ => Err("`radius`: mm, not below zero, or a formula of the thickness `t`".into()),
+        },
+    }
+}
+
+/// A sheet rule's bend radius (mm, or a formula of `t`) for thickness `t`.
+pub fn bend_radius(radius: &Value, t: f64) -> Result<f64, String> {
+    match radius {
+        Value::String(f) => eval(f, &|n| if n == "t" { Ok(t) } else { Err(ExprError::Unknown(n.into())) }).map_err(|e| e.to_string()),
+        r => r.as_f64().ok_or_else(|| "a number or a formula".into()),
+    }
+}
+
+/// `e` as an object of `what` with no keys but `keys`, those of `text` text.
+fn fields<'a>(what: &str, e: &'a Value, keys: &[&str], text: &[&str]) -> Result<&'a Map<String, Value>, String> {
+    let o = e.as_object().ok_or_else(|| format!("a {what} is an object"))?;
+    if let Some(k) = o.keys().find(|k| !keys.contains(&k.as_str())) {
+        let keys: Vec<String> = keys.iter().map(|k| format!("`{k}`")).collect();
+        return Err(format!("a {what} has no `{k}`: {}", keys.join(", ")));
+    }
+    if let Some(k) = text.iter().find(|k| o.get(**k).is_some_and(|v| !v.is_string())) {
+        return Err(format!("`{k}` is text"));
+    }
+    Ok(o)
 }
 
 /// The anchors of an element: one or two of its points, where it is put.
@@ -885,6 +931,47 @@ pub fn save(level: &str, element: &Value, was: Option<&str>, model: Option<&Path
         std::fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
     }
     Ok(path)
+}
+
+/// [`save`] kept whole with the other levels (D179): a rule's material must be in the library
+/// (`project`'s, as [`load`] reads it); a material renamed takes its rules along.
+pub fn put(level: &str, element: &Value, was: Option<&str>, model: Option<&Path>, project: Option<&Path>) -> Result<PathBuf, String> {
+    if level == "rule" {
+        let m = element["material"].as_str().unwrap_or_default();
+        if !m.is_empty() && load("material", project).get(m).is_none() {
+            return Err(format!("no material `{m}` in the library: a rule is of one"));
+        }
+    }
+    let path = save(level, element, was, model, &load(level, project))?;
+    let name = element["name"].as_str().unwrap_or_default().trim();
+    if level == "material"
+        && let Some(was) = was.filter(|w| *w != name)
+    {
+        for r in rules_of(was, project) {
+            let mut e = r.element;
+            e["material"] = json!(name);
+            if let Some(f) = r.file {
+                write(&f, &e)?;
+            }
+        }
+    }
+    Ok(path)
+}
+
+/// [`remove`] kept whole with the other levels: a material with rules stays.
+pub fn delete(level: &str, name: &str, project: Option<&Path>) -> Result<PathBuf, String> {
+    if level == "material" {
+        let rules: Vec<String> = rules_of(name, project).iter().map(|r| format!("`{}`", r.name())).collect();
+        if !rules.is_empty() {
+            return Err(format!("`{name}` has rules ({}): remove them or give them another material first", rules.join(", ")));
+        }
+    }
+    remove(name, &load(level, project))
+}
+
+/// The rules of material `name`.
+fn rules_of(name: &str, project: Option<&Path>) -> Vec<Entry> {
+    load("rule", project).entries.into_iter().filter(|e| e.element["material"] == name).collect()
 }
 
 /// Removes element `name`'s file, the most specific one; a built-in element stays.

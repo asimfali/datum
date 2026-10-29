@@ -434,19 +434,23 @@ struct Viewer {
     adapter: String,
     /// Parameter definitions as typed, by name; a new one's name and definition.
     edits: BTreeMap<String, String>,
-    new_parameter: (String, String),
+    new_parameter: crate::table::Pending,
     /// Work plane offsets as typed in their rows, by feature.
     offsets: BTreeMap<String, String>,
     /// Why the window refused what was asked, before the model was asked.
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
     table: Option<(crate::table::Source, crate::table::Editor)>,
-    /// The library's materials the materials table shows, read when it opens and after the commands
-    /// it sent were run; and the new material's cells as typed so far.
+    /// The library's materials and rules the tables show, read when one opens and after the
+    /// commands it sent were run; the new material's and the new rule's cells as typed so far; and
+    /// the material whose rules the rules table shows.
     materials: Vec<Json>,
+    rules: Vec<Json>,
+    rule_material: Option<String>,
     new_material: crate::table::Pending,
-    /// A library command was sent: the materials are read again with the model it brings.
-    materials_due: bool,
+    new_rule: crate::table::Pending,
+    /// A library command was sent: the materials and rules are read again with the model it brings.
+    library_due: bool,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
     /// A newer release, once the background check finds one: its version and page.
@@ -556,8 +560,11 @@ impl Viewer {
             local_error: None,
             table: None,
             materials: Vec::new(),
+            rules: Vec::new(),
+            rule_material: None,
             new_material: Default::default(),
-            materials_due: false,
+            new_rule: Default::default(),
+            library_due: false,
             path: None,
             update,
             newer: None,
@@ -637,9 +644,11 @@ impl Viewer {
         }
     }
 
-    fn reload_materials(&mut self) {
-        let lib = datum_model::library::load("material", self.current_project().as_deref());
-        self.materials = lib.entries.into_iter().map(|e| e.element).collect();
+    fn reload_library_records(&mut self) {
+        let project = self.current_project();
+        let read = |level| datum_model::library::load(level, project.as_deref()).entries.into_iter().map(|e| e.element).collect();
+        self.materials = read("material");
+        self.rules = read("rule");
     }
 
     /// Opens the table window on `source`, or closes it if that is what it shows.
@@ -648,7 +657,7 @@ impl Viewer {
             self.table = None;
         } else {
             self.table = Some((source, Default::default()));
-            self.reload_materials();
+            self.reload_library_records();
         }
     }
 
@@ -1346,8 +1355,8 @@ impl Viewer {
             if self.quitting == Some(true) && m.error.is_some() {
                 self.quitting = None;
             }
-            if std::mem::take(&mut self.materials_due) {
-                self.reload_materials();
+            if std::mem::take(&mut self.library_due) {
+                self.reload_library_records();
                 if let (Some((_, editor)), Some(why)) = (&mut self.table, &m.error) {
                     editor.error = Some(why.clone());
                 }
@@ -1899,7 +1908,9 @@ impl Viewer {
                 ui.end_row();
             }
             // A new parameter: its name, then its value; Enter in the value or Add adds it.
-            let (name, value) = &mut self.new_parameter;
+            self.new_parameter.resize(2, String::new());
+            let (name, value) = self.new_parameter.split_at_mut(1);
+            let (name, value) = (&mut name[0], &mut value[0]);
             ui.add_sized([60.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(name).hint_text(self.i18n.t("param-name", "name")));
             let r = field(ui, value, self.i18n.t("param-value", "value or formula"));
             let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1913,11 +1924,12 @@ impl Viewer {
             self.run(ui, Act::ParameterTable);
         }
         if added {
-            let (name, value) = std::mem::take(&mut self.new_parameter);
-            let name = name.trim().to_string();
+            let mut cells = std::mem::take(&mut self.new_parameter);
+            cells.resize(2, String::new());
+            let (name, value) = (cells[0].trim().to_string(), std::mem::take(&mut cells[1]));
             if params.contains_key(&name) {
                 self.local_error = Some(format!("`{name}` is a parameter already: change its value in its row"));
-                self.new_parameter = (name, value);
+                self.new_parameter = vec![name, value];
             } else {
                 self.local_error = None;
                 send.push((name, if value.trim().is_empty() { "0".into() } else { value }));
@@ -2364,47 +2376,79 @@ impl Viewer {
             .collect()
     }
 
-    /// The parameters or the materials in a window of their own (D178): rebuilt every frame, from
-    /// the model or from the materials read last, the edits sent as the side bar sends them.
+    /// The parameters, the materials or the rules of one material in a window of their own
+    /// (D178): rebuilt every frame, from the model or from the library read last, the edits sent
+    /// as the side bar sends them.
     fn table_window(&mut self, ctx: &egui::Context) {
-        use crate::table::Source;
+        use crate::table::{MATERIALS, RULES, Source};
         let Some((source, mut editor)) = self.table.take() else { return };
         let Some(m) = &self.model else { return };
+        let materials: Vec<String> = self.materials.iter().filter_map(|e| e["name"].as_str().map(String::from)).collect();
+        if source == Source::Rules && !self.rule_material.as_ref().is_some_and(|s| materials.contains(s)) {
+            self.rule_material = materials.first().cloned();
+        }
+        let selected = self.rule_material.clone();
+        let rules: Vec<Json> = self.rules.iter().filter(|r| selected.as_ref().is_some_and(|s| r["material"] == *s)).cloned().collect();
         let (table, title) = match source {
             Source::Parameters => (crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
-            Source::Materials => {
-                (crate::table::materials(&self.materials, &self.new_material, &self.i18n), self.i18n.t("table-materials-title", "Materials"))
-            }
+            Source::Materials => (
+                crate::table::records(&MATERIALS, &self.materials, &self.new_material, &self.i18n),
+                self.i18n.t("table-materials-title", "Materials"),
+            ),
+            Source::Rules => (crate::table::records(&RULES, &rules, &self.new_rule, &self.i18n), self.i18n.t("table-rules-title", "Rules")),
         };
         let rows = table.rows().len();
         let editable: Box<dyn Fn(usize, usize) -> bool> = match source {
             Source::Parameters => Box::new(crate::table::editable(rows)),
-            Source::Materials => Box::new(crate::table::editable_materials),
+            Source::Materials | Source::Rules => Box::new(crate::table::editable_records),
         };
-        let (mut out, mut closed) = (Default::default(), false);
+        let (mut out, mut closed, mut picked) = (Default::default(), false, None);
         // As wide as the table, when it opens.
         let width = datum_table::layout(&table).size()[0] as f32 * crate::table::SCALE * self.table_zoom + 40.0;
         let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size([width, 400.0]);
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
             closed = ui.input(|i| i.viewport().close_requested());
+            if source == Source::Rules {
+                if materials.is_empty() {
+                    ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in View → Materials"));
+                    return;
+                }
+                let rows = 6.0 * ui.spacing().interact_size.y;
+                egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
+                    for name in &materials {
+                        if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
+                            picked = Some(name.clone());
+                        }
+                    }
+                });
+                ui.separator();
+            }
             out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
         });
-        let (mut sent, error) = match source {
-            Source::Parameters => {
-                let (mut sent, error) = crate::table::parameter_requests(&m.inspect, &mut self.new_parameter, &out.edits, &self.i18n);
+        if let Some(name) = picked.filter(|n| selected.as_ref() != Some(n)) {
+            self.rule_material = Some(name);
+            self.new_rule.clear();
+        }
+        let i18n = &self.i18n;
+        let library = |rec, elements: &[Json], base, pending: &mut crate::table::Pending| {
+            let (mut sent, error) = crate::table::record_requests(rec, elements, &base, pending, &out.edits, i18n);
+            sent.extend(crate::table::remove_record_requests(rec, elements, &out.delete));
+            (sent, error)
+        };
+        let (mut sent, error) = match (source, &selected) {
+            (Source::Parameters, _) => {
+                let (mut sent, error) = crate::table::parameter_requests(&m.inspect, &mut self.new_parameter, &out.edits, i18n);
                 sent.extend(crate::table::remove_requests(&m.inspect, &out.delete));
                 (sent, error)
             }
-            Source::Materials => {
-                let (mut sent, error) = crate::table::material_requests(&self.materials, &mut self.new_material, &out.edits, &self.i18n);
-                sent.extend(crate::table::remove_material_requests(&self.materials, &out.delete));
-                (sent, error)
-            }
+            (Source::Materials, _) => library(&MATERIALS, &self.materials, json!({}), &mut self.new_material),
+            (Source::Rules, Some(material)) => library(&RULES, &rules, json!({"material": material}), &mut self.new_rule),
+            (Source::Rules, None) => Default::default(),
         };
         if !out.edits.is_empty() {
             editor.error = error;
         }
-        self.materials_due |= source == Source::Materials && !sent.is_empty();
+        self.library_due |= source != Source::Parameters && !sent.is_empty();
         for r in sent.drain(..) {
             self.send(r);
         }
@@ -3414,7 +3458,8 @@ impl Viewer {
             | Act::LookAt
             | Act::WorkPlane
             | Act::ParameterTable
-            | Act::MaterialTable => self.model.is_some(),
+            | Act::MaterialTable
+            | Act::RuleTable => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.sketch.is_some(),
@@ -3444,6 +3489,7 @@ impl Viewer {
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::ParameterTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
             Act::MaterialTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
+            Act::RuleTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Rules),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
         }
@@ -3471,6 +3517,7 @@ impl Viewer {
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
+            Act::RuleTable => self.toggle_table(crate::table::Source::Rules),
             Act::NewSketch => {
                 self.leave();
                 self.start_sketch();
@@ -3612,6 +3659,7 @@ impl Viewer {
             self.item(ui, Act::Measure, true);
             self.item(ui, Act::ParameterTable, true);
             self.item(ui, Act::MaterialTable, true);
+            self.item(ui, Act::RuleTable, true);
             self.item(ui, Act::SmoothEdges, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
@@ -3915,8 +3963,11 @@ mod tests {
             local_error: None,
             table: None,
             materials: Vec::new(),
+            rules: Vec::new(),
+            rule_material: None,
             new_material: Default::default(),
-            materials_due: false,
+            new_rule: Default::default(),
+            library_due: false,
             path: None,
             update: channel().1,
             newer: None,
@@ -4915,13 +4966,13 @@ mod tests {
             h.get_all_by_label(click).next().unwrap().click();
             h.run();
         };
-        v.new_parameter = ("gap".into(), "w / 10".into());
+        v.new_parameter = vec!["gap".into(), "w / 10".into()];
         panel(&mut v, "Add");
-        assert!(v.new_parameter.0.is_empty() && v.local_error.is_none());
-        v.new_parameter = ("hole".into(), "5".into());
+        assert!(v.new_parameter.iter().all(String::is_empty) && v.local_error.is_none());
+        v.new_parameter = vec!["hole".into(), "5".into()];
         panel(&mut v, "Add");
         assert!(v.local_error.as_ref().is_some_and(|e| e.contains("already")), "{:?}", v.local_error);
-        assert_eq!(v.new_parameter.0, "hole", "kept to be renamed");
+        assert_eq!(v.new_parameter[0], "hole", "kept to be renamed");
         panel(&mut v, "Remove the parameter");
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::SetParameter(n, val) if n == "gap" && val == "w / 10")));
