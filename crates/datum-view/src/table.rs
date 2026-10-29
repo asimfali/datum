@@ -3,7 +3,7 @@
 //! The editor only reports what was edited and which rows to delete; what that does to the
 //! model is the source's mapping to requests below.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use datum_table::{Line, Piece, Slot, Table, layout, parse_tsv, pieces, place, text_of};
 use egui::{Align2, Button, Color32, Event, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, TextStyle, Vec2};
@@ -476,9 +476,20 @@ fn split_text(mut pieces: Vec<Piece>, i: usize, caret: usize) -> (Vec<Piece>, us
 /// The columns of the parameters table, in millimetres: name, value, result.
 const WIDTHS: [f64; 3] = [30.0, 50.0, 25.0];
 
+/// The cells of a new row as typed so far, by column; may be shorter than the columns.
+pub type Pending = Vec<String>;
+
+/// Shows `pending` in the last row of `t`, the new row's.
+fn show_pending(t: &mut Table, pending: &Pending, columns: usize) {
+    let last = t.rows().len() - 1;
+    for (c, text) in pending.iter().enumerate().take(columns) {
+        t.set(last, c, text.as_str());
+    }
+}
+
 /// The model's parameters (`inspect`) as a table: a header, a row for each parameter and a last,
 /// empty row for a new one, which shows what was typed in it so far (`pending`).
-pub fn parameters(inspect: &Json, pending: &(String, String), i18n: &I18n) -> Table {
+pub fn parameters(inspect: &Json, pending: &Pending, i18n: &I18n) -> Table {
     let params = inspect["parameters"].as_object();
     let mut t = Table::new(WIDTHS.to_vec(), params.map_or(0, |p| p.len()) + 2);
     t.set(0, 0, i18n.t("table-name", "Name"));
@@ -489,9 +500,7 @@ pub fn parameters(inspect: &Json, pending: &(String, String), i18n: &I18n) -> Ta
         t.set(k + 1, 1, definition(&p["definition"]));
         t.set(k + 1, 2, p["value"].as_f64().map(number).or_else(|| p["error"].as_str().map(String::from)).unwrap_or_default());
     }
-    let last = t.rows().len() - 1;
-    t.set(last, 0, pending.0.as_str());
-    t.set(last, 1, pending.1.as_str());
+    show_pending(&mut t, pending, 2);
     t
 }
 
@@ -501,48 +510,85 @@ pub fn editable(rows: usize) -> impl Fn(usize, usize) -> bool {
     move |r, c| (c == 1 && r >= 1) || (c == 0 && r + 1 >= rows)
 }
 
+/// The new rows the edits reach: the rows from `first_new`, the columns below `columns`. The
+/// first new row starts from `pending`, the others empty.
+fn new_rows(pending: &Pending, first_new: usize, columns: usize, edits: &[Edit]) -> BTreeMap<usize, Pending> {
+    let mut new: BTreeMap<usize, Pending> = BTreeMap::new();
+    for (r, c, text) in edits.iter().filter(|(r, c, _)| *r >= first_new && *c < columns) {
+        let row = new.entry(*r).or_insert_with(|| {
+            let mut row = if *r == first_new { pending.clone() } else { Vec::new() };
+            row.resize(columns, String::new());
+            row
+        });
+        row[*c].clone_from(text);
+    }
+    new
+}
+
+/// Finishes the new rows: the name (cell 0) is trimmed, the first new row is kept in `pending`
+/// and an unnamed row waits. A name in `names` is an error (`taken` says it) and the row stays;
+/// otherwise `request` makes the request of the row, or says why not, and the row stays. A row
+/// sent takes its name; the first is cleared from `pending`. The second is the last error.
+fn finish_new_rows(
+    new: BTreeMap<usize, Pending>,
+    first_new: usize,
+    pending: &mut Pending,
+    names: &mut Vec<String>,
+    taken: impl Fn(&str) -> String,
+    mut request: impl FnMut(&Pending) -> Result<Request, String>,
+) -> (Vec<Request>, Option<String>) {
+    let (mut sent, mut error) = (Vec::new(), None);
+    for (r, mut row) in new {
+        row[0] = row[0].trim().to_string();
+        if r == first_new {
+            pending.clone_from(&row);
+        }
+        if row[0].is_empty() {
+            continue;
+        }
+        if names.contains(&row[0]) {
+            error = Some(taken(&row[0]));
+            continue;
+        }
+        match request(&row) {
+            Err(why) => error = Some(why),
+            Ok(req) => {
+                if r == first_new {
+                    pending.clear();
+                }
+                names.push(row[0].clone());
+                sent.push(req);
+            }
+        }
+    }
+    (sent, error)
+}
+
 /// What the edits do: `SetParameter` for a changed value and for each new parameter. A new
 /// row's name and value typed in separate edits wait in `pending`, the first new row's, until
 /// there is a name. The second is why nothing was sent, if a name was taken.
-pub fn parameter_requests(inspect: &Json, pending: &mut (String, String), edits: &[Edit], i18n: &I18n) -> (Vec<Request>, Option<String>) {
+pub fn parameter_requests(inspect: &Json, pending: &mut Pending, edits: &[Edit], i18n: &I18n) -> (Vec<Request>, Option<String>) {
     let params: Vec<(&String, &Json)> = inspect["parameters"].as_object().into_iter().flatten().collect();
-    let first_new = params.len() + 1;
     let mut sent = Vec::new();
-    let mut new: BTreeMap<usize, (String, String)> = BTreeMap::new();
     for (r, c, text) in edits {
-        match (r.checked_sub(1).and_then(|k| params.get(k)), c) {
-            // Whether the value is changed is the model's to see; a parameter needs one.
-            (Some((name, p)), 1) => {
-                if !text.trim().is_empty() && *text != definition(&p["definition"]) {
-                    sent.push(Request::SetParameter((*name).clone(), value_of(text)));
-                }
-            }
-            (None, 0 | 1) if *r >= first_new => {
-                let row = new.entry(*r).or_insert_with(|| if *r == first_new { pending.clone() } else { Default::default() });
-                if *c == 0 { row.0.clone_from(text) } else { row.1.clone_from(text) }
-            }
-            _ => {}
+        // Whether the value is changed is the model's to see; a parameter needs one.
+        if let (Some((name, p)), 1) = (r.checked_sub(1).and_then(|k| params.get(k)), c)
+            && !text.trim().is_empty()
+            && *text != definition(&p["definition"])
+        {
+            sent.push(Request::SetParameter((*name).clone(), value_of(text)));
         }
     }
-    let mut error = None;
-    let mut taken: BTreeSet<String> = params.iter().map(|(n, _)| (*n).clone()).collect();
-    for (r, (name, value)) in new {
-        let name = name.trim().to_string();
-        if r == first_new {
-            *pending = (name.clone(), value.clone());
-        }
-        if name.is_empty() {
-            continue;
-        }
-        if !taken.insert(name.clone()) {
-            error = Some(i18n.f("table-taken", "`{ $name }` is a parameter already", &[("name", &name)]));
-        } else {
-            if r == first_new {
-                *pending = Default::default();
-            }
-            sent.push(Request::SetParameter(name, value_of(if value.trim().is_empty() { "0" } else { &value })));
-        }
-    }
+    let mut names: Vec<String> = params.iter().map(|(n, _)| (*n).clone()).collect();
+    let (added, error) = finish_new_rows(
+        new_rows(pending, params.len() + 1, 2, edits),
+        params.len() + 1,
+        pending,
+        &mut names,
+        |name| i18n.f("table-taken", "`{ $name }` is a parameter already", &[("name", name)]),
+        |row| Ok(Request::SetParameter(row[0].clone(), value_of(if row[1].trim().is_empty() { "0" } else { &row[1] }))),
+    );
+    sent.extend(added);
     (sent, error)
 }
 
@@ -565,157 +611,206 @@ pub enum Source {
     #[default]
     Parameters,
     Materials,
+    Rules,
 }
 
-/// A new material's cells as typed so far, by column.
-pub type Pending = [String; 4];
-
-/// The columns of the materials table, in millimetres: name, designation, density, description.
-const MATERIAL_WIDTHS: [f64; 4] = [30.0, 90.0, 35.0, 50.0];
-
-/// The keys of a material's JSON the columns show.
-const FIELDS: [&str; 4] = ["name", "designation", "density", "description"];
-
-/// What a material's columns show.
-fn material_cells(e: &Json) -> Pending {
-    let text = |k: &str| e[k].as_str().unwrap_or_default().to_string();
-    [text("name"), text("designation"), e["density"].as_f64().map(number).unwrap_or_default(), text("description")]
+/// A library level shown as a table: its `keys` are the columns, `widths` in millimetres.
+pub struct Records {
+    level: &'static str,
+    keys: &'static [&'static str],
+    widths: &'static [f64],
 }
 
-/// The library's materials (`elements`, in library order) as a table: a header, a row for each
-/// and a last, empty row for a new one, which shows what was typed in it so far (`pending`).
-pub fn materials(elements: &[Json], pending: &Pending, i18n: &I18n) -> Table {
-    let mut t = Table::new(MATERIAL_WIDTHS.to_vec(), elements.len() + 2);
-    let header = [
-        i18n.t("table-name", "Name"),
-        i18n.t("table-designation", "Designation"),
-        i18n.t("table-density", "Density (kg/m³)"),
-        i18n.t("table-description", "Description"),
-    ];
-    for (c, h) in header.iter().enumerate() {
-        t.set(0, c, &**h);
+pub const MATERIALS: Records =
+    Records { level: "material", keys: &["name", "designation", "density", "description"], widths: &[30.0, 90.0, 35.0, 50.0] };
+
+/// The rules of one material: the `material` key is not a column.
+pub const RULES: Records =
+    Records { level: "rule", keys: &["name", "kind", "thickness", "radius", "description"], widths: &[35.0, 25.0, 25.0, 45.0, 50.0] };
+
+impl Records {
+    fn is_rule(&self) -> bool {
+        self.level == RULES.level
     }
-    for (k, e) in elements.iter().enumerate() {
-        for (c, text) in material_cells(e).into_iter().enumerate() {
-            t.set(k + 1, c, text);
+}
+
+/// The header of the column of `key`.
+fn header<'a>(key: &str, i18n: &'a I18n) -> &'a str {
+    match key {
+        "name" => i18n.t("table-name", "Name"),
+        "designation" => i18n.t("table-designation", "Designation"),
+        "density" => i18n.t("table-density", "Density (kg/m³)"),
+        "description" => i18n.t("table-description", "Description"),
+        "kind" => i18n.t("table-kind", "Kind"),
+        "thickness" => i18n.t("table-thickness", "Thickness (mm)"),
+        _ => i18n.t("table-radius", "Bend radius (mm or of t)"),
+    }
+}
+
+/// The kinds of a rule: its name in the JSON, the label.
+fn kinds(i18n: &I18n) -> [(&'static str, &str); 2] {
+    [("sheet", i18n.t("table-kind-sheet", "Sheet")), ("part", i18n.t("table-kind-part", "Part"))]
+}
+
+/// What the column of `key` shows of element `e`.
+fn cell_text(key: &str, e: &Json, i18n: &I18n) -> String {
+    match &e[key] {
+        Json::String(s) if key == "kind" => kinds(i18n).iter().find(|(k, _)| k == s).map_or(s.clone(), |(_, label)| (*label).to_string()),
+        Json::String(s) => s.clone(),
+        v => v.as_f64().map(number).unwrap_or_default(),
+    }
+}
+
+/// The library's records (`elements`, in library order) as a table: a header, a row for each and
+/// a last, empty row for a new one, which shows what was typed in it so far (`pending`).
+pub fn records(rec: &Records, elements: &[Json], pending: &Pending, i18n: &I18n) -> Table {
+    let mut t = Table::new(rec.widths.to_vec(), elements.len() + 2);
+    for (c, key) in rec.keys.iter().enumerate() {
+        t.set(0, c, header(key, i18n));
+        for (k, e) in elements.iter().enumerate() {
+            t.set(k + 1, c, cell_text(key, e, i18n));
         }
     }
-    let last = t.rows().len() - 1;
-    for (c, text) in pending.iter().enumerate() {
-        t.set(last, c, text.as_str());
-    }
+    show_pending(&mut t, pending, rec.keys.len());
     t
 }
 
-/// The cells of a materials table that can be edited: all but the header's.
-pub fn editable_materials(r: usize, _: usize) -> bool {
+/// The cells of a records table that can be edited: all but the header's.
+pub fn editable_records(r: usize, _: usize) -> bool {
     r >= 1
 }
 
-/// Material field `c` as typed: its value, none for an emptied one (the key is dropped), or why
-/// not. The name is needed, the density is a number above zero (a comma will do).
-fn field_value(c: usize, text: &str, i18n: &I18n) -> Result<Option<Json>, String> {
+/// Field `key` of a record as typed: its value, none for an emptied one (the key is dropped), or
+/// why not. The name is needed; the density and the thickness are numbers above zero (a comma
+/// will do), the radius a number or a formula of `t`, the kind Sheet or Part.
+fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Option<Json>, String> {
     let text = text.trim();
-    match c {
-        0 if text.is_empty() => Err(i18n.t("table-material-nameless", "A material needs a name").to_string()),
-        2 if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
+    match key {
+        "name" if text.is_empty() && rec.is_rule() => Err(i18n.t("table-rule-nameless", "A rule needs a name").to_string()),
+        "name" if text.is_empty() => Err(i18n.t("table-material-nameless", "A material needs a name").to_string()),
+        "density" | "thickness" if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
             Ok(d) if d.is_finite() && d > 0.0 => Ok(Some(json!(d))),
-            _ => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
+            _ if key == "density" => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
+            _ => Err(i18n.t("table-rule-thickness", "The thickness is a number above zero, in mm").to_string()),
         },
+        "radius" if !text.is_empty() => {
+            let v = value_of(text);
+            match datum_model::library::bend_radius(&v, 1.0) {
+                Ok(r) if r >= 0.0 => Ok(Some(v)),
+                _ => {
+                    Err(i18n.t("table-rule-radius", "The bend radius is a number in mm, not below zero, or a formula of the thickness t").to_string())
+                }
+            }
+        }
+        "kind" if !text.is_empty() => {
+            let lower = text.to_lowercase();
+            match kinds(i18n).iter().find(|(k, label)| lower == *k || lower == label.to_lowercase()) {
+                Some((k, _)) => Ok(Some(json!(k))),
+                None => Err(i18n.t("table-rule-kind", "The kind is Sheet or Part").to_string()),
+            }
+        }
         _ => Ok((!text.is_empty()).then(|| json!(text))),
     }
 }
 
-/// Sets field `c` of material `e` to `v`, or drops it.
-fn set_field(e: &mut Json, c: usize, v: Option<Json>) {
+/// The record `e` as a whole: a rule has a kind and a part's has no thickness or bend radius;
+/// the library's own check has the last word.
+fn check_record(rec: &Records, e: &Json, i18n: &I18n) -> Result<(), String> {
+    if rec.is_rule() {
+        match e["kind"].as_str() {
+            None => return Err(i18n.t("table-rule-kind", "The kind is Sheet or Part").to_string()),
+            Some("part") if !e["thickness"].is_null() || !e["radius"].is_null() => {
+                return Err(i18n.t("table-rule-part", "A part's rule has no thickness or bend radius").to_string());
+            }
+            _ => {}
+        }
+    }
+    datum_model::library::check(rec.level, e)
+}
+
+/// Sets `key` of record `e` to `v`, or drops it.
+fn set_field(e: &mut Json, key: &str, v: Option<Json>) {
     if let Some(o) = e.as_object_mut() {
         match v {
-            Some(v) => o.insert(FIELDS[c].into(), v),
-            None => o.remove(FIELDS[c]),
+            Some(v) => o.insert(key.into(), v),
+            None => o.remove(key),
         };
     }
 }
 
-fn put_library(element: Json, was: Option<&str>) -> Request {
-    let mut params = json!({"level": "material", "element": element});
+fn put_library(level: &str, element: Json, was: Option<&str>) -> Request {
+    let mut params = json!({"level": level, "element": element});
     if let Some(was) = was {
         params["was"] = json!(was);
     }
     Request::Command("put_library", params)
 }
 
-/// What the edits do: `put_library` of the material with the changed fields (one request for a
-/// row), and of a new material once its row has a name. The new row's cells wait in `pending`,
-/// the first new row's, until then. The second is the last error: an emptied name, a bad density,
-/// a name taken; what is refused is not sent.
-pub fn material_requests(elements: &[Json], pending: &mut Pending, edits: &[Edit], i18n: &I18n) -> (Vec<Request>, Option<String>) {
+/// What the edits do: `put_library` of the record with the changed fields (one request for a
+/// row), and of a new record once its row has a name; it starts from `base`. The new row's cells
+/// wait in `pending`, the first new row's, until then. The second is the last error: an emptied
+/// name, a bad field, a name taken, a record the library would refuse; what is refused is not sent.
+pub fn record_requests(
+    rec: &Records,
+    elements: &[Json],
+    base: &Json,
+    pending: &mut Pending,
+    edits: &[Edit],
+    i18n: &I18n,
+) -> (Vec<Request>, Option<String>) {
     let first_new = elements.len() + 1;
-    let taken = |name: &str| i18n.f("table-material-taken", "`{ $name }` is a material already", &[("name", name)]);
-    let mut names: Vec<String> = elements.iter().map(|e| material_cells(e)[0].clone()).collect();
+    let taken = |name: &str| {
+        if rec.is_rule() {
+            i18n.f("table-rule-taken", "`{ $name }` is a rule already", &[("name", name)])
+        } else {
+            i18n.f("table-material-taken", "`{ $name }` is a material already", &[("name", name)])
+        }
+    };
+    let cell = |e: &Json, c: usize| cell_text(rec.keys[c], e, i18n);
+    let mut names: Vec<String> = elements.iter().map(|e| cell(e, 0)).collect();
     let mut changed: BTreeMap<usize, Json> = BTreeMap::new();
-    let mut new: BTreeMap<usize, Pending> = BTreeMap::new();
     let mut error = None;
-    for (r, c, text) in edits {
-        if *c >= FIELDS.len() {
+    for (r, c, text) in edits.iter().filter(|(_, c, _)| *c < rec.keys.len()) {
+        let Some(k) = r.checked_sub(1).filter(|&k| k < elements.len()) else { continue };
+        if cell(changed.get(&k).unwrap_or(&elements[k]), *c) == text.trim() {
             continue;
         }
-        if let Some(k) = r.checked_sub(1).filter(|&k| k < elements.len()) {
-            let e = changed.get(&k).unwrap_or(&elements[k]);
-            if material_cells(e)[*c] == text.trim() {
-                continue;
-            }
-            match field_value(*c, text, i18n) {
-                Err(why) => error = Some(why),
-                Ok(_) if *c == 0 && names.iter().enumerate().any(|(j, n)| j != k && n == text.trim()) => error = Some(taken(text.trim())),
-                Ok(v) => {
-                    if *c == 0 {
-                        names[k] = text.trim().to_string();
-                    }
-                    set_field(changed.entry(k).or_insert_with(|| elements[k].clone()), *c, v);
-                }
-            }
-        } else if *r >= first_new {
-            let row = new.entry(*r).or_insert_with(|| if *r == first_new { pending.clone() } else { Default::default() });
-            row[*c].clone_from(text);
-        }
-    }
-    let mut sent: Vec<Request> = changed.into_iter().map(|(k, e)| put_library(e, Some(&material_cells(&elements[k])[0]))).collect();
-    for (r, mut row) in new {
-        row[0] = row[0].trim().to_string();
-        if r == first_new {
-            pending.clone_from(&row);
-        }
-        if row[0].is_empty() {
-            continue;
-        }
-        if names.contains(&row[0]) {
-            error = Some(taken(&row[0]));
-            continue;
-        }
-        let mut element = json!({"name": row[0]});
-        let fields: Result<Vec<_>, _> = (1..FIELDS.len()).map(|c| field_value(c, &row[c], i18n)).collect();
-        match fields {
+        match field_value(rec, rec.keys[*c], text, i18n) {
             Err(why) => error = Some(why),
-            Ok(values) => {
-                for (c, v) in (1..).zip(values) {
-                    set_field(&mut element, c, v);
+            Ok(_) if *c == 0 && names.iter().enumerate().any(|(j, n)| j != k && n == text.trim()) => error = Some(taken(text.trim())),
+            Ok(v) => {
+                if *c == 0 {
+                    names[k] = text.trim().to_string();
                 }
-                if r == first_new {
-                    *pending = Default::default();
-                }
-                names.push(row[0].clone());
-                sent.push(put_library(element, None));
+                set_field(changed.entry(k).or_insert_with(|| elements[k].clone()), rec.keys[*c], v);
             }
         }
     }
-    (sent, error)
+    let mut sent = Vec::new();
+    for (k, e) in changed {
+        match check_record(rec, &e, i18n) {
+            Ok(()) => sent.push(put_library(rec.level, e, Some(&cell(&elements[k], 0)))),
+            Err(why) => error = Some(why),
+        }
+    }
+    let (added, why) = finish_new_rows(new_rows(pending, first_new, rec.keys.len(), edits), first_new, pending, &mut names, taken, |row| {
+        let mut element = base.clone();
+        set_field(&mut element, "name", Some(json!(row[0])));
+        for (key, text) in rec.keys.iter().zip(row).skip(1) {
+            set_field(&mut element, key, field_value(rec, key, text, i18n)?);
+        }
+        check_record(rec, &element, i18n)?;
+        Ok(put_library(rec.level, element, None))
+    });
+    sent.extend(added);
+    (sent, why.or(error))
 }
 
-/// The commands removing the materials in `rows` of the table.
-pub fn remove_material_requests(elements: &[Json], rows: &[usize]) -> Vec<Request> {
+/// The commands removing the records in `rows` of the table.
+pub fn remove_record_requests(rec: &Records, elements: &[Json], rows: &[usize]) -> Vec<Request> {
     rows.iter()
         .filter_map(|r| elements.get(r.checked_sub(1)?))
-        .map(|e| Request::Command("remove_library", json!({"level": "material", "name": material_cells(e)[0]})))
+        .map(|e| Request::Command("remove_library", json!({"level": rec.level, "name": e["name"]})))
         .collect()
 }
 
@@ -741,7 +836,7 @@ mod tests {
         assert_eq!(format!("{got:?}"), format!("{want:?}"));
     }
 
-    fn requests(edits: &[(usize, usize, &str)], pending: &mut (String, String)) -> (Vec<Request>, Option<String>) {
+    fn requests(edits: &[(usize, usize, &str)], pending: &mut Pending) -> (Vec<Request>, Option<String>) {
         let edits: Vec<Edit> = edits.iter().map(|&(r, c, t)| (r, c, t.to_string())).collect();
         parameter_requests(&inspect(), pending, &edits, &I18n::default())
     }
@@ -781,7 +876,7 @@ mod tests {
 
     #[test]
     fn the_parameters_are_a_table() {
-        let t = parameters(&inspect(), &("n".into(), "1".into()), &I18n::default());
+        let t = parameters(&inspect(), &["n".into(), "1".into()].to_vec(), &I18n::default());
         assert_eq!(t.rows().len(), 5, "header, three parameters, a new one");
         assert_eq!(t.copy((0, 0), (0, 2)), "Name\tValue\tResult");
         assert_eq!(t.copy((1, 0), (3, 2)), "a\t5\t5\nb\ta * 2\t10\nc\tzz\tunknown `zz`");
@@ -803,11 +898,11 @@ mod tests {
     fn a_new_parameter_has_a_name_and_a_value() {
         let mut pending = Default::default();
         same(&requests(&[(4, 0, "w"), (4, 1, "a + 1")], &mut pending).0, &[set("w", json!("a + 1"))]);
-        assert_eq!(pending, Default::default());
+        assert!(pending.is_empty());
         same(&requests(&[(4, 0, "w")], &mut pending).0, &[set("w", json!(0.0))]);
         // A value without a name stays in the row; the name comes later.
         let (sent, _) = requests(&[(4, 1, "3")], &mut pending);
-        assert!(sent.is_empty() && pending == (String::new(), "3".into()));
+        assert!(sent.is_empty() && pending == ["", "3"].map(String::from));
         same(&requests(&[(4, 0, "z")], &mut pending).0, &[set("z", json!(3.0))]);
     }
 
@@ -817,7 +912,7 @@ mod tests {
         let (sent, error) = requests(&[(4, 0, "a"), (4, 1, "2")], &mut pending);
         assert!(sent.is_empty());
         assert_eq!(error.as_deref(), Some("`a` is a parameter already"));
-        assert_eq!(pending, ("a".into(), "2".into()), "kept to be renamed");
+        assert_eq!(pending, ["a", "2"].map(String::from), "kept to be renamed");
     }
 
     #[test]
@@ -830,9 +925,9 @@ mod tests {
 
     #[test]
     fn clearing_a_value_is_refused() {
-        let mut pending = ("k".into(), "1".into());
+        let mut pending = vec!["k".to_string(), "1".to_string()];
         let (sent, _) = requests(&[(1, 1, ""), (4, 0, ""), (4, 1, "")], &mut pending);
-        assert!(sent.is_empty() && pending == Default::default(), "the new row cleared");
+        assert!(sent.is_empty() && pending.iter().all(String::is_empty), "the new row cleared");
     }
 
     #[test]
@@ -857,29 +952,33 @@ mod tests {
 
     fn material_edits(edits: &[(usize, usize, &str)], pending: &mut Pending) -> (Vec<Request>, Option<String>) {
         let edits: Vec<Edit> = edits.iter().map(|&(r, c, t)| (r, c, t.to_string())).collect();
-        material_requests(&library(), pending, &edits, &I18n::default())
+        record_requests(&MATERIALS, &library(), &json!({}), pending, &edits, &I18n::default())
+    }
+
+    fn put(element: Json, was: Option<&str>) -> Request {
+        put_library("material", element, was)
     }
 
     #[test]
     fn the_materials_are_a_table() {
-        let pending = ["Н".into(), String::new(), "1,5".into(), String::new()];
-        let t = materials(&library(), &pending, &I18n::default());
+        let pending = ["Н".into(), String::new(), "1,5".into(), String::new()].to_vec();
+        let t = records(&MATERIALS, &library(), &pending, &I18n::default());
         assert_eq!(t.rows().len(), 4, "header, two materials, a new one");
         assert_eq!(t.copy((0, 0), (0, 3)), "Name\tDesignation\tDensity (kg/m³)\tDescription");
         assert_eq!(t.copy((1, 0), (2, 3)), "Сталь 3\tЛист [ГОСТ 19903 | Ст3]\t7850\tобщая\nАМг2\t\t2670\t");
         assert_eq!(t.copy((3, 0), (3, 3)), "Н\t\t1,5\t");
-        assert!(editable_materials(1, 0) && editable_materials(3, 3) && !editable_materials(0, 1));
+        assert!(editable_records(1, 0) && editable_records(3, 3) && !editable_records(0, 1));
     }
 
     #[test]
     fn a_changed_cell_puts_the_material() {
         let mut pending = Default::default();
         let (sent, error) = material_edits(&[(2, 2, "2,7"), (2, 1, "Лист"), (2, 3, "")], &mut pending);
-        let want = put_library(json!({"name": "АМг2", "designation": "Лист", "density": 2.7}), Some("АМг2"));
+        let want = put(json!({"name": "АМг2", "designation": "Лист", "density": 2.7}), Some("АМг2"));
         same(&sent, &[want]);
         assert_eq!(error, None);
         let (sent, _) = material_edits(&[(1, 1, ""), (1, 3, ""), (1, 0, "Сталь 20")], &mut pending);
-        same(&sent, &[put_library(json!({"name": "Сталь 20", "density": 7850.0}), Some("Сталь 3"))]);
+        same(&sent, &[put(json!({"name": "Сталь 20", "density": 7850.0}), Some("Сталь 3"))]);
     }
 
     #[test]
@@ -905,8 +1004,8 @@ mod tests {
         let (sent, _) = material_edits(&[(3, 2, "8,0"), (3, 1, "Круг")], &mut pending);
         assert!(sent.is_empty() && pending == ["", "Круг", "8,0", ""].map(String::from));
         let (sent, _) = material_edits(&[(3, 0, " Сталь 45 ")], &mut pending);
-        same(&sent, &[put_library(json!({"name": "Сталь 45", "designation": "Круг", "density": 8.0}), None)]);
-        assert_eq!(pending, Pending::default());
+        same(&sent, &[put(json!({"name": "Сталь 45", "designation": "Круг", "density": 8.0}), None)]);
+        assert!(pending.is_empty());
     }
 
     #[test]
@@ -921,21 +1020,85 @@ mod tests {
 
     #[test]
     fn materials_are_removed_by_name() {
-        let got = remove_material_requests(&library(), &[0, 2, 7]);
+        let got = remove_record_requests(&MATERIALS, &library(), &[0, 2, 7]);
         same(&got, &[Request::Command("remove_library", json!({"level": "material", "name": "АМг2"}))]);
+    }
+
+    fn rules() -> Vec<Json> {
+        vec![
+            json!({"name": "Лист 2", "material": "Сталь 3", "kind": "sheet", "thickness": 2.0, "radius": "1.5 * t"}),
+            json!({"name": "Деталь", "material": "Сталь 3", "kind": "part"}),
+        ]
+    }
+
+    fn rule_edits(edits: &[(usize, usize, &str)], pending: &mut Pending) -> (Vec<Request>, Option<String>) {
+        let edits: Vec<Edit> = edits.iter().map(|&(r, c, t)| (r, c, t.to_string())).collect();
+        record_requests(&RULES, &rules(), &json!({"material": "Сталь 3"}), pending, &edits, &I18n::default())
+    }
+
+    #[test]
+    fn the_rules_are_a_table() {
+        let pending = vec!["Н".to_string(), "Part".to_string()];
+        let t = records(&RULES, &rules(), &pending, &I18n::default());
+        assert_eq!(t.rows().len(), 4, "header, two rules, a new one");
+        assert_eq!(t.copy((0, 0), (0, 4)), "Name\tKind\tThickness (mm)\tBend radius (mm or of t)\tDescription");
+        assert_eq!(t.copy((1, 0), (2, 4)), "Лист 2\tSheet\t2\t1.5 * t\t\nДеталь\tPart\t\t\t");
+        assert_eq!(t.copy((3, 0), (3, 4)), "Н\tPart\t\t\t");
+    }
+
+    #[test]
+    fn a_new_rule_takes_the_material_and_parses_its_kind() {
+        let mut pending = Default::default();
+        let (sent, error) = rule_edits(&[(3, 0, "Лист 3"), (3, 1, "sheet"), (3, 2, "3,5"), (3, 3, "2 * t")], &mut pending);
+        let want = json!({"material": "Сталь 3", "name": "Лист 3", "kind": "sheet", "thickness": 3.5, "radius": "2 * t"});
+        same(&sent, &[put_library("rule", want, None)]);
+        assert_eq!(error, None);
+        assert!(pending.is_empty());
+        let (sent, _) = rule_edits(&[(3, 0, "Д"), (3, 1, "PART")], &mut pending);
+        same(&sent, &[put_library("rule", json!({"material": "Сталь 3", "name": "Д", "kind": "part"}), None)]);
+    }
+
+    #[test]
+    fn a_rule_the_library_would_refuse_is_not_sent() {
+        let mut pending = Default::default();
+        for (edits, why) in [
+            (vec![(3, 0, "Д"), (3, 1, "part"), (3, 2, "2")], "A part's rule has no thickness or bend radius"),
+            (vec![(3, 0, "Д"), (3, 2, "2")], "The kind is Sheet or Part"),
+            (vec![(3, 0, "Д"), (3, 1, "tube")], "The kind is Sheet or Part"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "-1")], "The bend radius is a number in mm, not below zero, or a formula of the thickness t"),
+            (
+                vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "2 * q")],
+                "The bend radius is a number in mm, not below zero, or a formula of the thickness t",
+            ),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 2, "0")], "The thickness is a number above zero, in mm"),
+            (vec![(3, 0, "Деталь")], "`Деталь` is a rule already"),
+            (vec![(1, 0, " ")], "A rule needs a name"),
+            (vec![(2, 2, "1")], "A part's rule has no thickness or bend radius"),
+        ] {
+            let (sent, error) = rule_edits(&edits, &mut pending);
+            assert!(sent.is_empty(), "{edits:?}");
+            assert_eq!(error.as_deref(), Some(why), "{edits:?}");
+            pending.clear();
+        }
+    }
+
+    #[test]
+    fn rules_are_removed_by_name() {
+        let got = remove_record_requests(&RULES, &rules(), &[0, 2, 7]);
+        same(&got, &[Request::Command("remove_library", json!({"level": "rule", "name": "Деталь"}))]);
     }
 
     /// The editor as the window shows it: a material's fraction drawn, its under line edited by
     /// a double-click on it, and the Fraction button pressed while a text part is edited.
     #[test]
     fn a_fraction_is_edited_where_it_is_clicked() {
-        let mut t = materials(&library(), &Pending::default(), &I18n::default());
+        let mut t = records(&MATERIALS, &library(), &Pending::default(), &I18n::default());
         t.set(1, 1, "Лист [Б-ПН | Ст3]");
         let lay = layout(&t);
         let state = (Editor::default(), t.clone(), Vec::<Edit>::new());
         let mut h = egui_kittest::Harness::builder().with_size([800.0, 200.0]).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, (editor, table, edits): &mut (Editor, Table, Vec<Edit>)| {
-                edits.extend(editor.show(ui, table, &editable_materials, 1.0, &I18n::default()).edits);
+                edits.extend(editor.show(ui, table, &editable_records, 1.0, &I18n::default()).edits);
             },
             state,
         );
