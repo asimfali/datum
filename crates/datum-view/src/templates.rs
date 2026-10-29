@@ -11,6 +11,7 @@ use datum_model::library::{self, Anchor, Entry, Source};
 use serde_json::{Map, Value as Json};
 
 use crate::draw::{Draft, Patch, Snap, Spot};
+use crate::i18n::I18n;
 use crate::sketch::{Pick, SketchEdit};
 
 /// An element of the library as the palette shows it: with its outline, drawn once.
@@ -31,11 +32,11 @@ pub fn library(project: Option<&std::path::Path>) -> Vec<Item> {
 }
 
 /// Where an element in the list comes from, as the list shows it.
-pub fn source(e: &Entry) -> &'static str {
+pub fn source<'a>(e: &Entry, i18n: &'a I18n) -> &'a str {
     match e.source {
-        Source::BuiltIn => "built in",
-        Source::Program => "beside the program",
-        Source::Project => "the project's",
+        Source::BuiltIn => i18n.t("source-built-in", "built in"),
+        Source::Program => i18n.t("source-program", "beside the program"),
+        Source::Project => i18n.t("source-project", "the project's"),
     }
 }
 
@@ -213,7 +214,7 @@ mod tests {
             ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
             let painter = ui.painter().with_clip_rect(rect);
             e.paint(&painter, rect);
-            e.draft.paint(&e, &painter, rect);
+            e.draft.paint(&e, &painter, rect, &I18n::default());
         });
         h.run();
         if let Some(path) = shot {
@@ -224,7 +225,7 @@ mod tests {
 
     #[test]
     fn the_library_loads() {
-        let names: Vec<String> = library(None).iter().map(|t| format!("{} ({})", t.entry.name(), source(&t.entry))).collect();
+        let names: Vec<String> = library(None).iter().map(|t| format!("{} ({})", t.entry.name(), source(&t.entry, &I18n::default()))).collect();
         assert!(library(None).iter().all(|t| t.outline.len() == 4 || t.outline.len() == 6), "outlines drawn for the palette");
         assert_eq!(names, ["Rectangle (built in)", "Center rectangle (built in)"]);
     }

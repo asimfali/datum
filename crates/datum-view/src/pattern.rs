@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Map, Value as Json, json};
 
+use crate::i18n::I18n;
 use crate::sketch::{Pick, SketchEdit};
 
 /// What the copies follow.
@@ -24,19 +25,7 @@ pub enum Base {
 }
 
 /// The fields of each kind, by key: a number or a formula, empty when not given.
-const FIELDS: [(&str, &str); 11] = [
-    ("n1", "Count"),
-    ("s1", "Step"),
-    ("g1", "Grows by"),
-    ("n2", "Count"),
-    ("s2", "Step"),
-    ("g2", "Grows by"),
-    ("angle", "Angle, °"),
-    ("step", "Step, °"),
-    ("clearance", "Clearance"),
-    ("n", "Count"),
-    ("g", "Grows by"),
-];
+const FIELDS: [&str; 11] = ["n1", "s1", "g1", "n2", "s2", "g2", "angle", "step", "clearance", "n", "g"];
 
 pub struct PatternForm {
     pub base: Base,
@@ -181,7 +170,7 @@ impl PatternForm {
     pub fn new(sk: &SketchEdit, base: Base) -> Self {
         let mut patch = datum_model::SketchPatch::new(&sk.json);
         let name = patch.fresh("pattern");
-        let mut fields: BTreeMap<&'static str, String> = FIELDS.iter().map(|(k, _)| (*k, String::new())).collect();
+        let mut fields: BTreeMap<&'static str, String> = FIELDS.iter().map(|k| (*k, String::new())).collect();
         let mut set = |k: &'static str, v: &str| {
             fields.insert(k, v.to_string());
         };
@@ -269,27 +258,38 @@ impl PatternForm {
     }
 
     /// What the menu shows as the kind.
-    pub fn title(&self) -> String {
+    pub fn title(&self, i18n: &I18n) -> String {
         match &self.base {
-            Base::Grid(_) => "Pattern on a grid".into(),
-            Base::Around(c) => format!("Pattern around `{c}`"),
-            Base::Along { group, .. } if self.fill => format!("Pattern filling `{group}`"),
-            Base::Along { group, .. } => format!("Pattern along `{group}`"),
+            Base::Grid(_) => i18n.t("pattern-grid", "Pattern on a grid").into(),
+            Base::Around(c) => i18n.f("pattern-around", "Pattern around `{ $name }`", &[("name", c)]),
+            Base::Along { group, .. } if self.fill => i18n.f("pattern-filling", "Pattern filling `{ $name }`", &[("name", group)]),
+            Base::Along { group, .. } => i18n.f("pattern-along", "Pattern along `{ $name }`", &[("name", group)]),
         }
     }
 
     /// The fields the kind asks, by row: each row's keys, and whether it has a flip (which way).
-    pub fn rows(&self) -> Vec<(&'static str, Vec<&'static str>, Option<usize>)> {
+    pub fn rows<'a>(&self, i18n: &'a I18n) -> Vec<(&'a str, Vec<&'static str>, Option<usize>)> {
         match &self.base {
-            Base::Grid(_) => vec![("First direction", vec!["n1", "s1", "g1"], Some(0)), ("Second direction", vec!["n2", "s2", "g2"], Some(1))],
-            Base::Around(_) => vec![("Around", vec!["n", "angle", "step", "g"], Some(0))],
-            Base::Along { .. } if self.fill => vec![("Steps", vec!["s1", "s2", "clearance"], None)],
-            Base::Along { .. } => vec![("Along", vec!["n", "s1", "g"], Some(0))],
+            Base::Grid(_) => vec![
+                (i18n.t("pattern-first", "First direction"), vec!["n1", "s1", "g1"], Some(0)),
+                (i18n.t("pattern-second", "Second direction"), vec!["n2", "s2", "g2"], Some(1)),
+            ],
+            Base::Around(_) => vec![(i18n.t("pattern-row-around", "Around"), vec!["n", "angle", "step", "g"], Some(0))],
+            Base::Along { .. } if self.fill => vec![(i18n.t("pattern-steps", "Steps"), vec!["s1", "s2", "clearance"], None)],
+            Base::Along { .. } => vec![(i18n.t("pattern-row-along", "Along"), vec!["n", "s1", "g"], Some(0))],
         }
     }
 
-    pub fn label(key: &str) -> &'static str {
-        FIELDS.iter().find(|(k, _)| *k == key).map_or("", |(_, l)| l)
+    pub fn label<'a>(i18n: &'a I18n, key: &str) -> &'a str {
+        match key {
+            "n1" | "n2" | "n" => i18n.t("pattern-count", "Count"),
+            "s1" | "s2" => i18n.t("pattern-step", "Step"),
+            "g1" | "g2" | "g" => i18n.t("pattern-grows", "Grows by"),
+            "angle" => i18n.t("pattern-angle", "Angle, °"),
+            "step" => i18n.t("pattern-step-angle", "Step, °"),
+            "clearance" => i18n.t("pattern-clearance", "Clearance"),
+            _ => "",
+        }
     }
 
     /// The pattern's JSON, as the fields and the base give it.
@@ -469,12 +469,12 @@ impl CopiesForm {
     }
 
     /// The axes a shift is given in, by the first copy's pattern.
-    pub fn axes(&self, sk: &SketchEdit) -> [&'static str; 2] {
+    pub fn axes<'a>(&self, sk: &SketchEdit, i18n: &'a I18n) -> [&'a str; 2] {
         let p = &sk.json["sketch"]["patterns"][&self.copies[0].0];
         if p.get("along").is_some() {
-            ["Along", "Across"]
+            [i18n.t("pattern-row-along", "Along"), i18n.t("pattern-across", "Across")]
         } else if p.get("around").is_some() {
-            ["Degrees", "Outward"]
+            [i18n.t("pattern-degrees", "Degrees"), i18n.t("pattern-outward", "Outward")]
         } else {
             ["X", "Y"]
         }
@@ -670,7 +670,7 @@ mod tests {
         sk.solve();
         sk.selected = vec![Pick::Copy("row".into(), [1, 0]), Pick::Copy("row".into(), [2, 0])];
         let mut f = CopiesForm::new(&sk).unwrap();
-        assert_eq!(f.axes(&sk), ["X", "Y"]);
+        assert_eq!(f.axes(&sk, &I18n::default()), ["X", "Y"]);
         f.shift = ["".into(), "2".into()];
         let p = f.shifted(&sk);
         assert_eq!(p["patterns"]["row"]["shift"], json!({"1,0": [0, 2.0], "2,0": [0, 2.0]}));

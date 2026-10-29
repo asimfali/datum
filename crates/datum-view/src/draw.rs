@@ -9,6 +9,7 @@ use datum_model::SketchPatch;
 use datum_ops::Placed;
 use serde_json::{Map, Value as Json, json};
 
+use crate::i18n::I18n;
 use crate::sketch::SketchEdit;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -642,7 +643,7 @@ impl Draft {
     }
 
     /// Draws what is half drawn and where the cursor would click.
-    pub fn paint(&self, edit: &SketchEdit, painter: &egui::Painter, rect: egui::Rect) {
+    pub fn paint(&self, edit: &SketchEdit, painter: &egui::Painter, rect: egui::Rect, i18n: &I18n) {
         let Some(spot) = self.cursor.as_ref().filter(|_| self.tool != Tool::Select) else { return };
         let height = f64::from(rect.height());
         let screen = |q: [f64; 2]| {
@@ -722,12 +723,12 @@ impl Draft {
                         Some("horizontal_distance") => "H ",
                         Some("vertical_distance") => "V ",
                         Some("radius") => "R",
-                        Some("arc_length") => "arc ",
+                        Some("arc_length") => i18n.t("dim-arc", "arc "),
                         _ => "",
                     };
                     format!("{kind}{}{}", short(now), if c["type"] == "angle" { "°" } else { "" })
                 }
-                None => format!("{} picked: a second, or click where the dimension goes", self.picks.len()),
+                None => i18n.f("dim-picked", "{ $n } picked: a second, or click where the dimension goes", &[("n", &self.picks.len().to_string())]),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }
@@ -735,16 +736,16 @@ impl Draft {
         let at = screen(spot.at);
         painter.circle_stroke(at, 5.0, egui::Stroke::new(1.5, DRAFT));
         let mark = match (&spot.snap, &self.lean) {
-            (Snap::Point(_), _) => "point",
-            (Snap::Middle(_), _) => "middle",
-            (Snap::On(_), _) => "on",
-            (Snap::Vertex(_), _) => "vertex",
-            (Snap::Edge(_), _) => "edge",
+            (Snap::Point(_), _) => i18n.t("snap-point", "point"),
+            (Snap::Middle(_), _) => i18n.t("snap-middle", "middle"),
+            (Snap::On(_), _) => i18n.t("snap-on", "on"),
+            (Snap::Vertex(_), _) => i18n.t("snap-vertex", "vertex"),
+            (Snap::Edge(_), _) => i18n.t("snap-edge", "edge"),
             (Snap::Free, Some(Lean::Horizontal)) => "H",
             (Snap::Free, Some(Lean::Vertical)) => "V",
-            (Snap::Free, Some(Lean::Parallel(_))) => "parallel",
-            (Snap::Free, Some(Lean::Perpendicular(_))) => "perpendicular",
-            (Snap::Free, Some(Lean::Tangent(_))) => "tangent",
+            (Snap::Free, Some(Lean::Parallel(_))) => i18n.t("snap-parallel", "parallel"),
+            (Snap::Free, Some(Lean::Perpendicular(_))) => i18n.t("snap-perpendicular", "perpendicular"),
+            (Snap::Free, Some(Lean::Tangent(_))) => i18n.t("snap-tangent", "tangent"),
             (Snap::Free, None) => "",
         };
         if !mark.is_empty() {
@@ -1083,7 +1084,7 @@ mod tests {
             ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
             let painter = ui.painter().with_clip_rect(rect);
             e.paint(&painter, rect);
-            e.draft.paint(&e, &painter, rect);
+            e.draft.paint(&e, &painter, rect, &I18n::default());
         });
         h.run();
         if let Some(path) = shot {

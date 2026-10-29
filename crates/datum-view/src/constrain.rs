@@ -7,6 +7,7 @@ use datum_ops::Placed;
 use serde_json::{Value as Json, json};
 
 use crate::dims::Pick2;
+use crate::i18n::I18n;
 use crate::sketch::Glyph;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,21 +26,51 @@ pub enum Kind {
     Fix,
 }
 
-/// Every kind with its glyph, name and what to click, in the panel's order.
-pub const KINDS: [(Kind, Glyph, &str, &str); 12] = [
-    (Kind::Coincident, Glyph::Coincident, "Coincident", "two points, or a point and a curve it lies on"),
-    (Kind::Horizontal, Glyph::Horizontal, "Horizontal", "a line, or two points on one horizontal"),
-    (Kind::Vertical, Glyph::Vertical, "Vertical", "a line, or two points on one vertical"),
-    (Kind::Parallel, Glyph::Parallel, "Parallel", "two lines"),
-    (Kind::Perpendicular, Glyph::Perpendicular, "Perpendicular", "two lines"),
-    (Kind::Collinear, Glyph::Collinear, "Collinear", "two lines on one straight line"),
-    (Kind::Equal, Glyph::Equal, "Equal", "two lines of one length, or two arcs or circles of one radius"),
-    (Kind::Tangent, Glyph::Tangent, "Tangent", "two curves touching, one of them an arc or circle"),
-    (Kind::Concentric, Glyph::Concentric, "Concentric", "two arcs or circles around one centre"),
-    (Kind::Midpoint, Glyph::Midpoint, "Midpoint", "a point and the line it is halfway along"),
-    (Kind::Symmetric, Glyph::Symmetric, "Symmetric", "two points, then the line they mirror in"),
-    (Kind::Fix, Glyph::Fix, "Fix", "a point, held where it is"),
+/// Every kind with its glyph, in the panel's order.
+pub const KINDS: [(Kind, Glyph); 12] = [
+    (Kind::Coincident, Glyph::Coincident),
+    (Kind::Horizontal, Glyph::Horizontal),
+    (Kind::Vertical, Glyph::Vertical),
+    (Kind::Parallel, Glyph::Parallel),
+    (Kind::Perpendicular, Glyph::Perpendicular),
+    (Kind::Collinear, Glyph::Collinear),
+    (Kind::Equal, Glyph::Equal),
+    (Kind::Tangent, Glyph::Tangent),
+    (Kind::Concentric, Glyph::Concentric),
+    (Kind::Midpoint, Glyph::Midpoint),
+    (Kind::Symmetric, Glyph::Symmetric),
+    (Kind::Fix, Glyph::Fix),
 ];
+
+/// A kind's name and what to click for it, in the window's language.
+pub fn text(i18n: &I18n, kind: Kind) -> (&str, &str) {
+    match kind {
+        Kind::Coincident => {
+            (i18n.t("constrain-coincident", "Coincident"), i18n.t("constrain-coincident-what", "two points, or a point and a curve it lies on"))
+        }
+        Kind::Horizontal => {
+            (i18n.t("constrain-horizontal", "Horizontal"), i18n.t("constrain-horizontal-what", "a line, or two points on one horizontal"))
+        }
+        Kind::Vertical => (i18n.t("constrain-vertical", "Vertical"), i18n.t("constrain-vertical-what", "a line, or two points on one vertical")),
+        Kind::Parallel => (i18n.t("constrain-parallel", "Parallel"), i18n.t("constrain-parallel-what", "two lines")),
+        Kind::Perpendicular => (i18n.t("constrain-perpendicular", "Perpendicular"), i18n.t("constrain-perpendicular-what", "two lines")),
+        Kind::Collinear => (i18n.t("constrain-collinear", "Collinear"), i18n.t("constrain-collinear-what", "two lines on one straight line")),
+        Kind::Equal => {
+            (i18n.t("constrain-equal", "Equal"), i18n.t("constrain-equal-what", "two lines of one length, or two arcs or circles of one radius"))
+        }
+        Kind::Tangent => {
+            (i18n.t("constrain-tangent", "Tangent"), i18n.t("constrain-tangent-what", "two curves touching, one of them an arc or circle"))
+        }
+        Kind::Concentric => {
+            (i18n.t("constrain-concentric", "Concentric"), i18n.t("constrain-concentric-what", "two arcs or circles around one centre"))
+        }
+        Kind::Midpoint => (i18n.t("constrain-midpoint", "Midpoint"), i18n.t("constrain-midpoint-what", "a point and the line it is halfway along")),
+        Kind::Symmetric => {
+            (i18n.t("constrain-symmetric", "Symmetric"), i18n.t("constrain-symmetric-what", "two points, then the line they mirror in"))
+        }
+        Kind::Fix => (i18n.t("constrain-fix", "Fix"), i18n.t("constrain-fix-what", "a point, held where it is")),
+    }
+}
 
 /// What the next click should pick.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,8 +104,8 @@ pub enum Step {
     More,
     /// The constraint to add.
     Done(Json),
-    /// The picks cannot make this kind: why.
-    Wrong(String),
+    /// The picks cannot make this kind: what it takes is in [`text`].
+    Wrong(Kind),
 }
 
 /// The constraint of `kind` tying `picks` in sketch `placed`, or what is still missing.
@@ -82,7 +113,6 @@ pub fn step(kind: Kind, picks: &[Pick2], placed: &Placed) -> Step {
     use Pick2::{Curve as C, Point as P};
     let line = |n: &str| placed.lines.contains_key(n);
     let round = |n: &str| placed.arcs.contains_key(n) || placed.circles.contains_key(n);
-    let wrong = |what: &str| Step::Wrong(format!("{}: {what}", KINDS.iter().find(|k| k.0 == kind).map_or("", |k| k.2)));
     match (kind, picks) {
         (_, []) => Step::More,
         (Kind::Fix, [P(p)]) => Step::Done(json!({"type": "fix", "point": p})),
@@ -110,7 +140,7 @@ pub fn step(kind: Kind, picks: &[Pick2], placed: &Placed) -> Step {
         (Kind::Midpoint, [P(p), C(l)] | [C(l), P(p)]) if line(l) => Step::Done(json!({"type": "midpoint", "point": p, "line": l})),
         (Kind::Symmetric, [P(_)] | [P(_), P(_)]) => Step::More,
         (Kind::Symmetric, [P(a), P(b), C(l)]) if line(l) && a != b => Step::Done(json!({"type": "symmetric", "points": [a, b], "line": l})),
-        _ => wrong(KINDS.iter().find(|k| k.0 == kind).map_or("", |k| k.3)),
+        _ => Step::Wrong(kind),
     }
 }
 
@@ -165,7 +195,7 @@ mod tests {
         assert_eq!(done(Kind::Midpoint, &[c("l1"), p("p3")]), json!({"type": "midpoint", "point": "p3", "line": "l1"}));
         assert_eq!(done(Kind::Symmetric, &[p("p1"), p("p5"), c("l1")]), json!({"type": "symmetric", "points": ["p1", "p5"], "line": "l1"}));
         assert_eq!(step(Kind::Parallel, &[c("l1")], placed), Step::More);
-        assert!(matches!(step(Kind::Tangent, &[c("l1"), c("l2")], placed), Step::Wrong(w) if w.contains("arc or circle")));
+        assert_eq!(step(Kind::Tangent, &[c("l1"), c("l2")], placed), Step::Wrong(Kind::Tangent));
         assert!(matches!(step(Kind::Concentric, &[c("a1"), c("l1")], placed), Step::Wrong(_)));
         // What the next click picks: a tangent the curve, a midpoint's second what the first is not.
         assert_eq!(wants(Kind::Tangent, &[]), Want::Curve);
