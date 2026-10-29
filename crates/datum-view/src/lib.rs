@@ -23,6 +23,7 @@ mod select;
 mod settings;
 mod sidebar;
 mod sketch;
+mod table;
 mod templates;
 mod update;
 

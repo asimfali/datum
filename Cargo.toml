@@ -23,6 +23,7 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 schemars = "1.2"
 datum-mcp = { path = "crates/datum-mcp" }
 datum-sketch = { path = "crates/datum-sketch" }
+datum-table = { path = "crates/datum-table" }
 proptest = "1.12"
 rayon = "1.12"
 criterion = { version = "0.8", default-features = false }

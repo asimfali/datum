@@ -774,6 +774,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "datum-table"
+version = "0.4.2"
+
+[[package]]
 name = "datum-view"
 version = "0.4.2"
 dependencies = [
@@ -783,6 +787,7 @@ dependencies = [
  "datum-model",
  "datum-ops",
  "datum-sketch",
+ "datum-table",
  "eframe",
  "egui",
  "egui-wgpu",

@@ -16,6 +16,7 @@ datum-graph = { workspace = true }
 datum-ops = { workspace = true }
 datum-sketch = { workspace = true }
 datum-model = { workspace = true }
+datum-table = { workspace = true }
 libm = { workspace = true }
 rayon = { workspace = true }
 serde_json = { workspace = true }
