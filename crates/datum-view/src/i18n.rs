@@ -117,7 +117,7 @@ mod tests {
     /// stays when nothing asks for it.
     #[test]
     fn the_catalog_and_the_code_agree() {
-        let sources = [include_str!("app.rs"), include_str!("sidebar.rs"), include_str!("dock.rs")];
+        let sources = [include_str!("app.rs"), include_str!("sidebar.rs"), include_str!("dock.rs"), include_str!("table.rs")];
         let mut asked: Vec<&str> = sources
             .iter()
             .flat_map(|source| source.split(".t(").skip(1).chain(source.split(".f(").skip(1)))

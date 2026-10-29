@@ -78,6 +78,8 @@ act-sketch-presets = По комбинациям
 act-sketch-presets-about = Элемент библиотеки с комбинациями ставится по одной из них: ↑ ↓ — выбрать в списке у курсора, щелчок — поставить
 act-tools-measure = Измерить
 act-tools-measure-about = Пока в эскизе: щёлкните точку, кривую или копию массива, затем вторую: расстояние или угол; щелчок внутри замкнутой области — её площадь; Shift добавляет к измерению; Esc или F3 — выход
+act-view-parameter-table = Таблица параметров
+act-view-parameter-table-about = Параметры модели в отдельном окне: диапазоны из Excel вставляются и копируются обратно
 act-sketch-names = Имена
 act-sketch-names-about = Имена точек, кривых, групп и массивов
 act-sketch-dimensions = Размеры
@@ -178,3 +180,11 @@ measure-area = Площадь
 measure-perimeter = Периметр
 measure-holes = Отверстий
 
+# The table editor (D178)
+table-title = Параметры
+table-name = Имя
+table-value = Значение
+table-result = Результат
+table-delete-rows = Удалить строки
+table-open = Открыть таблицей
+table-taken = `{ $name }` — уже есть такой параметр

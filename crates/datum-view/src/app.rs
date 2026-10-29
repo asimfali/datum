@@ -107,7 +107,8 @@ fn title(project: Option<&std::path::Path>, path: Option<&std::path::Path>) -> S
     t
 }
 
-enum Request {
+#[derive(Debug)]
+pub(crate) enum Request {
     Open(PathBuf),
     /// No model any more: the session starts empty, the window shows none.
     Close,
@@ -438,6 +439,8 @@ struct Viewer {
     offsets: BTreeMap<String, String>,
     /// Why the window refused what was asked, before the model was asked.
     local_error: Option<String>,
+    /// The parameters table's window, while it is open (D178).
+    table: Option<crate::table::Editor>,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
     /// A newer release, once the background check finds one: its version and page.
@@ -543,6 +546,7 @@ impl Viewer {
             offsets: BTreeMap::new(),
             new_parameter: Default::default(),
             local_error: None,
+            table: None,
             path: None,
             update,
             newer: None,
@@ -1872,6 +1876,9 @@ impl Viewer {
         });
         ui.weak(self.i18n.t("param-formula-note", "A value may be a formula: w / 2 - gap. Sketch dimensions and depths take parameters too"))
             .on_hover_text(self.i18n.t("formulas-hint", FORMULAS));
+        if ui.button(self.i18n.t("table-open", "Open as table")).on_hover_text(self.i18n.about(Act::ParameterTable)).clicked() {
+            self.run(ui, Act::ParameterTable);
+        }
         if added {
             let (name, value) = std::mem::take(&mut self.new_parameter);
             let name = name.trim().to_string();
@@ -2322,6 +2329,30 @@ impl Viewer {
                 Some((name.to_string(), crate::origin::square(name, &plane, near)))
             })
             .collect()
+    }
+
+    /// The parameters table in a window of its own (D178): rebuilt from the model every frame,
+    /// its edits sent as the side bar sends them.
+    fn table_window(&mut self, ctx: &egui::Context) {
+        let Some(mut editor) = self.table.take() else { return };
+        let Some(m) = &self.model else { return };
+        let table = crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n);
+        let editable = crate::table::editable(table.rows().len());
+        let (mut out, mut closed) = (Default::default(), false);
+        let builder = egui::ViewportBuilder::default().with_title(self.i18n.t("table-title", "Parameters")).with_inner_size([400.0, 360.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
+            closed = ui.input(|i| i.viewport().close_requested());
+            out = editor.show(ui, &table, &editable, &self.i18n);
+        });
+        let (mut sent, error) = crate::table::parameter_requests(&m.inspect, &mut self.new_parameter, &out.edits, &self.i18n);
+        sent.extend(crate::table::remove_requests(&m.inspect, &out.delete));
+        if !out.edits.is_empty() {
+            editor.error = error;
+        }
+        for r in sent {
+            self.send(r);
+        }
+        self.table = (!closed).then_some(editor);
     }
 
     /// The offset of a new work plane, asked once its base is picked: a number or a formula;
@@ -3114,7 +3145,7 @@ impl Viewer {
 
 /// What the level worked in does to its parent, by `inspect`: the parent's features it changes,
 /// its own features, the parent's parameters it sets otherwise, its own parameters.
-fn marks(inspect: &Json) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
+pub(crate) fn marks(inspect: &Json) -> (Vec<String>, Vec<String>, Vec<String>, Vec<String>) {
     let level = inspect["level"].as_str();
     let this = inspect["levels"].as_array().into_iter().flatten().find(|l| Some(l["name"].as_str().unwrap_or_default()) == level);
     let names = |key: &str| -> Vec<String> {
@@ -3256,7 +3287,7 @@ fn offsets(inspect: &Json) -> BTreeMap<String, String> {
 
 /// How a parameter's definition shows in its field: a number (whole ones without `.0`), an
 /// expression as is.
-fn definition(v: &Json) -> String {
+pub(crate) fn definition(v: &Json) -> String {
     match (v.as_str(), v.as_f64()) {
         (Some(e), _) => e.to_string(),
         (None, Some(x)) if x.fract() == 0.0 && x.abs() < 1e15 => format!("{}", x as i64),
@@ -3319,7 +3350,9 @@ impl Viewer {
             Context::Sketch => self.sketch.is_some(),
         };
         here && match a.act {
-            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane => self.model.is_some(),
+            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane | Act::ParameterTable => {
+                self.model.is_some()
+            }
             Act::CloseProject => self.project.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.sketch.is_some(),
@@ -3347,6 +3380,7 @@ impl Viewer {
             Act::SideBar => self.side_bar.visible,
             Act::SideBarRight => self.side_bar.right,
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
+            Act::ParameterTable => self.table.is_some(),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
         }
@@ -3372,6 +3406,7 @@ impl Viewer {
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
             Act::Home => self.home(ui),
+            Act::ParameterTable => self.table = if self.table.is_some() { None } else { Some(Default::default()) },
             Act::NewSketch => {
                 self.leave();
                 self.start_sketch();
@@ -3511,6 +3546,7 @@ impl Viewer {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
             self.item(ui, Act::Measure, true);
+            self.item(ui, Act::ParameterTable, true);
             self.item(ui, Act::SmoothEdges, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
@@ -3733,6 +3769,7 @@ impl eframe::App for Viewer {
         }
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
+        self.table_window(ui.ctx());
         self.settings_said(ui.ctx());
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -3811,6 +3848,7 @@ mod tests {
             new_parameter: Default::default(),
             offsets: planes,
             local_error: None,
+            table: None,
             path: None,
             update: channel().1,
             newer: None,
@@ -4820,6 +4858,27 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::SetParameter(n, val) if n == "gap" && val == "w / 10")));
         assert!(!sent.iter().any(|r| matches!(r, Request::SetParameter(n, _) if n == "hole")));
         assert!(sent.iter().any(|r| matches!(r, Request::Command("remove_parameter", p) if p["name"] == "h")), "the first row's");
+    }
+
+    /// The parameters table (D178): the cursor on a value, a character typed replaces it, Enter
+    /// sends the new value.
+    #[test]
+    fn the_parameters_table_sets_a_value() {
+        let (mut v, inbox) = viewer("parametric.json");
+        v.table = Some(Default::default());
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui(|ui| v.table_window(ui.ctx()));
+        h.run();
+        for key in [egui::Key::ArrowDown, egui::Key::ArrowRight] {
+            h.key_press(key);
+            h.run();
+        }
+        h.event(egui::Event::Text("9".into()));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        drop(h);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(&sent[..], [Request::SetParameter(n, val)] if n == "floor_count" && *val == json!(9.0)), "{sent:?}");
     }
 
     /// The base and its parts in the panel (D152, D169): a click on a part works in it, in the
