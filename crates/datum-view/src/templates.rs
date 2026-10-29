@@ -155,7 +155,7 @@ mod tests {
     use datum_brep::TopoId;
 
     use super::*;
-    use crate::draw::{Snap, Tool};
+    use crate::draw::{Snap, Stage, Tool};
     use crate::sketch::Context;
     use serde_json::json;
 
@@ -164,7 +164,8 @@ mod tests {
         SketchEdit::new("s".into(), Context { id: TopoId::derive("feature").tag("s").finish(), input: None }, json, BTreeMap::new(), None)
     }
 
-    /// Places template `t` by `spots` through the tool, as clicks would.
+    /// Places template `t` by `spots` through the tool, as clicks would, then Enter takes the
+    /// sizes if they are asked.
     fn place_by(e: &mut SketchEdit, t: Json, spots: &[Spot]) -> Json {
         e.draft.tool = Tool::Template;
         e.draft.template = Some(t);
@@ -176,7 +177,17 @@ mod tests {
             patch = d.click(e);
             e.draft = d;
         }
+        if patch.is_none() {
+            patch = enter(e);
+        }
         e.apply(patch.unwrap())
+    }
+
+    fn enter(e: &mut SketchEdit) -> Option<Map<String, Json>> {
+        let mut d = std::mem::take(&mut e.draft);
+        let patch = d.enter(e);
+        e.draft = d;
+        patch
     }
 
     fn free(at: [f64; 2]) -> Spot {
@@ -285,8 +296,9 @@ mod tests {
         p["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| c["value"].clone()).collect()
     }
 
-    /// One stream of input: the field asks the parameters (typed, else the preset's, else the
-    /// element's), Enter puts the element where the cursor is.
+    /// One stream of input: Enter puts the base point where the cursor is (the second corner is
+    /// not asked: the sizes give it), the field asks the parameters (typed, else the preset's,
+    /// else the element's), Enter puts the element.
     #[test]
     fn parameters_typed_then_enter() {
         let mut e = editor(json!({"points": {}}));
@@ -297,9 +309,9 @@ mod tests {
         e.params.insert("h".into(), 4.0);
         assert_eq!((asked(&e.draft, "width", &e.params), asked(&e.draft, "height", &e.params)), ("20".into(), "h + 1".into()));
         e.draft.cursor = Some(free([3.0, 4.0]));
-        let mut d = std::mem::take(&mut e.draft);
-        let patch = d.enter(&e).unwrap();
-        e.draft = d;
+        assert!(enter(&mut e).is_none(), "the base point");
+        assert_eq!(e.draft.stage(&e.modes), Some(Stage::Sizes));
+        let patch = enter(&mut e).unwrap();
         let p = e.apply(patch);
         assert_eq!(lengths(&p), [json!(20.0), json!("(h + 1)")], "{p}");
         assert!(e.draft.answers.contains_key("height"), "the values stay for the next one");
@@ -307,7 +319,8 @@ mod tests {
         assert_eq!(placed.solved.dof, 2, "sized, free to move: {:?}", placed.solved.free);
     }
 
-    /// By presets (F4, D176): one click puts the plate of the preset's size, a group of its name.
+    /// By presets (F4, D176): one click is the base point (the preset gives the size, no second
+    /// corner), Enter puts the plate of the preset's size, a group of its name (D184).
     #[test]
     fn by_presets_one_click() {
         let mut e = editor(json!({"points": {}}));
@@ -317,7 +330,9 @@ mod tests {
         assert!(e.draft.by_presets(&e.modes));
         e.draft.cursor = Some(free([3.0, 4.0]));
         let mut d = std::mem::take(&mut e.draft);
-        let patch = d.click(&e).expect("placed by the first click");
+        assert!(d.click(&e).is_none(), "the base point: the preset is picked next");
+        assert_eq!(d.stage(&e.modes), Some(Stage::Sizes));
+        let patch = d.enter(&e).expect("Enter puts it");
         e.draft = d;
         let p = e.apply(patch);
         assert_eq!(lengths(&p), [json!(20.0), json!(10.0)], "{p}");
@@ -336,31 +351,56 @@ mod tests {
         assert!((l[0].as_f64().unwrap() - 30.0).abs() < 1e-9 && l[1] == json!(5.0), "{p}");
     }
 
-    /// A socket asked after the element is placed: a click on a line completes it, a click on a
-    /// point does not (it takes a line), Enter skips it.
+    /// The sockets are asked after the anchors, before the sizes, and go in with the element as one
+    /// change (D184): a click on a line completes the one asked, a click on a point does not (it
+    /// takes a line), Enter skips it.
     #[test]
-    fn sockets_after_placing() {
+    fn sockets_before_the_sizes() {
         let mut e = editor(json!({"points": {"p1": [0, 0], "p2": [20, 0]}, "lines": {"l1": {"from": "p1", "to": "p2"}}}));
         let step = json!({"name": "Step", "anchors": ["a"],
+            "parameters": [{"name": "h", "value": 5}],
             "links": [{"constraint": {"type": "perpendicular", "lines": ["?", "up"]}, "kind": "line"}],
-            "sketch": {"points": {"a": [0, 0], "b": [0, 5]}, "lines": {"up": {"from": "a", "to": "b"}}}});
-        place_by(&mut e, step.clone(), &[free([5.0, 3.0])]);
-        assert_eq!(e.draft.linking.len(), 1);
-        assert_eq!(e.draft.linking[0].shown, "perpendicular ? l2");
-        let click = |e: &mut SketchEdit, snap: Snap| {
-            e.draft.cursor = Some(Spot { at: [10.0, 0.0], snap });
+            "sketch": {"points": {"a": [0, 0], "b": [0, 5]}, "lines": {"up": {"from": "a", "to": "b"}},
+                       "constraints": [{"type": "length", "line": "up", "value": "h"}]}});
+        assert_eq!(datum_model::library::sockets(&step), [("perpendicular ? up".to_string(), "line".to_string())]);
+        e.draft.choose(step.clone());
+        let click = |e: &mut SketchEdit, at: [f64; 2], snap: Snap| {
+            e.draft.cursor = Some(Spot { at, snap });
             let mut d = std::mem::take(&mut e.draft);
             let patch = d.click(e);
             e.draft = d;
-            patch.map(|p| e.apply(p))
+            patch
         };
-        assert!(click(&mut e, Snap::Point("p1".into())).is_none(), "a point is not a line");
-        let p = click(&mut e, Snap::On("l1".into())).unwrap();
-        assert_eq!(p["add_constraints"], json!([{"type": "perpendicular", "lines": ["l1", "l2"]}]), "{p}");
-        assert!(e.draft.linking.is_empty());
-        // The next one: Enter skips its socket.
-        place_by(&mut e, step, &[free([8.0, 3.0])]);
+        assert!(click(&mut e, [5.0, 3.0], Snap::Free).is_none(), "the base point");
+        assert_eq!(e.draft.stage(&e.modes), Some(Stage::Sockets));
+        assert!(click(&mut e, [10.0, 0.0], Snap::Point("p1".into())).is_none() && e.draft.sockets.is_empty(), "a point is not a line");
+        assert!(click(&mut e, [10.0, 0.0], Snap::On("l1".into())).is_none(), "the socket: the sizes are next");
+        assert_eq!(e.draft.stage(&e.modes), Some(Stage::Sizes));
+        e.draft.answers.insert("h".into(), json!(8));
+        let patch = enter(&mut e).expect("Enter puts it");
+        let p = e.apply(patch);
+        let c = p["add_constraints"].as_array().unwrap();
+        assert!(c.contains(&json!({"type": "perpendicular", "lines": ["l1", "l2"]})), "the socket in the same change: {p}");
+        assert!(c.iter().any(|c| c["type"] == "length" && c["value"] == json!(8.0)), "{p}");
+        assert!(e.draft.clicks.is_empty() && e.draft.sockets.is_empty(), "ready for the next");
+        // The next one: Enter skips its socket, Enter takes its sizes.
+        click(&mut e, [8.0, 3.0], Snap::Free);
+        assert!(enter(&mut e).is_none());
+        let patch = enter(&mut e).unwrap();
+        let p = e.apply(patch);
+        assert!(!p["add_constraints"].as_array().unwrap().iter().any(|c| c["type"] == "perpendicular"), "{p}");
+    }
+
+    /// An element with nothing to ask goes in at its base point, the tool ready for the next.
+    #[test]
+    fn nothing_to_ask_goes_in_at_once() {
+        let mut e = editor(json!({"points": {}}));
+        let dot =
+            json!({"name": "Dot", "anchors": ["a"], "sketch": {"points": {"a": [0, 0], "b": [1, 0]}, "lines": {"l": {"from": "a", "to": "b"}}}});
+        e.draft.choose(dot);
+        e.draft.cursor = Some(free([2.0, 2.0]));
         let mut d = std::mem::take(&mut e.draft);
-        assert!(d.enter(&e).is_none() && d.linking.is_empty());
+        assert!(d.click(&e).is_some(), "put by the click");
+        assert!(!d.cancel() && d.stage(&e.modes) == Some(Stage::Anchors));
     }
 }
