@@ -24,6 +24,8 @@ pub enum Icon {
     Circle,
     Point,
     Dimension,
+    /// A ruler: measure.
+    Measure,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -133,6 +135,13 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             painter.line_segment([at(-6.0, 0.0), at(6.0, 0.0)], stroke);
             painter.add(egui::Shape::convex_polygon(vec![at(-6.0, 0.0), at(-3.0, -2.0), at(-3.0, 2.0)], colour, Stroke::NONE));
             painter.add(egui::Shape::convex_polygon(vec![at(6.0, 0.0), at(3.0, 2.0), at(3.0, -2.0)], colour, Stroke::NONE));
+        }
+        Icon::Measure => {
+            // A ruler laid aslant, its ticks.
+            painter.add(egui::Shape::closed_line(vec![at(-7.0, 3.0), at(3.0, -7.0), at(7.0, -3.0), at(-3.0, 7.0)], stroke));
+            for t in [2.5, 5.0, 7.5] {
+                painter.line_segment([at(-7.0 + t, 3.0 - t), at(-5.0 + t, 5.0 - t)], stroke);
+            }
         }
     }
 }

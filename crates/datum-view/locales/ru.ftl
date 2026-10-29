@@ -76,6 +76,8 @@ act-sketch-badges = Значки
 act-sketch-badges-about = Значки геометрических ограничений: щелчок выбирает, Del убирает
 act-sketch-presets = По комбинациям
 act-sketch-presets-about = Элемент библиотеки с комбинациями ставится по одной из них: ↑ ↓ — выбрать в списке у курсора, щелчок — поставить
+act-sketch-measure = Измерить
+act-sketch-measure-about = Щёлкните точку, кривую или копию массива, затем вторую: расстояние или угол; щелчок внутри замкнутой области — её площадь; Shift добавляет к измерению; Esc или F3 — выход
 act-sketch-names = Имена
 act-sketch-names-about = Имена точек, кривых, групп и массивов
 act-sketch-dimensions = Размеры
@@ -159,4 +161,20 @@ feature-on-hint = Включена, пока { $formula } не равно 0
 feature-off-hint = Выключена: операция передаёт вход дальше без изменений — так вариант обходится без операции родителя
 changed-here = Изменено в этом варианте
 own-here = Своё в этом варианте
+
+# Measuring in the sketch (D177)
+measure-length = Длина
+measure-radius = Радиус
+measure-diameter = Диаметр
+measure-angle = Угол
+measure-supplement = 180° −
+measure-arc-length = Длина дуги
+measure-distance = Расстояние
+measure-dx = ΔX
+measure-dy = ΔY
+measure-centres = Между центрами
+measure-gap = Зазор
+measure-area = Площадь
+measure-perimeter = Периметр
+measure-holes = Отверстий
 

@@ -123,6 +123,8 @@ mod tests {
             .flat_map(|source| source.split(".t(").skip(1).chain(source.split(".f(").skip(1)))
             .filter_map(|rest| rest.trim_start().strip_prefix('"')?.split('"').next())
             .collect();
+        // The names of measured values, by key in a table (`Quantity::text`).
+        asked.extend(include_str!("measure.rs").split("(\"").skip(1).filter_map(|rest| rest.split('"').next()).filter(|k| k.starts_with("measure-")));
         asked.sort_unstable();
         asked.dedup();
         for (code, _, text) in CATALOGS {

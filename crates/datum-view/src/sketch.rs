@@ -13,6 +13,7 @@ use serde_json::{Value as Json, json};
 
 use crate::camera::SketchCamera;
 use crate::draw::{Draft, face_edges};
+use crate::measure::{Shape, Taken};
 
 /// What the background thread knows of the sketch being edited: its feature's ID (for
 /// `Op::eval`) and its input body (a face it lies on, edges it projects).
@@ -273,6 +274,8 @@ const SELECTED: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 const DIMENSION: egui::Color32 = egui::Color32::from_rgb(20, 120, 60);
 const NAME: egui::Color32 = egui::Color32::from_rgb(110, 110, 120);
 /// A pattern's copies: drawn by the pattern, not by hand.
+/// What the measure tool took (D177): not a dimension's colour, it changes nothing.
+const MEASURE: egui::Color32 = egui::Color32::from_rgb(150, 50, 190);
 const COPY: egui::Color32 = egui::Color32::from_rgb(90, 100, 120);
 const FILL: egui::Color32 = egui::Color32::from_rgba_unmultiplied_const(60, 110, 200, 45);
 
@@ -732,12 +735,17 @@ impl SketchEdit {
     /// The copy of a pattern under pixel offset `(dx, dy)`: the cursor taken back into the
     /// cell's place, near one of its curves. Not the cell itself.
     pub fn copy_at(&self, dx: f64, dy: f64, height: f64) -> Option<Pick> {
+        self.copy_curve_at(dx, dy, height).map(|(c, k, _, _)| Pick::Copy(c.name.clone(), k))
+    }
+
+    /// [`Self::copy_at`], with where the copy goes and the curve of its cell the cursor is near.
+    fn copy_curve_at(&self, dx: f64, dy: f64, height: f64) -> Option<(&datum_ops::Copies, [i64; 2], &datum_ops::Place, &String)> {
         let p = self.placed.as_ref().ok()?;
         let q = self.camera.at(dx, dy, height);
         let near = NEAR_CURVE * self.camera.per_pixel(height);
         for c in &p.patterns {
-            let curves: Vec<Vec<[f64; 2]>> = c.cell.iter().filter_map(|n| Self::curve_points(p, n)).collect();
-            let pts = curves.iter().flatten();
+            let curves: Vec<(&String, Vec<[f64; 2]>)> = c.cell.iter().filter_map(|n| Some((n, Self::curve_points(p, n)?))).collect();
+            let pts = curves.iter().flat_map(|(_, v)| v);
             let lo = pts.clone().fold([f64::INFINITY; 2], |m, v| [m[0].min(v[0]), m[1].min(v[1])]);
             let hi = pts.fold([f64::NEG_INFINITY; 2], |m, v| [m[0].max(v[0]), m[1].max(v[1])]);
             for (k, place) in c.at.iter().rev() {
@@ -749,12 +757,59 @@ impl SketchEdit {
                 if v.0 < lo[0] - near || v.0 > hi[0] + near || v.1 < lo[1] - near || v.1 > hi[1] + near {
                     continue;
                 }
-                if curves.iter().any(|pts| pts.windows(2).any(|w| segment_distance(v, (w[0][0], w[0][1]), (w[1][0], w[1][1])) <= near)) {
-                    return Some(Pick::Copy(c.name.clone(), *k));
+                if let Some((n, _)) =
+                    curves.iter().find(|(_, pts)| pts.windows(2).any(|w| segment_distance(v, (w[0][0], w[0][1]), (w[1][0], w[1][1])) <= near))
+                {
+                    return Some((c, *k, place, n));
                 }
             }
         }
         None
+    }
+
+    /// What a click of the measure tool at pixel offset `(dx, dy)` takes (D177): a point, a
+    /// curve, a copy's end or curve, or else the region around the cursor.
+    pub fn measure_at(&self, dx: f64, dy: f64, height: f64) -> Option<Taken> {
+        let p = self.placed.as_ref().ok()?;
+        if let Some(n) = self.point_at(dx, dy, height) {
+            let v = p.solved.points.get(&n)?;
+            return Some(Taken::Shape(Shape::Point([v.x, v.y])));
+        }
+        if let Some(n) = self.curve_at(dx, dy, height) {
+            return Self::shape(p, &n, None).map(Taken::Shape);
+        }
+        if let Some((_, _, place, n)) = self.copy_curve_at(dx, dy, height) {
+            let shape = Self::shape(p, n, Some(place))?;
+            let ends = match shape {
+                Shape::Line(a, b) | Shape::Arc { from: a, to: b, .. } => vec![a, b],
+                _ => Vec::new(),
+            };
+            let end = ends.into_iter().find(|e| {
+                let (x, y) = self.camera.offset(*e, height);
+                libm::hypot(x - dx, y - dy) <= NEAR_POINT
+            });
+            return Some(Taken::Shape(end.map_or(shape, Shape::Point)));
+        }
+        let mut regions = datum_ops::profile_regions(self.context.id, p).ok()?;
+        let k = crate::measure::region_at(&regions, self.camera.at(dx, dy, height))?;
+        Some(Taken::Region(regions.swap_remove(k)))
+    }
+
+    /// Curve `name` of the placed sketch as a shape to measure, moved to a copy's `place`.
+    fn shape(p: &Placed, name: &str, place: Option<&datum_ops::Place>) -> Option<Shape> {
+        let at = |n: &str| {
+            let v = *p.solved.points.get(n)?;
+            let v = place.map_or(v, |pl| pl.apply(v));
+            Some([v.x, v.y])
+        };
+        if let Some(l) = p.lines.get(name) {
+            return Some(Shape::Line(at(&l.from)?, at(&l.to)?));
+        }
+        if let Some(a) = p.arcs.get(name) {
+            return Some(Shape::Arc { center: at(&a.center)?, from: at(&a.from)?, to: at(&a.to)? });
+        }
+        let c = p.circles.get(name)?;
+        Some(Shape::Circle { center: at(&c.center)?, radius: 0.5 * c.diameter.value()? })
     }
 
     /// The outline of copy `k` of pattern `c`: its cell's curves moved there.
@@ -1093,6 +1148,85 @@ impl SketchEdit {
 
     /// Draws the selection frame being dragged: solid when it takes what is inside, dashed when
     /// what it touches.
+    /// What the measure tool took, lit, a dashed line between two shapes' centres or from a
+    /// point to its foot on a line, and the values by the last click (D177).
+    pub fn paint_measure(&self, painter: &egui::Painter, rect: egui::Rect, lines: &[String]) {
+        let measured = &self.draft.measured;
+        if measured.is_empty() {
+            return;
+        }
+        let height = f64::from(rect.height());
+        let screen = |q: [f64; 2]| {
+            let (x, y) = self.camera.offset(q, height);
+            rect.center() + egui::vec2(x as f32, y as f32)
+        };
+        let stroke = egui::Stroke::new(3.0, MEASURE);
+        let ring = |c: [f64; 2], r: f64, start: f64, sweep: f64| -> Vec<egui::Pos2> {
+            (0..=64)
+                .map(|k| {
+                    let (sn, cs) = libm::sincos(start + sweep * f64::from(k) / 64.0);
+                    screen([c[0] + r * cs, c[1] + r * sn])
+                })
+                .collect()
+        };
+        for m in measured {
+            match m {
+                Taken::Shape(Shape::Point(q)) => {
+                    painter.circle_stroke(screen(*q), 5.0, stroke);
+                }
+                Taken::Shape(Shape::Line(a, b)) => {
+                    painter.line_segment([screen(*a), screen(*b)], stroke);
+                }
+                Taken::Shape(Shape::Arc { center: c, from: f, to: t }) => {
+                    let start = libm::atan2(f[1] - c[1], f[0] - c[0]);
+                    let sweep = (libm::atan2(t[1] - c[1], t[0] - c[0]) - start).rem_euclid(TAU);
+                    painter.add(egui::Shape::line(ring(*c, libm::hypot(f[0] - c[0], f[1] - c[1]), start, sweep), stroke));
+                }
+                Taken::Shape(Shape::Circle { center, radius }) => {
+                    painter.add(egui::Shape::line(ring(*center, *radius, 0.0, TAU), stroke));
+                }
+                Taken::Region(r) => {
+                    for l in std::iter::once(&r.outer).chain(&r.holes) {
+                        let n = l.points.len();
+                        let mut pts = Vec::new();
+                        for k in 0..n {
+                            let (a, b) = (l.points[k], l.points[(k + 1) % n]);
+                            match l.arc(k) {
+                                Some(arc) => {
+                                    let (c, start) = ([arc.center.x, arc.center.y], libm::atan2(a.y - arc.center.y, a.x - arc.center.x));
+                                    pts.extend(ring(c, libm::hypot(a.x - c[0], a.y - c[1]), start, arc.turn(a, b)));
+                                }
+                                None => pts.push(screen([a.x, a.y])),
+                            }
+                        }
+                        pts.extend(pts.first().copied());
+                        painter.add(egui::Shape::line(pts, egui::Stroke::new(2.0, MEASURE)));
+                    }
+                }
+            }
+        }
+        // Between two shapes: their centres joined, or a point dropped onto a line.
+        let centre = |s: &Shape| match *s {
+            Shape::Point(q) | Shape::Circle { center: q, .. } | Shape::Arc { center: q, .. } => Some(q),
+            Shape::Line(..) => None,
+        };
+        if let [Taken::Shape(a), Taken::Shape(b)] = &measured[..] {
+            let ends = match (centre(a), centre(b), a, b) {
+                (Some(p), Some(q), _, _) => Some((p, q)),
+                (Some(p), None, _, Shape::Line(l, m)) | (None, Some(p), Shape::Line(l, m), _) => Some((p, foot(p, *l, *m))),
+                _ => None,
+            };
+            if let Some((p, q)) = ends {
+                crate::draw::dashed(painter, &[screen(p), screen(q)], egui::Stroke::new(1.4, MEASURE), 6.0, 4.0);
+            }
+        }
+        let galley = painter.layout_no_wrap(lines.join("\n"), LABEL, MEASURE);
+        let r = egui::Rect::from_min_size(screen(self.draft.measured_at) + egui::vec2(14.0, 14.0), galley.size()).expand(4.0);
+        painter.rect_filled(r, 3.0, egui::Color32::from_white_alpha(230));
+        painter.rect_stroke(r, 3.0, egui::Stroke::new(1.0, MEASURE), egui::StrokeKind::Inside);
+        painter.galley(r.min + egui::vec2(4.0, 4.0), galley, MEASURE);
+    }
+
     pub fn paint_frame(&self, painter: &egui::Painter, rect: egui::Rect) {
         let Some(f) = self.frame else { return };
         let at = |q: (f64, f64)| rect.center() + egui::vec2(q.0 as f32, q.1 as f32);
@@ -1291,6 +1425,17 @@ fn fill(feature: TopoId, p: &Placed) -> Option<Vec<[[f64; 2]; 3]>> {
         out.extend(m.triangles.iter().map(|t| t.map(|k| [m.points[k as usize].x, m.points[k as usize].y])));
     }
     Some(out)
+}
+
+/// The foot of the perpendicular from `p` to the line through `a` and `b` (`a` if they meet).
+fn foot(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let len2 = d[0] * d[0] + d[1] * d[1];
+    if len2 == 0.0 {
+        return a;
+    }
+    let t = ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / len2;
+    [a[0] + t * d[0], a[1] + t * d[1]]
 }
 
 /// The font of dimension labels.

@@ -21,6 +21,8 @@ pub enum Tool {
     /// Pick a line, an arc, a circle, two points, a point and a line or two lines: dimensioned
     /// at once (two other points: then click where the dimension goes).
     Dimension,
+    /// Measure what is clicked (D177): nothing is changed.
+    Measure,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
     /// Add a geometric constraint of this kind: click what it ties (D118).
@@ -108,6 +110,9 @@ pub struct Draft {
     pub picks: Vec<crate::dims::Pick2>,
     pub axis: Option<crate::dims::Axis>,
     pub asked: Option<String>,
+    /// Measure tool: what is measured, and where the last click was (its label goes there).
+    pub measured: Vec<crate::measure::Taken>,
+    pub measured_at: [f64; 2],
     /// Template tool: the library element placed, the preset chosen, the parameter values
     /// typed (by name), and the parameter the field by the cursor asks.
     pub template: Option<Json>,
@@ -142,6 +147,8 @@ impl Default for Draft {
             picks: Vec::new(),
             axis: None,
             asked: None,
+            measured: Vec::new(),
+            measured_at: [0.0; 2],
             template: None,
             preset: None,
             answers: Map::new(),
@@ -189,8 +196,9 @@ pub fn face_edges(body: &Body, placed: &Placed) -> Vec<FaceEdge> {
 impl Draft {
     /// Cancels what is half drawn; true if there was something.
     pub fn cancel(&mut self) -> bool {
-        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty() || !self.linking.is_empty();
+        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty() || !self.linking.is_empty() || !self.measured.is_empty();
         self.linking.clear();
+        self.measured.clear();
         self.chain = None;
         self.clicks.clear();
         self.picks.clear();
@@ -471,7 +479,7 @@ impl Draft {
         let spot = self.cursor.clone()?;
         let mut patch = Patch::new(edit);
         match self.tool {
-            Tool::Select | Tool::Dimension | Tool::Constrain(_) => return None,
+            Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
             Tool::Template if !self.linking.is_empty() => return self.link(edit, &spot),
             Tool::Template => {
                 // By a preset its size is given: the first anchor's click puts it.
