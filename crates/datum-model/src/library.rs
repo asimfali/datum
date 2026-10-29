@@ -652,6 +652,12 @@ fn label_of(c: &Value) -> String {
     format!("{} {}", c["type"].as_str().unwrap_or_default(), names.join(" "))
 }
 
+/// The sockets of element `e` before it is placed, in order: how each reads by the element's
+/// names and what it takes (one of [`KINDS`]).
+pub fn sockets(e: &Value) -> Vec<(String, String)> {
+    e["links"].as_array().into_iter().flatten().map(|l| (label_of(&l["constraint"]), l["kind"].as_str().unwrap_or("curve").to_string())).collect()
+}
+
 /// The sockets of element `e` placed with parameter values `values` and its names `renamed`
 /// (as [`place`] gave them), in order.
 pub fn links(e: &Value, values: &BTreeMap<String, Value>, renamed: &BTreeMap<String, String>) -> Result<Vec<Link>, String> {

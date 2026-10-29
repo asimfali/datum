@@ -29,6 +29,14 @@ pub enum Tool {
     Constrain(crate::constrain::Kind),
 }
 
+/// Where placing a library element is (D184).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    Anchors,
+    Sockets,
+    Sizes,
+}
+
 /// What a click lands on.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Snap {
@@ -119,9 +127,12 @@ pub struct Draft {
     pub preset: Option<String>,
     pub answers: Map<String, Json>,
     pub asking: usize,
-    /// The sockets of the element just placed, the one asked first: a click on what it takes
-    /// completes it, Enter skips it (D116).
-    pub linking: Vec<datum_model::library::Link>,
+    /// The sockets of the element being placed completed so far, in order: what each is tied to,
+    /// none for one skipped (D116). Asked after its anchors, before its sizes (D184).
+    pub sockets: Vec<Option<String>>,
+    /// Enter ended the anchors of the element being placed: the rest are not asked, its sizes
+    /// give its size.
+    pub anchored: bool,
     /// The next segment of the chain is an arc tangent to the last (T, or a drag from its end).
     pub tangent: bool,
     /// The command ended last: Enter takes it up again.
@@ -153,7 +164,8 @@ impl Default for Draft {
             preset: None,
             answers: Map::new(),
             asking: 0,
-            linking: Vec::new(),
+            sockets: Vec::new(),
+            anchored: false,
             tangent: false,
             last: None,
             cursor: None,
@@ -196,8 +208,9 @@ pub fn face_edges(body: &Body, placed: &Placed) -> Vec<FaceEdge> {
 impl Draft {
     /// Cancels what is half drawn; true if there was something.
     pub fn cancel(&mut self) -> bool {
-        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty() || !self.linking.is_empty() || !self.measured.is_empty();
-        self.linking.clear();
+        let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty() || !self.sockets.is_empty() || !self.measured.is_empty();
+        self.sockets.clear();
+        self.anchored = false;
         self.measured.clear();
         self.chain = None;
         self.clicks.clear();
@@ -248,48 +261,80 @@ impl Draft {
 
     /// Whether the element placed goes by its presets (F4, D176): it has some, the mode is on.
     pub fn by_presets(&self, modes: &crate::sketch::Modes) -> bool {
-        modes.presets
-            && self.tool == Tool::Template
-            && self.linking.is_empty()
-            && self.template.as_ref().and_then(|t| t["presets"].as_object()).is_some_and(|p| !p.is_empty())
+        modes.presets && self.tool == Tool::Template && self.template.as_ref().and_then(|t| t["presets"].as_object()).is_some_and(|p| !p.is_empty())
     }
 
-    /// Enter while placing an element: it goes where the cursor is, with the anchors clicked so
-    /// far; the size its other anchors would give, its parameters give.
+    /// Where placing a library element is (D184): its anchors are clicked first (by presets only
+    /// the first: the preset gives the size), then its sockets, then its sizes are typed or its
+    /// preset picked. None: no element is being placed.
+    pub fn stage(&self, modes: &crate::sketch::Modes) -> Option<Stage> {
+        let t = self.template.as_ref().filter(|_| self.tool == Tool::Template)?;
+        let anchors = if self.by_presets(modes) { 1 } else { datum_model::library::anchors(t).len() };
+        Some(if self.clicks.len() < anchors && !self.anchored {
+            Stage::Anchors
+        } else if self.sockets.len() < datum_model::library::sockets(t).len() {
+            Stage::Sockets
+        } else {
+            Stage::Sizes
+        })
+    }
+
+    /// Whether the sizes are asked once the anchors and sockets are in: by presets, or the element
+    /// has parameters; otherwise it goes in at once.
+    fn asks_sizes(&self, modes: &crate::sketch::Modes) -> bool {
+        self.by_presets(modes) || self.template.as_ref().and_then(|t| datum_model::library::parameter_names(t).ok()).is_some_and(|n| !n.is_empty())
+    }
+
+    /// Enter while placing an element: the anchors end (with none clicked yet, the first goes
+    /// where the cursor is), the socket asked is skipped, the sizes are taken.
     pub fn enter(&mut self, edit: &SketchEdit) -> Option<Map<String, Json>> {
-        if !self.linking.is_empty() {
-            self.linking.remove(0);
-            return None;
-        }
-        let spot = self.cursor.clone().filter(|_| self.tool == Tool::Template)?;
-        let mut patch = Patch::new(edit);
-        self.place(&mut patch, edit, spot)?;
-        patch.done()
+        self.step(edit, None)
     }
 
-    /// The element placed by the clicks so far and `spot`; its sockets are asked next. The values
-    /// typed stay for the next.
-    fn place(&mut self, patch: &mut Patch, edit: &SketchEdit, spot: Spot) -> Option<()> {
-        let t = self.template.clone()?;
-        let mut spots = std::mem::take(&mut self.clicks);
-        spots.push(spot);
-        self.linking = crate::templates::place(patch, &t, self.preset.as_deref(), &self.answers, &spots, self.construction, &edit.params)?;
-        Some(())
+    /// A click (`spot`) or Enter (none) while placing an element (D184): an anchor (Enter: where
+    /// the cursor is), a socket completed by what it takes (Enter skips it), the sizes taken. The
+    /// element and its sockets go in as one change once nothing is left to ask; the values typed
+    /// stay for the next.
+    fn step(&mut self, edit: &SketchEdit, spot: Option<Spot>) -> Option<Map<String, Json>> {
+        match self.stage(&edit.modes)? {
+            Stage::Anchors => match spot {
+                Some(s) => self.clicks.push(s),
+                None => {
+                    if self.clicks.is_empty() {
+                        self.clicks.push(self.cursor.clone()?);
+                    }
+                    self.anchored = true;
+                }
+            },
+            Stage::Sockets => match spot.map(|s| s.snap) {
+                None => self.sockets.push(None),
+                Some(Snap::Point(n) | Snap::Middle(n) | Snap::On(n)) => {
+                    let (_, kind) = datum_model::library::sockets(self.template.as_ref()?).into_iter().nth(self.sockets.len())?;
+                    if !datum_model::library::fits(edit.placed.as_ref().ok()?, &kind, &n) {
+                        return None;
+                    }
+                    self.sockets.push(Some(n));
+                }
+                Some(_) => return None,
+            },
+            Stage::Sizes => return self.put(edit),
+        }
+        (self.stage(&edit.modes) == Some(Stage::Sizes) && !self.asks_sizes(&edit.modes)).then(|| self.put(edit)).flatten()
     }
 
-    /// A click completing the socket asked: on a point, a line or a curve, as it takes.
-    fn link(&mut self, edit: &SketchEdit, spot: &Spot) -> Option<Map<String, Json>> {
-        let link = self.linking.first()?;
-        let target = match &spot.snap {
-            Snap::Point(n) | Snap::Middle(n) | Snap::On(n) => n,
-            _ => return None,
-        };
-        if !datum_model::library::fits(edit.placed.as_ref().ok()?, &link.kind, target) {
-            return None;
-        }
+    /// The element at its anchors, with its sockets completed: one change.
+    fn put(&mut self, edit: &SketchEdit) -> Option<Map<String, Json>> {
+        let t = self.template.as_ref()?;
         let mut patch = Patch::new(edit);
-        patch.constrain(link.to(target));
-        self.linking.remove(0);
+        let links = crate::templates::place(&mut patch, t, self.preset.as_deref(), &self.answers, &self.clicks, self.construction, &edit.params)?;
+        for (link, target) in links.iter().zip(&self.sockets) {
+            if let Some(target) = target {
+                patch.constrain(link.to(target));
+            }
+        }
+        self.clicks.clear();
+        self.sockets.clear();
+        self.anchored = false;
         patch.done()
     }
 
@@ -480,15 +525,7 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
-            Tool::Template if !self.linking.is_empty() => return self.link(edit, &spot),
-            Tool::Template => {
-                // By a preset its size is given: the first anchor's click puts it.
-                if self.clicks.len() + 1 < datum_model::library::anchors(self.template.as_ref()?).len() && !self.by_presets(&edit.modes) {
-                    self.clicks.push(spot);
-                    return None;
-                }
-                self.place(&mut patch, edit, spot)?;
-            }
+            Tool::Template => return self.step(edit, Some(spot)),
             Tool::Point => {
                 // A point already there needs no other; a vertex of the face is projected.
                 if matches!(spot.snap, Snap::Point(_)) {
@@ -661,9 +698,11 @@ impl Draft {
                 polyline(arc(c.at, r, 0.0, std::f64::consts::TAU));
             }
             (Tool::Arc, _, [c]) => polyline(vec![c.at, spot.at]),
-            (Tool::Template, _, clicks) if self.linking.is_empty() => {
+            (Tool::Template, _, clicks) => {
+                // The cursor is the anchor asked; once they are clicked, the element stays there.
+                let asked = (self.stage(&edit.modes) == Some(Stage::Anchors)).then_some(spot.at);
                 if let Some(t) = &self.template {
-                    let at: Vec<[f64; 2]> = clicks.iter().map(|c| c.at).chain([spot.at]).collect();
+                    let at: Vec<[f64; 2]> = clicks.iter().map(|c| c.at).chain(asked).collect();
                     for line in crate::templates::outline(t, self.preset.as_deref(), &self.answers, &at, &edit.params) {
                         polyline(line);
                     }

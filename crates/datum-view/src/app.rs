@@ -1758,8 +1758,8 @@ impl Viewer {
                 }
                 Tool::Constrain(_) => "Click what the constraint ties, one by one · it is added once enough is picked · Esc or a right click ends",
                 Tool::Template => {
-                    "Click where each anchor goes (a rectangle: a corner, then the other; from its centre: the centre, then a corner) · \
-                     parameters in the field: Tab to the next, a preset beside it, clicks size what is not typed · F4: by presets, ↑ ↓ pick one, a click puts it · Enter puts it at the cursor · Esc or a right click ends"
+                    "Click the base point (a rectangle: a corner, then the other; from its centre: the centre, then a corner), then its sockets (Enter skips one), \
+                     then the sizes: Tab to the next · F4: a preset from the list · Enter puts it · Esc or a right click cancels"
                 }
                 _ => {
                     "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command"
@@ -2673,16 +2673,13 @@ impl Viewer {
         let h = f64::from(rect.height());
         let mut sent = Vec::new();
         let mut leave = false;
-        // An element dragged from the palette and let go here: its first anchor goes there, as a
-        // click would put it (the pointer belongs to the palette while it is dragged).
+        // An element dragged from the palette and let go here: it hangs at the cursor there, its
+        // base point waits for a click (the pointer belongs to the palette while it is dragged).
         if let (Some(t), Some(pos)) = (r.dnd_release_payload::<Json>(), ui.input(|i| i.pointer.latest_pos())) {
             sk.draft.choose((*t).clone());
             sk.field = None;
             let mut draft = std::mem::take(&mut sk.draft);
             draft.track(sk, f64::from(pos.x - rect.center().x), f64::from(pos.y - rect.center().y), h, false);
-            if let Some(patch) = draft.click(sk) {
-                sent.push(Request::Command("edit_sketch", sk.apply(patch)));
-            }
             sk.draft = draft;
         }
         let typing = ui.ctx().text_edit_focused();
@@ -2722,8 +2719,11 @@ impl Viewer {
                 sk.field = None;
             }
         }
-        // Placing a library element by presets (F4, D176): one of them is always chosen, ↑ ↓ go
-        // through the list by the cursor; nothing is asked.
+        // Placing a library element (D184). By presets (F4, D176) one of them is always chosen:
+        // the one in the preview.
+        let stage = sk.draft.stage(&sk.modes);
+        let sizes = stage == Some(crate::draw::Stage::Sizes);
+        let base = sk.draft.clicks.first().map(|c| c.at);
         let presets: Vec<String> = sk
             .draft
             .template
@@ -2732,67 +2732,99 @@ impl Viewer {
             .and_then(|t| t["presets"].as_object())
             .map(|p| p.keys().cloned().collect())
             .unwrap_or_default();
-        if !presets.is_empty() {
-            let at = sk.draft.preset.as_ref().and_then(|p| presets.iter().position(|n| n == p));
+        if !presets.is_empty() && !sk.draft.preset.as_ref().is_some_and(|p| presets.contains(p)) {
+            sk.draft.preset = Some(presets[0].clone());
+            sk.draft.answers.clear();
+        }
+        // Its sizes by presets: the list by the base point, filtered by the text typed (the
+        // field has the keyboard), ↑ ↓ move the chosen one, which the preview shows.
+        let filter_id = egui::Id::new("datum_sketch_preset_filter");
+        let (mut picking, mut nothing_picked, mut picker_esc) = (false, false, false);
+        if let (true, Some(base)) = (sizes && !presets.is_empty(), base) {
+            let stored = ui.data(|d| d.get_temp::<String>(filter_id));
+            let fresh = stored.is_none();
+            let mut text = stored.unwrap_or_default();
             let (up, down) = ui.input_mut(|i| {
                 (i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
             });
-            let k = match at {
-                Some(k) if up => (k + presets.len() - 1) % presets.len(),
-                Some(k) if down => (k + 1) % presets.len(),
-                Some(k) => k,
-                None => 0,
-            };
-            sk.draft.preset = Some(presets[k].clone());
-            sk.draft.answers.clear();
-            if let Some(spot) = &sk.draft.cursor {
-                let (x, y) = sk.camera.offset(spot.at, h);
-                let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
-                egui::Area::new(egui::Id::new("datum_sketch_presets")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        for (i, name) in presets.iter().enumerate() {
-                            if ui.selectable_label(i == k, name).clicked() {
-                                sk.draft.preset = Some(name.clone());
+            let (x, y) = sk.camera.offset(base, h);
+            let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
+            let draft = &mut sk.draft;
+            egui::Area::new(egui::Id::new("datum_sketch_presets")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    let o = egui::TextEdit::singleline(&mut text).id(egui::Id::new("datum_sketch_preset_text")).desired_width(160.0).show(ui);
+                    o.response.request_focus();
+                    let lower = text.to_lowercase();
+                    let shown: Vec<&String> = presets.iter().filter(|n| n.to_lowercase().contains(&lower)).collect();
+                    let at = draft.preset.as_ref().and_then(|p| shown.iter().position(|n| *n == p));
+                    let k = match at {
+                        Some(k) if up => (k + shown.len() - 1) % shown.len(),
+                        Some(k) if down => (k + 1) % shown.len(),
+                        Some(k) => k,
+                        None => 0,
+                    };
+                    if let Some(name) = shown.get(k).filter(|n| draft.preset.as_ref() != Some(**n)) {
+                        draft.preset = Some((*name).clone());
+                        draft.answers.clear();
+                    }
+                    nothing_picked = shown.is_empty();
+                    let moved = up || down || fresh || o.response.changed();
+                    egui::ScrollArea::vertical().max_height(ui.spacing().interact_size.y * 12.0).show(ui, |ui| {
+                        for (i, name) in shown.iter().enumerate() {
+                            let row = ui.selectable_label(i == k, name.as_str());
+                            if row.clicked() {
+                                draft.preset = Some((*name).clone());
+                                draft.answers.clear();
+                            }
+                            if i == k && moved {
+                                row.scroll_to_me(None);
                             }
                         }
                     });
                 });
-            }
+            });
+            ui.data_mut(|d| d.insert_temp(filter_id, text));
+            picking = true;
+            picker_esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+        } else {
+            ui.data_mut(|d| d.remove::<String>(filter_id));
         }
-        // Placing a library element with parameters: the field by the cursor asks them, one by
-        // one, Tab to the next; a preset fills them all (D98).
+        // Its parameters in the sizes stage: the field by the base point asks them, one by one,
+        // Tab to the next; a preset fills them all (D98).
         let names = sk
             .draft
             .template
             .as_ref()
-            .filter(|_| sk.draft.tool == Tool::Template && sk.draft.linking.is_empty() && presets.is_empty())
+            .filter(|_| sizes && presets.is_empty())
             .and_then(|t| datum_model::library::parameter_names(t).ok())
             .unwrap_or_default();
-        // Its sockets next, one by one: what the one asked takes, by the cursor (D116).
-        if let (Some(link), Some(spot)) = (sk.draft.linking.first(), &sk.draft.cursor) {
-            let (x, y) = sk.camera.offset(spot.at, h);
-            let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
-            let text = format!("{} — click a {} · Enter skips ({} left)", link.shown, link.kind, sk.draft.linking.len());
-            egui::Area::new(egui::Id::new("datum_sketch_link")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text));
-            });
+        // Its sockets before them, one by one: what the one asked takes, by the cursor (D116).
+        if stage == Some(crate::draw::Stage::Sockets)
+            && let (Some(t), Some(spot)) = (&sk.draft.template, &sk.draft.cursor)
+        {
+            let all = datum_model::library::sockets(t);
+            if let Some((label, kind)) = all.get(sk.draft.sockets.len()) {
+                let (x, y) = sk.camera.offset(spot.at, h);
+                let pos = rect.center() + egui::vec2(x as f32 + 14.0, y as f32 + 14.0);
+                let text = format!("{label} — click a {kind} · Enter skips ({} left)", all.len() - sk.draft.sockets.len());
+                egui::Area::new(egui::Id::new("datum_sketch_link")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text));
+                });
+            }
         }
         if names.is_empty() {
             if sk.field.as_ref().is_some_and(|f| matches!(f.entry, Entry::Parameter(_))) {
                 sk.field = None;
             }
-        } else if let Some(spot) = &sk.draft.cursor {
+        } else if let Some(at) = base {
             let k = sk.draft.asking % names.len();
             match &mut sk.field {
-                Some(f) if f.entry == Entry::Parameter(k) => f.at = spot.at,
-                _ => {
-                    sk.field =
-                        Some(Field { entry: Entry::Parameter(k), text: crate::templates::asked(&sk.draft, &names[k], &sk.params), at: spot.at })
-                }
+                Some(f) if f.entry == Entry::Parameter(k) => f.at = at,
+                _ => sk.field = Some(Field { entry: Entry::Parameter(k), text: crate::templates::asked(&sk.draft, &names[k], &sk.params), at }),
             }
         }
-        // The field by the cursor: a value typed while drawing, a parameter of an element placed,
-        // or a dimension's. Enter applies it, Esc drops it.
+        // The field by the cursor (a parameter's, by the base point): a value typed while drawing,
+        // a parameter of an element placed, or a dimension's. Enter applies it, Esc drops it.
         let mut field_done = (false, false);
         let mut parameter_done = None;
         if let Some(f) = &mut sk.field {
@@ -3009,12 +3041,11 @@ impl Viewer {
                     sk.field = None;
                 }
             }
-            // Enter while placing an element: it goes where the cursor is; on a socket, skips it.
-            let skip = (!draft.linking.is_empty() || draft.by_presets(&sk.modes)) && !typing && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (field_done.0 || skip)
-                && draft.tool == Tool::Template
-                && let Some(patch) = draft.enter(sk)
-            {
+            // Enter while placing an element, in its field or out of any: the anchor goes where the
+            // cursor is, a socket is skipped, the sizes are taken (once, whichever handles it).
+            let in_field = picking || sk.field.as_ref().is_some_and(|f| matches!(f.entry, Entry::Parameter(_)));
+            let enter = draft.tool == Tool::Template && !nothing_picked && (in_field || !typing) && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if enter && let Some(patch) = draft.enter(sk) {
                 sent.push(Request::Command("edit_sketch", sk.apply(patch)));
             }
             // Enter on a dimension's value (the dimension tool opened it).
@@ -3035,7 +3066,7 @@ impl Viewer {
                 sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
             }
             // Esc, or a right click (a right drag pans): the mouse alone ends the command too.
-            if (!typing && !typing_field && ui.input(|i| i.key_pressed(egui::Key::Escape))) || r.secondary_clicked() {
+            if (!typing && !typing_field && ui.input(|i| i.key_pressed(egui::Key::Escape))) || picker_esc || r.secondary_clicked() {
                 draft.escape();
             }
             sk.draft = draft;
@@ -4553,13 +4584,23 @@ mod tests {
                 sk.draft.paint(sk, &painter, rect);
             }
         });
-        h.hover_at(egui::pos2(300.0, 200.0));
-        h.run();
+        // The two anchors are clicked first, then the sizes are asked by the first.
+        for at in [egui::pos2(250.0, 150.0), egui::pos2(350.0, 250.0)] {
+            h.hover_at(at);
+            h.run();
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+                h.run();
+            }
+        }
         h.get_by_label("width (1/2)");
         h.get_by_value("Element's values");
         if let Some(path) = shot {
             h.render().unwrap().save(path).unwrap();
         }
+        // The anchors' clicks size what is not typed: the width is typed too.
+        h.get_by_role(egui::accesskit::Role::TextInput).type_text("100");
+        h.run();
         h.key_press(egui::Key::Tab);
         h.run();
         h.get_by_label("height (2/2)");
@@ -4724,8 +4765,9 @@ mod tests {
         }
         let sk = v.sketch.as_ref().unwrap();
         assert_eq!(sk.draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Rectangle")), "the dragged one is being placed");
-        assert_eq!(sk.draft.clicks.len(), 1, "its first corner where it was let go");
-        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "two corners: nothing placed yet");
+        assert_eq!(sk.draft.tool, Tool::Template);
+        assert!(sk.draft.clicks.is_empty(), "hangs at the cursor: the base point is not clicked yet");
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "nothing placed yet");
     }
 
     /// The plate's sketch in the window: the `button` of a constraint, then a click on each
