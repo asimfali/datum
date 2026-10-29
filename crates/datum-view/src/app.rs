@@ -1277,18 +1277,19 @@ impl Viewer {
                 }
             }
             ui.separator();
-            for act in [Act::NewSketch, Act::WorkPlane, Act::LookAt] {
-                self.item(ui, act, false);
-            }
-            ui.separator();
-            let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Measure);
-            let (on, enabled) = (self.checked(Act::Measure), self.available(Act::Measure.action()));
-            if crate::icons::tile(ui, self.i18n.label(Act::Measure), &hint, on, enabled, |p, c, colour| {
-                crate::icons::paint(p, c, Icon::Measure, colour)
-            })
-            .clicked()
+            // Icons, as undo and redo: the name and what it does on hover.
+            for (act, icon) in
+                [(Act::NewSketch, Icon::NewSketch), (Act::WorkPlane, Icon::WorkPlane), (Act::LookAt, Icon::LookAt), (Act::Measure, Icon::Measure)]
             {
-                self.run(ui, Act::Measure);
+                if act == Act::Measure {
+                    ui.separator();
+                }
+                let hint = format!("{}\n{}", self.i18n.label(act), self.keys.hint(ui.ctx(), &self.i18n, act));
+                let (on, enabled) = (self.checked(act), self.available(act.action()));
+                if crate::icons::tile(ui, self.i18n.label(act), &hint, on, enabled, |p, c, colour| crate::icons::paint(p, c, icon, colour)).clicked()
+                {
+                    self.run(ui, act);
+                }
             }
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
