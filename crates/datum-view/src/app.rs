@@ -439,8 +439,14 @@ struct Viewer {
     offsets: BTreeMap<String, String>,
     /// Why the window refused what was asked, before the model was asked.
     local_error: Option<String>,
-    /// The parameters table's window, while it is open (D178).
-    table: Option<crate::table::Editor>,
+    /// The table window, while it is open (D178): what it shows and its editor.
+    table: Option<(crate::table::Source, crate::table::Editor)>,
+    /// The library's materials the materials table shows, read when it opens and after the commands
+    /// it sent were run; and the new material's cells as typed so far.
+    materials: Vec<Json>,
+    new_material: crate::table::Pending,
+    /// A library command was sent: the materials are read again with the model it brings.
+    materials_due: bool,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
     /// A newer release, once the background check finds one: its version and page.
@@ -492,6 +498,8 @@ struct Viewer {
     i18n: crate::i18n::I18n,
     settings: Option<PathBuf>,
     settings_problems: Vec<String>,
+    /// The table editor's zoom, from `settings.json`.
+    table_zoom: f32,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -514,7 +522,7 @@ impl Viewer {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let settings = crate::settings::path();
-        let crate::settings::Settings { keys, language, problems: settings_problems } = crate::settings::load(settings.as_deref());
+        let crate::settings::Settings { keys, language, table_zoom, problems: settings_problems } = crate::settings::load(settings.as_deref());
         for p in &settings_problems {
             crate::log::write(&format!("settings: {p}"));
         }
@@ -547,6 +555,9 @@ impl Viewer {
             new_parameter: Default::default(),
             local_error: None,
             table: None,
+            materials: Vec::new(),
+            new_material: Default::default(),
+            materials_due: false,
             path: None,
             update,
             newer: None,
@@ -575,6 +586,7 @@ impl Viewer {
             language_chosen: false,
             settings,
             settings_problems,
+            table_zoom,
             shown: 0,
             maximized: false,
             picking: None,
@@ -622,6 +634,21 @@ impl Viewer {
         match &self.path {
             Some(p) => datum_model::workspace::project_root(p),
             None => self.project.clone(),
+        }
+    }
+
+    fn reload_materials(&mut self) {
+        let lib = datum_model::library::load("material", self.current_project().as_deref());
+        self.materials = lib.entries.into_iter().map(|e| e.element).collect();
+    }
+
+    /// Opens the table window on `source`, or closes it if that is what it shows.
+    fn toggle_table(&mut self, source: crate::table::Source) {
+        if self.table.as_ref().is_some_and(|t| t.0 == source) {
+            self.table = None;
+        } else {
+            self.table = Some((source, Default::default()));
+            self.reload_materials();
         }
     }
 
@@ -1318,6 +1345,12 @@ impl Viewer {
             // A save that failed while closing the window: it stays open, the error shown.
             if self.quitting == Some(true) && m.error.is_some() {
                 self.quitting = None;
+            }
+            if std::mem::take(&mut self.materials_due) {
+                self.reload_materials();
+                if let (Some((_, editor)), Some(why)) = (&mut self.table, &m.error) {
+                    editor.error = Some(why.clone());
+                }
             }
             self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
@@ -2331,28 +2364,51 @@ impl Viewer {
             .collect()
     }
 
-    /// The parameters table in a window of its own (D178): rebuilt from the model every frame,
-    /// its edits sent as the side bar sends them.
+    /// The parameters or the materials in a window of their own (D178): rebuilt every frame, from
+    /// the model or from the materials read last, the edits sent as the side bar sends them.
     fn table_window(&mut self, ctx: &egui::Context) {
-        let Some(mut editor) = self.table.take() else { return };
+        use crate::table::Source;
+        let Some((source, mut editor)) = self.table.take() else { return };
         let Some(m) = &self.model else { return };
-        let table = crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n);
-        let editable = crate::table::editable(table.rows().len());
+        let (table, title) = match source {
+            Source::Parameters => (crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
+            Source::Materials => {
+                (crate::table::materials(&self.materials, &self.new_material, &self.i18n), self.i18n.t("table-materials-title", "Materials"))
+            }
+        };
+        let rows = table.rows().len();
+        let editable: Box<dyn Fn(usize, usize) -> bool> = match source {
+            Source::Parameters => Box::new(crate::table::editable(rows)),
+            Source::Materials => Box::new(crate::table::editable_materials),
+        };
         let (mut out, mut closed) = (Default::default(), false);
-        let builder = egui::ViewportBuilder::default().with_title(self.i18n.t("table-title", "Parameters")).with_inner_size([400.0, 360.0]);
+        // As wide as the table, when it opens.
+        let width = datum_table::layout(&table).size()[0] as f32 * crate::table::SCALE * self.table_zoom + 40.0;
+        let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size([width, 400.0]);
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
             closed = ui.input(|i| i.viewport().close_requested());
-            out = editor.show(ui, &table, &editable, &self.i18n);
+            out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
         });
-        let (mut sent, error) = crate::table::parameter_requests(&m.inspect, &mut self.new_parameter, &out.edits, &self.i18n);
-        sent.extend(crate::table::remove_requests(&m.inspect, &out.delete));
+        let (mut sent, error) = match source {
+            Source::Parameters => {
+                let (mut sent, error) = crate::table::parameter_requests(&m.inspect, &mut self.new_parameter, &out.edits, &self.i18n);
+                sent.extend(crate::table::remove_requests(&m.inspect, &out.delete));
+                (sent, error)
+            }
+            Source::Materials => {
+                let (mut sent, error) = crate::table::material_requests(&self.materials, &mut self.new_material, &out.edits, &self.i18n);
+                sent.extend(crate::table::remove_material_requests(&self.materials, &out.delete));
+                (sent, error)
+            }
+        };
         if !out.edits.is_empty() {
             editor.error = error;
         }
-        for r in sent {
+        self.materials_due |= source == Source::Materials && !sent.is_empty();
+        for r in sent.drain(..) {
             self.send(r);
         }
-        self.table = (!closed).then_some(editor);
+        self.table = (!closed).then_some((source, editor));
     }
 
     /// The offset of a new work plane, asked once its base is picked: a number or a formula;
@@ -3350,9 +3406,15 @@ impl Viewer {
             Context::Sketch => self.sketch.is_some(),
         };
         here && match a.act {
-            Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane | Act::ParameterTable => {
-                self.model.is_some()
-            }
+            Act::Save
+            | Act::SaveAs
+            | Act::Close
+            | Act::ExportStep
+            | Act::Home
+            | Act::LookAt
+            | Act::WorkPlane
+            | Act::ParameterTable
+            | Act::MaterialTable => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.sketch.is_some(),
@@ -3380,7 +3442,8 @@ impl Viewer {
             Act::SideBar => self.side_bar.visible,
             Act::SideBarRight => self.side_bar.right,
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
-            Act::ParameterTable => self.table.is_some(),
+            Act::ParameterTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
+            Act::MaterialTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
         }
@@ -3406,7 +3469,8 @@ impl Viewer {
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
             Act::Home => self.home(ui),
-            Act::ParameterTable => self.table = if self.table.is_some() { None } else { Some(Default::default()) },
+            Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
+            Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
             Act::NewSketch => {
                 self.leave();
                 self.start_sketch();
@@ -3547,6 +3611,7 @@ impl Viewer {
             self.item(ui, Act::LookAt, true);
             self.item(ui, Act::Measure, true);
             self.item(ui, Act::ParameterTable, true);
+            self.item(ui, Act::MaterialTable, true);
             self.item(ui, Act::SmoothEdges, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
@@ -3849,6 +3914,9 @@ mod tests {
             offsets: planes,
             local_error: None,
             table: None,
+            materials: Vec::new(),
+            new_material: Default::default(),
+            materials_due: false,
             path: None,
             update: channel().1,
             newer: None,
@@ -3877,6 +3945,7 @@ mod tests {
             i18n: crate::i18n::I18n::default(),
             settings: None,
             settings_problems: Vec::new(),
+            table_zoom: 1.0,
             shown: 0,
             maximized: false,
             picking: None,

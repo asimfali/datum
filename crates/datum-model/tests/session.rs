@@ -285,6 +285,40 @@ fn the_project_library_comes_first() {
     assert_eq!(datum_model::library::folder("sketch", Some(&model)), Ok(root.join("Библиотека/sketch")));
 }
 
+/// Materials are the enterprise's own (D178): none built in; written, renamed and removed as
+/// files of the project's library, as the table editor and an agent do it.
+#[test]
+fn materials_are_written_renamed_and_removed() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_material");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let mut s = Session::default();
+    run(&mut s, "save", json!({"path": root.join("part/plate.json")}));
+    let names = |s: &mut Session| -> Vec<Value> {
+        run(s, "library", json!({"level": "material"}))["elements"].as_array().unwrap().iter().map(|e| e["name"].clone()).collect()
+    };
+    assert!(names(&mut s).is_empty(), "none built in");
+    let steel = json!({"name": "08пс", "designation": "Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс ГОСТ 16523-97]", "density": 7850});
+    let r = run(&mut s, "put_library", json!({"level": "material", "element": steel}));
+    assert_eq!(std::path::PathBuf::from(r["saved"].as_str().unwrap()), root.join("library/material/08пс.json"));
+    let lib = run(&mut s, "library", json!({"level": "material"}));
+    assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["density"]), (&json!("project"), &json!(7850)), "{lib}");
+    let put = |s: &mut Session, element: Value, was: &str| s.execute("put_library", &json!({"level": "material", "element": element, "was": was}));
+    assert!(put(&mut s, json!({"name": "x", "density": 0}), "x").unwrap_err().contains("density"));
+    assert!(put(&mut s, json!({"name": "x", "grade": "08пс"}), "x").unwrap_err().contains("has no `grade`"));
+    put(&mut s, json!({"name": "Ст3"}), "Ст3").unwrap();
+    assert!(put(&mut s, json!({"name": "Ст3"}), "08пс").unwrap_err().contains("already"), "a rename onto another");
+    let mut renamed = steel.clone();
+    renamed["name"] = json!("08пс лист");
+    put(&mut s, renamed, "08пс").unwrap();
+    assert_eq!(names(&mut s), [json!("08пс лист"), json!("Ст3")], "the old file gone");
+    assert!(!root.join("library/material/08пс.json").exists());
+    run(&mut s, "remove_library", json!({"level": "material", "name": "Ст3"}));
+    assert_eq!(names(&mut s), [json!("08пс лист")]);
+    assert!(s.execute("remove_library", &json!({"level": "sketch", "name": "Rectangle"})).unwrap_err().contains("built in"));
+}
+
 /// A piece of sketch kept in the project's library and placed again: the model's parameters its
 /// dimensions name become the element's, in the order asked; placed, it is sized by the answers.
 #[test]

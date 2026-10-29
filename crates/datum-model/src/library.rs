@@ -27,7 +27,8 @@ use crate::patch::SketchPatch;
 use crate::workspace;
 
 /// The levels with elements so far: a library folder's subfolders by the same names.
-pub const LEVELS: [&str; 1] = ["sketch"];
+/// A material (D178) is the enterprise's own: none is built in.
+pub const LEVELS: [&str; 2] = ["sketch", "material"];
 
 const BUILT_IN_SKETCH: [&str; 2] =
     [include_str!("../../../library/sketch/rectangle.json"), include_str!("../../../library/sketch/center_rectangle.json")];
@@ -132,11 +133,14 @@ pub fn load(level: &str, project: Option<&Path>) -> Library {
 
 /// Whether `e` is an element of `level`: why not, if it is not.
 pub fn check(level: &str, e: &Value) -> Result<(), String> {
-    if level != "sketch" {
+    if !LEVELS.contains(&level) {
         return Err(format!("no elements of level `{level}` yet (levels: {LEVELS:?})"));
     }
-    if !e["name"].as_str().is_some_and(|n| !n.is_empty()) {
+    if !e["name"].as_str().is_some_and(|n| !n.trim().is_empty()) {
         return Err("an element needs a `name`".into());
+    }
+    if level == "material" {
+        return check_material(e);
     }
     let sketch: Sketch = serde_json::from_value(e["sketch"].clone()).map_err(|err| format!("`sketch`: {err}"))?;
     let anchors = anchors(e);
@@ -171,6 +175,25 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
         if let Some(n) = values.keys().find(|n| !names.contains(n)) {
             return Err(format!("preset `{preset}`: no parameter `{n}`"));
         }
+    }
+    Ok(())
+}
+
+/// A material (D178): its `name`, a `designation` as the engineer writes it in a title block (a
+/// cell's text form: `Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс ГОСТ 16523-97]`, `{t}` where a
+/// part's thickness goes), its `density` in kg/m³ and a `description`; nothing else.
+fn check_material(e: &Value) -> Result<(), String> {
+    let o = e.as_object().ok_or("a material is an object")?;
+    if let Some(k) = o.keys().find(|k| !["name", "designation", "density", "description"].contains(&k.as_str())) {
+        return Err(format!("a material has no `{k}`: `name`, `designation`, `density`, `description`"));
+    }
+    for k in ["designation", "description"] {
+        if o.get(k).is_some_and(|v| !v.is_string()) {
+            return Err(format!("`{k}` is text"));
+        }
+    }
+    if o.get("density").is_some_and(|d| !d.as_f64().is_some_and(|d| d > 0.0)) {
+        return Err("`density`: kg/m³, above zero".into());
     }
     Ok(())
 }
@@ -835,6 +858,50 @@ pub fn unparametrize(e: &mut Value, name: &str) -> Result<(), String> {
 /// folder of the workspace.
 pub fn folder(level: &str, model: Option<&Path>) -> Result<PathBuf, String> {
     Ok(workspace::folder("library", model)?.join(level))
+}
+
+/// Writes `element` (checked) of `level`, in place of the one named `was` (its own name if
+/// none): into the file of the library's element of that name, renamed for a new name, or else
+/// into [`folder`] of `model`'s workspace (a built-in one is so overridden). A name taken by
+/// another element is refused. Where it went.
+pub fn save(level: &str, element: &Value, was: Option<&str>, model: Option<&Path>, lib: &Library) -> Result<PathBuf, String> {
+    check(level, element)?;
+    let name = element["name"].as_str().unwrap_or_default().trim();
+    let was = was.unwrap_or(name);
+    let old = lib.get(was).and_then(|e| e.file.clone());
+    if name != was && lib.get(name).is_some() {
+        return Err(format!("`{name}` is in the library already"));
+    }
+    let dir = match &old {
+        Some(f) => f.parent().map(Path::to_path_buf).ok_or("no folder")?,
+        None => folder(level, model)?,
+    };
+    let path = dir.join(file_name(name));
+    if old.as_ref() != Some(&path) && path.exists() {
+        return Err(format!("{} exists and is not `{was}`", path.display()));
+    }
+    write(&path, element)?;
+    if let Some(f) = old.filter(|f| *f != path) {
+        std::fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    }
+    Ok(path)
+}
+
+/// Removes element `name`'s file, the most specific one; a built-in element stays.
+pub fn remove(name: &str, lib: &Library) -> Result<PathBuf, String> {
+    let e = lib.get(name).ok_or_else(|| format!("no element `{name}` in the library"))?;
+    let f = e.file.clone().ok_or_else(|| format!("`{name}` is built in"))?;
+    std::fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    Ok(f)
+}
+
+/// `element` as a file at `path`, its folder made.
+pub fn write(path: &Path, element: &Value) -> Result<(), String> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    }
+    let text = serde_json::to_string_pretty(element).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// A file name for element `name`: what a file system would refuse, replaced.

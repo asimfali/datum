@@ -1,8 +1,12 @@
 //! Tables (D178): one model and one layout for the table editor, drawings (the title block,
 //! specifications) and exports. A table is a grid: column widths, row heights and the text of
-//! each cell, in millimetres as on a sheet. The layout is a pure function of it, so the editor's
+//! each cell, in millimetres as on a sheet; a cell's text is pieces in a line ([`Piece`]). The layout is a pure function of it, so the editor's
 //! window, a sheet and a PDF draw the same cells. What a table shows (a model's parameters, the
 //! library's materials) and what an edit does is its source's business, not this crate's.
+
+mod content;
+
+pub use content::{Boxed, Line, PAD, Piece, STACK, Slot, TEXT, pieces, place, text_of};
 
 /// The height of a row on a drawing by ESKD, and of a new row.
 pub const ROW: f64 = 8.0;

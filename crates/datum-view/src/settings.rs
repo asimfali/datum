@@ -13,8 +13,9 @@
 //!
 //! An action gets the key given instead of its own, and the key leaves an action it would run
 //! with too; `null` takes the key from whoever has it. Section `language` (`system`, `en`, `ru`)
-//! is the interface language; not given, the system's. What cannot be applied is said, never
-//! dropped silently.
+//! is the interface language; not given, the system's. Section `table` holds `zoom`, how large
+//! the table editor draws (1 by default, 1.5 half as large again). What cannot be applied is
+//! said, never dropped silently.
 
 use std::path::PathBuf;
 
@@ -41,12 +42,19 @@ pub fn path() -> Option<PathBuf> {
 }
 
 /// What the file says, and what could not be applied.
-#[derive(Default)]
 pub struct Settings {
     pub keys: Keys,
     /// The interface language's code, or `system`; none: the file says nothing.
     pub language: Option<String>,
+    /// The table editor's zoom.
+    pub table_zoom: f32,
     pub problems: Vec<String>,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { keys: Keys::default(), language: None, table_zoom: 1.0, problems: Vec::new() }
+    }
 }
 
 /// The settings read from `path` (none there: the defaults).
@@ -64,11 +72,17 @@ fn parse(text: &str) -> Settings {
     let Some(sections) = json.as_object() else {
         return Settings { problems: vec!["not read, the defaults stand: not a JSON object".into()], ..settings };
     };
-    settings.problems = sections.keys().filter(|k| !["keys", "language"].contains(&k.as_str())).map(|k| format!("`{k}`: no such section")).collect();
+    settings.problems =
+        sections.keys().filter(|k| !["keys", "language", "table"].contains(&k.as_str())).map(|k| format!("`{k}`: no such section")).collect();
     match sections.get("language").map(|l| l.as_str().filter(|c| crate::i18n::known(c))) {
         None => {}
         Some(Some(code)) => settings.language = Some(code.to_string()),
         Some(None) => settings.problems.push(format!("`language`: one of {} (the system's language stands)", crate::i18n::codes())),
+    }
+    match sections.get("table").map(|t| t["zoom"].as_f64().filter(|z| (0.5..=4.0).contains(z))) {
+        None => {}
+        Some(Some(zoom)) => settings.table_zoom = zoom as f32,
+        Some(None) => settings.problems.push("`table`: `zoom` from 0.5 to 4 (1 stands)".into()),
     }
     let entries = match sections.get("keys") {
         None => &Vec::new(),
@@ -204,6 +218,15 @@ mod tests {
         let Settings { language, problems, .. } = parse(&json!({"language": "klingon"}).to_string());
         assert_eq!(language, None);
         assert!(problems.join("\n").contains("`language`: one of system, en, ru"), "{problems:?}");
+    }
+
+    #[test]
+    fn the_tables_are_zoomed() {
+        assert_eq!(parse(&json!({"table": {"zoom": 1.5}}).to_string()).table_zoom, 1.5);
+        assert_eq!(parse("{}").table_zoom, 1.0);
+        let Settings { table_zoom, problems, .. } = parse(&json!({"table": {"zoom": 10}}).to_string());
+        assert_eq!(table_zoom, 1.0);
+        assert!(problems.join("\n").contains("`table`: `zoom` from 0.5 to 4"), "{problems:?}");
     }
 
     #[test]

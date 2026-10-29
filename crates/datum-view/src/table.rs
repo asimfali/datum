@@ -5,8 +5,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use datum_table::{Table, layout, parse_tsv};
-use egui::{Align2, Event, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, TextStyle, Vec2};
+use datum_table::{Line, Piece, Slot, Table, layout, parse_tsv, pieces, place, text_of};
+use egui::{Align2, Button, Color32, Event, FontId, Key, Modifiers, Pos2, Rect, Sense, Stroke, StrokeKind, TextStyle, Vec2};
 use serde_json::{Value as Json, json};
 
 use crate::app::{Request, definition, marks};
@@ -14,8 +14,9 @@ use crate::dims::value_of;
 use crate::i18n::I18n;
 use crate::measure::number;
 
-/// Pixels per millimetre of the table.
-const SCALE: f32 = 3.5;
+/// Pixels per millimetre of the table at zoom 1: text of [`datum_table::TEXT`] reads as the
+/// window's own.
+pub const SCALE: f32 = 5.0;
 
 /// A cell edited: row, column, the new text.
 pub type Edit = (usize, usize, String);
@@ -28,10 +29,29 @@ pub struct Output {
     pub delete: Vec<usize>,
 }
 
-/// A cell being edited, and whether its field still has to take the keyboard.
+/// The narrowest a part's field is, in millimetres: an empty part is a sliver to type into.
+const FIELD_MIN: f32 = 10.0;
+
+/// A cell being edited, and whether its field still has to take the keyboard. With a `part` of
+/// the cell's `pieces` only that part is edited (its text is `text`, `pieces` holds the rest),
+/// otherwise the whole text of the cell. `caret` is the text cursor, in characters.
 struct Editing {
+    at: (usize, usize),
+    pieces: Vec<Piece>,
+    part: Option<(usize, Slot)>,
     text: String,
+    caret: usize,
     fresh: bool,
+}
+
+impl Editing {
+    /// The cell's pieces with the edited text in place.
+    fn current(&self) -> Vec<Piece> {
+        match self.part {
+            Some((i, slot)) => with_part(self.pieces.clone(), i, slot, self.text.clone()),
+            None => pieces(&self.text),
+        }
+    }
 }
 
 /// Where an edit ended: the cell the cursor goes to.
@@ -51,34 +71,56 @@ pub struct Editor {
     anchor: (usize, usize),
     editing: Option<Editing>,
     pub error: Option<String>,
+    /// Pixels per millimetre in this frame: [`SCALE`] times the zoom of `settings.json`.
+    scale: f32,
 }
 
 impl Editor {
     /// The grid of `table`. `editable(row, column)` says which cells can be changed, also for
     /// rows beyond the table: a paste may reach past its last row.
-    pub fn show(&mut self, ui: &mut egui::Ui, table: &Table, editable: &dyn Fn(usize, usize) -> bool, i18n: &I18n) -> Output {
+    pub fn show(&mut self, ui: &mut egui::Ui, table: &Table, editable: &dyn Fn(usize, usize) -> bool, zoom: f32, i18n: &I18n) -> Output {
+        self.scale = SCALE * zoom;
         let lay = layout(table);
         let (rows, columns) = (table.rows().len(), table.columns().len());
         let clamp = |(r, c): (usize, usize)| (r.min(rows.saturating_sub(1)), c.min(columns.saturating_sub(1)));
         (self.cursor, self.anchor) = (clamp(self.cursor), clamp(self.anchor));
         let mut out = Output::default();
+        let can = editable(self.cursor.0, self.cursor.1);
+        let button = ui.add_enabled(can, Button::new(i18n.t("table-fraction", "Fraction")));
+        // Pressing it ends the field's focus, so while a cell is edited it acts on the press, with the
+        // text cursor the field still has.
+        let pressed = ui.input(|i| i.pointer.primary_pressed());
+        if can && if self.editing.is_some() { button.hovered() && pressed } else { button.clicked() } {
+            self.add_fraction(table);
+        }
         let moved = self.editing.is_none() && ui.input(|i| i.viewport().focused != Some(false)) && self.keys(ui, table, editable, &mut out);
         let error = ui.visuals().error_fg_color;
         let line = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
         egui::ScrollArea::both().auto_shrink([false, false]).max_height(ui.available_height() - line).show(ui, |ui| {
             let size = lay.size();
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(size[0] as f32, size[1] as f32) * SCALE, Sense::click_and_drag());
-            let on_screen = |r: datum_table::Rect| {
-                Rect::from_min_size(rect.min + Vec2::new(r.x as f32, r.y as f32) * SCALE, Vec2::new(r.w as f32, r.h as f32) * SCALE)
-            };
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(size[0] as f32, size[1] as f32) * self.scale, Sense::click_and_drag());
+            let scale = self.scale;
+            let on_screen = |r| on_screen(rect.min, scale, r);
             let cell_rect = |at: (usize, usize)| lay.cell(at.0, at.1).map(on_screen).unwrap_or(Rect::NOTHING);
-            let at = |p: Pos2| lay.at([f64::from((p.x - rect.min.x) / SCALE), f64::from((p.y - rect.min.y) / SCALE)]);
-            self.paint(ui, table, editable, &lay, &on_screen, rect);
+            let mm = |p: Pos2| [f64::from((p.x - rect.min.x) / scale), f64::from((p.y - rect.min.y) / scale)];
+            let at = |p: Pos2| lay.at(mm(p));
+            let laid = self.laid_out(ui, table, &lay);
+            self.paint(ui, table, editable, &lay, &laid, rect);
             if moved {
                 ui.scroll_to_rect(cell_rect(self.cursor), None);
             }
-            if self.editing.is_some() {
-                self.field(ui, cell_rect(self.cursor), rows, columns, &mut out);
+            if let Some(e) = &self.editing {
+                let (area, font) = match e.part {
+                    Some((i, slot)) => {
+                        let b = laid[e.at.0 * columns + e.at.1].1.boxes.iter().find(|b| b.piece == i && b.slot == slot);
+                        let b = b.map_or(Rect::NOTHING, |b| on_screen(b.rect));
+                        let size = Vec2::new(b.width().max(FIELD_MIN * scale), b.height().max(ui.spacing().interact_size.y));
+                        (Rect::from_center_size(b.center() + Vec2::new((size.x - b.width()) / 2.0, 0.0), size), b.height())
+                    }
+                    None => (cell_rect(e.at), datum_table::TEXT as f32 * scale),
+                };
+                let font = FontId::new(font, TextStyle::Body.resolve(ui.style()).family);
+                self.field(ui, area, font, (rows, columns), &mut out);
             }
             let (pressed, secondary, shift, pos) =
                 ui.input(|i| (i.pointer.primary_pressed(), i.pointer.secondary_pressed(), i.modifiers.shift, i.pointer.interact_pos()));
@@ -100,7 +142,8 @@ impl Editor {
                 self.cursor = c;
             }
             if resp.double_clicked() && editable(self.cursor.0, self.cursor.1) {
-                self.edit(table.cell(self.cursor.0, self.cursor.1).to_string());
+                let hit = pos.and_then(|p| laid[self.cursor.0 * columns + self.cursor.1].1.at(mm(p)));
+                self.start(table, self.cursor, hit.map(|b| (b.piece, b.slot)));
             }
             resp.context_menu(|ui| {
                 if ui.button(i18n.t("table-delete-rows", "Delete rows")).clicked() {
@@ -125,9 +168,63 @@ impl Editor {
         (self.cursor.0.min(self.anchor.0)..=self.cursor.0.max(self.anchor.0)).collect()
     }
 
-    /// Editing the cursor cell, starting from `text`.
+    /// Every cell's pieces and where they go, the edited cell's with the text typed so far.
+    fn laid_out(&self, ui: &egui::Ui, table: &Table, lay: &datum_table::Layout) -> Vec<(Vec<Piece>, Line)> {
+        let font = TextStyle::Body.resolve(ui.style());
+        let width = |t: &str, h: f64| {
+            let galley = ui.painter().layout_no_wrap(t.to_string(), FontId::new(h as f32 * self.scale, font.family.clone()), Color32::PLACEHOLDER);
+            f64::from(galley.size().x / self.scale)
+        };
+        let edited = self.editing.as_ref().filter(|e| e.part.is_some());
+        let (rows, columns) = (table.rows().len(), table.columns().len());
+        (0..rows * columns)
+            .map(|k| {
+                let at = (k / columns, k % columns);
+                let ps = edited.filter(|e| e.at == at).map_or_else(|| pieces(table.cell(at.0, at.1)), Editing::current);
+                let line = lay.cell(at.0, at.1).map(|cell| place(&ps, cell, datum_table::TEXT, &width)).unwrap_or_default();
+                (ps, line)
+            })
+            .collect()
+    }
+
+    /// Editing the cell `at`: its first part if it has a fraction, or `hit`, the part clicked;
+    /// the whole text otherwise.
+    fn start(&mut self, table: &Table, at: (usize, usize), hit: Option<(usize, Slot)>) {
+        let mut ps = pieces(table.cell(at.0, at.1));
+        let first = match ps.first() {
+            Some(Piece::Fraction { .. }) => Slot::Over,
+            _ => Slot::Text,
+        };
+        let part = ps.iter().any(|p| matches!(p, Piece::Fraction { .. })).then_some(hit.unwrap_or((0, first)));
+        let text = match part {
+            Some((i, slot)) => std::mem::take(part_mut(&mut ps[i], slot)),
+            None => table.cell(at.0, at.1).to_string(),
+        };
+        self.editing = Some(Editing { at, pieces: ps, part, caret: text.chars().count(), text, fresh: true });
+    }
+
+    /// Editing the cursor cell, starting from `text`, which replaces its own.
     fn edit(&mut self, text: String) {
-        self.editing = Some(Editing { text, fresh: true });
+        self.editing = Some(Editing { at: self.cursor, pieces: Vec::new(), part: None, caret: text.chars().count(), text, fresh: true });
+    }
+
+    /// The Fraction button: a new empty fraction at the text cursor of the part being edited, or at
+    /// the end of the cursor cell's line; its upper part is edited next.
+    fn add_fraction(&mut self, table: &Table) {
+        let (at, ps, new) = match self.editing.take() {
+            Some(Editing { at, pieces, part: Some((i, slot)), text, caret, .. }) => {
+                let (ps, new) = split_text(with_part(pieces, i, slot, text), i, caret);
+                (at, ps, new)
+            }
+            e => {
+                let at = e.as_ref().map_or(self.cursor, |e| e.at);
+                let ps = pieces(&e.map_or_else(|| table.cell(at.0, at.1).to_string(), |e| e.text));
+                let n = ps.len();
+                let (ps, new) = insert_fraction(ps, n);
+                (at, ps, new)
+            }
+        };
+        self.editing = Some(Editing { at, pieces: ps, part: Some((new, Slot::Over)), text: String::new(), caret: 0, fresh: true });
     }
 
     /// Moves the cursor by `(dr, dc)`; `extend` keeps the selection's other corner.
@@ -173,7 +270,7 @@ impl Editor {
         if (ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) | ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F2)))
             && editable(r, c)
         {
-            self.edit(table.cell(r, c).to_string());
+            self.start(table, (r, c), None);
         }
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete)) {
             out.edits.extend(self.cells().filter(|&(r, c)| editable(r, c)).map(|(r, c)| (r, c, String::new())));
@@ -218,9 +315,10 @@ impl Editor {
         (r0..=r1).flat_map(move |r| (c0..=c1).map(move |c| (r, c)))
     }
 
-    /// The text field over the cell being edited: Enter, Tab and Esc end it (read before the
-    /// field, which would take them), a click elsewhere keeps what was typed.
-    fn field(&mut self, ui: &mut egui::Ui, rect: Rect, rows: usize, columns: usize, out: &mut Output) {
+    /// The text field over the cell or the part being edited, in `font`, as the cell's text is:
+    /// Enter, Tab and Esc end it (read before the field, which would take them), a click elsewhere
+    /// keeps what was typed.
+    fn field(&mut self, ui: &mut egui::Ui, area: Rect, font: FontId, (rows, columns): (usize, usize), out: &mut Output) {
         let id = egui::Id::new("datum_table_field");
         let end = ui.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::Enter) {
@@ -236,17 +334,22 @@ impl Editor {
             }
         });
         let Some(editing) = &mut self.editing else { return };
-        if std::mem::take(&mut editing.fresh) {
+        if editing.fresh {
             ui.memory_mut(|m| m.request_focus(id));
         }
-        let r = ui.put(rect, egui::TextEdit::singleline(&mut editing.text).id(id).lock_focus(true).desired_width(rect.width()));
-        if end.is_none() && !r.lost_focus() {
+        let field = egui::TextEdit::singleline(&mut editing.text).id(id).lock_focus(true).desired_width(area.width()).font(font);
+        let r = ui.put(area, field);
+        editing.fresh &= !r.has_focus();
+        if let Some(range) = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()) {
+            editing.caret = range.primary.index.0;
+        }
+        if end.is_none() && (editing.fresh || !r.lost_focus()) {
             return;
         }
-        let text = std::mem::take(&mut editing.text);
-        self.editing = None;
+        let Some(editing) = self.editing.take() else { return };
         if !matches!(end, Some(End::Cancel)) {
-            out.edits.push((self.cursor.0, self.cursor.1, text));
+            let text = if editing.part.is_some() { text_of(&editing.current()) } else { editing.text };
+            out.edits.push((editing.at.0, editing.at.1, text));
         }
         let by = match end {
             Some(End::Down) => (1, 0),
@@ -265,9 +368,10 @@ impl Editor {
         table: &Table,
         editable: &dyn Fn(usize, usize) -> bool,
         lay: &datum_table::Layout,
-        on_screen: &dyn Fn(datum_table::Rect) -> Rect,
+        laid: &[(Vec<Piece>, Line)],
         rect: Rect,
     ) {
+        let on_screen = |r| on_screen(rect.min, self.scale, r);
         let v = ui.visuals();
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, v.extreme_bg_color);
@@ -277,13 +381,14 @@ impl Editor {
         let corner = |at: (usize, usize)| lay.cell(at.0, at.1).map(on_screen).unwrap_or(Rect::NOTHING);
         painter.rect_filled(corner(self.anchor).union(corner(self.cursor)), 0.0, v.selection.bg_fill.gamma_multiply(0.5));
         let grid = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
-        for [[x0, y0], [x1, y1]] in &lay.lines {
-            let p = |x: f64, y: f64| rect.min + Vec2::new(x as f32, y as f32) * SCALE;
-            painter.line_segment([p(*x0, *y0), p(*x1, *y1)], grid);
+        let p = |[x, y]: [f64; 2]| rect.min + Vec2::new(x as f32, y as f32) * self.scale;
+        for [from, to] in &lay.lines {
+            painter.line_segment([p(*from), p(*to)], grid);
         }
         let font = TextStyle::Body.resolve(ui.style());
+        let columns = table.columns().len();
         for r in 0..table.rows().len() {
-            for c in 0..table.columns().len() {
+            for c in 0..columns {
                 let cell = corner((r, c));
                 let color = if r == 0 {
                     v.strong_text_color()
@@ -292,17 +397,80 @@ impl Editor {
                 } else {
                     v.weak_text_color()
                 };
-                painter.with_clip_rect(cell.intersect(rect)).text(
-                    egui::pos2(cell.min.x + 4.0, cell.center().y),
-                    Align2::LEFT_CENTER,
-                    table.cell(r, c),
-                    font.clone(),
-                    color,
-                );
+                let clip = painter.with_clip_rect(cell.intersect(rect));
+                let (ps, line) = &laid[r * columns + c];
+                for b in &line.boxes {
+                    let area = on_screen(b.rect);
+                    clip.text(
+                        area.center(),
+                        Align2::CENTER_CENTER,
+                        part(&ps[b.piece], b.slot),
+                        FontId::new(area.height(), font.family.clone()),
+                        color,
+                    );
+                }
+                for [from, to] in &line.bars {
+                    clip.line_segment([p(*from), p(*to)], Stroke::new(1.0, color));
+                }
             }
         }
         painter.rect_stroke(corner(self.cursor), 0.0, Stroke::new(2.0, v.selection.stroke.color), StrokeKind::Inside);
     }
+}
+
+/// Where table rectangle `r` (millimetres) is on screen at `scale` pixels per millimetre, the
+/// table's top left being `origin`.
+fn on_screen(origin: Pos2, scale: f32, r: datum_table::Rect) -> Rect {
+    Rect::from_min_size(origin + Vec2::new(r.x as f32, r.y as f32) * scale, Vec2::new(r.w as f32, r.h as f32) * scale)
+}
+
+/// The text of `piece`'s part `slot`.
+fn part(piece: &Piece, slot: Slot) -> &str {
+    match (piece, slot) {
+        (Piece::Text(t), _) => t,
+        (Piece::Fraction { under, .. }, Slot::Under) => under,
+        (Piece::Fraction { over, .. }, _) => over,
+    }
+}
+
+fn part_mut(piece: &mut Piece, slot: Slot) -> &mut String {
+    match (piece, slot) {
+        (Piece::Text(t), _) => t,
+        (Piece::Fraction { under, .. }, Slot::Under) => under,
+        (Piece::Fraction { over, .. }, _) => over,
+    }
+}
+
+/// `pieces` with the text of piece `i`'s part `slot` replaced.
+fn with_part(mut pieces: Vec<Piece>, i: usize, slot: Slot, text: String) -> Vec<Piece> {
+    *part_mut(&mut pieces[i], slot) = text;
+    pieces
+}
+
+/// `pieces` with an empty fraction inserted at `index`, and `index`.
+fn insert_fraction(mut pieces: Vec<Piece>, index: usize) -> (Vec<Piece>, usize) {
+    pieces.insert(index, Piece::Fraction { over: String::new(), under: String::new() });
+    (pieces, index)
+}
+
+/// `pieces` with an empty fraction where text piece `i` is cut at character `caret`, and the
+/// fraction's index; after piece `i` if that is a fraction.
+fn split_text(mut pieces: Vec<Piece>, i: usize, caret: usize) -> (Vec<Piece>, usize) {
+    let Piece::Text(text) = &pieces[i] else { return insert_fraction(pieces, i + 1) };
+    let cut = text.char_indices().nth(caret).map_or(text.len(), |(b, _)| b);
+    let (before, after) = (text[..cut].to_string(), text[cut..].to_string());
+    let mut new = i;
+    let mut parts = Vec::new();
+    if !before.is_empty() {
+        parts.push(Piece::Text(before));
+        new += 1;
+    }
+    parts.push(Piece::Fraction { over: String::new(), under: String::new() });
+    if !after.is_empty() {
+        parts.push(Piece::Text(after));
+    }
+    pieces.splice(i..=i, parts);
+    (pieces, new)
 }
 
 /// The columns of the parameters table, in millimetres: name, value, result.
@@ -391,10 +559,171 @@ pub fn remove_requests(inspect: &Json, rows: &[usize]) -> Vec<Request> {
         .collect()
 }
 
+/// What the table window shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Source {
+    #[default]
+    Parameters,
+    Materials,
+}
+
+/// A new material's cells as typed so far, by column.
+pub type Pending = [String; 4];
+
+/// The columns of the materials table, in millimetres: name, designation, density, description.
+const MATERIAL_WIDTHS: [f64; 4] = [30.0, 90.0, 35.0, 50.0];
+
+/// The keys of a material's JSON the columns show.
+const FIELDS: [&str; 4] = ["name", "designation", "density", "description"];
+
+/// What a material's columns show.
+fn material_cells(e: &Json) -> Pending {
+    let text = |k: &str| e[k].as_str().unwrap_or_default().to_string();
+    [text("name"), text("designation"), e["density"].as_f64().map(number).unwrap_or_default(), text("description")]
+}
+
+/// The library's materials (`elements`, in library order) as a table: a header, a row for each
+/// and a last, empty row for a new one, which shows what was typed in it so far (`pending`).
+pub fn materials(elements: &[Json], pending: &Pending, i18n: &I18n) -> Table {
+    let mut t = Table::new(MATERIAL_WIDTHS.to_vec(), elements.len() + 2);
+    let header = [
+        i18n.t("table-name", "Name"),
+        i18n.t("table-designation", "Designation"),
+        i18n.t("table-density", "Density (kg/m³)"),
+        i18n.t("table-description", "Description"),
+    ];
+    for (c, h) in header.iter().enumerate() {
+        t.set(0, c, &**h);
+    }
+    for (k, e) in elements.iter().enumerate() {
+        for (c, text) in material_cells(e).into_iter().enumerate() {
+            t.set(k + 1, c, text);
+        }
+    }
+    let last = t.rows().len() - 1;
+    for (c, text) in pending.iter().enumerate() {
+        t.set(last, c, text.as_str());
+    }
+    t
+}
+
+/// The cells of a materials table that can be edited: all but the header's.
+pub fn editable_materials(r: usize, _: usize) -> bool {
+    r >= 1
+}
+
+/// Material field `c` as typed: its value, none for an emptied one (the key is dropped), or why
+/// not. The name is needed, the density is a number above zero (a comma will do).
+fn field_value(c: usize, text: &str, i18n: &I18n) -> Result<Option<Json>, String> {
+    let text = text.trim();
+    match c {
+        0 if text.is_empty() => Err(i18n.t("table-material-nameless", "A material needs a name").to_string()),
+        2 if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
+            Ok(d) if d.is_finite() && d > 0.0 => Ok(Some(json!(d))),
+            _ => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
+        },
+        _ => Ok((!text.is_empty()).then(|| json!(text))),
+    }
+}
+
+/// Sets field `c` of material `e` to `v`, or drops it.
+fn set_field(e: &mut Json, c: usize, v: Option<Json>) {
+    if let Some(o) = e.as_object_mut() {
+        match v {
+            Some(v) => o.insert(FIELDS[c].into(), v),
+            None => o.remove(FIELDS[c]),
+        };
+    }
+}
+
+fn put_library(element: Json, was: Option<&str>) -> Request {
+    let mut params = json!({"level": "material", "element": element});
+    if let Some(was) = was {
+        params["was"] = json!(was);
+    }
+    Request::Command("put_library", params)
+}
+
+/// What the edits do: `put_library` of the material with the changed fields (one request for a
+/// row), and of a new material once its row has a name. The new row's cells wait in `pending`,
+/// the first new row's, until then. The second is the last error: an emptied name, a bad density,
+/// a name taken; what is refused is not sent.
+pub fn material_requests(elements: &[Json], pending: &mut Pending, edits: &[Edit], i18n: &I18n) -> (Vec<Request>, Option<String>) {
+    let first_new = elements.len() + 1;
+    let taken = |name: &str| i18n.f("table-material-taken", "`{ $name }` is a material already", &[("name", name)]);
+    let mut names: Vec<String> = elements.iter().map(|e| material_cells(e)[0].clone()).collect();
+    let mut changed: BTreeMap<usize, Json> = BTreeMap::new();
+    let mut new: BTreeMap<usize, Pending> = BTreeMap::new();
+    let mut error = None;
+    for (r, c, text) in edits {
+        if *c >= FIELDS.len() {
+            continue;
+        }
+        if let Some(k) = r.checked_sub(1).filter(|&k| k < elements.len()) {
+            let e = changed.get(&k).unwrap_or(&elements[k]);
+            if material_cells(e)[*c] == text.trim() {
+                continue;
+            }
+            match field_value(*c, text, i18n) {
+                Err(why) => error = Some(why),
+                Ok(_) if *c == 0 && names.iter().enumerate().any(|(j, n)| j != k && n == text.trim()) => error = Some(taken(text.trim())),
+                Ok(v) => {
+                    if *c == 0 {
+                        names[k] = text.trim().to_string();
+                    }
+                    set_field(changed.entry(k).or_insert_with(|| elements[k].clone()), *c, v);
+                }
+            }
+        } else if *r >= first_new {
+            let row = new.entry(*r).or_insert_with(|| if *r == first_new { pending.clone() } else { Default::default() });
+            row[*c].clone_from(text);
+        }
+    }
+    let mut sent: Vec<Request> = changed.into_iter().map(|(k, e)| put_library(e, Some(&material_cells(&elements[k])[0]))).collect();
+    for (r, mut row) in new {
+        row[0] = row[0].trim().to_string();
+        if r == first_new {
+            pending.clone_from(&row);
+        }
+        if row[0].is_empty() {
+            continue;
+        }
+        if names.contains(&row[0]) {
+            error = Some(taken(&row[0]));
+            continue;
+        }
+        let mut element = json!({"name": row[0]});
+        let fields: Result<Vec<_>, _> = (1..FIELDS.len()).map(|c| field_value(c, &row[c], i18n)).collect();
+        match fields {
+            Err(why) => error = Some(why),
+            Ok(values) => {
+                for (c, v) in (1..).zip(values) {
+                    set_field(&mut element, c, v);
+                }
+                if r == first_new {
+                    *pending = Default::default();
+                }
+                names.push(row[0].clone());
+                sent.push(put_library(element, None));
+            }
+        }
+    }
+    (sent, error)
+}
+
+/// The commands removing the materials in `rows` of the table.
+pub fn remove_material_requests(elements: &[Json], rows: &[usize]) -> Vec<Request> {
+    rows.iter()
+        .filter_map(|r| elements.get(r.checked_sub(1)?))
+        .map(|e| Request::Command("remove_library", json!({"level": "material", "name": material_cells(e)[0]})))
+        .collect()
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use egui_kittest::kittest::Queryable;
 
     fn inspect() -> Json {
         json!({"parameters": {
@@ -415,6 +744,39 @@ mod tests {
     fn requests(edits: &[(usize, usize, &str)], pending: &mut (String, String)) -> (Vec<Request>, Option<String>) {
         let edits: Vec<Edit> = edits.iter().map(|&(r, c, t)| (r, c, t.to_string())).collect();
         parameter_requests(&inspect(), pending, &edits, &I18n::default())
+    }
+
+    fn text(t: &str) -> Piece {
+        Piece::Text(t.into())
+    }
+
+    fn fraction(over: &str, under: &str) -> Piece {
+        Piece::Fraction { over: over.into(), under: under.into() }
+    }
+
+    #[test]
+    fn a_part_is_replaced() {
+        let ps = vec![text("Лист "), fraction("a", "б")];
+        assert_eq!(with_part(ps.clone(), 1, Slot::Under, "в".into()), vec![text("Лист "), fraction("a", "в")]);
+        assert_eq!(with_part(ps, 0, Slot::Text, "Круг".into()), vec![text("Круг"), fraction("a", "б")]);
+    }
+
+    #[test]
+    fn a_fraction_splits_the_text_at_the_cursor() {
+        let (ps, new) = split_text(vec![text("Лист ГОСТ")], 0, 5);
+        assert_eq!((ps, new), (vec![text("Лист "), fraction("", ""), text("ГОСТ")], 1));
+        let (ps, new) = split_text(vec![fraction("a", "б"), text("Лист")], 1, 0);
+        assert_eq!((ps, new), (vec![fraction("a", "б"), fraction("", ""), text("Лист")], 1));
+        let (ps, new) = split_text(vec![text("Лист")], 0, 4);
+        assert_eq!((ps, new), (vec![text("Лист"), fraction("", "")], 1));
+    }
+
+    #[test]
+    fn a_fraction_goes_after_a_fraction_or_at_the_end() {
+        let ps = vec![fraction("a", "б"), text("Лист")];
+        assert_eq!(split_text(ps.clone(), 0, 3), (vec![fraction("a", "б"), fraction("", ""), text("Лист")], 1));
+        assert_eq!(insert_fraction(ps, 2), (vec![fraction("a", "б"), text("Лист"), fraction("", "")], 2));
+        assert_eq!(insert_fraction(Vec::new(), 0), (vec![fraction("", "")], 0));
     }
 
     #[test]
@@ -484,5 +846,140 @@ mod tests {
         variant["level"] = json!("v");
         variant["levels"] = json!([{"name": "v", "own_parameters": ["b"]}]);
         assert_eq!(removed(&variant, &[1, 2, 3]), format!("{:?}", [Request::Command("remove_parameter", json!({"name": "b"}))]));
+    }
+
+    fn library() -> Vec<Json> {
+        vec![
+            json!({"name": "Сталь 3", "designation": "Лист [ГОСТ 19903 | Ст3]", "density": 7850.0, "description": "общая"}),
+            json!({"name": "АМг2", "density": 2670.0}),
+        ]
+    }
+
+    fn material_edits(edits: &[(usize, usize, &str)], pending: &mut Pending) -> (Vec<Request>, Option<String>) {
+        let edits: Vec<Edit> = edits.iter().map(|&(r, c, t)| (r, c, t.to_string())).collect();
+        material_requests(&library(), pending, &edits, &I18n::default())
+    }
+
+    #[test]
+    fn the_materials_are_a_table() {
+        let pending = ["Н".into(), String::new(), "1,5".into(), String::new()];
+        let t = materials(&library(), &pending, &I18n::default());
+        assert_eq!(t.rows().len(), 4, "header, two materials, a new one");
+        assert_eq!(t.copy((0, 0), (0, 3)), "Name\tDesignation\tDensity (kg/m³)\tDescription");
+        assert_eq!(t.copy((1, 0), (2, 3)), "Сталь 3\tЛист [ГОСТ 19903 | Ст3]\t7850\tобщая\nАМг2\t\t2670\t");
+        assert_eq!(t.copy((3, 0), (3, 3)), "Н\t\t1,5\t");
+        assert!(editable_materials(1, 0) && editable_materials(3, 3) && !editable_materials(0, 1));
+    }
+
+    #[test]
+    fn a_changed_cell_puts_the_material() {
+        let mut pending = Default::default();
+        let (sent, error) = material_edits(&[(2, 2, "2,7"), (2, 1, "Лист"), (2, 3, "")], &mut pending);
+        let want = put_library(json!({"name": "АМг2", "designation": "Лист", "density": 2.7}), Some("АМг2"));
+        same(&sent, &[want]);
+        assert_eq!(error, None);
+        let (sent, _) = material_edits(&[(1, 1, ""), (1, 3, ""), (1, 0, "Сталь 20")], &mut pending);
+        same(&sent, &[put_library(json!({"name": "Сталь 20", "density": 7850.0}), Some("Сталь 3"))]);
+    }
+
+    #[test]
+    fn an_unchanged_or_refused_cell_sends_nothing() {
+        let mut pending = Default::default();
+        let (sent, error) = material_edits(&[(1, 0, "Сталь 3"), (1, 2, "7850"), (3, 5, "x")], &mut pending);
+        assert!(sent.is_empty() && error.is_none());
+        for (edit, why) in [
+            ((1, 0, " "), "A material needs a name"),
+            ((1, 2, "много"), "The density is a number above zero, in kg/m³"),
+            ((1, 2, "0"), "The density is a number above zero, in kg/m³"),
+            ((1, 0, "АМг2"), "`АМг2` is a material already"),
+        ] {
+            let (sent, error) = material_edits(&[edit], &mut pending);
+            assert!(sent.is_empty(), "{edit:?}");
+            assert_eq!(error.as_deref(), Some(why));
+        }
+    }
+
+    #[test]
+    fn a_new_material_waits_for_its_name() {
+        let mut pending = Default::default();
+        let (sent, _) = material_edits(&[(3, 2, "8,0"), (3, 1, "Круг")], &mut pending);
+        assert!(sent.is_empty() && pending == ["", "Круг", "8,0", ""].map(String::from));
+        let (sent, _) = material_edits(&[(3, 0, " Сталь 45 ")], &mut pending);
+        same(&sent, &[put_library(json!({"name": "Сталь 45", "designation": "Круг", "density": 8.0}), None)]);
+        assert_eq!(pending, Pending::default());
+    }
+
+    #[test]
+    fn a_new_material_with_a_bad_field_or_a_taken_name_stays() {
+        let mut pending = Default::default();
+        let (sent, error) = material_edits(&[(3, 0, "М1"), (3, 2, "-1")], &mut pending);
+        assert!(sent.is_empty() && error.is_some() && pending[0] == "М1", "kept to be corrected");
+        let (sent, error) = material_edits(&[(3, 0, "АМг2")], &mut pending);
+        assert!(sent.is_empty());
+        assert_eq!(error.as_deref(), Some("`АМг2` is a material already"));
+    }
+
+    #[test]
+    fn materials_are_removed_by_name() {
+        let got = remove_material_requests(&library(), &[0, 2, 7]);
+        same(&got, &[Request::Command("remove_library", json!({"level": "material", "name": "АМг2"}))]);
+    }
+
+    /// The editor as the window shows it: a material's fraction drawn, its under line edited by
+    /// a double-click on it, and the Fraction button pressed while a text part is edited.
+    #[test]
+    fn a_fraction_is_edited_where_it_is_clicked() {
+        let mut t = materials(&library(), &Pending::default(), &I18n::default());
+        t.set(1, 1, "Лист [Б-ПН | Ст3]");
+        let lay = layout(&t);
+        let state = (Editor::default(), t.clone(), Vec::<Edit>::new());
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 200.0]).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, (editor, table, edits): &mut (Editor, Table, Vec<Edit>)| {
+                edits.extend(editor.show(ui, table, &editable_materials, 1.0, &I18n::default()).edits);
+            },
+            state,
+        );
+        h.run();
+        // The cell's line laid out as the editor lays it out, under the button's row.
+        let button = h.get_by_label("Fraction").rect();
+        let origin = egui::pos2(button.min.x, button.max.y + h.ctx.style_of(h.ctx.theme()).spacing.item_spacing.y);
+        let font = TextStyle::Body.resolve(&h.ctx.style_of(h.ctx.theme()));
+        let width = |t: &str, mm: f64| {
+            let g = h.ctx.fonts_mut(|f| f.layout_no_wrap(t.to_string(), FontId::new(mm as f32 * SCALE, font.family.clone()), Color32::PLACEHOLDER));
+            f64::from(g.size().x / SCALE)
+        };
+        let line = place(&pieces(t.cell(1, 1)), lay.cell(1, 1).unwrap(), datum_table::TEXT, &width);
+        let centre = |slot: Slot| on_screen(origin, SCALE, line.boxes.iter().find(|b| b.slot == slot).unwrap().rect).center();
+        let (under, word) = (centre(Slot::Under), centre(Slot::Text));
+        let press = |h: &mut egui_kittest::Harness<'_, (Editor, Table, Vec<Edit>)>, at: egui::Pos2| {
+            h.hover_at(at);
+            for pressed in [true, false] {
+                h.event(Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+                h.step();
+            }
+        };
+        let enter = |h: &mut egui_kittest::Harness<'_, (Editor, Table, Vec<Edit>)>, text: &str| {
+            h.event(Event::Text(text.into()));
+            h.step();
+            h.event(Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+            h.run();
+        };
+        press(&mut h, under);
+        press(&mut h, under);
+        h.run();
+        enter(&mut h, "08пс");
+        let edits = std::mem::take(&mut h.state_mut().2);
+        assert_eq!(edits.len(), 1, "{edits:?}");
+        let (r, c, text) = &edits[0];
+        assert_eq!((*r, *c), (1, 1));
+        assert!(text.starts_with("Лист [Б-ПН | ") && text.contains("08пс") && text.ends_with(']'), "the under line edited: {text}");
+        press(&mut h, word);
+        press(&mut h, word);
+        h.run();
+        press(&mut h, button.center());
+        h.run();
+        enter(&mut h, "x");
+        let edits = std::mem::take(&mut h.state_mut().2);
+        assert!(edits.iter().any(|(_, _, t)| t.contains("[x | ]")), "a new fraction, its over line typed: {edits:?}");
     }
 }

@@ -217,11 +217,12 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "library",
-        description: "The library's elements of a `level` (VISION §10; `sketch` so far): built in, then from `library/<level>` \
+        description: "The library's elements of a `level` (VISION §10; `sketch` or `material`): built in, then from `library/<level>` \
                       beside the program, then from `library/<level>` of the model's project (the nearest folder above the model \
-                      file with `datum-project.json`); one of a name already listed takes its place. Each with its `source`, \
-                      `parameters` in the order they are asked, `presets` (typical values by name) and `anchors`. `skipped`: \
-                      files that are not elements, with why.",
+                      file with `datum-project.json`); one of a name already listed takes its place. Each with its `source` and \
+                      all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
+                      by name) and `anchors`; a material's `designation` and `density`. `skipped`: files that are not elements, \
+                      with why.",
         params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
             let level = p.get("level").and_then(Value::as_str).unwrap_or("sketch");
@@ -231,10 +232,8 @@ const COMMANDS: &[Command] = &[
                 .iter()
                 .map(|e| {
                     let mut v = json!({"source": e.source});
-                    for k in ["name", "description", "parameters", "presets", "anchors", "fit", "links"] {
-                        if let Some(x) = e.element.get(k) {
-                            v[k] = x.clone();
-                        }
+                    for (k, x) in e.element.as_object().into_iter().flatten().filter(|(k, _)| *k != "sketch") {
+                        v[k] = x.clone();
                     }
                     v
                 })
@@ -308,13 +307,49 @@ const COMMANDS: &[Command] = &[
             if path.exists() && !p.get("replace").and_then(Value::as_bool).unwrap_or(false) {
                 return Err(format!("{} exists: give `replace` to write over it", path.display()));
             }
-            if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            }
-            let text = serde_json::to_string_pretty(&element).map_err(|e| e.to_string())?;
-            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+            library::write(&path, &element)?;
             let dimensions: Vec<Value> = library::dimensions(&element).into_iter().map(|d| json!({"dimension": d.label, "value": d.value})).collect();
             Ok(json!({"element": element, "saved": path.display().to_string(), "dimensions": dimensions}))
+        },
+    },
+    Command {
+        name: "put_library",
+        description: "Write library element `element` of `level` (D178): a new one, or in place of the one named `was` (renamed \
+                      if its name differs; without `was`, the one of its own name). It goes into the file of the element it \
+                      replaces, else into `library/<level>` of the model's project (beside the program without one). Materials \
+                      are the enterprise's own, none built in: fill them in when the engineer asks, from the enterprise's \
+                      standards. A material: `name` (as the engineer calls it: `08пс`, `Ст3 лист`), `designation` as written in \
+                      the title block — a word, then a fraction `[over | under]`: the gauge and its standard over the bar, the \
+                      grade and its standard under it, `{t}` where a part's thickness goes (`Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс \
+                      ГОСТ 16523-97]`), `density` in kg/m³ (for masses), `description`. The reply says where it went.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "level": {"type": "string", "enum": library::LEVELS},
+                "element": {"type": "object"},
+                "was": {"type": "string"}
+            }, "required": ["level", "element"], "additionalProperties": false})
+        },
+        run: |s, p| {
+            let level = text(p, "level")?;
+            let lib = library::load(level, s.project().as_deref());
+            let path = library::save(level, &p["element"], p.get("was").and_then(Value::as_str), s.path.as_deref(), &lib)?;
+            Ok(json!({"saved": path.display().to_string()}))
+        },
+    },
+    Command {
+        name: "remove_library",
+        description: "Remove library element `name` of `level`: its file, the most specific one (one of the same name from a less \
+                      specific place shows again); a built-in element stays.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "level": {"type": "string", "enum": library::LEVELS},
+                "name": {"type": "string"}
+            }, "required": ["level", "name"], "additionalProperties": false})
+        },
+        run: |s, p| {
+            let level = text(p, "level")?;
+            let path = library::remove(text(p, "name")?, &library::load(level, s.project().as_deref()))?;
+            Ok(json!({"removed": path.display().to_string()}))
         },
     },
     Command {
@@ -825,8 +860,8 @@ impl Session {
             Value::Null => Map::new(),
             _ => return Err("params must be an object".into()),
         };
-        // `level` of these is what they work on, not where they run.
-        if !matches!(c.name, "activate" | "choose")
+        // `level` of these is what they work on (a library's level, too), not where they run.
+        if !matches!(c.name, "activate" | "choose" | "library" | "put_library" | "remove_library")
             && let Some(level) = p.remove("level")
         {
             let back = self.active.clone();
