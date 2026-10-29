@@ -1280,6 +1280,16 @@ impl Viewer {
             for act in [Act::NewSketch, Act::WorkPlane, Act::LookAt] {
                 self.item(ui, act, false);
             }
+            ui.separator();
+            let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Measure);
+            let (on, enabled) = (self.checked(Act::Measure), self.available(Act::Measure.action()));
+            if crate::icons::tile(ui, self.i18n.label(Act::Measure), &hint, on, enabled, |p, c, colour| {
+                crate::icons::paint(p, c, Icon::Measure, colour)
+            })
+            .clicked()
+            {
+                self.run(ui, Act::Measure);
+            }
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
@@ -1654,7 +1664,6 @@ impl Viewer {
                         Act::Circle => crate::icons::Icon::Circle,
                         Act::Point => crate::icons::Icon::Point,
                         Act::Dimension => crate::icons::Icon::Dimension,
-                        Act::Measure => crate::icons::Icon::Measure,
                         _ => crate::icons::Icon::Select,
                     };
                     let hint = self.keys.hint(ui.ctx(), &self.i18n, act);
@@ -3255,7 +3264,7 @@ fn definition(v: &Json) -> String {
 }
 
 /// The sketch tools, as the side panel lists them.
-const TOOLS: [Act; 7] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Dimension, Act::Measure];
+const TOOLS: [Act; 6] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Dimension];
 
 /// The sketch's modes, as the menu lists them (D167).
 const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
@@ -3279,7 +3288,6 @@ fn tool(act: Act) -> Tool {
         Act::Circle => Tool::Circle,
         Act::Point => Tool::Point,
         Act::Dimension => Tool::Dimension,
-        Act::Measure => Tool::Measure,
         _ => Tool::Select,
     }
 }
@@ -3312,6 +3320,8 @@ impl Viewer {
         here && match a.act {
             Act::Save | Act::SaveAs | Act::Close | Act::ExportStep | Act::Home | Act::LookAt | Act::WorkPlane => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
+            // A command of the whole window; for now it measures in a sketch only (D177).
+            Act::Measure => self.sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
@@ -3328,6 +3338,7 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
+            Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
                 let mut m = self.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
                 *mode(&mut m, act)
@@ -3498,6 +3509,7 @@ impl Viewer {
         ui.menu_button(self.i18n.t("menu-view", "View").to_string(), |ui| {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
+            self.item(ui, Act::Measure, true);
             self.item(ui, Act::SmoothEdges, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
