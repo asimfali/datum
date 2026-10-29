@@ -60,6 +60,9 @@ pub fn text_of(pieces: &[Piece]) -> String {
         .collect()
 }
 
+/// The height of a table's text, in millimetres: ESKD's 3.5 font, as in a title block's rows.
+pub const TEXT: f64 = 3.5;
+
 /// The height of a fraction's lines to the text's, as a stacked fraction in AutoCAD: both fit an
 /// ESKD row with the text's height.
 pub const STACK: f64 = 0.7;

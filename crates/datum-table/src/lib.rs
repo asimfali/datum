@@ -6,7 +6,7 @@
 
 mod content;
 
-pub use content::{Boxed, Line, PAD, Piece, STACK, Slot, pieces, place, text_of};
+pub use content::{Boxed, Line, PAD, Piece, STACK, Slot, TEXT, pieces, place, text_of};
 
 /// The height of a row on a drawing by ESKD, and of a new row.
 pub const ROW: f64 = 8.0;

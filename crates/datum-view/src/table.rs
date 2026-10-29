@@ -14,8 +14,9 @@ use crate::dims::value_of;
 use crate::i18n::I18n;
 use crate::measure::number;
 
-/// Pixels per millimetre of the table.
-const SCALE: f32 = 3.5;
+/// Pixels per millimetre of the table at zoom 1: text of [`datum_table::TEXT`] reads as the
+/// window's own.
+pub const SCALE: f32 = 5.0;
 
 /// A cell edited: row, column, the new text.
 pub type Edit = (usize, usize, String);
@@ -70,12 +71,15 @@ pub struct Editor {
     anchor: (usize, usize),
     editing: Option<Editing>,
     pub error: Option<String>,
+    /// Pixels per millimetre in this frame: [`SCALE`] times the zoom of `settings.json`.
+    scale: f32,
 }
 
 impl Editor {
     /// The grid of `table`. `editable(row, column)` says which cells can be changed, also for
     /// rows beyond the table: a paste may reach past its last row.
-    pub fn show(&mut self, ui: &mut egui::Ui, table: &Table, editable: &dyn Fn(usize, usize) -> bool, i18n: &I18n) -> Output {
+    pub fn show(&mut self, ui: &mut egui::Ui, table: &Table, editable: &dyn Fn(usize, usize) -> bool, zoom: f32, i18n: &I18n) -> Output {
+        self.scale = SCALE * zoom;
         let lay = layout(table);
         let (rows, columns) = (table.rows().len(), table.columns().len());
         let clamp = |(r, c): (usize, usize)| (r.min(rows.saturating_sub(1)), c.min(columns.saturating_sub(1)));
@@ -94,10 +98,11 @@ impl Editor {
         let line = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
         egui::ScrollArea::both().auto_shrink([false, false]).max_height(ui.available_height() - line).show(ui, |ui| {
             let size = lay.size();
-            let (rect, resp) = ui.allocate_exact_size(Vec2::new(size[0] as f32, size[1] as f32) * SCALE, Sense::click_and_drag());
-            let on_screen = |r| on_screen(rect.min, r);
+            let (rect, resp) = ui.allocate_exact_size(Vec2::new(size[0] as f32, size[1] as f32) * self.scale, Sense::click_and_drag());
+            let scale = self.scale;
+            let on_screen = |r| on_screen(rect.min, scale, r);
             let cell_rect = |at: (usize, usize)| lay.cell(at.0, at.1).map(on_screen).unwrap_or(Rect::NOTHING);
-            let mm = |p: Pos2| [f64::from((p.x - rect.min.x) / SCALE), f64::from((p.y - rect.min.y) / SCALE)];
+            let mm = |p: Pos2| [f64::from((p.x - rect.min.x) / scale), f64::from((p.y - rect.min.y) / scale)];
             let at = |p: Pos2| lay.at(mm(p));
             let laid = self.laid_out(ui, table, &lay);
             self.paint(ui, table, editable, &lay, &laid, rect);
@@ -109,12 +114,12 @@ impl Editor {
                     Some((i, slot)) => {
                         let b = laid[e.at.0 * columns + e.at.1].1.boxes.iter().find(|b| b.piece == i && b.slot == slot);
                         let b = b.map_or(Rect::NOTHING, |b| on_screen(b.rect));
-                        let size = Vec2::new(b.width().max(FIELD_MIN * SCALE), b.height().max(ui.spacing().interact_size.y));
-                        (Rect::from_center_size(b.center() + Vec2::new((size.x - b.width()) / 2.0, 0.0), size), Some(b.height()))
+                        let size = Vec2::new(b.width().max(FIELD_MIN * scale), b.height().max(ui.spacing().interact_size.y));
+                        (Rect::from_center_size(b.center() + Vec2::new((size.x - b.width()) / 2.0, 0.0), size), b.height())
                     }
-                    None => (cell_rect(e.at), None),
+                    None => (cell_rect(e.at), datum_table::TEXT as f32 * scale),
                 };
-                let font = font.map(|h| FontId::new(h, TextStyle::Body.resolve(ui.style()).family));
+                let font = FontId::new(font, TextStyle::Body.resolve(ui.style()).family);
                 self.field(ui, area, font, (rows, columns), &mut out);
             }
             let (pressed, secondary, shift, pos) =
@@ -167,8 +172,8 @@ impl Editor {
     fn laid_out(&self, ui: &egui::Ui, table: &Table, lay: &datum_table::Layout) -> Vec<(Vec<Piece>, Line)> {
         let font = TextStyle::Body.resolve(ui.style());
         let width = |t: &str, h: f64| {
-            let galley = ui.painter().layout_no_wrap(t.to_string(), FontId::new(h as f32 * SCALE, font.family.clone()), Color32::PLACEHOLDER);
-            f64::from(galley.size().x / SCALE)
+            let galley = ui.painter().layout_no_wrap(t.to_string(), FontId::new(h as f32 * self.scale, font.family.clone()), Color32::PLACEHOLDER);
+            f64::from(galley.size().x / self.scale)
         };
         let edited = self.editing.as_ref().filter(|e| e.part.is_some());
         let (rows, columns) = (table.rows().len(), table.columns().len());
@@ -176,7 +181,7 @@ impl Editor {
             .map(|k| {
                 let at = (k / columns, k % columns);
                 let ps = edited.filter(|e| e.at == at).map_or_else(|| pieces(table.cell(at.0, at.1)), Editing::current);
-                let line = lay.cell(at.0, at.1).map(|cell| place(&ps, cell, f64::from(font.size / SCALE), &width)).unwrap_or_default();
+                let line = lay.cell(at.0, at.1).map(|cell| place(&ps, cell, datum_table::TEXT, &width)).unwrap_or_default();
                 (ps, line)
             })
             .collect()
@@ -310,10 +315,10 @@ impl Editor {
         (r0..=r1).flat_map(move |r| (c0..=c1).map(move |c| (r, c)))
     }
 
-    /// The text field over the cell or the part being edited, in `font` if the part has its own:
+    /// The text field over the cell or the part being edited, in `font`, as the cell's text is:
     /// Enter, Tab and Esc end it (read before the field, which would take them), a click elsewhere
     /// keeps what was typed.
-    fn field(&mut self, ui: &mut egui::Ui, area: Rect, font: Option<FontId>, (rows, columns): (usize, usize), out: &mut Output) {
+    fn field(&mut self, ui: &mut egui::Ui, area: Rect, font: FontId, (rows, columns): (usize, usize), out: &mut Output) {
         let id = egui::Id::new("datum_table_field");
         let end = ui.input_mut(|i| {
             if i.consume_key(Modifiers::NONE, Key::Enter) {
@@ -332,10 +337,7 @@ impl Editor {
         if editing.fresh {
             ui.memory_mut(|m| m.request_focus(id));
         }
-        let mut field = egui::TextEdit::singleline(&mut editing.text).id(id).lock_focus(true).desired_width(area.width());
-        if let Some(font) = font {
-            field = field.font(font);
-        }
+        let field = egui::TextEdit::singleline(&mut editing.text).id(id).lock_focus(true).desired_width(area.width()).font(font);
         let r = ui.put(area, field);
         editing.fresh &= !r.has_focus();
         if let Some(range) = egui::TextEdit::load_state(ui.ctx(), id).and_then(|s| s.cursor.char_range()) {
@@ -369,7 +371,7 @@ impl Editor {
         laid: &[(Vec<Piece>, Line)],
         rect: Rect,
     ) {
-        let on_screen = |r| on_screen(rect.min, r);
+        let on_screen = |r| on_screen(rect.min, self.scale, r);
         let v = ui.visuals();
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 0.0, v.extreme_bg_color);
@@ -379,7 +381,7 @@ impl Editor {
         let corner = |at: (usize, usize)| lay.cell(at.0, at.1).map(on_screen).unwrap_or(Rect::NOTHING);
         painter.rect_filled(corner(self.anchor).union(corner(self.cursor)), 0.0, v.selection.bg_fill.gamma_multiply(0.5));
         let grid = Stroke::new(1.0, v.widgets.noninteractive.bg_stroke.color);
-        let p = |[x, y]: [f64; 2]| rect.min + Vec2::new(x as f32, y as f32) * SCALE;
+        let p = |[x, y]: [f64; 2]| rect.min + Vec2::new(x as f32, y as f32) * self.scale;
         for [from, to] in &lay.lines {
             painter.line_segment([p(*from), p(*to)], grid);
         }
@@ -416,9 +418,10 @@ impl Editor {
     }
 }
 
-/// Where table rectangle `r` (millimetres) is on screen, the table's top left being `origin`.
-fn on_screen(origin: Pos2, r: datum_table::Rect) -> Rect {
-    Rect::from_min_size(origin + Vec2::new(r.x as f32, r.y as f32) * SCALE, Vec2::new(r.w as f32, r.h as f32) * SCALE)
+/// Where table rectangle `r` (millimetres) is on screen at `scale` pixels per millimetre, the
+/// table's top left being `origin`.
+fn on_screen(origin: Pos2, scale: f32, r: datum_table::Rect) -> Rect {
+    Rect::from_min_size(origin + Vec2::new(r.x as f32, r.y as f32) * scale, Vec2::new(r.w as f32, r.h as f32) * scale)
 }
 
 /// The text of `piece`'s part `slot`.
@@ -932,7 +935,7 @@ mod tests {
         let state = (Editor::default(), t.clone(), Vec::<Edit>::new());
         let mut h = egui_kittest::Harness::builder().with_size([800.0, 200.0]).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, (editor, table, edits): &mut (Editor, Table, Vec<Edit>)| {
-                edits.extend(editor.show(ui, table, &editable_materials, &I18n::default()).edits);
+                edits.extend(editor.show(ui, table, &editable_materials, 1.0, &I18n::default()).edits);
             },
             state,
         );
@@ -945,8 +948,8 @@ mod tests {
             let g = h.ctx.fonts_mut(|f| f.layout_no_wrap(t.to_string(), FontId::new(mm as f32 * SCALE, font.family.clone()), Color32::PLACEHOLDER));
             f64::from(g.size().x / SCALE)
         };
-        let line = place(&pieces(t.cell(1, 1)), lay.cell(1, 1).unwrap(), f64::from(font.size / SCALE), &width);
-        let centre = |slot: Slot| on_screen(origin, line.boxes.iter().find(|b| b.slot == slot).unwrap().rect).center();
+        let line = place(&pieces(t.cell(1, 1)), lay.cell(1, 1).unwrap(), datum_table::TEXT, &width);
+        let centre = |slot: Slot| on_screen(origin, SCALE, line.boxes.iter().find(|b| b.slot == slot).unwrap().rect).center();
         let (under, word) = (centre(Slot::Under), centre(Slot::Text));
         let press = |h: &mut egui_kittest::Harness<'_, (Editor, Table, Vec<Edit>)>, at: egui::Pos2| {
             h.hover_at(at);

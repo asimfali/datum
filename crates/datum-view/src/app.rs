@@ -498,6 +498,8 @@ struct Viewer {
     i18n: crate::i18n::I18n,
     settings: Option<PathBuf>,
     settings_problems: Vec<String>,
+    /// The table editor's zoom, from `settings.json`.
+    table_zoom: f32,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -520,7 +522,7 @@ impl Viewer {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let settings = crate::settings::path();
-        let crate::settings::Settings { keys, language, problems: settings_problems } = crate::settings::load(settings.as_deref());
+        let crate::settings::Settings { keys, language, table_zoom, problems: settings_problems } = crate::settings::load(settings.as_deref());
         for p in &settings_problems {
             crate::log::write(&format!("settings: {p}"));
         }
@@ -584,6 +586,7 @@ impl Viewer {
             language_chosen: false,
             settings,
             settings_problems,
+            table_zoom,
             shown: 0,
             maximized: false,
             picking: None,
@@ -2367,15 +2370,11 @@ impl Viewer {
         use crate::table::Source;
         let Some((source, mut editor)) = self.table.take() else { return };
         let Some(m) = &self.model else { return };
-        let (table, title, size) = match source {
-            Source::Parameters => {
-                (crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters"), [400.0, 360.0])
+        let (table, title) = match source {
+            Source::Parameters => (crate::table::parameters(&m.inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
+            Source::Materials => {
+                (crate::table::materials(&self.materials, &self.new_material, &self.i18n), self.i18n.t("table-materials-title", "Materials"))
             }
-            Source::Materials => (
-                crate::table::materials(&self.materials, &self.new_material, &self.i18n),
-                self.i18n.t("table-materials-title", "Materials"),
-                [720.0, 360.0],
-            ),
         };
         let rows = table.rows().len();
         let editable: Box<dyn Fn(usize, usize) -> bool> = match source {
@@ -2383,10 +2382,12 @@ impl Viewer {
             Source::Materials => Box::new(crate::table::editable_materials),
         };
         let (mut out, mut closed) = (Default::default(), false);
-        let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size(size);
+        // As wide as the table, when it opens.
+        let width = datum_table::layout(&table).size()[0] as f32 * crate::table::SCALE * self.table_zoom + 40.0;
+        let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size([width, 400.0]);
         ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
             closed = ui.input(|i| i.viewport().close_requested());
-            out = editor.show(ui, &table, &editable, &self.i18n);
+            out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
         });
         let (mut sent, error) = match source {
             Source::Parameters => {
@@ -3944,6 +3945,7 @@ mod tests {
             i18n: crate::i18n::I18n::default(),
             settings: None,
             settings_problems: Vec::new(),
+            table_zoom: 1.0,
             shown: 0,
             maximized: false,
             picking: None,
