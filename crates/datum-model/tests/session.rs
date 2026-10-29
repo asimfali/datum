@@ -301,7 +301,7 @@ fn materials_are_written_renamed_and_removed() {
     assert!(names(&mut s).is_empty(), "none built in");
     let steel = json!({"name": "08пс", "designation": "Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс ГОСТ 16523-97]", "density": 7850});
     let r = run(&mut s, "put_library", json!({"level": "material", "element": steel}));
-    assert_eq!(r["saved"], json!(root.join("library/material/08пс.json").display().to_string()));
+    assert_eq!(std::path::PathBuf::from(r["saved"].as_str().unwrap()), root.join("library/material/08пс.json"));
     let lib = run(&mut s, "library", json!({"level": "material"}));
     assert_eq!((&lib["elements"][0]["source"], &lib["elements"][0]["density"]), (&json!("project"), &json!(7850)), "{lib}");
     let put = |s: &mut Session, element: Value, was: &str| s.execute("put_library", &json!({"level": "material", "element": element, "was": was}));
