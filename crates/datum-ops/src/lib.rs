@@ -23,7 +23,7 @@ use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use sheet::{Sheet, Side, path_ends, sheet};
+pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
     Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, contour_at, depth_to, extrude_sketch, face_plane, place, profile_regions,
 };

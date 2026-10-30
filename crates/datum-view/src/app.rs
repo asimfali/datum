@@ -598,7 +598,7 @@ struct Viewer {
     plane_draft: Option<(Json, String)>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
-    /// "Select a contour, then E": where it shows, and since when (until a click or a few seconds).
+    /// "Select a contour or a chain, then E": where it shows, and since when (until a click or a few seconds).
     contour_hint: Option<(egui::Pos2, std::time::Instant)>,
     /// The part whose body was last clicked in 3D: what the toolbar's material and rule refer to.
     part: Option<String>,
@@ -730,27 +730,24 @@ fn rules_of<'a>(rules: &'a [Json], material: Option<&str>, kind: Option<&str>) -
         .collect()
 }
 
+/// What E may take of sketch `p` with nothing selected: its closed regions and a curve of each
+/// open chain. More than one of them all told is to be chosen first.
+fn candidates(sk: &SketchEdit, p: &datum_ops::Placed) -> (usize, Vec<String>) {
+    let regions = datum_ops::chosen(sk.context.id, p, &[]).and_then(|c| datum_ops::profile_regions(sk.context.id, &c)).map_or(0, |r| r.len());
+    (regions, datum_ops::paths(p))
+}
+
 /// The open chain E makes sheet metal of, as the form takes it: a curve of it, and its end nearest
 /// `at` on screen (`view`: the viewport). It is the chain a selected curve lies on; with nothing
-/// selected and no closed profile, the only one the sketch has.
+/// selected, the sketch's only candidate, if a chain.
 fn sheet_chain(sk: &SketchEdit, selected: &[String], at: egui::Pos2, view: egui::Rect) -> Option<(String, Option<String>)> {
     let p = sk.placed.as_ref().ok()?;
     let curve = match selected.iter().find(|n| datum_ops::path_ends(p, n).is_some()) {
         Some(n) => n.clone(),
-        None if selected.is_empty() && datum_ops::chosen(sk.context.id, p, &[]).is_err() => {
-            let lines = p.lines.iter().filter(|(_, l)| !l.construction).map(|(n, _)| n);
-            let arcs = p.arcs.iter().filter(|(_, a)| !a.construction).map(|(n, _)| n);
-            let mut open = lines.chain(arcs).filter_map(|n| {
-                datum_ops::path_ends(p, n).map(|mut ends| {
-                    (n, {
-                        ends.sort();
-                        ends
-                    })
-                })
-            });
-            let (n, ends) = open.next()?;
-            open.all(|(_, e)| e == ends).then(|| n.clone())?
-        }
+        None if selected.is_empty() => match candidates(sk, p) {
+            (0, chains) if chains.len() == 1 => chains[0].clone(),
+            _ => return None,
+        },
         None => return None,
     };
     let ends = datum_ops::path_ends(p, &curve)?;
@@ -2971,7 +2968,8 @@ impl Viewer {
             && chain.is_none()
             && let Some(sk) = &self.sketch
             && let Ok(p) = &sk.placed
-            && datum_ops::chosen(sk.context.id, p, &[]).and_then(|c| datum_ops::profile_regions(sk.context.id, &c)).is_ok_and(|r| r.len() > 1)
+            && let (regions, chains) = candidates(sk, p)
+            && regions + chains.len() > 1
         {
             self.contour_hint = Some((at, std::time::Instant::now()));
             return;
@@ -3031,7 +3029,8 @@ impl Viewer {
             } else {
                 let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(at) + egui::vec2(14.0, 14.0);
                 egui::Area::new(egui::Id::new("datum_contour_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(self.i18n.t("extrude-contour-hint", "Select a contour, then E")));
+                    egui::Frame::popup(ui.style())
+                        .show(ui, |ui| ui.label(self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E")));
                 });
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
@@ -6344,6 +6343,17 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("plate", p) if p == flipped)));
+    }
+
+    /// With nothing selected in a sketch of a contour and a chain, E makes neither: it asks.
+    #[test]
+    fn e_with_a_contour_and_a_chain_asks_which() {
+        let (mut h, inbox) = with_open_chain("bottom", Some("Лист"));
+        h.state_mut().sketch.as_mut().unwrap().selected.clear();
+        h.key_press(egui::Key::E);
+        h.run();
+        assert!(h.state().contour_hint.is_some() && h.state().extrusion.is_none());
+        assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)))));
     }
 
     /// With a part rule (or none) a curve of the closed outline gives an extrusion.
