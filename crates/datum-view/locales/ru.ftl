@@ -388,6 +388,7 @@ sheet-width = Ширина
 sheet-rule-needed = Выберите листовое правило в верхней панели (Правило)
 sheet-preview = Лист · { $body } · { $rule }
 plate-thickness = Толщина — из правила { $rule }
+sheet-cut = Вырез листа — насквозь по толщине
 plate-flip = ⇄ Другая сторона
 plate-preview = Грань · { $body } · { $rule }
 toolbar-material = Материал
