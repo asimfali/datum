@@ -312,7 +312,7 @@ const COMMANDS: &[Command] = &[
                       file with `datum-project.json`); one of a name already listed takes its place. Each with its `source` and \
                       all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
                       by name) and `anchors`; a material's `designation` and `density`; a rule's `kind`, `material`, `thickness` and \
-                      `radius`. `skipped`: files that are not elements, \
+                      `radius`, `k_factor`. `skipped`: files that are not elements, \
                       with why.",
         params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
@@ -636,7 +636,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "set_flat",
         description: "How body `feature` is laid flat: `back` (true: seen from the other side), `k_factor` (a number or a formula; 0.5 \
-                      by default; cuts on bends were sketched with their own, they must agree). Saved with the model, for the \
+                      by default; a part's sheet rule with a `k_factor` overrides it; cuts on bends take the same). Saved with the model, for the \
                       feature wherever it is inherited.",
         params: || {
             json!({"type": "object", "properties": {"feature": {"type": "string"}, "back": {"type": "boolean"},
@@ -1089,6 +1089,14 @@ impl Session {
         crate::levels::bodies(g).into_iter().filter(|(begun, _)| parts.contains(begun)).map(|(_, last)| last).collect()
     }
 
+    /// The K-factor the sheet rule of the part of feature `ix` gives, if it does (D197): the
+    /// rule's is the only one then, as for thickness (D193).
+    fn rule_k(&self, ix: NodeIx) -> Option<f64> {
+        let begun = crate::levels::body_chain(&self.graph, ix).last()?;
+        let rule = self.doc.rule(&self.graph.nodes()[begun as usize].name, self.active.as_deref())?;
+        crate::library::load("rule", self.project().as_deref()).get(&rule)?.element["k_factor"].as_f64()
+    }
+
     /// The blank of feature `name` of the level worked in: an `unfold` feature's, or a sheet
     /// or plate body's laid flat as its settings say (D164).
     pub fn flat_of(&mut self, name: &str) -> Result<Arc<Flat>, String> {
@@ -1101,7 +1109,10 @@ impl Session {
         let settings = self.doc.flats.get(name).cloned().unwrap_or_default();
         let values = parameter_values(self.graph.parameters());
         let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
-        let k = settings.k_factor.resolve(&lookup).map_err(|e| format!("k_factor: {e}"))?;
+        let k = match self.rule_k(ix) {
+            Some(k) => k,
+            None => settings.k_factor.resolve(&lookup).map_err(|e| format!("k_factor: {e}"))?,
+        };
         let mut h = blake3::Hasher::new();
         h.update(&value.hash());
         h.update(&[u8::from(settings.back)]);
@@ -1131,7 +1142,8 @@ impl Session {
             .into_iter()
             .map(|(name, flat)| {
                 let set = self.doc.flats.get(&name).cloned().unwrap_or_default();
-                let mut v = json!({"feature": name, "side": if set.back { "back" } else { "front" }, "k_factor": set.k_factor});
+                let k = self.find(&name).ok().and_then(|ix| self.rule_k(ix)).map_or_else(|| json!(set.k_factor), |k| json!(k));
+                let mut v = json!({"feature": name, "side": if set.back { "back" } else { "front" }, "k_factor": k});
                 match flat {
                     Ok(f) => {
                         let [lines, arcs, circles] = f.counts();

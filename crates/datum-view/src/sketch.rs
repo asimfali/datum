@@ -472,7 +472,7 @@ impl SketchEdit {
         let op = op.resolve(&lookup)?;
         let inputs: Vec<&Value> = self.context.input.iter().map(|v| v.as_ref()).collect();
         match op.eval(self.context.id, &inputs).map_err(|e| e.to_string())? {
-            Value::Sketch(p) => Ok(p),
+            Value::Sketch(p) => Ok(*p),
             _ => Err("not a sketch".into()),
         }
     }

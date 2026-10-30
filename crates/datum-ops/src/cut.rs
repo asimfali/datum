@@ -506,7 +506,7 @@ fn outline(body: &Body, h: Ix, frame: &Frame) -> Result<Vec<ProfileLoop>, BrepEr
 }
 
 /// Overlapping pairs `(a, b)` of a box of `left` and one of `right`, sorted.
-fn between(left: &[Box2], right: &[Box2]) -> Vec<(usize, usize)> {
+pub(crate) fn between(left: &[Box2], right: &[Box2]) -> Vec<(usize, usize)> {
     let all: Vec<Box2> = left.iter().chain(right).copied().collect();
     overlapping(&all).into_iter().filter(|&(a, b)| a < left.len() && b >= left.len()).map(|(a, b)| (a, b - left.len())).collect()
 }

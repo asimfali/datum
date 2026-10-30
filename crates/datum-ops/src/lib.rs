@@ -1,6 +1,7 @@
 //! Datum operations: pure functions from parameters and input values (bodies, sketches) to a
 //! new value.
 
+mod bent;
 mod boolean;
 mod bounds;
 mod copies;
@@ -63,7 +64,8 @@ pub enum Op {
     /// A sketch (points, lines, constraints), solved and placed: on the XY plane, on `plane`, or
     /// on the face with ID `face` of the input body. On a cylinder face of a rolled sheet, the
     /// sketch lies in the sheet's development, lengths along its neutral layer at `k_factor` of
-    /// the thickness from the inside (0.5: the middle): coordinates of the flat blank. `project`
+    /// the thickness from the inside (0.5: the middle): coordinates of the flat blank; on a plane
+    /// face of sheet metal, the K-factor a cut across its bends goes on through the blank at (D197). `project`
     /// names edges and vertices of the input body (by ID) projected into the sketch as fixed
     /// construction geometry to dimension from. No input, or the body holding the face or the
     /// projected edges.
@@ -219,7 +221,8 @@ fn count(n: &Num) -> Result<u32, BrepError> {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Body(Body),
-    Sketch(Placed),
+    /// Boxed: a placed sketch is much larger than the rest.
+    Sketch(Box<Placed>),
     Flat(Flat),
     /// A work plane: its origin, X axis and normal, as a sketch plane.
     Plane(SketchPlane),
@@ -427,7 +430,7 @@ impl Op {
             if plane.is_some() || face.is_some() || !project.is_empty() || k_factor.is_some() {
                 return Err(BrepError::Sketch("a sketch on a work plane takes no `plane`, `face`, `project` or `k_factor`".into()));
             }
-            return Ok(Value::Sketch(place(sketch, Some(on), None, None, None, project)?));
+            return Ok(Value::Sketch(Box::new(place(sketch, Some(on), None, None, None, project)?)));
         }
         // Every operation but `extrude` and `sheet` takes bodies.
         let sketch =
@@ -467,7 +470,7 @@ impl Op {
                     ));
                 }
                 let k = k_factor.as_ref().map(num).transpose()?;
-                return Ok(Value::Sketch(place(sketch, plane.as_ref(), inputs.first().copied(), face.as_deref(), k, project)?));
+                return Ok(Value::Sketch(Box::new(place(sketch, plane.as_ref(), inputs.first().copied(), face.as_deref(), k, project)?)));
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
@@ -532,7 +535,7 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
         // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
         let local = match s.face {
             // Sheet metal: through its thickness alone, made directly or refused.
-            Some(_) if *wall => return from_face(feature, t, s, Reach::Sheet),
+            Some(_) if *wall => return bent::punch(feature, t, s),
             Some(_) => through_walls(feature, t, s),
             None if *wall => return Err(BrepError::Sketch("a cut of sheet metal takes a sketch on a face of it".into())),
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),

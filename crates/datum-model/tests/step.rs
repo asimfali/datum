@@ -27,10 +27,12 @@ fn reference_models_export_or_say_why_not() {
             let name = level.map_or_else(|| name.clone(), |l| format!("{name} [{l}]"));
             let step = out.join(format!("{name}.step"));
             let note = out.join(format!("{name}.step.txt"));
-            // Round holes and slots in a rolled sheet: circles of the development, not circles in 3D.
+            // Round holes and slots in a rolled sheet, or across a bend: circles of the development,
+            // not circles in 3D.
             let inexact: &[&str] = match name.as_str() {
                 "rolled_perforation" => &["perforated", "slotted"],
                 "rolled_holes" => &["perforated"],
+                "sheet_bend_cut" => &["punched"],
                 _ => &[],
             };
             assert_eq!(datum_model::inexact_features(&g, &e), inexact, "{name}");

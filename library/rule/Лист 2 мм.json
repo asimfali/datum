@@ -4,5 +4,6 @@
   "material": "Сталь 08пс",
   "thickness": 2,
   "radius": "t",
+  "k_factor": 0.44,
   "description": "Лист 2 мм, внутренний радиус гиба равен толщине"
 }

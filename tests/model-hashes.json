@@ -121,7 +121,7 @@
     "sheet": "a434c8b8f0ae305850a3b5b85ee31f5599f72d7c1b2b4de35fc582321a4c208b"
   },
   "rolled_perforation.json": {
-    "blank": "6bda27bf8841a79cd388192e7aeb7de7902929abcb058b30f3aced547c9d8477",
+    "blank": "c0aab8eca53c9c9e45a81a3d3a2135f9c0670aae0524b92438517b6367f10808",
     "holes": "4e2142ace468038cce2c827e7e5f2ec56286d1c91309dec11e18cf5f581d3f5b",
     "perforated": "601c8eeb29e170f90a3befdc1dce5b2780a26d1c59ddda667dc0917ee750adb4",
     "profile": "1a5901f84035376660fae62855780be792071d8ae47f4cc3e87205d119e73181",
@@ -144,6 +144,12 @@
     "outline": "d3d0927f02cbebdc387312552c381d9ff69c837cc028d6eb726237ab3e05be19",
     "panel": "55a8676c7dbe3d74b425dead272d48ce5247567f481bbb42f7c3ffcf61cf0267",
     "perforated": "035d41d66c6957ec209a55e198bb2d377943d77d05360aedf3cc44cac72ad2c0"
+  },
+  "sheet_bend_cut.json": {
+    "hole_sketch": "a03f941bde8c35aa846018b3464bee542150c400cfc55e6ac1a9871016b3c2a0",
+    "l": "221893f35071e6b6944b904d641f3c39cc0e64fd16dc1904baad530defc22c9b",
+    "path": "e70db42597975c87e3bb6c69b335b16eda72abd7dcd88719f14340afa318c211",
+    "punched": "bbd1522be177dc81b218264d69fcbdf9867606279531a34f860ae8a8d8d71b9d"
   },
   "sheet_cut_inclined.json": {
     "hole_sketch": "469a4ce1c9d0d56f608fdb2e4f3aeadf6b81dbaab4aa1038c6051ad15f87e98e",

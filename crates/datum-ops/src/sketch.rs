@@ -105,6 +105,9 @@ pub struct Placed {
     pub frame: [Vec3; 4],
     /// On a cylinder face, where the sketch lies (boxed: most sketches are on planes).
     pub developed: Option<Box<Developed>>,
+    /// On a plane face of sheet metal, the K-factor its bends are laid flat at: a cut across a
+    /// bend goes on through the blank (D197).
+    pub k_factor: Option<f64>,
     pub solved: Solved,
     pub lines: BTreeMap<String, Line>,
     pub arcs: BTreeMap<String, Arc>,
@@ -365,7 +368,8 @@ fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
 /// the world axis least along the normal, projected: on a top face sketch coordinates are world X
 /// and Y. The frame follows the face's plane only. On a cylinder face of a rolled sheet the
 /// sketch lies in the sheet's development (see [`Developed`]) with its neutral layer at
-/// `k_factor` of the thickness. With `project`, edges and vertices of `body` are projected into
+/// `k_factor` of the thickness; on a plane face of sheet metal, `k_factor` lays its bends flat
+/// for a cut across them. With `project`, edges and vertices of `body` are projected into
 /// the sketch (see [`projected`]). A face, edge or vertex gone after a rebuild is a lost
 /// reference.
 pub fn place(
@@ -384,6 +388,9 @@ pub fn place(
         (None, Some(_)) => return Err(BrepError::Sketch("a sketch on a face takes the body as its input and the face ID as `face`".into())),
         _ => None,
     };
+    if k_factor.is_some() && face.is_none() {
+        return Err(BrepError::Sketch("`k_factor` is for a sketch on a face of sheet metal".into()));
+    }
     let (frame, on) = match (plane, face) {
         (Some(_), Some(_)) => return Err(BrepError::Sketch("give a plane or a face, not both".into())),
         (Some(p), None) => {
@@ -393,7 +400,6 @@ pub fn place(
         (None, Some((body, id))) => {
             let (f, id) = find_face(body, id)?;
             match body.faces()[f].surface {
-                Surface::Plane(_) if k_factor.is_some() => return Err(BrepError::Sketch("`k_factor` is for a sketch on a cylinder face".into())),
                 Surface::Plane(raw) => {
                     let p = plane_of(body, f)?;
                     normal = raw.normal;
@@ -443,6 +449,7 @@ pub fn place(
     let mut placed = Placed {
         face: on,
         projected: now,
+        k_factor: if developed.is_some() { None } else { k_factor },
         developed: developed.map(Box::new),
         frame,
         solved,
@@ -511,6 +518,10 @@ pub fn place(
                 bytes(&[d.turn.x.to_bits().to_le_bytes(), d.turn.y.to_bits().to_le_bytes()].concat());
             }
         }
+    }
+    if let Some(k) = placed.k_factor {
+        bytes(b"k_factor");
+        bytes(&k.to_bits().to_le_bytes());
     }
     if let Some(d) = developed {
         bytes(b"developed");
