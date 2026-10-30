@@ -222,11 +222,23 @@ impl Renderer {
     /// multisampled if `smooth`, and returns the commands to submit, for a read-back to be appended.
     pub fn draw(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame, width: u32, height: u32, smooth: bool) -> wgpu::CommandEncoder {
         self.prepare(device, queue, frame);
-        if self.target.as_ref().is_none_or(|t| (t.width, t.height) != (width, height)) {
+        let fresh = self.target.as_ref().is_none_or(|t| (t.width, t.height) != (width, height));
+        if fresh {
             self.target = Some(Target::new(device, width, height));
         }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("datum_view") });
         let Some(t) = &self.target else { return encoder };
+        // A picture only resolved into stays uninitialized to wgpu, which clears it to nothing
+        // when it is read (DX12, Radeon RX550: a model opened showed nothing until the view moved
+        // and drew without multisampling). Stored once by a pass, it is initialized.
+        if fresh {
+            let ops = wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT), store: wgpu::StoreOp::Store };
+            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("datum_view_init"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment { view: &t.view, depth_slice: None, resolve_target: None, ops })],
+                ..Default::default()
+            });
+        }
         let (view, resolve_target, depth) = if smooth { (&t.multisampled[0], Some(&t.view), &t.multisampled[1]) } else { (&t.view, None, &t.depth) };
         let [r, g, b] = BACKGROUND;
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
