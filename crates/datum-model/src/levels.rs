@@ -7,6 +7,7 @@
 //! evaluated as an ordinary graph made of all that: inherited features keep their names, so their
 //! IDs and cache keys are the parent's, and what the variants share is computed once.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use datum_graph::{Graph, NodeIx};
@@ -274,6 +275,38 @@ impl Doc {
     pub fn rule(&self, part: &str, level: Option<&str>) -> Option<String> {
         let up = std::iter::successors(level.map(String::from), |l| self.levels.get(l).and_then(|l| l.parent.clone()));
         up.filter_map(|l| self.levels.get(&l)?.rule.clone()).next().or_else(|| self.parts.get(part).cloned().flatten()?.rule)
+    }
+
+    /// Graph `g` of level `level` (none: the root) as it is built (D193): each sheet metal part's
+    /// thickness and bend radius from its rule (the library of `project`), their only place. A
+    /// part without a rule, or whose rule the library lacks, keeps the feature as it is: a file
+    /// from before rules has its own numbers, a new one fails asking for a rule. The library is
+    /// read only when a sheet metal part has a rule.
+    pub fn built<'g>(&self, g: &'g Graph, level: Option<&str>, project: Option<&std::path::Path>) -> Cow<'g, Graph> {
+        let sheets: Vec<(usize, String)> = g
+            .nodes()
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| matches!(n.op, Op::Sheet { .. }))
+            .filter_map(|(ix, n)| Some((ix, self.rule(&n.name, level)?)))
+            .collect();
+        if sheets.is_empty() {
+            return Cow::Borrowed(g);
+        }
+        let rules = crate::library::load("rule", project);
+        let mut out = g.clone();
+        for (ix, rule) in sheets {
+            let Some(rule) = rules.get(&rule) else { continue };
+            let Some(t) = rule.element["thickness"].as_f64() else { continue };
+            let Ok(r) = crate::library::bend_radius(&rule.element["radius"], t) else { continue };
+            let mut op = g.nodes()[ix].op.clone();
+            if let Op::Sheet { thickness, radius, .. } = &mut op {
+                (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r)));
+            }
+            // The same operation with other numbers: its arity holds.
+            let _ = out.set_op(ix as NodeIx, op);
+        }
+        Cow::Owned(out)
     }
 
     /// The kind of part `part` (D179): `sheet` if its body began as sheet metal, else `part`. Set

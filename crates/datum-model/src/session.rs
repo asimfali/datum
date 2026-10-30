@@ -368,9 +368,9 @@ const COMMANDS: &[Command] = &[
                       grade and its standard under it, `{t}` where a part's thickness goes (`Лист [Б-ПН-{t} ГОСТ 19903-2015 | 08пс \
                       ГОСТ 16523-97]`), `density` in kg/m³ (for masses), `description`. Renamed, its rules follow. A rule (D179) is \
                       what a part is made by — every part has one: `name` (as the engineer calls it: `08пс 2 мм`), `material` \
-                      (a material's name in the library), `kind`: `sheet` for sheet metal, with `thickness` in mm (what a part \
-                      takes unless it gives its own) and bend `radius` in mm or as a formula of the thickness `t` (`t`, `1.5 * t`: \
-                      one rule serves every thickness), or `part` for an ordinary part (neither of them); `description`. The \
+                      (a material's name in the library), `kind`: `sheet` for sheet metal, with `thickness` in mm (the sheet's: \
+                      its only place, a sheet part's feature has none) and inner bend `radius` in mm or as a formula of the \
+                      thickness `t` (`t`, `1.5 * t`), both required, or `part` for an ordinary part (neither of them); `description`. The \
                       reply says where it went.",
         params: || {
             json!({"type": "object", "properties": {
@@ -382,6 +382,10 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             let level = text(p, "level")?;
             let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.path.as_deref(), s.project().as_deref())?;
+            // A rule edited: the sheets made by it take its thickness (D193).
+            if level == "rule" {
+                s.rebuild();
+            }
             Ok(json!({"saved": path.display().to_string()}))
         },
     },
@@ -398,6 +402,9 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             let level = text(p, "level")?;
             let path = library::delete(level, text(p, "name")?, s.project().as_deref())?;
+            if level == "rule" {
+                s.rebuild();
+            }
             Ok(json!({"removed": path.display().to_string()}))
         },
     },
@@ -649,6 +656,7 @@ const COMMANDS: &[Command] = &[
             if let Some(r) = p.get("rule") {
                 s.set_rule(body, r.as_str().map(String::from))?;
             }
+            let rule = p.contains_key("rule");
             let mut entry = s.doc.parts.get(body).cloned().unwrap_or(Some(crate::levels::PartInfo::default()));
             if let Some(n) = p.get("name") {
                 let n = n.as_str().unwrap_or_default().trim();
@@ -661,6 +669,10 @@ const COMMANDS: &[Command] = &[
                 entry = if part { Some(entry.unwrap_or_default()) } else { None };
             }
             s.doc.put_part(body, entry);
+            // A sheet's thickness is its rule's (D193).
+            if rule {
+                s.rebuild();
+            }
             Ok(s.levels())
         },
     },
@@ -1098,7 +1110,7 @@ impl Session {
             .map(|part| {
                 let level = self.doc.chosen(&part);
                 let bodies = self.doc.graph(level.as_deref()).map(|g| {
-                    let e = self.evaluator.evaluate(&g);
+                    let e = self.evaluator.evaluate(&self.doc.built(&g, level.as_deref(), self.project().as_deref()));
                     crate::levels::bodies(&g)
                         .into_iter()
                         .filter(|(begun, _)| *begun == part)
@@ -1203,7 +1215,7 @@ impl Session {
     }
 
     fn rebuild(&mut self) -> Value {
-        self.last = self.evaluator.evaluate(&self.graph);
+        self.last = self.evaluator.evaluate(&self.doc.built(&self.graph, self.active.as_deref(), self.project().as_deref()));
         let failed: Vec<Value> = self.failures().collect();
         json!({"features": self.graph.nodes().len(), "computed": self.last.computed, "reused": self.last.reused, "failed": failed})
     }
@@ -1348,9 +1360,6 @@ impl Session {
             if kind != of {
                 let word = |k: &str| if k == "sheet" { "a sheet metal" } else { "an ordinary" };
                 return Err(format!("rule `{r}` is for {} part; `{part}` is {} part, as its first feature made it", word(kind), word(of)));
-            }
-            if kind == "sheet" {
-                return Err(format!("rule `{r}`: sheet metal rules come with sheet metal parts (0.4.6)"));
             }
         }
         match self.active.clone() {

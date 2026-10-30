@@ -194,8 +194,8 @@ fn check_material(e: &Value) -> Result<(), String> {
 
 /// A rule (D179, D180): its `name`, `kind` (`sheet` or `part`), the `material` it is of (by
 /// name; a rule is never without one) and a `description`; a sheet rule's `thickness` in mm
-/// (what a part takes unless it gives its own) and bend `radius`: mm, or a formula of the
-/// part's thickness `t` (`t`, `1.5 * t`), as one rule serves every thickness.
+/// (the part's: its only place, D193) and inner bend `radius`: mm, or a formula of the
+/// thickness `t` (`t`, `1.5 * t`).
 fn check_rule(e: &Value) -> Result<(), String> {
     let o = fields("rule", e, &["name", "kind", "material", "thickness", "radius", "description"], &["kind", "material", "description"])?;
     if !o.get("material").and_then(Value::as_str).is_some_and(|m| !m.trim().is_empty()) {
@@ -211,15 +211,12 @@ fn check_rule(e: &Value) -> Result<(), String> {
         }
         _ => return Err("`kind`: `sheet` or `part`".into()),
     }
-    if o.get("thickness").is_some_and(|t| !t.as_f64().is_some_and(|t| t > 0.0)) {
-        return Err("`thickness`: mm, above zero".into());
-    }
-    match o.get("radius") {
-        None => Ok(()),
-        Some(r) => match bend_radius(r, 1.0) {
-            Ok(r) if r >= 0.0 => Ok(()),
-            _ => Err("`radius`: mm, not below zero, or a formula of the thickness `t`".into()),
-        },
+    let Some(t) = o.get("thickness").and_then(Value::as_f64).filter(|t| *t > 0.0) else {
+        return Err("a sheet rule's `thickness`: mm, above zero".into());
+    };
+    match o.get("radius").map(|r| bend_radius(r, t)) {
+        Some(Ok(r)) if r > 0.0 => Ok(()),
+        _ => Err("a sheet rule's bend `radius`: mm above zero, or a formula of the thickness `t`".into()),
     }
 }
 

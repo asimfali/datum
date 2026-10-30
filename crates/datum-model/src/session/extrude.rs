@@ -91,7 +91,7 @@ impl Session {
         tool.insert("mode".into(), "new".into());
         tool.insert("inputs".into(), json!([sketch].into_iter().chain(plane).collect::<Vec<_>>()));
         let ix = add_feature(&mut g, tool)?;
-        let e = self.evaluator.evaluate(&g);
+        let e = self.evaluator.evaluate(&self.doc.built(&g, self.active.as_deref(), self.project().as_deref()));
         let (lo, hi) = match e.results[ix as usize].as_deref() {
             Ok(v) => v.body().ok_or("the extrusion makes no body")?.bounds(),
             Err(why) => return Err(format!("the extrusion fails: {why}")),
