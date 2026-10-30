@@ -5,6 +5,7 @@
 
 use datum_brep::{BrepError, ProfileArc, ProfileLoop, Region, TopoId, extrude};
 use datum_math::{Rigid, Sign, Vec2, orient2d};
+use datum_sketch::Step;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +32,43 @@ impl Side {
     }
 }
 
+/// The open chain of the profile curves of `s` that curve `path` lies on, or else its only one,
+/// from its end named first.
+fn chain<'s>(s: &'s Placed, path: Option<&str>) -> Result<Vec<Step<'s>>, BrepError> {
+    let bad = |m: String| BrepError::Sketch(format!("sheet path: {m}"));
+    let found = datum_sketch::contours(&s.lines, &s.arcs, &|_, c| !c);
+    if let Some(p) = found.branches.first() {
+        return Err(bad(format!("it branches at point `{p}`")));
+    }
+    let on = |c: &[Step], name: &str| c.iter().any(|st| st.curve == name);
+    let chain = match path {
+        Some(name) => found.paths.iter().find(|c| on(c, name)).ok_or_else(|| {
+            if found.loops.iter().any(|c| on(c, name)) || s.circles.contains_key(name) {
+                BrepError::Unsupported(format!("sheet path: `{name}` is on a closed contour; a closed path comes later"))
+            } else {
+                bad(format!("`{name}` is on no chain of the sketch"))
+            }
+        })?,
+        None => match (&found.paths[..], &found.loops[..]) {
+            ([], []) => return Err(bad("the sketch has no lines".into())),
+            ([], _) => return Err(BrepError::Unsupported("sheet path: a closed path comes later".into())),
+            ([one], _) => one,
+            _ => return Err(bad("the sketch has several open chains: choose one by a curve of it (`path`)".into())),
+        },
+    };
+    if let Some(st) = chain.iter().find(|st| s.arcs.contains_key(st.curve)) {
+        return Err(BrepError::Unsupported(format!("sheet path: arc `{}` in the path (rolled sections) comes later", st.curve)));
+    }
+    Ok(chain.clone())
+}
+
+/// The two end points of the open chain curve `curve` of `s` lies on (none: it is on none), the
+/// one named first first: where a sheet's path may start.
+pub fn path_ends(s: &Placed, curve: &str) -> Option<[String; 2]> {
+    let c = chain(s, Some(curve)).ok()?;
+    Some([c[0].from.to_string(), c[c.len() - 1].to.to_string()])
+}
+
 /// The sheet: the dimensions of a sheet-metal feature.
 #[derive(Clone, Copy, Debug)]
 pub struct Sheet {
@@ -40,38 +78,34 @@ pub struct Sheet {
     pub side: Side,
 }
 
-/// The path of `s` (its lines, not construction, an open chain from `start` or else from its end
-/// point named first) as sheet metal `sheet`, extruded from `z0` to `z1` along the sketch's
-/// normal. Faces are named by the lines and by the corners' points: editing dimensions keeps
-/// every ID.
-pub fn sheet(feature: TopoId, s: &Placed, start: Option<&str>, sheet: Sheet, z0: f64, z1: f64) -> Result<datum_brep::Body, BrepError> {
+/// The path of `s` (an open chain of its lines, not construction: the one curve `path` lies on, or
+/// else the sketch's only one; closed contours and circles left out, D191) from `start` or else
+/// from its end point named first, as sheet metal `sheet`, extruded from `z0` to `z1` along the
+/// sketch's normal. Faces are named by the lines and by the corners' points: editing dimensions
+/// keeps every ID.
+pub fn sheet(
+    feature: TopoId,
+    s: &Placed,
+    path: Option<&str>,
+    start: Option<&str>,
+    sheet: Sheet,
+    z0: f64,
+    z1: f64,
+) -> Result<datum_brep::Body, BrepError> {
     let bad = |m: String| BrepError::Sketch(format!("sheet path: {m}"));
     if s.developed.is_some() {
         return Err(BrepError::Unsupported("sheet metal from a sketch on a cylinder face".into()));
     }
-    if s.arcs.values().any(|a| !a.construction) || s.circles.values().any(|c| !c.construction) {
-        return Err(BrepError::Unsupported("sheet path: arcs in the path (rolled sections) come later".into()));
-    }
+    let chain = chain(s, path)?;
     let Sheet { thickness: t, radius: r, side } = sheet;
     if !(t > 0.0 && r > 0.0 && t.is_finite() && r.is_finite()) {
         return Err(BrepError::Degenerate(format!("sheet metal needs a positive thickness and bend radius, got {t} and {r}")));
     }
 
-    // The chain: points in order, and the line between each two.
-    let found = datum_sketch::contours(&s.lines, &s.arcs, &|n, c| !c && s.lines.contains_key(n));
-    if let Some(p) = found.branches.first() {
-        return Err(bad(format!("it branches at point `{p}`")));
-    }
-    let chain = match (&found.paths[..], &found.loops[..]) {
-        ([], []) => return Err(bad("the sketch has no lines".into())),
-        ([], _) => return Err(BrepError::Unsupported("sheet path: a closed path comes later".into())),
-        ([path], []) => path,
-        _ => return Err(bad("its lines are not one chain".into())),
-    };
     let chain = match start {
-        None => chain.clone(),
-        Some(p) if p == chain[0].from => chain.clone(),
-        Some(p) if p == chain[chain.len() - 1].to => datum_sketch::reversed(chain),
+        None => chain,
+        Some(p) if p == chain[0].from => chain,
+        Some(p) if p == chain[chain.len() - 1].to => datum_sketch::reversed(&chain),
         Some(p) => return Err(bad(format!("`{p}` is not an end of the path"))),
     };
     let names: Vec<&str> = std::iter::once(chain[0].from).chain(chain.iter().map(|st| st.to)).collect();

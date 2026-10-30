@@ -23,7 +23,7 @@ use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use sheet::{Sheet, Side, sheet};
+pub use sheet::{Sheet, Side, path_ends, sheet};
 pub use sketch::{
     Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, contour_at, depth_to, extrude_sketch, face_plane, place, profile_regions,
 };
@@ -127,6 +127,10 @@ pub enum Op {
         side: Side,
         z0: Num,
         z1: Num,
+        /// A curve of the open chain to take (a skeleton sketch holds many, D191); none: the
+        /// sketch's only one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<String>,
     },
@@ -307,12 +311,13 @@ impl Op {
             },
             Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
-            Self::Sheet { thickness, radius, side, z0, z1, start } => Self::Sheet {
+            Self::Sheet { thickness, radius, side, z0, z1, path, start } => Self::Sheet {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
                 side: *side,
                 z0: r(z0, "z0")?,
                 z1: r(z1, "z1")?,
+                path: path.clone(),
                 start: start.clone(),
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
@@ -437,14 +442,14 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
-            Self::Sheet { thickness, radius, side, z0, z1, start } => {
+            Self::Sheet { thickness, radius, side, z0, z1, path, start } => {
                 let (Some(thickness), Some(radius)) = (thickness, radius) else {
                     return Err(BrepError::Invalid(
                         "sheet metal takes its thickness and bend radius from the part's sheet rule: give the part one".into(),
                     ));
                 };
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
-                sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
+                sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
             // Made above, before inputs are taken as bodies.
             Self::Plane { .. } => return Err(BrepError::Invalid("a plane is no body".into())),

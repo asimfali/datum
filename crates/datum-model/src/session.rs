@@ -16,6 +16,7 @@ use crate::levels::Doc;
 use crate::{SketchPatch, add_feature, feature_json, library, parse_doc, to_json_doc};
 
 mod extrude;
+mod sheet;
 
 /// The model being edited, its cache and its latest evaluation. Every edit re-evaluates; the
 /// cache makes that cost proportional to what changed.
@@ -169,6 +170,30 @@ const COMMANDS: &[Command] = &[
             }, "required": ["name", "sketch", "mode"], "additionalProperties": false})
         },
         run: |s, p| s.extrude(p),
+    },
+    Command {
+        name: "sheet",
+        description: "Sheet metal from an open chain of lines of sketch `sketch` as feature `name`, a part of its own (D185): \
+                      `rule` is required, a sheet rule of the library (`library` with level `rule`) whose thickness and bend \
+                      radius it takes, then and whenever the rule changes. `path`: a curve of the chain (a skeleton sketch holds \
+                      many; closed contours are left out); none: the sketch's only chain. `start`: the end point it starts from \
+                      (none: the end named first); `side`: where the material lies looking along the path from the start, \
+                      `left` (default), `right` or `middle`. `z1`: how far it goes along the sketch's normal from `z0` (0), \
+                      or, `symmetric`, half each way. Arcs in the path (rolled sections) come later. The reply names the part and its rule.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "sketch": {"type": "string"},
+                "rule": {"type": "string"},
+                "path": {"type": "string"},
+                "start": {"type": "string"},
+                "side": {"type": "string", "enum": ["left", "right", "middle"]},
+                "z0": {"type": ["number", "string"]},
+                "z1": {"type": ["number", "string"]},
+                "symmetric": {"type": "boolean"}
+            }, "required": ["name", "sketch", "rule", "z1"], "additionalProperties": false})
+        },
+        run: |s, p| s.sheet(p),
     },
     Command {
         name: "set_parameter",
@@ -1255,14 +1280,21 @@ impl Session {
         let below = self.doc.below(self.active.as_deref());
         self.doc.patches_of(&below, feature, |p| rename_names(p, &renamed));
         let mut ops: Vec<(NodeIx, Op)> = vec![(ix, serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?)];
-        for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1) {
-            if let (Op::Sheet { start: Some(st), .. }, true) = (&n.op, n.inputs.contains(&ix))
-                && let Some(new) = renamed(st)
-            {
-                let mut op = n.op.clone();
-                if let Op::Sheet { start, .. } = &mut op {
-                    *start = Some(new);
+        // What a feature of this sketch names in it: a sheet's start point and path, an
+        // extrusion's profiles (D191).
+        for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1).filter(|(_, n)| n.inputs.contains(&ix)) {
+            let mut op = n.op.clone();
+            let mut follow = |name: &mut String| {
+                if let Some(new) = renamed(name) {
+                    *name = new;
                 }
+            };
+            match &mut op {
+                Op::Sheet { start, path, .. } => start.iter_mut().chain(path.iter_mut()).for_each(&mut follow),
+                Op::Extrude { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
+                _ => {}
+            }
+            if op != n.op {
                 ops.push((j as NodeIx, op));
             }
         }
