@@ -220,8 +220,9 @@ struct Model {
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
     rebuild_ms: f64,
     scene_ms: f64,
-    /// The feature each body of the scene is of.
+    /// The feature each body of the scene is of, and the feature that began it: its part's key.
     bodies: Vec<String>,
+    begun: Vec<String>,
     /// The flat blanks of what the level worked in makes, by feature, or why there is none (D164).
     flats: Vec<(String, Result<Arc<datum_ops::Flat>, String>)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
@@ -237,6 +238,7 @@ struct Picture {
     scene: Scene,
     geometry: Arc<Geometry>,
     bodies: Vec<String>,
+    begun: Vec<String>,
     editing: Option<(String, Context)>,
     inspect: Json,
 }
@@ -320,9 +322,24 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, editing: context, inspect } = picture;
+        let Picture { scene, geometry, bodies, begun, editing: context, inspect } = picture;
         if models
-            .send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, flats, editing: context, preview })
+            .send(Model {
+                inspect,
+                scene,
+                geometry,
+                error,
+                notes,
+                opened,
+                closed,
+                rebuild_ms,
+                scene_ms,
+                bodies,
+                begun,
+                flats,
+                editing: context,
+                preview,
+            })
             .is_err()
         {
             return;
@@ -366,7 +383,9 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
         .filter_map(|(n, i)| Some((n, evaluation.results[i as usize].as_deref().ok()?)))
         .collect();
     let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
-    let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
+    let bodies: Vec<String> = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
+    let chains = datum_model::levels::bodies(graph);
+    let begun = bodies.iter().map(|b| chains.iter().find(|(_, last)| last == b).map_or_else(|| b.clone(), |(first, _)| first.clone())).collect();
     let around: Vec<datum_graph::ValueRef> = product
         .into_iter()
         .filter(|(part, level, _)| Some(part) != mine.as_ref() && session.visible(part) && !own(part, level))
@@ -384,7 +403,7 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     });
     let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
     let inspect = session.inspect();
-    Picture { scene, geometry, bodies, editing: context, inspect }
+    Picture { scene, geometry, bodies, begun, editing: context, inspect }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -1655,8 +1674,10 @@ impl Viewer {
             .i18n
             .t("set-base-hint", "The base: every part as the root makes it, the product shown whole; a change here reaches every variant")
             .to_string();
-        if ui.selectable_label(active.is_none(), self.i18n.t("set-base", "Base")).on_hover_text(base).clicked() {
+        let mut clicked_part: Option<Option<String>> = None;
+        if ui.selectable_label(active.is_none() && self.part.is_none(), self.i18n.t("set-base", "Base")).on_hover_text(base).clicked() {
             go = Some(None);
+            clicked_part = Some(None);
         }
         // The product's variants (D169): each part's variant and what is hidden, by name.
         let mut set_cmd: Option<(&str, String)> = None;
@@ -1711,7 +1732,11 @@ impl Viewer {
             let (Some(part), Some(name)) = (p["part"].as_str(), p["name"].as_str()) else { continue };
             let chosen = p["chosen"].as_str().map(String::from);
             let family: Vec<_> = levels.iter().filter(|l| l.3.as_deref() == Some(part)).collect();
-            let here = active.as_ref().is_some_and(|a| family.iter().any(|l| &l.0 == a));
+            // Worked in: a variant of it, or in the base, the part clicked (the toolbar's material and rule are its).
+            let here = match &active {
+                Some(a) => family.iter().any(|l| &l.0 == a),
+                None => self.part.as_deref() == Some(part),
+            };
             ui.horizontal(|ui| {
                 let mut visible = p["visible"].as_bool().unwrap_or(true);
                 if ui
@@ -1727,6 +1752,7 @@ impl Viewer {
                     .clicked()
                 {
                     go = Some(chosen.clone());
+                    clicked_part = Some(Some(part.to_string()));
                 }
                 egui::ComboBox::from_id_salt(("datum_part", part)).selected_text(chosen.clone().unwrap_or_else(|| "base".into())).show_ui(ui, |ui| {
                     if ui.selectable_label(chosen.is_none(), self.i18n.t("variant-none", "base")).clicked() {
@@ -1814,6 +1840,9 @@ impl Viewer {
         }
         if let Some((part, visible)) = show {
             self.send(Request::Command("show", json!({ "part": part, "visible": visible })));
+        }
+        if let Some(p) = clicked_part {
+            self.part = p;
         }
         if let Some(level) = go
             && level != active
@@ -2656,8 +2685,11 @@ impl Viewer {
             && let (Some(m), Some((x, y))) = (&self.model, offset)
         {
             let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect);
-            let named = m.scene.pick(origin, dir).and_then(|f| m.bodies.get(f.body)).cloned();
-            self.part = named.clone().filter(|n| m.inspect["parts"].as_array().into_iter().flatten().any(|p| p["part"] == *n));
+            let hit = m.scene.pick(origin, dir);
+            let named = hit.and_then(|f| m.bodies.get(f.body)).cloned();
+            // A body is named by its last feature, its part by the first.
+            let part = hit.and_then(|f| m.begun.get(f.body)).cloned();
+            self.part = part.filter(|n| m.inspect["parts"].as_array().into_iter().flatten().any(|p| p["part"] == *n));
             if crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
                 && let Some(n) = named.filter(|n| m.flats.iter().any(|(f, _)| f == n))
             {
@@ -4566,6 +4598,7 @@ mod tests {
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
                 bodies: Vec::new(),
+                begun: Vec::new(),
                 flats: Vec::new(),
                 editing: None,
                 preview: None,
@@ -6134,6 +6167,10 @@ mod tests {
         let down = datum_math::Vec3::new(0.0, 0.0, -1.0);
         let hit = p.scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).expect("the top face");
         assert_eq!((hit.distance, p.bodies[hit.body].as_str()), (90.0, "plate"));
+        // A body grown by another feature is named by it, its part still by the first.
+        s.execute("add", &json!({"name": "moved", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 5]})).unwrap();
+        let p = picture(&s, None, &mut MeshCache::default());
+        assert_eq!((p.bodies.as_slice(), p.begun.as_slice()), (["moved".to_string()].as_slice(), ["plate".to_string()].as_slice()));
         // Hidden, it is neither drawn nor picked.
         s.execute("show", &json!({"part": "plate", "visible": false})).unwrap();
         assert!(picture(&s, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
