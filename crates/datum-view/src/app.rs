@@ -602,7 +602,7 @@ struct Extrusion {
     selected: bool,
 }
 
-/// The modes of an extrusion a click goes through.
+/// The modes of an extrusion, as the form offers them.
 const EXTRUDE_MODES: [&str; 3] = ["new", "join", "cut"];
 
 impl Extrusion {
@@ -2752,9 +2752,12 @@ impl Viewer {
                     if symmetric.inner.clicked() {
                         x.symmetric = !x.symmetric;
                     }
-                    if ui.button(mode_name(&self.i18n, shown)).clicked() {
-                        let next = EXTRUDE_MODES.iter().position(|m| *m == shown).map_or(0, |i| (i + 1) % EXTRUDE_MODES.len());
-                        x.mode = Some(EXTRUDE_MODES[next]);
+                    // Every mode at once, the one in force lit: a click chooses that one.
+                    ui.separator();
+                    for mode in EXTRUDE_MODES {
+                        if ui.selectable_label(shown == mode, mode_name(&self.i18n, mode)).clicked() {
+                            x.mode = Some(mode);
+                        }
                     }
                     // Through: a cut's only (D187).
                     if shown == "cut" && ui.selectable_label(x.through, self.i18n.t("extrude-through", "Through")).clicked() {
@@ -5901,9 +5904,9 @@ mod tests {
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        h.get_by_label("New body").click();
-        h.run();
-        h.get_by_label("Join").click();
+        // A click chooses the mode it is on; Through comes with Cut.
+        assert!(h.query_by_label("Through").is_none());
+        h.get_by_label("Cut").click();
         h.run();
         h.get_by_label("Through").click();
         h.run();
