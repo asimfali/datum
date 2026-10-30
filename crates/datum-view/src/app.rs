@@ -335,15 +335,17 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     let (graph, evaluation) = (session.graph(), session.evaluation());
     // In a variant, its part alone, the other parts as the product has them faded around it;
     // in the base, the product whole: every part in its chosen variant (D160, D169). The
-    // graph's own bodies of the parts are left out, the rest of it (sketches, a body no part)
-    // shown as it is.
+    // graph's own bodies of the parts shown otherwise (another variant, around, or hidden) are
+    // left out, the rest of it (a part as the base has it, sketches, a body no part) shown as it
+    // is: its faces are the ones a sketch is put on.
     let mine = session.active().and_then(|a| session.part_of(a));
     let product = session.product();
+    let own = |part: &str, level: &Option<String>| mine.is_none() && level.is_none() && session.visible(part);
     let skip: Vec<String> = datum_model::levels::bodies(graph)
         .into_iter()
         .filter(|(begun, _)| match &mine {
             Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
-            None => product.iter().any(|(q, _, _)| q == begun),
+            None => product.iter().any(|(q, level, _)| q == begun && !own(q, level)),
         })
         .map(|(_, last)| last)
         .collect();
@@ -357,7 +359,7 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
     let around: Vec<datum_graph::ValueRef> = product
         .into_iter()
-        .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
+        .filter(|(part, level, _)| Some(part) != mine.as_ref() && session.visible(part) && !own(part, level))
         .filter_map(|(_, _, bodies)| bodies.ok())
         .flatten()
         .map(|(_, v)| v)
@@ -391,6 +393,63 @@ fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editi
 /// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
 type Drawn = (u64, [f32; 16], [f32; 3], [u32; 3]);
 
+/// A feature's title being typed in its row.
+struct Renaming {
+    key: String,
+    text: String,
+    /// Not yet focused, its text not yet selected.
+    fresh: bool,
+}
+
+/// The feature tree's rows: which is selected, which is renamed, and what a frame asked.
+#[derive(Default)]
+struct TreeRows {
+    selected: Option<String>,
+    renaming: Option<Renaming>,
+    clicked: Option<String>,
+    renamed: Option<(String, String)>,
+}
+
+impl TreeRows {
+    /// A feature's row label: its title, or its key without one (then the title's tooltip names
+    /// the key), and `tail`; a text field while it is renamed. Enter takes the text, Esc or
+    /// leaving the field drops it.
+    fn label(&mut self, ui: &mut egui::Ui, i18n: &crate::i18n::I18n, f: &Json, mark: &str, tail: &str) {
+        let key = f["name"].as_str().unwrap_or_default();
+        let title = f["title"].as_str();
+        if let Some(r) = self.renaming.as_mut().filter(|r| r.key == key) {
+            let id = ui.id().with(("rename", key));
+            ui.label(mark);
+            let mut edit = egui::TextEdit::singleline(&mut r.text).id(id).desired_width(140.0).show(ui);
+            if std::mem::take(&mut r.fresh) {
+                edit.response.request_focus();
+                let all = egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(r.text.chars().count()));
+                edit.state.cursor.set_char_range(Some(all));
+                edit.state.store(ui.ctx(), id);
+            } else {
+                let enter = edit.response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if enter {
+                    self.renamed = Some((r.key.clone(), r.text.clone()));
+                }
+                if enter || edit.response.lost_focus() || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    self.renaming = None;
+                }
+            }
+            ui.label(format!("·  {tail}"));
+            return;
+        }
+        let text = egui::RichText::new(format!("{mark} {}  ·  {tail}", title.unwrap_or(key)));
+        let text = if mark == "✖" { text.color(ui.visuals().error_fg_color) } else { text };
+        let mut r = ui.selectable_label(self.selected.as_deref() == Some(key), text);
+        if title.is_some() {
+            r = r.on_hover_text(i18n.f("feature-key", "Key: { $key } — commands and the agent use it", &[("key", key)]));
+        }
+        if r.clicked() {
+            self.clicked = Some(key.to_string());
+        }
+    }
+}
+
 struct Viewer {
     requests: Sender<Request>,
     models: Receiver<Model>,
@@ -422,6 +481,8 @@ struct Viewer {
     new_parameter: crate::table::Pending,
     /// Work plane offsets as typed in their rows, by feature.
     offsets: BTreeMap<String, String>,
+    /// The feature tree's selected row and the title being typed.
+    tree: TreeRows,
     /// Why the window refused what was asked, before the model was asked.
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
@@ -600,6 +661,7 @@ impl Viewer {
             adapter,
             edits: BTreeMap::new(),
             offsets: BTreeMap::new(),
+            tree: TreeRows::default(),
             new_parameter: Default::default(),
             local_error: None,
             table: None,
@@ -2039,23 +2101,27 @@ impl Viewer {
         let mut show_flat: Option<String> = None;
         // A sketch row clicked while an extrusion waits for one, and where.
         let waiting = self.extrusion.as_ref().is_some_and(|x| x.sketch.is_none());
-        let mut picked: Option<(String, egui::Pos2)> = None;
         // Out of `self` while the rows borrow it.
         let mut offsets = std::mem::take(&mut self.offsets);
+        let mut tree = std::mem::take(&mut self.tree);
         egui::ScrollArea::vertical().show(ui, |ui| {
+            // Under the rows, which win a click: what is left selects nothing, as Esc does.
+            let empty = ui.interact(ui.available_rect_before_wrap(), ui.id().with("tree"), egui::Sense::click());
+            if empty.clicked() || (tree.renaming.is_none() && !ui.ctx().text_edit_focused() && ui.input(|i| i.key_pressed(egui::Key::Escape))) {
+                tree.selected = None;
+            }
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let bare = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
                 // In a level: what it changes of its parent's (a dot, ↺ back), what is its own (+).
                 let (is_changed, is_own) = (changed.iter().any(|c| c == bare), own.iter().any(|c| c == bare));
-                let name = bare;
                 let mut row = |ui: &mut egui::Ui| match f["error"].as_str() {
                     // A flat blank: its size, and its DXF for the turret press.
                     None if f["status"]["flat"].is_object() => {
                         let flat = &f["status"]["flat"];
                         ui.horizontal(|ui| {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
-                            ui.label(format!("✔ {name}  ·  {op}  ·  {w:.1} × {h:.1}"));
+                            tree.label(ui, &self.i18n, f, "✔", &format!("{op}  ·  {w:.1} × {h:.1}"));
                             if ui
                                 .button(self.i18n.t("feature-show", "Show"))
                                 .on_hover_text(self.i18n.t("feature-show-hint", "In the flat pattern pane"))
@@ -2064,7 +2130,7 @@ impl Viewer {
                                 show_flat = Some(bare.to_string());
                             }
                             if ui.button("DXF…").clicked()
-                                && let Some(p) = self.exported("dxf", name).save_file()
+                                && let Some(p) = self.exported("dxf", bare).save_file()
                             {
                                 export = Some((bare.to_string(), p));
                             }
@@ -2073,7 +2139,7 @@ impl Viewer {
                     // Sheet metal: the side of the path its thickness lies on, flipped by a click.
                     None if op == "sheet" => {
                         ui.horizontal(|ui| {
-                            ui.label(format!("✔ {name}  ·  {op}"));
+                            tree.label(ui, &self.i18n, f, "✔", op);
                             let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
                             let label = serde_json::to_value(side).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
                             let side_name = match label.as_str() {
@@ -2099,7 +2165,7 @@ impl Viewer {
                                 (Some(plane), false) => plane.to_string(),
                                 (None, _) => f["base"].as_str().unwrap_or("xy").to_uppercase(),
                             };
-                            ui.label(format!("✔ {name}  ·  {from} +"));
+                            tree.label(ui, &self.i18n, f, "✔", &format!("{from} +"));
                             let text = offsets.entry(bare.to_string()).or_default();
                             let r = ui
                                 .add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text(self.i18n.t("offset", "offset")))
@@ -2112,11 +2178,7 @@ impl Viewer {
                     }
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
-                            let sense = if waiting { egui::Sense::click() } else { egui::Sense::hover() };
-                            let label = ui.add(egui::Label::new(format!("✔ {name}  ·  {op}")).sense(sense));
-                            if label.clicked() {
-                                picked = Some((bare.to_string(), label.interact_pointer_pos().unwrap_or(label.rect.center())));
-                            }
+                            tree.label(ui, &self.i18n, f, "✔", op);
                             if crate::icons::button(
                                 ui,
                                 crate::icons::Icon::Edit,
@@ -2131,10 +2193,10 @@ impl Viewer {
                         });
                     }
                     None => {
-                        ui.label(format!("✔ {name}  ·  {op}"));
+                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, "✔", op));
                     }
                     Some(e) => {
-                        ui.colored_label(ui.visuals().error_fg_color, format!("✖ {name}  ·  {op}"));
+                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, "✖", op));
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
@@ -2181,6 +2243,30 @@ impl Viewer {
             }
         });
         self.offsets = offsets;
+        let (clicked, renamed) = (tree.clicked.take(), tree.renamed.take());
+        self.tree = tree;
+        // A sketch row clicked while an extrusion waits for one gives it its sketch, and where;
+        // otherwise a click selects a row, a second click on the selected row renames it.
+        let is_sketch = |key: &str| {
+            self.model
+                .as_ref()
+                .is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == key && f["op"] == "sketch"))
+        };
+        let mut picked: Option<(String, egui::Pos2)> = None;
+        if let Some(key) = clicked {
+            if waiting && is_sketch(&key) {
+                picked = Some((key, ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()));
+            } else if self.tree.selected.as_ref() == Some(&key) {
+                self.start_rename();
+            } else {
+                self.tree.selected = Some(key);
+            }
+        }
+        if let Some((name, text)) = renamed {
+            // The key itself or nothing: back to the key.
+            let title = Some(text.trim()).filter(|t| !t.is_empty() && *t != name);
+            self.send(Request::Command("set_title", json!({"name": name, "title": title})));
+        }
         let edit = edit.or(toggle);
         if let Some(f) = show_flat {
             self.flat.chosen = Some(f);
@@ -2202,6 +2288,16 @@ impl Viewer {
         }
         if let Some(name) = enter {
             self.enter(name);
+        }
+    }
+
+    /// The selected feature's title made a field: the title, or the key without one.
+    fn start_rename(&mut self) {
+        let Some(key) = self.tree.selected.clone() else { return };
+        let feature = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == key.as_str()));
+        if let Some(f) = feature {
+            let text = f["title"].as_str().unwrap_or(&key).to_string();
+            self.tree.renaming = Some(Renaming { key, text, fresh: true });
         }
     }
 
@@ -2387,11 +2483,16 @@ impl Viewer {
             let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
             self.under = offset.and_then(|(x, y)| {
                 let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
-                // The nearest along the ray: a face, an origin plane or a work plane.
-                let face = m.scene.pick(origin, dir).map(|f| (f.distance, Under::Face(f)));
-                let first = crate::origin::hit(&crate::origin::origin_squares(), origin, dir, size).map(|(t, k)| (t, Under::Origin(k)));
-                let planes = crate::origin::hit(&squares, origin, dir, size).map(|(t, k)| (t, Under::Work(k)));
-                [face, first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
+                // A face of a body; off the bodies, the nearest origin or work plane along the ray.
+                // The planes are larger than the model: the nearest would be a plane in front of
+                // the face aimed at, and there is room to take a plane beside the bodies.
+                if let Some(f) = m.scene.pick(origin, dir) {
+                    return Some(Under::Face(f));
+                }
+                let first = crate::origin::hit(&crate::origin::origin_squares(), origin, dir, size);
+                let planes = crate::origin::hit(&squares, origin, dir, size);
+                let (first, planes) = (first.map(|(t, k)| (t, Under::Origin(k))), planes.map(|(t, k)| (t, Under::Work(k))));
+                [first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
             });
             if r.clicked() {
                 chosen = self.under.map(|u| (purpose, u));
@@ -3733,6 +3834,7 @@ impl Viewer {
             | Act::RuleTable => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Extrude => self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch")),
+            Act::Rename => self.tree.selected.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
@@ -3791,6 +3893,7 @@ impl Viewer {
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
             Act::RuleTable => self.toggle_table(crate::table::Source::Rules),
+            Act::Rename => self.start_rename(),
             Act::NewSketch => {
                 self.leave();
                 self.start_sketch();
@@ -3936,6 +4039,7 @@ impl Viewer {
         ui.menu_button(self.i18n.t("menu-edit", "Edit").to_string(), |ui| {
             self.item(ui, Act::Undo, true);
             self.item(ui, Act::Redo, true);
+            self.item(ui, Act::Rename, true);
         });
         ui.menu_button(self.i18n.t("menu-view", "View").to_string(), |ui| {
             self.item(ui, Act::Home, true);
@@ -4269,6 +4373,7 @@ mod tests {
             edits,
             new_parameter: Default::default(),
             offsets: planes,
+            tree: TreeRows::default(),
             local_error: None,
             table: None,
             materials: Vec::new(),
@@ -5139,6 +5244,88 @@ mod tests {
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("undo", _))), "F2 undoes");
     }
 
+    /// The tree of a model whose `outline` is titled "Plate", and the requests it sends; the keys
+    /// and the rows run as in the window.
+    fn titled_tree() -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.model.as_mut().unwrap().inspect["features"][0]["title"] = json!("Plate");
+        let h = egui_kittest::Harness::builder().with_size([400.0, 300.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                v.features_section(ui);
+            },
+            v,
+        );
+        (h, inbox)
+    }
+
+    fn titles(inbox: &std::sync::mpsc::Receiver<Request>) -> Vec<Json> {
+        inbox.try_iter().filter_map(|r| if let Request::Command("set_title", p) = r { Some(p) } else { None }).collect()
+    }
+
+    fn press(h: &mut egui_kittest::Harness<'_, Viewer>, key: egui::Key) {
+        h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+    }
+
+    /// A row shows its title, and the key in the tooltip.
+    #[test]
+    fn a_row_shows_its_title() {
+        let (mut h, _inbox) = titled_tree();
+        h.run();
+        h.get_by_label("✔ Plate  ·  sketch").hover();
+        h.run();
+        h.get_by_label("Key: outline — commands and the agent use it");
+    }
+
+    /// A click selects, F2 opens the field with the title; Enter sends the new one. The key
+    /// typed back sends none (the title is removed); E in the field starts no tool.
+    #[test]
+    fn a_title_typed_in_the_row() {
+        let (mut h, inbox) = titled_tree();
+        h.run();
+        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.run();
+        assert_eq!(h.state().tree.selected.as_deref(), Some("outline"));
+        press(&mut h, egui::Key::F2);
+        h.run();
+        assert_eq!(h.state().tree.renaming.as_ref().map(|r| r.text.as_str()), Some("Plate"));
+        h.event(egui::Event::Text("Deska".into()));
+        h.run();
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(titles(&inbox), vec![json!({"name": "outline", "title": "Deska"})]);
+        assert!(h.state().tree.renaming.is_none());
+
+        press(&mut h, egui::Key::F2);
+        h.run();
+        h.event(egui::Event::Text("outline".into()));
+        h.run();
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(titles(&inbox), vec![json!({"name": "outline", "title": null})]);
+    }
+
+    /// A second click on the selected row opens the field; Esc drops it, sending nothing.
+    #[test]
+    fn a_second_click_renames_and_esc_cancels() {
+        let (mut h, inbox) = titled_tree();
+        h.run();
+        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.run();
+        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.run();
+        h.run();
+        assert!(h.state().tree.renaming.is_some());
+        h.event(egui::Event::Text("x".into()));
+        h.run();
+        press(&mut h, egui::Key::Escape);
+        h.run();
+        assert!(h.state().tree.renaming.is_none());
+        assert!(titles(&inbox).is_empty());
+        // Esc again clears the selection.
+        press(&mut h, egui::Key::Escape);
+        assert!(h.state().tree.selected.is_none());
+    }
+
     /// A folder `name` in the temporary folder, emptied; a project if `project`.
     fn folder(name: &str, project: bool) -> PathBuf {
         let d = std::env::temp_dir().join(format!("datum-view-{name}"));
@@ -5652,5 +5839,24 @@ mod tests {
         h.get_by_label("✔ other  ·  sketch").click();
         h.run();
         assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
+    }
+
+    /// In the base, a part as the base has it is a body of the scene, not around it: a ray from
+    /// above takes its top face, as S needs to put a sketch on it.
+    #[test]
+    fn the_bases_parts_are_picked() {
+        let mut s = Session::default();
+        let square = json!({"points": {"a": [0, 0], "b": [40, 0], "c": [40, 30], "d": [0, 30]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+        s.execute("add", &json!({"name": "outline", "op": "sketch", "sketch": square})).unwrap();
+        s.execute("extrude", &json!({"name": "plate", "sketch": "outline", "mode": "new", "z1": 10})).unwrap();
+        let p = picture(&s, None, &mut MeshCache::default());
+        assert_eq!(p.bodies, ["plate"]);
+        let down = datum_math::Vec3::new(0.0, 0.0, -1.0);
+        let hit = p.scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).expect("the top face");
+        assert_eq!((hit.distance, p.bodies[hit.body].as_str()), (90.0, "plate"));
+        // Hidden, it is neither drawn nor picked.
+        s.execute("show", &json!({"part": "plate", "visible": false})).unwrap();
+        assert!(picture(&s, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
     }
 }
