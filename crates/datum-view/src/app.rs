@@ -610,8 +610,29 @@ struct Viewer {
     viewport: egui::Rect,
 }
 
+/// What the form of E makes, decided when it opens.
+enum Kind {
+    Extrusion,
+    /// Sheet metal from an open chain: a curve of it, and the end it starts at.
+    Sheet(String, Option<String>),
+    /// A face of sheet metal (a plate) from closed contours, by the toolbar's sheet rule.
+    Face,
+}
+
+impl Kind {
+    /// The command it sends, also its features' names: `extrude1`, `sheet1`, `plate1`.
+    fn command(&self) -> &'static str {
+        match self {
+            Self::Extrusion => "extrude",
+            Self::Sheet(..) => "sheet",
+            Self::Face => "plate",
+        }
+    }
+}
+
 /// An extrusion of a whole sketch being set up: the form of depth, symmetry and mode, with the
-/// command previewed at every change. On an open chain it is sheet metal's: width, symmetry, side.
+/// command previewed at every change. On an open chain it is sheet metal's: width, symmetry, side;
+/// with a sheet rule on closed contours, a face's: thickness from the rule, symmetry, side.
 struct Extrusion {
     /// The sketch to extrude; none while the engineer is to click one in the tree.
     sketch: Option<String>,
@@ -625,8 +646,9 @@ struct Extrusion {
     through: bool,
     /// What the engineer chose; none: suggested from the depth and where the sketch lies.
     mode: Option<&'static str>,
-    /// Sheet metal from an open chain: a curve of it, and the end it starts at.
-    chain: Option<(String, Option<String>)>,
+    kind: Kind,
+    /// A face on the back of the sketch.
+    flip: bool,
     /// Sheet metal's side of the path its thickness lies on.
     side: datum_ops::Side,
     /// Where the form (or the hint) is, by the cursor of the key or the click that asked.
@@ -645,7 +667,23 @@ impl Extrusion {
     /// a new body takes `next_rule`, the rule of a part (of a sheet, for sheet metal).
     fn params(&self, sketch: &str, on_face: bool, next_rule: Option<&str>) -> (&'static str, Json) {
         let depth = value_of(&self.depth);
-        if let Some((path, start)) = &self.chain {
+        if let Kind::Face = self.kind {
+            let mut params = json!({"name": self.name, "sketch": sketch});
+            if !self.profiles.is_empty() {
+                params["profiles"] = json!(self.profiles);
+            }
+            if self.flip && !self.symmetric {
+                params["flip"] = json!(true);
+            }
+            if self.symmetric {
+                params["symmetric"] = json!(true);
+            }
+            if let Some(rule) = next_rule {
+                params["rule"] = json!(rule);
+            }
+            return ("plate", params);
+        }
+        if let Kind::Sheet(path, start) = &self.kind {
             let mut params = json!({"name": self.name, "sketch": sketch, "path": path, "side": self.side, "z1": depth});
             if let Some(start) = start {
                 params["start"] = json!(start);
@@ -2947,8 +2985,15 @@ impl Viewer {
         let mut unused = features.iter().filter(|f| f["op"] == "sketch").filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
         let lone = unused.next().filter(|_| unused.next().is_none());
         let sketch = open.or_else(|| lone.map(String::from));
-        let base = if chain.is_some() { "sheet" } else { "extrude" };
-        let name = (1..).map(|k| format!("{base}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default();
+        let kind = match chain {
+            Some((path, start)) => Kind::Sheet(path, start),
+            None if self.sheet_rule().is_some() => Kind::Face,
+            None => Kind::Extrusion,
+        };
+        let name = (1..)
+            .map(|k| format!("{}{k}", kind.command()))
+            .find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str())))
+            .unwrap_or_default();
         self.extrusion = Some(Extrusion {
             sketch,
             name,
@@ -2957,7 +3002,8 @@ impl Viewer {
             symmetric: false,
             through: false,
             mode: None,
-            chain,
+            kind,
+            flip: false,
             side: datum_ops::Side::Left,
             at,
             sent: None,
@@ -2991,10 +3037,10 @@ impl Viewer {
             }
         }
         let Some(x) = &self.extrusion else { return };
-        let sheet = x.chain.is_some();
-        let next_rule = if sheet { self.sheet_rule() } else { self.part_rule() };
+        let (sheet, face) = (matches!(x.kind, Kind::Sheet(..)), matches!(x.kind, Kind::Face));
+        let next_rule = if sheet || face { self.sheet_rule() } else { self.part_rule() };
         // Sheet metal is made by a sheet rule: without one the form only says so.
-        let refused = sheet && next_rule.is_none();
+        let refused = (sheet || face) && next_rule.is_none();
         let Some(x) = &mut self.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         let Some(sketch) = x.sketch.clone() else {
@@ -3019,6 +3065,14 @@ impl Viewer {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 let through = x.through && shown == "cut";
                 ui.horizontal(|ui| {
+                    if face {
+                        ui.label(self.i18n.f(
+                            "plate-thickness",
+                            "Thickness from the rule: { $rule }",
+                            &[("rule", next_rule.as_deref().unwrap_or_default())],
+                        ));
+                        return;
+                    }
                     ui.label(if sheet { self.i18n.t("sheet-width", "Width") } else { self.i18n.t("extrude-depth", "Depth") });
                     let id = egui::Id::new("datum_extrusion_depth");
                     let mut out = egui::TextEdit::singleline(&mut x.depth).id(id).desired_width(90.0).interactive(!through).show(ui);
@@ -3040,6 +3094,12 @@ impl Viewer {
                         x.symmetric = !x.symmetric;
                     }
                     ui.separator();
+                    if face {
+                        if ui.add_enabled(!x.symmetric, egui::Button::new(self.i18n.t("plate-flip", "⇄ Other side"))).clicked() {
+                            x.flip = !x.flip;
+                        }
+                        return;
+                    }
                     if sheet {
                         let label = self.i18n.f("side", "Side: { $side }", &[("side", side_name(&self.i18n, x.side))]);
                         if ui.button(label).on_hover_text(self.i18n.t("side-hint", "Thickness side of the path: left, right, middle")).clicked() {
@@ -3068,6 +3128,10 @@ impl Viewer {
                     None => {
                         ui.weak("…");
                     }
+                    Some(Ok(reply)) if face => {
+                        let (body, rule) = (reply["body"].as_str().unwrap_or_default(), next_rule.as_deref().unwrap_or_default());
+                        ui.label(self.i18n.f("plate-preview", "Face · { $body } · { $rule }", &[("body", body), ("rule", rule)]));
+                    }
                     Some(Ok(reply)) if sheet => {
                         let (body, rule) = (reply["body"].as_str().unwrap_or_default(), next_rule.as_deref().unwrap_or_default());
                         ui.label(self.i18n.f("sheet-preview", "Sheet · { $body } · { $rule }", &[("body", body), ("rule", rule)]));
@@ -3083,7 +3147,7 @@ impl Viewer {
             });
         });
         let params = x.params(&sketch, on_face, next_rule.as_deref()).1;
-        let command = if sheet { "sheet" } else { "extrude" };
+        let command = x.kind.command();
         if esc {
             self.close_extrusion();
         } else if !refused {
@@ -6258,10 +6322,34 @@ mod tests {
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)) | Request::Command(..))));
     }
 
-    /// A curve of the closed outline still gives an extrusion.
+    /// With a sheet rule chosen, E on a curve of the closed outline asks for a face of sheet
+    /// metal: no depth, the side flipped by its button, Enter on a fresh preview makes it.
+    #[test]
+    fn e_on_a_closed_contour_with_a_sheet_rule_makes_a_face() {
+        let (mut h, inbox) = with_open_chain("bottom", Some("Лист"));
+        h.key_press(egui::Key::E);
+        h.run();
+        let previews = |inbox: &std::sync::mpsc::Receiver<Request>| -> Vec<Json> {
+            inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("plate", p))) = r { Some(p) } else { None }).collect()
+        };
+        let first = previews(&inbox).pop().expect("a plate preview");
+        assert_eq!((&first["profiles"], &first["rule"], &first["name"]), (&json!(["bottom"]), &json!("Лист"), &json!("plate1")));
+        assert!(first.get("z1").is_none() && first.get("flip").is_none());
+        h.get_by_label("Thickness from the rule: Лист");
+        h.get_by_label("⇄ Other side").click();
+        h.run();
+        let flipped = previews(&inbox).pop().expect("a preview of the other side");
+        assert_eq!(flipped["flip"], true);
+        h.state_mut().model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "plate1"}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("plate", p) if p == flipped)));
+    }
+
+    /// With a part rule (or none) a curve of the closed outline gives an extrusion.
     #[test]
     fn e_on_a_closed_contour_still_extrudes() {
-        let (mut h, inbox) = with_open_chain("bottom", Some("Лист"));
+        let (mut h, inbox) = with_open_chain("bottom", None);
         h.key_press(egui::Key::E);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -6427,7 +6515,8 @@ mod tests {
             symmetric: false,
             through: false,
             mode: Some(mode),
-            chain: None,
+            kind: Kind::Extrusion,
+            flip: false,
             side: datum_ops::Side::Left,
             at: egui::Pos2::ZERO,
             sent: None,
