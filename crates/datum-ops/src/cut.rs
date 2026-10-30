@@ -147,6 +147,25 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
 
     // No other face crosses the cut between the two, or reaches a pocket's floor or a boss's top.
     let other: Vec<Ix> = (0..target.faces().len() as Ix).filter(|&h| h as usize != f && Some(h) != g).collect();
+    // A floor or a top in the plane of a face it meets is said so, with what to do.
+    if let (Reach::Depth(d), Frame::Plane { z, .. }) = (reach, &frame) {
+        let level = |h: &&Ix| {
+            let face = &target.faces()[**h as usize];
+            let parallel = matches!(face.surface, Surface::Plane(p) if p.normal.cross(*z) == Vec3::ZERO);
+            parallel && target.face_loops(**h).flat_map(|l| target.loop_points(l)).next().is_some_and(|p| frame.depth(p) == end)
+        };
+        for &h in other.iter().filter(level) {
+            let loops = outline(target, h, &frame)?;
+            let meets = |p: &ProfileLoop| loops.iter().any(|l| p.touches(l) || l.winding(p.points[0]) != 0 || p.winding(l.points[0]) != 0);
+            if profiles.iter().any(meets) {
+                return Err(unsupported(if d < 0.0 {
+                    "its floor lies on a face of the body: make it shallower, or cut through".into()
+                } else {
+                    "its top lies on a face of the body: make it lower or higher".into()
+                }));
+            }
+        }
+    }
     let span = match reach {
         Reach::Through => Span { lo: end, hi: 0.0, closed: [false, false] },
         Reach::Depth(d) if d < 0.0 => Span { lo: d, hi: 0.0, closed: [true, false] },

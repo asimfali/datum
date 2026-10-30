@@ -190,6 +190,11 @@ fn what_a_pocket_or_a_boss_refuses() {
         let r = extrude("x", &plate, &top, circle(30.0, 30.0, 10.0), pocket_of(depth));
         assert!(matches!(r, Err(BrepError::Unsupported(_))), "{depth}: {:?}", r.map(|b| b.volume()));
     }
+    // On the bottom face exactly: said so, with what to do.
+    match extrude("x", &plate, &top, circle(30.0, 30.0, 10.0), pocket_of(-10.0)) {
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("floor lies on a face of the body") && m.contains("cut through"), "{m}"),
+        r => panic!("{:?}", r.map(|b| b.volume())),
+    }
     // Over a hole made earlier, inside the profile.
     let through = serde_json::json!({"mode": "cut", "through": true});
     let holed = extrude("hole", &plate, &top, circle(30.0, 30.0, 6.0), through).unwrap();
