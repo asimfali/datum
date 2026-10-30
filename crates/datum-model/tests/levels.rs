@@ -74,9 +74,9 @@ fn variants_follow_their_parent() {
         levels["levels"],
         json!([
             {"name": "long", "parent": null, "depth": 0, "parameters": {"w": 200.0}, "features": [],
-             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": [], "part": "plate", "output": ["plate"]},
+             "changed": [], "own": [], "parameters_set": ["w"], "own_parameters": [], "part": "plate", "output": ["plate"], "rule": null},
             {"name": "long_holed", "parent": "long", "depth": 1, "parameters": {}, "features": ["outline"],
-             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": [], "part": "plate", "output": ["plate"]}
+             "changed": ["outline"], "own": [], "parameters_set": [], "own_parameters": [], "part": "plate", "output": ["plate"], "rule": null}
         ])
     );
     // Back as the parent has it: the hole goes, then the length.

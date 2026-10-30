@@ -581,6 +581,12 @@ struct Viewer {
     extrusion: Option<Extrusion>,
     /// "Select a contour, then E": where it shows, and since when (until a click or a few seconds).
     contour_hint: Option<(egui::Pos2, std::time::Instant)>,
+    /// The part whose body was last clicked in 3D: what the toolbar's material and rule refer to.
+    part: Option<String>,
+    /// The rule for the next new part (E), while no part is active; and the material shown when the
+    /// part has no rule, with the part it was chosen for. Window state, not saved.
+    next_rule: Option<String>,
+    material: Option<(Option<String>, String)>,
 }
 
 /// An extrusion of a whole sketch being set up: the form of depth, symmetry and mode, with the
@@ -610,8 +616,9 @@ struct Extrusion {
 const EXTRUDE_MODES: [&str; 3] = ["new", "join", "cut"];
 
 impl Extrusion {
-    /// The mode in force and the params of the command, for `sketch` (`on_face`: it lies on a face).
-    fn params(&self, sketch: &str, on_face: bool) -> (&'static str, Json) {
+    /// The mode in force and the params of the command, for `sketch` (`on_face`: it lies on a face);
+    /// a new body takes `next_rule`, the rule of a part.
+    fn params(&self, sketch: &str, on_face: bool, next_rule: Option<&str>) -> (&'static str, Json) {
         let depth = value_of(&self.depth);
         let suggested = if depth.as_f64().is_some_and(|d| d < 0.0) {
             "cut"
@@ -631,8 +638,20 @@ impl Extrusion {
         if !self.profiles.is_empty() {
             params["profiles"] = json!(self.profiles);
         }
+        if let (Some(rule), "new") = (next_rule, mode) {
+            params["rule"] = json!(rule);
+        }
         (mode, params)
     }
+}
+
+/// The names of the rules of `material` that suit a part of `kind` (any, if none).
+fn rules_of<'a>(rules: &'a [Json], material: Option<&str>, kind: Option<&str>) -> Vec<&'a str> {
+    rules
+        .iter()
+        .filter(|r| material.is_some_and(|m| r["material"] == m) && kind.is_none_or(|k| r["kind"] == k))
+        .filter_map(|r| r["name"].as_str())
+        .collect()
 }
 
 /// An extrusion mode in words.
@@ -732,7 +751,11 @@ impl Viewer {
             plane_draft: None,
             extrusion: None,
             contour_hint: None,
+            part: None,
+            next_rule: None,
+            material: None,
         };
+        v.reload_library_records();
         if let Some(p) = path {
             v.open(p);
         }
@@ -1474,10 +1497,103 @@ impl Viewer {
                     self.run(ui, act);
                 }
             }
+            ui.separator();
+            self.material_and_rule(ui);
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
             self.open(p);
+        }
+    }
+
+    /// The active part (D169): the variant's, else the one last clicked in 3D.
+    fn active_part(&self) -> Option<String> {
+        let m = self.model.as_ref()?;
+        match m.inspect["level"].as_str() {
+            Some(level) => m.inspect["levels"].as_array()?.iter().find(|l| l["name"] == level)?["part"].as_str().map(String::from),
+            None => self.part.clone(),
+        }
+    }
+
+    /// The rule a new part would take: the one chosen while no part is active, if it is a part's.
+    fn part_rule(&self) -> Option<String> {
+        let rule = self.next_rule.as_ref()?;
+        self.rules.iter().any(|r| r["name"] == *rule && r["kind"] == "part").then(|| rule.clone())
+    }
+
+    /// The toolbar's material and rule of the active part, or of the next new part.
+    fn material_and_rule(&mut self, ui: &mut egui::Ui) {
+        let part = self.active_part();
+        let enabled = self.model.is_some();
+        let features = self.model.iter().flat_map(|m| m.inspect["features"].as_array().into_iter().flatten());
+        // The kind a part's rules must be of: its first feature's; any, for a new part.
+        let kind = part.as_ref().map(|p| if features.clone().any(|f| f["name"] == *p && f["op"] == "sheet") { "sheet" } else { "part" });
+        // The variant's own rule (or the nearest up its chain) while one is active, else the part's.
+        let rule = match (&part, self.model.as_ref()) {
+            (Some(p), Some(m)) => {
+                let row = match m.inspect["level"].as_str() {
+                    Some(level) => m.inspect["levels"].as_array().into_iter().flatten().find(|l| l["name"] == level),
+                    None => m.inspect["parts"].as_array().into_iter().flatten().find(|r| r["part"] == *p),
+                };
+                row.and_then(|r| r["rule"].as_str())
+            }
+            _ => self.next_rule.as_deref(),
+        }
+        .map(String::from);
+        let record = rule.as_ref().and_then(|n| self.rules.iter().find(|r| r["name"] == *n));
+        let material = record
+            .and_then(|r| r["material"].as_str())
+            .map(String::from)
+            .or_else(|| self.material.iter().find(|(p, _)| *p == part).map(|(_, m)| m.clone()));
+        let mut apply: Option<Option<String>> = None;
+        let mut pick_material: Option<Option<String>> = None;
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.label(self.i18n.t("toolbar-material", "Material"));
+            egui::ComboBox::from_id_salt("datum_toolbar_material")
+                .selected_text(material.as_deref().unwrap_or("—"))
+                .show_ui(ui, |ui| {
+                    if ui.selectable_label(material.is_none(), "—").clicked() {
+                        pick_material = Some(None);
+                    }
+                    for name in self.materials.iter().filter_map(|e| e["name"].as_str()) {
+                        let mut r = ui.selectable_label(material.as_deref() == Some(name), name);
+                        if rules_of(&self.rules, Some(name), kind).is_empty() {
+                            r = r.on_hover_text(self.i18n.t("toolbar-no-rules", "No rules of this material: add one in View → Rules"));
+                        }
+                        if r.clicked() {
+                            pick_material = Some(Some(name.to_string()));
+                        }
+                    }
+                })
+                .response
+                .on_hover_text(self.i18n.t("toolbar-material-hint", "The active part's material; with no part, for the next new one"));
+            ui.label(self.i18n.t("toolbar-rule", "Rule"));
+            let rules = material.as_deref().map_or_else(Vec::new, |m| rules_of(&self.rules, Some(m), kind));
+            let r = egui::ComboBox::from_id_salt("datum_toolbar_rule").selected_text(rule.as_deref().unwrap_or("—")).show_ui(ui, |ui| {
+                if ui.selectable_label(rule.is_none(), "—").clicked() {
+                    apply = Some(None);
+                }
+                for name in &rules {
+                    if ui.selectable_label(rule.as_deref() == Some(name), *name).clicked() {
+                        apply = Some(Some(name.to_string()));
+                    }
+                }
+            });
+            r.response.on_hover_text(self.i18n.t(
+                "toolbar-rule-hint",
+                "The active part's rule: material, and for a sheet its thickness and bend radius; with no part, for the next new one (E)",
+            ));
+        });
+        if let Some(chosen) = pick_material {
+            // The first rule of the material; none: the material alone is shown.
+            apply = Some(chosen.as_deref().and_then(|m| rules_of(&self.rules, Some(m), kind).first().map(|r| r.to_string())));
+            self.material = chosen.map(|m| (part.clone(), m));
+        }
+        if let Some(rule) = apply {
+            match part {
+                Some(body) => self.send(Request::Command("set_part", json!({"body": body, "rule": rule}))),
+                None => self.next_rule = rule,
+            }
         }
     }
 
@@ -1503,6 +1619,12 @@ impl Viewer {
                 if let (Some((_, editor)), Some(why)) = (&mut self.table, &m.error) {
                     editor.error = Some(why.clone());
                 }
+            }
+            if m.opened {
+                self.reload_library_records();
+            }
+            if self.part.as_ref().is_some_and(|p| !m.inspect["parts"].as_array().into_iter().flatten().any(|r| r["part"] == *p)) {
+                self.part = None;
             }
             self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
@@ -2526,17 +2648,20 @@ impl Viewer {
                 self.picking = None;
             }
         }
-        // A click on a body in 3D (no pick asked for) brings its flat pattern forward (D164).
+        // A click on a body in 3D (no pick asked for) takes its part for the toolbar's material and
+        // rule, and brings its flat pattern forward (D164).
         if self.picking.is_none()
             && self.sketch.is_none()
             && r.clicked()
-            && crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
             && let (Some(m), Some((x, y))) = (&self.model, offset)
         {
             let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect);
-            let named = m.scene.pick(origin, dir).and_then(|f| m.bodies.get(f.body)).filter(|n| m.flats.iter().any(|(f, _)| f == *n)).cloned();
-            if named.is_some() {
-                self.flat.chosen = named;
+            let named = m.scene.pick(origin, dir).and_then(|f| m.bodies.get(f.body)).cloned();
+            self.part = named.clone().filter(|n| m.inspect["parts"].as_array().into_iter().flatten().any(|p| p["part"] == *n));
+            if crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
+                && let Some(n) = named.filter(|n| m.flats.iter().any(|(f, _)| f == n))
+            {
+                self.flat.chosen = Some(n);
             }
         }
         // What a pick refers to in a feature: an origin plane, a work plane, a body's face.
@@ -2761,6 +2886,7 @@ impl Viewer {
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
         }
+        let next_rule = self.part_rule();
         let Some(x) = &mut self.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         let Some(sketch) = x.sketch.clone() else {
@@ -2779,7 +2905,7 @@ impl Viewer {
         });
         // The preview of what the form says now; until it comes, none (a reply to an earlier
         // depth must not let Enter make this one).
-        let (shown, params) = x.params(&sketch, on_face);
+        let (shown, params) = x.params(&sketch, on_face, next_rule.as_deref());
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -2834,7 +2960,7 @@ impl Viewer {
                 }
             });
         });
-        let params = x.params(&sketch, on_face).1;
+        let params = x.params(&sketch, on_face, next_rule.as_deref()).1;
         if esc {
             self.close_extrusion();
         } else if enter && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params) {
@@ -4508,6 +4634,9 @@ mod tests {
             plane_draft: None,
             extrusion: None,
             contour_hint: None,
+            part: None,
+            next_rule: None,
+            material: None,
         };
         (v, inbox)
     }
@@ -6052,5 +6181,79 @@ mod tests {
         let hole = sk.placed.as_ref().unwrap().solved.points["h1"];
         assert_eq!(picks(hole.x, hole.y), ["left_hole"]);
         assert!(picks(500.0, 500.0).is_empty());
+    }
+
+    /// The rules offered: of the material, and of the part's kind.
+    #[test]
+    fn rules_filter_by_material_and_kind() {
+        let rules = [
+            json!({"name": "s1", "kind": "sheet", "material": "steel"}),
+            json!({"name": "p1", "kind": "part", "material": "steel"}),
+            json!({"name": "p2", "kind": "part", "material": "alu"}),
+        ];
+        assert_eq!(rules_of(&rules, Some("steel"), None), ["s1", "p1"]);
+        assert_eq!(rules_of(&rules, Some("steel"), Some("part")), ["p1"]);
+        assert_eq!(rules_of(&rules, Some("alu"), Some("sheet")), Vec::<&str>::new());
+        assert!(rules_of(&rules, None, None).is_empty());
+    }
+
+    /// The toolbar's lists over a model with one part `plate` and the library's records.
+    fn toolbar_lists() -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.model.as_mut().unwrap().inspect["parts"] = json!([{"part": "plate", "rule": null}]);
+        v.materials = vec![json!({"name": "steel"})];
+        v.rules =
+            vec![json!({"name": "body", "kind": "part", "material": "steel"}), json!({"name": "plate_s", "kind": "sheet", "material": "steel"})];
+        let h = egui_kittest::Harness::builder().with_size([900.0, 200.0]).build_ui_state(|ui, v: &mut Viewer| v.toolbar(ui), v);
+        (h, inbox)
+    }
+
+    /// With no part active the rule chosen is for the next new body of E: a part's rule only, in
+    /// a new body only.
+    #[test]
+    fn the_rule_of_the_next_part_goes_with_e() {
+        let (mut h, _inbox) = toolbar_lists();
+        h.run();
+        h.state_mut().material = Some((None, "steel".into()));
+        h.run();
+        h.get_all_by_role(egui::accesskit::Role::ComboBox).nth(1).unwrap().click();
+        h.run();
+        h.get_by_label("body").click();
+        h.run();
+        assert_eq!(h.state().next_rule.as_deref(), Some("body"));
+        let x = |mode| Extrusion {
+            sketch: None,
+            name: "e".into(),
+            profiles: Vec::new(),
+            depth: "5".into(),
+            symmetric: false,
+            through: false,
+            mode: Some(mode),
+            at: egui::Pos2::ZERO,
+            sent: None,
+            selected: false,
+        };
+        let rule = h.state().part_rule();
+        assert_eq!(x("new").params("s", false, rule.as_deref()).1["rule"], "body");
+        assert!(x("join").params("s", false, rule.as_deref()).1.get("rule").is_none());
+        assert!(x("cut").params("s", false, rule.as_deref()).1.get("rule").is_none());
+        h.state_mut().next_rule = Some("plate_s".into());
+        assert_eq!(h.state().part_rule(), None);
+    }
+
+    /// With a part active, the rule chosen is set on it.
+    #[test]
+    fn the_rule_of_the_active_part_is_set() {
+        let (mut h, inbox) = toolbar_lists();
+        h.state_mut().part = Some("plate".into());
+        h.state_mut().material = Some((Some("plate".into()), "steel".into()));
+        h.run();
+        h.get_all_by_role(egui::accesskit::Role::ComboBox).nth(1).unwrap().click();
+        h.run();
+        h.get_by_label("body").click();
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(&sent[..], [Request::Command("set_part", p)] if *p == json!({"body": "plate", "rule": "body"})), "{sent:?}");
+        assert_eq!(h.state().next_rule, None);
     }
 }
