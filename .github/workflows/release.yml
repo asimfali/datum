@@ -45,6 +45,10 @@ jobs:
           mkdir -p "$dir"
           cp -r examples "$dir"/
           cp -r tests/models "$dir"/models
+          # Starter materials and rules (sketch elements are built in): a tester extrudes with a
+          # rule at once; an enterprise replaces them with its own.
+          mkdir -p "$dir"/library
+          cp -r library/material library/rule "$dir"/library/
           cp README.md README.ru.md TESTERS.md LICENSE-MIT LICENSE-APACHE "$dir"/
           if [ "${{ runner.os }}" = Windows ]; then
             cp target/release/datum.exe "$dir"/

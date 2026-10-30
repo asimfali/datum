@@ -135,6 +135,8 @@ fn variants_take_the_rule() {
     assert_eq!((&p["level"], &p["rule"], &p["mass"]), (&Value::Null, &json!("Пластик"), &Value::Null), "the root's own: {p}");
     let levels = run(&mut s, "levels", json!({}));
     assert_eq!(levels["parts"][0]["rule"], "Пластик", "{levels}");
+    let rule = |l: &str| levels["levels"].as_array().unwrap().iter().find(|v| v["name"] == l).unwrap()["rule"].clone();
+    assert_eq!((rule("steel"), rule("steel_long")), (json!("Сталь"), json!("Сталь")), "each variant's rule in force: {levels}");
 }
 
 /// A variant of another part cannot be given a part's rule.

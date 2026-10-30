@@ -1036,6 +1036,32 @@ mod tests {
     }
 
     #[test]
+    fn the_starter_library_is_valid() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../library/");
+        let mut materials: Vec<String> = Vec::new();
+        for level in ["material", "rule"] {
+            let mut paths: Vec<_> = std::fs::read_dir(format!("{root}{level}"))
+                .unwrap()
+                .map(|f| f.unwrap().path())
+                .filter(|p| p.extension().is_some_and(|x| x == "json"))
+                .collect();
+            paths.sort();
+            for path in paths {
+                let file = path.display().to_string();
+                let e: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+                let valid = check(level, &e);
+                assert!(valid.is_ok(), "{file}: {valid:?}");
+                if level == "material" {
+                    materials.push(e["name"].as_str().unwrap().to_string());
+                } else {
+                    let of = e["material"].as_str().unwrap_or_default();
+                    assert!(materials.iter().any(|m| m == of), "{file}: no material `{of}` in the library");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn presets_follow_their_parameters() {
         let mut e = element();
         e["presets"]["short"]["half"] = json!(3);

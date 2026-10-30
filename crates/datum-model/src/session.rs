@@ -1137,7 +1137,9 @@ impl Session {
                                    "features": l.features.iter().filter_map(|f| f.get("name").cloned()).collect::<Vec<_>>()});
                 match self.doc.changes(&name).and_then(|c| self.doc.graph(Some(&name)).map(|g| (c, g))) {
                     Ok(([changed, own, set, new], g)) => {
-                        v["part"] = json!(self.doc.part_of(&name).ok());
+                        let part = self.doc.part_of(&name).ok();
+                        v["rule"] = json!(part.as_ref().and_then(|p| self.doc.rule(p, Some(&name))));
+                        v["part"] = json!(part);
                         v["output"] = json!(self.output_of(Some(&name), &g));
                         v["changed"] = json!(changed);
                         v["own"] = json!(own);
