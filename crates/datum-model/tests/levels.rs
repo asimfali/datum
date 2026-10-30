@@ -296,8 +296,8 @@ fn a_file_with_parts_as_levels_is_brought_over() {
     let levels = run(&mut s, "levels", json!({}));
     assert_eq!(
         levels["parts"],
-        json!([{"part": "lid", "name": "Крышка", "chosen": "Крышка", "visible": false},
-               {"part": "plate", "name": "Плита", "chosen": "Длинная", "visible": true}]),
+        json!([{"part": "lid", "name": "Крышка", "chosen": "Крышка", "visible": false, "rule": null},
+               {"part": "plate", "name": "Плита", "chosen": "Длинная", "visible": true, "rule": null}]),
         "the part levels by name, each a body of the root"
     );
     let names: Vec<&str> = levels["levels"].as_array().unwrap().iter().map(|l| l["name"].as_str().unwrap()).collect();

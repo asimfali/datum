@@ -693,22 +693,32 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "product",
-        description: "The product: each part in its chosen variant (`choose`; null: the root's own), with its body (volume, centre of mass).",
+        description: "The product: each part in its chosen variant (`choose`; null: the root's own), with its body (volume, centre of mass), \
+                      its `rule` there, the rule's `material` and the part's `mass` in kg (null: no rule, or the library lacks what it \
+                      needs; `rule_missing`: the rule is not in the library).",
         params: no_params,
         run: |s, _| {
+            let rules = library::load("rule", s.project().as_deref());
+            let materials = library::load("material", s.project().as_deref());
             let parts: Vec<Value> = s
                 .product()
                 .into_iter()
                 .map(|(part, level, bodies)| {
+                    let mut volume = 0.0;
                     let out: Vec<Value> = match bodies {
                         Ok(b) => b
                             .iter()
                             .filter_map(|(n, v)| v.body().map(|b| (n, b.mass_properties())))
-                            .map(|(n, m)| json!({"name": n, "volume": m.volume, "centroid": m.centroid}))
+                            .map(|(n, m)| {
+                                volume += m.volume;
+                                json!({"name": n, "volume": m.volume, "centroid": m.centroid})
+                            })
                             .collect(),
                         Err(e) => vec![json!({"error": e})],
                     };
-                    json!({"part": part, "name": s.doc.part_name(&part), "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out})
+                    let mut v = json!({"part": part, "name": s.doc.part_name(&part), "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out});
+                    rule_report(&mut v, s.doc.rule(&part, level.as_deref()), &rules, &materials, volume);
+                    v
                 })
                 .collect();
             Ok(json!({ "parts": parts }))
@@ -858,6 +868,20 @@ fn feature_schema() -> Value {
         "required": ["name", "op"],
         "allOf": [schemars::schema_for!(Op)]
     })
+}
+
+/// Sets `rule`, `material` and `mass` (kg, from `volume` in mm³) of a part in `v`, null where the
+/// library lacks what they need or the part has no body; `rule_missing` when it lacks the rule.
+fn rule_report(v: &mut Value, rule: Option<String>, rules: &library::Library, materials: &library::Library, volume: f64) {
+    let found = rule.as_deref().and_then(|r| rules.get(r));
+    let material = found.and_then(|r| r.element["material"].as_str());
+    let density = material.and_then(|m| materials.get(m)).and_then(|m| m.element["density"].as_f64());
+    if rule.is_some() && found.is_none() {
+        v["rule_missing"] = json!(true);
+    }
+    v["mass"] = json!(density.filter(|_| volume > 0.0).map(|d| volume * d * 1e-9));
+    v["material"] = json!(material);
+    v["rule"] = json!(rule);
 }
 
 fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
@@ -1114,7 +1138,10 @@ impl Session {
             .doc
             .parts()
             .into_iter()
-            .map(|p| json!({"part": p, "name": self.doc.part_name(&p), "chosen": self.doc.chosen(&p), "visible": !self.doc.hidden.contains(&p)}))
+            .map(|p| {
+                json!({"part": p, "name": self.doc.part_name(&p), "chosen": self.doc.chosen(&p), "visible": !self.doc.hidden.contains(&p),
+                                "rule": self.doc.rule(&p, None)})
+            })
             .collect();
         let sets: Vec<&String> = self.doc.sets.keys().collect();
         json!({"active": self.active, "parts": parts, "levels": list, "sets": sets, "set": self.doc.current_set()})
@@ -1299,11 +1326,11 @@ impl Session {
     fn set_rule(&mut self, part: &str, rule: Option<String>) -> Result<(), String> {
         if let Some(r) = &rule {
             let rules = library::load("rule", self.project().as_deref());
-            let e =
-                rules.entries.iter().find(|e| e.name() == r).ok_or_else(|| format!("no rule `{r}` in the library (`library` with level `rule`)"))?;
+            let e = rules.get(r).ok_or_else(|| format!("no rule `{r}` in the library (`library` with level `rule`)"))?;
             let (kind, of) = (e.element["kind"].as_str().unwrap_or_default(), self.doc.kind(part));
             if kind != of {
-                return Err(format!("rule `{r}` is for {kind} parts; `{part}` is a {of} part, as its first feature made it"));
+                let word = |k: &str| if k == "sheet" { "a sheet metal" } else { "an ordinary" };
+                return Err(format!("rule `{r}` is for {} part; `{part}` is {} part, as its first feature made it", word(kind), word(of)));
             }
             if kind == "sheet" {
                 return Err(format!("rule `{r}`: sheet metal rules come with sheet metal parts (0.4.6)"));
