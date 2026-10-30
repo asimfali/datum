@@ -1,5 +1,6 @@
 //! The `extrude` command (D185, D188): an extrusion of a sketch added with its target body found
-//! the way the window finds it. Its mode is given, never guessed: the agent sees no preview.
+//! the way the window finds it, and the part's rule if given (D189). Its mode is given, never
+//! guessed: the agent sees no preview.
 
 use datum_graph::{NodeIx, Op};
 use datum_ops::Mode;
@@ -15,7 +16,7 @@ pub(super) const MODE_REQUIRED: &str = "an extrusion needs `mode`: `new` (a body
 
 impl Session {
     /// Adds the extrusion the `extrude` command's parameters `p` describe and says what it is:
-    /// its mode and the body it began or changed.
+    /// its mode, the body it began or changed, and that part's rule.
     pub(super) fn extrude(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
         let name = text(p, "name")?;
         let mode: Mode = serde_json::from_value(p.get("mode").cloned().ok_or(MODE_REQUIRED)?).map_err(|e| format!("`mode`: {e}"))?;
@@ -36,9 +37,14 @@ impl Session {
         fields.insert("name".into(), name.into());
         fields.insert("inputs".into(), json!(inputs));
         let ix = add_feature(&mut self.graph, fields)?;
+        let body = target.map_or(name.into(), |(begun, _)| begun);
+        if let Some(r) = p.get("rule") {
+            self.set_rule(&body, r.as_str().map(String::from))?;
+        }
         let mut reply = self.rebuild_recording(ix);
         reply["mode"] = mode.name().into();
-        reply["body"] = target.map_or(name.into(), |(begun, _)| begun).into();
+        reply["rule"] = self.doc.rule(&body, self.active.as_deref()).into();
+        reply["body"] = body.into();
         Ok(reply)
     }
 
