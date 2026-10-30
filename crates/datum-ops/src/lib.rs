@@ -532,7 +532,7 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
         // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
         let local = match s.face {
             // Sheet metal: through its thickness alone, made directly or refused.
-            Some(_) if *wall => return from_face(feature, t, s, Reach::Through),
+            Some(_) if *wall => return from_face(feature, t, s, Reach::Sheet),
             Some(_) => through_walls(feature, t, s),
             None if *wall => return Err(BrepError::Sketch("a cut of sheet metal takes a sketch on a face of it".into())),
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),

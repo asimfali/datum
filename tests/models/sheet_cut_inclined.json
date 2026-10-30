@@ -1,0 +1,81 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            20,
+            75
+          ],
+          "c": [
+            110,
+            120
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          }
+        }
+      }
+    },
+    {
+      "name": "w",
+      "op": "sheet",
+      "inputs": [
+        "path"
+      ],
+      "thickness": 2,
+      "radius": 2,
+      "side": "left",
+      "z0": 0,
+      "z1": 40
+    },
+    {
+      "name": "hole_sketch",
+      "op": "sketch",
+      "inputs": [
+        "w"
+      ],
+      "face": "7bcfcdec3784a8e594d18f5cb57151f7",
+      "sketch": {
+        "points": {
+          "h": [
+            20,
+            38.36
+          ]
+        },
+        "circles": {
+          "hole": {
+            "center": "h",
+            "diameter": 10
+          }
+        }
+      }
+    },
+    {
+      "name": "punched",
+      "op": "extrude",
+      "inputs": [
+        "w",
+        "hole_sketch"
+      ],
+      "mode": "cut",
+      "through": true,
+      "wall": true
+    }
+  ]
+}

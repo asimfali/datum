@@ -74,3 +74,44 @@ fn a_u_is_cut_through_one_wall() {
     let v = volume(&mut s, "cut");
     assert!((whole - v - HOLE * 2.0).abs() < 1e-6, "one wall's hole: {whole} − {v}");
 }
+
+/// A sheet along two lines, neither along the axes, and the wall of the first: the face of its left
+/// side with its flat length, and a sketch of a hole there at `along` from the wall's start.
+fn inclined(name: &str, along: impl Fn(f64) -> f64) -> (Session, f64) {
+    let chain = json!({"points": {"a": [0, 0], "b": [20, 75], "c": [110, 120]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}});
+    let mut s = project(name, chain);
+    run(&mut s, "sheet", json!({"name": "w", "sketch": "path", "rule": "Лист", "side": "left", "z1": 40}));
+    let whole = volume(&mut s, "w");
+    // The face looking along the left normal of the first line, the one with the largest dot.
+    let len = libm::hypot(20.0, 75.0);
+    let left = [-75.0 / len, 20.0 / len];
+    let faces = run(&mut s, "query_faces", json!({"name": "w"}));
+    // Bends have no normal: they are not planes.
+    let dot = |f: &Value| f["normal"][0].as_f64().unwrap_or(-1.0) * left[0] + f["normal"][1].as_f64().unwrap_or(-1.0) * left[1];
+    let face = faces["faces"].as_array().unwrap().iter().max_by(|a, b| dot(a).total_cmp(&dot(b))).unwrap();
+    assert!(dot(face) > 1.0 - 1e-9, "{face}");
+    // The sketch's x runs along z and its y along the wall; the flat part is the face's area over 40 long.
+    let flat = face["area"].as_f64().unwrap() / 40.0;
+    hole_on(&mut s, "hole", "w", face["id"].as_str().unwrap(), 20.0, along(flat));
+    (s, whole)
+}
+
+/// A wall not along the axes: the opposite face is found all the same.
+#[test]
+fn an_inclined_wall_is_cut() {
+    let (mut s, whole) = inclined("sheet_cut_inclined", |flat| flat / 2.0);
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
+    assert!(r.get("failed").is_none_or(|f| f.as_array().is_some_and(Vec::is_empty)), "{r}");
+    let v = volume(&mut s, "cut");
+    assert!((whole - v - HOLE * 2.0).abs() < 1e-6, "one wall's hole: {whole} − {v}");
+}
+
+/// A circle reaching onto the bend is refused, not cut half through.
+#[test]
+fn a_cut_across_a_bend_is_refused() {
+    let (mut s, _) = inclined("sheet_cut_bend", |flat| flat - 2.0);
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
+    let e = r["failed"][0]["error"].as_str().unwrap_or_else(|| panic!("{r}"));
+    assert!(e.contains("across a bend"), "{e}");
+}

@@ -145,6 +145,12 @@
     "panel": "55a8676c7dbe3d74b425dead272d48ce5247567f481bbb42f7c3ffcf61cf0267",
     "perforated": "035d41d66c6957ec209a55e198bb2d377943d77d05360aedf3cc44cac72ad2c0"
   },
+  "sheet_cut_inclined.json": {
+    "hole_sketch": "469a4ce1c9d0d56f608fdb2e4f3aeadf6b81dbaab4aa1038c6051ad15f87e98e",
+    "path": "aa5b0104f2d58edb5fdde36df035daf9675c50399325de7060b2eafe90e0048a",
+    "punched": "e2cd1ca24a0a9143bc68e125c24e9f8cc6ba9045ee5758fb4538ac8bf84b45c0",
+    "w": "4903dddd4ba41272bcebb96767982dfcbaf92614c875f6fa31324bd8ef1931b4"
+  },
   "sheet_panel.json": {
     "blank": "2fb51a00cb5d288c07badcdea6b7d33308655329a66ff3e190d914895ddd5463",
     "fixing": "740f28f1fa5859b41ad5f1c69ed81de68ea0ccd59b1555275163db1e5b82b086",
