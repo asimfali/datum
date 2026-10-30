@@ -83,30 +83,74 @@ fn rule_gives_material_and_mass() {
     assert!(saved.get("parts").is_none_or(|p| p.get("plate").is_none()), "{saved}");
 }
 
-/// A rule the library lacks, or of another kind than the part, is refused; so is a sheet rule
-/// until sheet parts have theirs (0.4.6).
+/// A rule the library lacks, or of another kind than the part, is refused.
 #[test]
 fn rule_of_the_parts_kind() {
     let (mut s, _) = project("part_rule_kind");
     let set = |s: &mut Session, body: &str, rule: &str| s.execute("set_part", &json!({"body": body, "rule": rule})).unwrap_err();
     assert!(set(&mut s, "plate", "Нет такого").contains("no rule `Нет такого`"));
     assert!(set(&mut s, "plate", "Лист").contains("is for a sheet metal part; `plate` is an ordinary part"));
+    bent(&mut s, json!({"thickness": 1, "radius": 1}));
+    assert!(set(&mut s, "bent", "Сталь").contains("is for an ordinary part; `bent` is a sheet metal part"));
+    // Nothing of the refused ones stayed.
+    assert_eq!(product(&mut s, "bent")["rule"], Value::Null);
+    assert_eq!(product(&mut s, "plate")["rule"], Value::Null);
+}
+
+/// Sheet metal `bent`, an L 20 × 15 bent 10 wide, with `numbers` of its own (thickness, radius)
+/// or none.
+fn bent(s: &mut Session, numbers: Value) {
     run(
-        &mut s,
+        s,
         "add",
         json!({"name": "path", "op": "sketch", "sketch": {
             "points": {"p": [0, 0], "q": [20, 0], "r": [20, 15]}, "lines": {"base": {"from": "p", "to": "q"}, "wall": {"from": "q", "to": "r"}}}}),
     );
+    let mut sheet = json!({"name": "bent", "op": "sheet", "inputs": ["path"], "side": "left", "z0": 0, "z1": 10, "start": "p"});
+    sheet.as_object_mut().unwrap().extend(numbers.as_object().unwrap().clone());
+    run(s, "add", sheet);
+}
+
+fn volume(s: &mut Session, name: &str) -> f64 {
+    run(s, "mass_properties", json!({"name": name}))["volume"].as_f64().unwrap()
+}
+
+/// A sheet's thickness and bend radius are its rule's (D193): set, edited in the library, gone;
+/// a sheet of no numbers and no rule fails asking for one.
+#[test]
+fn a_sheet_takes_its_rules_thickness() {
+    let (mut s, _) = project("part_rule_sheet");
+    bent(&mut s, json!({}));
+    let failed = run(&mut s, "inspect", json!({}));
+    assert!(failed.to_string().contains("from the part's sheet rule"), "{failed}");
+    run(&mut s, "set_part", json!({"body": "bent", "rule": "Лист"}));
+    let by_rule = volume(&mut s, "bent");
+    // The same as numbers of its own, 2 and `t` = 2.
+    let (mut own, _) = project("part_rule_sheet_own");
+    bent(&mut own, json!({"thickness": 2, "radius": 2}));
+    assert_eq!(by_rule, volume(&mut own, "bent"));
+    // The rule thinner: the sheet follows.
     run(
         &mut s,
-        "add",
-        json!({"name": "bent", "op": "sheet", "inputs": ["path"], "thickness": 1, "radius": 1, "side": "left", "z0": 0, "z1": 10, "start": "p"}),
+        "put_library",
+        json!({"level": "rule", "element": {"name": "Лист", "kind": "sheet", "material": "Сталь", "thickness": 1, "radius": "t"}}),
     );
-    assert!(set(&mut s, "bent", "Сталь").contains("is for an ordinary part; `bent` is a sheet metal part"));
-    assert!(set(&mut s, "bent", "Лист").contains("0.4.6"));
-    // Nothing of the refused ones stayed.
-    assert_eq!(product(&mut s, "bent")["rule"], Value::Null);
-    assert_eq!(product(&mut s, "plate")["rule"], Value::Null);
+    let (mut thin, _) = project("part_rule_sheet_thin");
+    bent(&mut thin, json!({"thickness": 1, "radius": 1}));
+    assert_eq!(volume(&mut s, "bent"), volume(&mut thin, "bent"));
+    assert!(mass(&product(&mut s, "bent")) > 0.0);
+    // No rule: no numbers again.
+    run(&mut s, "set_part", json!({"body": "bent", "rule": null}));
+    assert!(s.execute("mass_properties", &json!({"name": "bent"})).is_err());
+}
+
+/// A sheet rule needs its thickness and its bend radius.
+#[test]
+fn a_sheet_rule_has_both_numbers() {
+    let (mut s, _) = project("part_rule_sheet_numbers");
+    let put = |s: &mut Session, e: Value| s.execute("put_library", &json!({"level": "rule", "element": e})).unwrap_err();
+    assert!(put(&mut s, json!({"name": "Тонкий", "kind": "sheet", "material": "Сталь", "radius": 1})).contains("`thickness`"));
+    assert!(put(&mut s, json!({"name": "Тонкий", "kind": "sheet", "material": "Сталь", "thickness": 1})).contains("`radius`"));
 }
 
 /// A variant takes its own rule; a variant of it without one has its parent's, `null` returns

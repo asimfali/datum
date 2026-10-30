@@ -340,7 +340,7 @@ fn rules_are_of_a_material() {
         (json!({"name": "x", "kind": "sheet"}), "needs the `material`"),
         (json!({"name": "x", "kind": "plate", "material": "08пс"}), "`kind`"),
         (json!({"name": "x", "kind": "part", "material": "08пс", "thickness": 2}), "has no `thickness`"),
-        (json!({"name": "x", "kind": "sheet", "material": "08пс", "radius": "2 * s"}), "`radius`"),
+        (json!({"name": "x", "kind": "sheet", "material": "08пс", "thickness": 2, "radius": "2 * s"}), "`radius`"),
         (json!({"name": "x", "kind": "sheet", "material": "08пс", "thickness": 0}), "`thickness`"),
     ] {
         assert!(put(&mut s, "rule", rule.clone()).unwrap_err().contains(why), "{rule}");

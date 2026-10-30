@@ -105,11 +105,13 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 }
 
-/// The graph of model `path`, of its root or of level `level`.
+/// The graph of model `path`, of its root or of level `level`, as it is built: sheet metal by
+/// its parts' rules from the model's project library (D193).
 fn load(path: &Path, level: Option<&str>) -> Result<Graph, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let doc = datum_model::parse_doc(&text).map_err(|e| format!("{}: {e}", path.display()))?;
-    doc.graph(level).map_err(|e| format!("{}: {e}", path.display()))
+    let g = doc.graph(level).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(doc.built(&g, level, datum_model::workspace::project_root(path).as_deref()).into_owned())
 }
 
 fn hex8(h: [u8; 32]) -> String {
@@ -304,6 +306,7 @@ fn cmd_determinism(args: &[String]) -> Result<(), String> {
         // The root, and each level of parts and variants (D152).
         for (level, g) in doc.graphs() {
             let g = g.map_err(|e| format!("{}: {e}", path.display()))?;
+            let g = doc.built(&g, level.as_deref(), datum_model::workspace::project_root(&path).as_deref());
             let shown = match &level {
                 Some(l) => format!("{} [{l}]", path.display()),
                 None => path.display().to_string(),

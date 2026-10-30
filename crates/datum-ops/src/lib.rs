@@ -117,10 +117,13 @@ pub enum Op {
     /// Sheet metal from the input sketch's path: its lines (an open chain, from point `start` or
     /// else from its end named first) given `thickness` on `side` of the path (looking along it),
     /// bent at every corner with inner `radius`, and extruded from `z0` to `z1` along the sketch's
-    /// normal. One input: a sketch.
+    /// normal. One input: a sketch. The thickness and the radius are the part's sheet rule's
+    /// (D193), put here when the model is built; a file has its own only from before rules.
     Sheet {
-        thickness: Num,
-        radius: Num,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius: Option<Num>,
         side: Side,
         z0: Num,
         z1: Num,
@@ -305,8 +308,8 @@ impl Op {
             Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Sheet { thickness, radius, side, z0, z1, start } => Self::Sheet {
-                thickness: r(thickness, "thickness")?,
-                radius: r(radius, "radius")?,
+                thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
+                radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
                 side: *side,
                 z0: r(z0, "z0")?,
                 z1: r(z1, "z1")?,
@@ -435,6 +438,11 @@ impl Op {
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
             Self::Sheet { thickness, radius, side, z0, z1, start } => {
+                let (Some(thickness), Some(radius)) = (thickness, radius) else {
+                    return Err(BrepError::Invalid(
+                        "sheet metal takes its thickness and bend radius from the part's sheet rule: give the part one".into(),
+                    ));
+                };
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
