@@ -153,7 +153,9 @@ const COMMANDS: &[Command] = &[
                       `z1` < 0; `through: true` cuts through to the opposite face. Else `z0`, `z1` (either larger), `symmetric` \
                       (`z1` deep, half each side), or `plane`: a work plane to go up to. `rule`: the part's rule, as `set_part` \
                       gives it. `profiles`: curves of the sketch, each choosing the closed loop it is on with its holes \
-                      (a skeleton sketch holds many); none: every closed loop, open chains left out. The reply names the mode, the body and its rule.",
+                      (a skeleton sketch holds many); none: every closed loop, open chains left out. Sheet metal (a part begun by \
+                      `sheet` or `plate`) is only cut, through its thickness alone, as its blank is punched: `mode: cut` and no \
+                      depth. The reply names the mode, the body and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},

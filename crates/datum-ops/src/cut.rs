@@ -30,6 +30,9 @@ pub enum Reach {
     /// Along the face's normal, out of the body: a negative depth makes a pocket, a positive
     /// one a boss.
     Depth(f64),
+    /// Through one wall of sheet metal to its other side (D196): the face there is parallel by
+    /// how the sheet is built, its normal off by rounding on a wall not along the axes.
+    Sheet,
 }
 
 /// The profiles of `sketch`, which lies on a plane face of `target`, cut through all of it wall
@@ -79,7 +82,7 @@ pub fn through_walls(feature: TopoId, target: &Body, sketch: &Placed) -> Result<
 /// as far as `reach` says.
 pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) -> Result<Body, BrepError> {
     let what = match reach {
-        Reach::Through => "cut",
+        Reach::Through | Reach::Sheet => "cut",
         Reach::Depth(d) if d < 0.0 => "pocket",
         Reach::Depth(d) if d > 0.0 => "boss",
         Reach::Depth(_) => return Err(BrepError::Degenerate("an extrusion from a face of zero depth".into())),
@@ -92,14 +95,16 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
             let [o, x, y, z] = sketch.frame;
             Frame::Plane { o, x, y, z }
         }
-        (Surface::Cylinder(c), Some(d)) if reach == Reach::Through => Frame::Rolled { d, radius: c.radius, side: if c.convex { 1.0 } else { -1.0 } },
+        (Surface::Cylinder(c), Some(d)) if !matches!(reach, Reach::Depth(_)) => {
+            Frame::Rolled { d, radius: c.radius, side: if c.convex { 1.0 } else { -1.0 } }
+        }
         (Surface::Cylinder(_), Some(_)) => return Err(unsupported("a sketch on a rolled sheet cuts through it".into())),
         _ => return Err(BrepError::Invalid("the sketch does not lie on its face".into())),
     };
     // A pocket's floor and a boss's top take the far caps of an extrusion of the sketch: the
     // regions its profiles bound, none inside another.
     let (found, ends): (Vec<Found>, Vec<TopoId>) = match reach {
-        Reach::Through => (profile_loops(feature, sketch)?, Vec::new()),
+        Reach::Through | Reach::Sheet => (profile_loops(feature, sketch)?, Vec::new()),
         Reach::Depth(_) => {
             let regions = profile_regions(feature, sketch)?;
             if regions.iter().any(|r| !r.holes.is_empty()) {
@@ -144,22 +149,30 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
     }
 
     // The exit: on a plane, the nearest face below facing exactly the other way that holds the
-    // first profile; on a cylinder, the face across the sheet. A pocket and a boss have none.
+    // first profile; through sheet metal, the nearest facing away along the line from it, the
+    // sheet's other side; on a cylinder, the face across the sheet. A pocket and a boss have none.
     let exit = match (reach, &frame) {
         (Reach::Depth(d), _) => Some((None, d)),
-        (Reach::Through, Frame::Plane { z, .. }) => {
+        (Reach::Through | Reach::Sheet, Frame::Plane { z, .. }) => {
             let first = profiles[0].points[0];
+            let at = frame.point(first, 0.0);
             let faces = (0..target.faces().len() as Ix).filter_map(|g| {
                 let Surface::Plane(p) = target.faces()[g as usize].surface else { return None };
-                let opposite = g as usize != f && p.normal.cross(*z) == Vec3::ZERO && p.normal.dot(*z) < 0.0;
-                let d = frame
-                    .depth(target.point(target.half_edges()[target.loops()[target.faces()[g as usize].first_loop as usize].first as usize].origin));
+                let away = g as usize != f && p.normal.dot(*z) < 0.0;
+                let (opposite, d) = if reach == Reach::Sheet {
+                    (away, p.normal.dot(p.origin - at) / p.normal.dot(*z))
+                } else {
+                    let corner = target.half_edges()[target.loops()[target.faces()[g as usize].first_loop as usize].first as usize].origin;
+                    (away && p.normal.cross(*z) == Vec3::ZERO, frame.depth(target.point(corner)))
+                };
                 let holds = || outline(target, g, &frame).is_ok_and(|ls| ls.iter().map(|l| l.winding(first)).sum::<i32>() != 0);
                 (opposite && d < 0.0 && holds()).then_some((g, d))
             });
             faces.max_by(|a, b| a.1.total_cmp(&b.1)).map(|(g, d)| (Some(g), d))
         }
-        (Reach::Through, Frame::Rolled { radius, side, .. }) => opposite_cylinder(target, f).map(|(g, c)| (Some(g), (c.radius - radius) * side)),
+        (Reach::Through | Reach::Sheet, Frame::Rolled { radius, side, .. }) => {
+            opposite_cylinder(target, f).map(|(g, c)| (Some(g), (c.radius - radius) * side))
+        }
     };
     let Some((g, end)) = exit else {
         return Err(unsupported("no face opposite the sketch's face holds the profiles: a cut goes through a plate".into()));
@@ -172,7 +185,10 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
         let pairs = between(&boxes, &loop_boxes);
         in_order(pairs.par_iter().map(|&(p, l)| {
             if profiles[p].touches(&loops[l]) {
-                Err(unsupported(format!("a profile crosses an edge of the {name} face")))
+                // On sheet metal that edge is a bend's or the sheet's end: a cut across it is made
+                // in the blank (later).
+                let across = if reach == Reach::Sheet { ": a cut across a bend or an edge of sheet metal is not supported yet" } else { "" };
+                Err(unsupported(format!("a profile crosses an edge of the {name} face{across}")))
             } else if profiles[p].winding(loops[l].points[0]) != 0 {
                 Err(unsupported(format!("a hole of the {name} face lies inside a profile")))
             } else {
@@ -211,7 +227,7 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
         }
     }
     let span = match reach {
-        Reach::Through => Span { lo: end, hi: 0.0, closed: [false, false] },
+        Reach::Through | Reach::Sheet => Span { lo: end, hi: 0.0, closed: [false, false] },
         Reach::Depth(d) if d < 0.0 => Span { lo: d, hi: 0.0, closed: [true, false] },
         Reach::Depth(d) => Span { lo: 0.0, hi: d, closed: [false, true] },
     };

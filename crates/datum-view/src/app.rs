@@ -617,13 +617,15 @@ enum Kind {
     Sheet(String, Option<String>),
     /// A face of sheet metal (a plate) from closed contours, by the toolbar's sheet rule.
     Face,
+    /// A cut through the thickness of one wall of sheet metal, from a sketch on its face.
+    SheetCut,
 }
 
 impl Kind {
     /// The command it sends, also its features' names: `extrude1`, `sheet1`, `plate1`.
     fn command(&self) -> &'static str {
         match self {
-            Self::Extrusion => "extrude",
+            Self::Extrusion | Self::SheetCut => "extrude",
             Self::Sheet(..) => "sheet",
             Self::Face => "plate",
         }
@@ -683,6 +685,13 @@ impl Extrusion {
             }
             return ("plate", params);
         }
+        if let Kind::SheetCut = self.kind {
+            let mut params = json!({"name": self.name, "sketch": sketch, "mode": "cut"});
+            if !self.profiles.is_empty() {
+                params["profiles"] = json!(self.profiles);
+            }
+            return ("cut", params);
+        }
         if let Kind::Sheet(path, start) = &self.kind {
             let mut params = json!({"name": self.name, "sketch": sketch, "path": path, "side": self.side, "z1": depth});
             if let Some(start) = start {
@@ -728,6 +737,25 @@ fn rules_of<'a>(rules: &'a [Json], material: Option<&str>, kind: Option<&str>) -
         .filter(|r| material.is_some_and(|m| r["material"] == m) && kind.is_none_or(|k| r["kind"] == k))
         .filter_map(|r| r["name"].as_str())
         .collect()
+}
+
+/// Whether the sketch feature `sketch` lies on a face of a sheet metal part: the body its first
+/// input belongs to began with a `sheet` or a `plate`. Extrusions that changed a body (any mode
+/// but `new`) lead down to the body's first input.
+fn on_sheet(features: &[Json], sketch: &str) -> bool {
+    let first_input = |f: &Json| f["inputs"][0].as_str().map(String::from);
+    let by_name = |name: &str| features.iter().find(|f| f["name"].as_str() == Some(name));
+    let mut at = by_name(sketch).and_then(first_input);
+    // A chain is no longer than the features; the bound only stops a malformed model.
+    for _ in features {
+        let Some(f) = at.as_deref().and_then(by_name) else { return false };
+        if f["op"] == "extrude" && f["mode"].as_str().is_some_and(|m| m != "new") {
+            at = first_input(f);
+        } else {
+            return matches!(f["op"].as_str(), Some("sheet" | "plate"));
+        }
+    }
+    false
 }
 
 /// What E may take of sketch `p` with nothing selected: its closed regions and a curve of each
@@ -2547,9 +2575,13 @@ impl Viewer {
             self.flat.chosen = Some(f);
             crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
         }
-        if let (Some((sketch, at)), Some(x)) = (picked, &mut self.extrusion) {
-            x.sketch = Some(sketch);
-            x.at = at;
+        if let (Some((sketch, at)), true) = (picked, self.extrusion.is_some()) {
+            // Where the sketch lies decides what is made of it.
+            let kind = self.plain_kind(Some(&sketch));
+            let name = self.feature_name(kind.command());
+            if let Some(x) = &mut self.extrusion {
+                (x.sketch, x.at, x.kind, x.name) = (Some(sketch), at, kind, name);
+            }
         }
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
@@ -2985,13 +3017,9 @@ impl Viewer {
         let sketch = open.or_else(|| lone.map(String::from));
         let kind = match chain {
             Some((path, start)) => Kind::Sheet(path, start),
-            None if self.sheet_rule().is_some() => Kind::Face,
-            None => Kind::Extrusion,
+            None => self.plain_kind(sketch.as_deref()),
         };
-        let name = (1..)
-            .map(|k| format!("{}{k}", kind.command()))
-            .find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str())))
-            .unwrap_or_default();
+        let name = self.feature_name(kind.command());
         self.extrusion = Some(Extrusion {
             sketch,
             name,
@@ -3007,6 +3035,37 @@ impl Viewer {
             sent: None,
             selected: false,
         });
+    }
+
+    /// What E makes of closed contours of `sketch` (none yet: as if off a face): on a face of a
+    /// body, an extrusion, or a cut through the wall of sheet metal; off a face, a plate when a
+    /// sheet rule is chosen.
+    fn plain_kind(&self, sketch: Option<&str>) -> Kind {
+        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
+        match sketch {
+            Some(s) if Self::on_face(self.model.as_ref(), s) => {
+                if on_sheet(features, s) {
+                    Kind::SheetCut
+                } else {
+                    Kind::Extrusion
+                }
+            }
+            _ if self.sheet_rule().is_some() => Kind::Face,
+            _ => Kind::Extrusion,
+        }
+    }
+
+    /// Whether the sketch feature `sketch` lies on a face of a body.
+    fn on_face(model: Option<&Model>, sketch: &str) -> bool {
+        model.is_some_and(|m| {
+            m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"].as_str() == Some(sketch) && !f["face"].is_null())
+        })
+    }
+
+    /// The first free name of `command` + a number: `extrude1`, `plate2`.
+    fn feature_name(&self, command: &str) -> String {
+        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
+        (1..).map(|k| format!("{command}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
     }
 
     /// Drops the extrusion form, and the preview it made.
@@ -3036,7 +3095,7 @@ impl Viewer {
             }
         }
         let Some(x) = &self.extrusion else { return };
-        let (sheet, face) = (matches!(x.kind, Kind::Sheet(..)), matches!(x.kind, Kind::Face));
+        let (sheet, face, cut) = (matches!(x.kind, Kind::Sheet(..)), matches!(x.kind, Kind::Face), matches!(x.kind, Kind::SheetCut));
         let next_rule = if sheet || face { self.sheet_rule() } else { self.part_rule() };
         // Sheet metal is made by a sheet rule: without one the form only says so.
         let refused = (sheet || face) && next_rule.is_none();
@@ -3053,9 +3112,7 @@ impl Viewer {
             });
             return;
         };
-        let on_face = self.model.as_ref().is_some_and(|m| {
-            m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"].as_str() == Some(sketch.as_str()) && !f["face"].is_null())
-        });
+        let on_face = Self::on_face(self.model.as_ref(), &sketch);
         // The preview of what the form says now; until it comes, none (a reply to an earlier
         // depth must not let Enter make this one).
         let (shown, params) = x.params(&sketch, on_face, next_rule.as_deref());
@@ -3063,60 +3120,65 @@ impl Viewer {
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 let through = x.through && shown == "cut";
-                ui.horizontal(|ui| {
-                    if face {
-                        ui.label(self.i18n.f(
-                            "plate-thickness",
-                            "Thickness from the rule: { $rule }",
-                            &[("rule", next_rule.as_deref().unwrap_or_default())],
-                        ));
-                        return;
-                    }
-                    ui.label(if sheet { self.i18n.t("sheet-width", "Width") } else { self.i18n.t("extrude-depth", "Depth") });
-                    let id = egui::Id::new("datum_extrusion_depth");
-                    let mut out = egui::TextEdit::singleline(&mut x.depth).id(id).desired_width(90.0).interactive(!through).show(ui);
-                    // Typed over at once.
-                    if !x.selected {
-                        x.selected = true;
-                        out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                            egui::text::CCursor::new(0),
-                            egui::text::CCursor::new(x.depth.chars().count()),
-                        )));
-                        out.state.store(ui.ctx(), id);
-                    }
-                    out.response.request_focus();
-                });
-                ui.horizontal(|ui| {
-                    let symmetric =
-                        ui.add_enabled_ui(!through, |ui| ui.selectable_label(x.symmetric && !through, self.i18n.t("extrude-symmetric", "Symmetric")));
-                    if symmetric.inner.clicked() {
-                        x.symmetric = !x.symmetric;
-                    }
-                    ui.separator();
-                    if face {
-                        if ui.add_enabled(!x.symmetric, egui::Button::new(self.i18n.t("plate-flip", "⇄ Other side"))).clicked() {
-                            x.flip = !x.flip;
+                if cut {
+                    ui.label(self.i18n.t("sheet-cut", "Cut through the sheet's thickness"));
+                } else {
+                    ui.horizontal(|ui| {
+                        if face {
+                            ui.label(self.i18n.f(
+                                "plate-thickness",
+                                "Thickness from the rule: { $rule }",
+                                &[("rule", next_rule.as_deref().unwrap_or_default())],
+                            ));
+                            return;
                         }
-                        return;
-                    }
-                    if sheet {
-                        let label = self.i18n.f("side", "Side: { $side }", &[("side", side_name(&self.i18n, x.side))]);
-                        if ui.button(label).on_hover_text(self.i18n.t("side-hint", "Thickness side of the path: left, right, middle")).clicked() {
-                            x.side = x.side.next();
+                        ui.label(if sheet { self.i18n.t("sheet-width", "Width") } else { self.i18n.t("extrude-depth", "Depth") });
+                        let id = egui::Id::new("datum_extrusion_depth");
+                        let mut out = egui::TextEdit::singleline(&mut x.depth).id(id).desired_width(90.0).interactive(!through).show(ui);
+                        // Typed over at once.
+                        if !x.selected {
+                            x.selected = true;
+                            out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                                egui::text::CCursor::new(0),
+                                egui::text::CCursor::new(x.depth.chars().count()),
+                            )));
+                            out.state.store(ui.ctx(), id);
                         }
-                        return;
-                    }
-                    // Every mode at once, the one in force lit: a click chooses that one.
-                    for mode in EXTRUDE_MODES {
-                        if ui.selectable_label(shown == mode, mode_name(&self.i18n, mode)).clicked() {
-                            x.mode = Some(mode);
+                        out.response.request_focus();
+                    });
+                    ui.horizontal(|ui| {
+                        let symmetric = ui.add_enabled_ui(!through, |ui| {
+                            ui.selectable_label(x.symmetric && !through, self.i18n.t("extrude-symmetric", "Symmetric"))
+                        });
+                        if symmetric.inner.clicked() {
+                            x.symmetric = !x.symmetric;
                         }
-                    }
-                    // Through: a cut's only (D187).
-                    if shown == "cut" && ui.selectable_label(x.through, self.i18n.t("extrude-through", "Through")).clicked() {
-                        x.through = !x.through;
-                    }
-                });
+                        ui.separator();
+                        if face {
+                            if ui.add_enabled(!x.symmetric, egui::Button::new(self.i18n.t("plate-flip", "⇄ Other side"))).clicked() {
+                                x.flip = !x.flip;
+                            }
+                            return;
+                        }
+                        if sheet {
+                            let label = self.i18n.f("side", "Side: { $side }", &[("side", side_name(&self.i18n, x.side))]);
+                            if ui.button(label).on_hover_text(self.i18n.t("side-hint", "Thickness side of the path: left, right, middle")).clicked() {
+                                x.side = x.side.next();
+                            }
+                            return;
+                        }
+                        // Every mode at once, the one in force lit: a click chooses that one.
+                        for mode in EXTRUDE_MODES {
+                            if ui.selectable_label(shown == mode, mode_name(&self.i18n, mode)).clicked() {
+                                x.mode = Some(mode);
+                            }
+                        }
+                        // Through: a cut's only (D187).
+                        if shown == "cut" && ui.selectable_label(x.through, self.i18n.t("extrude-through", "Through")).clicked() {
+                            x.through = !x.through;
+                        }
+                    });
+                }
                 if !x.profiles.is_empty() {
                     ui.weak(self.i18n.f("extrude-contour", "Contour: { $names }", &[("names", &x.profiles.join(", "))]));
                 }
@@ -6343,6 +6405,55 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("plate", p) if p == flipped)));
+    }
+
+    /// `with_open_chain` with the outline's sketch laid on a face of a body that `op` began (a
+    /// `plate` is sheet metal), grown by a join first when `grown`.
+    fn on_a_face_of(op: &str, grown: bool) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut h, inbox) = with_open_chain("bottom", Some("Лист"));
+        let features = h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        let base = if grown { "grown" } else { "base" };
+        let outline = features.iter_mut().find(|f| f["name"] == "outline").unwrap();
+        (outline["inputs"], outline["face"]) = (json!([base]), json!("top"));
+        features.push(json!({"name": "base", "op": op}));
+        if grown {
+            features.push(json!({"name": "grown", "op": "extrude", "mode": "join", "inputs": ["base", "other"]}));
+        }
+        (h, inbox)
+    }
+
+    /// A sketch on a face of an ordinary body is extruded whatever rule the toolbar shows: never a plate.
+    #[test]
+    fn a_sketch_on_a_face_is_no_new_plate() {
+        let (mut h, inbox) = on_a_face_of("extrude", false);
+        h.key_press(egui::Key::E);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Preview(Some(("extrude", p))) if p["mode"] == "join")), "{sent:?}");
+        assert!(!sent.iter().any(|r| matches!(r, Request::Preview(Some(("plate", _))))));
+        h.get_by_label("Depth");
+    }
+
+    /// A sketch on a face of sheet metal, even of a wall grown by a join, cuts through its thickness:
+    /// no depth, no modes; Enter on a fresh preview makes the cut.
+    #[test]
+    fn a_sketch_on_a_face_of_sheet_metal_cuts_through() {
+        for grown in [false, true] {
+            let (mut h, inbox) = on_a_face_of("plate", grown);
+            h.key_press(egui::Key::E);
+            h.run();
+            h.get_by_label("Cut through the sheet's thickness");
+            assert!(h.query_by_label("Depth").is_none() && h.query_by_label("Symmetric").is_none() && h.query_by_label("Through").is_none());
+            let want = json!({"name": "extrude1", "sketch": "outline", "mode": "cut", "profiles": ["bottom"]});
+            let sent: Vec<Request> = inbox.try_iter().collect();
+            assert!(matches!(sent.last(), Some(Request::Preview(Some(("extrude", p)))) if *p == want), "{sent:?}");
+            h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"mode": "cut", "body": "grown"}))));
+            h.run();
+            h.get_by_label("Cut · grown");
+            h.key_press(egui::Key::Enter);
+            h.run();
+            assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("extrude", p) if p == want)));
+        }
     }
 
     /// With nothing selected in a sketch of a contour and a chain, E makes neither: it asks.
