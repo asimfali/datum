@@ -2367,13 +2367,8 @@ impl Viewer {
                     None => egui_renderer.register_native_texture(&rs.device, &view, wgpu::FilterMode::Nearest),
                 };
                 self.texture = Some((id, [w, h]));
-                // On DX12 the picture drawn in the frame its texture is given to egui does not
-                // show (a model opened stayed blank until the mouse moved): drawn again next frame.
-                self.drawn = None;
-                ui.ctx().request_repaint();
-            } else {
-                self.drawn = Some(drawn);
             }
+            self.drawn = Some(drawn);
         }
         if let Some((id, _)) = self.texture {
             ui.painter().image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
