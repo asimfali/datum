@@ -62,6 +62,12 @@ fn chain<'s>(s: &'s Placed, path: Option<&str>) -> Result<Vec<Step<'s>>, BrepErr
     Ok(chain.clone())
 }
 
+/// A curve of each open chain of the profile curves of `s`, by its lowest-named end: the paths a
+/// sheet may take.
+pub fn paths(s: &Placed) -> Vec<String> {
+    datum_sketch::contours(&s.lines, &s.arcs, &|_, c| !c).paths.iter().map(|c| c[0].curve.to_string()).collect()
+}
+
 /// The two end points of the open chain curve `curve` of `s` lies on (none: it is on none), the
 /// one named first first: where a sheet's path may start.
 pub fn path_ends(s: &Placed, curve: &str) -> Option<[String; 2]> {

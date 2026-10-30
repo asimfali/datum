@@ -23,7 +23,7 @@ use datum_math::{Rigid, Vec2, Vec3};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use sheet::{Sheet, Side, path_ends, sheet};
+pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
     Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, contour_at, depth_to, extrude_sketch, face_plane, place, profile_regions,
 };
@@ -134,12 +134,29 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<String>,
     },
+    /// A face of sheet metal (D195): the closed profiles of the input sketch (curves `profiles`
+    /// choose them, D191; none: every one) as a plate of `thickness`, on the sketch's front
+    /// (`flip`: its back; `symmetric`: half each way). The thickness is the part's sheet rule's,
+    /// put here when the model is built (D193). One input: a sketch.
+    Plate {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<Num>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        flip: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        symmetric: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        profiles: Vec<String>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
     /// from that face's side, its corner at the origin. Exported as DXF. One input: the body.
     Unfold { face: String, k_factor: Num },
 }
+
+/// Said when sheet metal is built with no rule giving its thickness.
+const NO_SHEET_RULE: &str = "sheet metal takes its thickness and bend radius from the part's sheet rule: give the part one";
 
 /// What an extrusion does with its target body (D185).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +283,7 @@ impl Op {
             Self::Extrude { .. } => "extrude",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
+            Self::Plate { .. } => "plate",
             Self::Plane { .. } => "plane",
         }
     }
@@ -276,7 +294,7 @@ impl Op {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
             Self::Sketch { .. } | Self::Plane { .. } => 0..=1,
             Self::Extrude { .. } => 1..=3,
-            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Unfold { .. } | Self::Sheet { .. } => 1..=1,
+            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Unfold { .. } | Self::Sheet { .. } | Self::Plate { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
         }
     }
@@ -311,6 +329,12 @@ impl Op {
             },
             Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
+            Self::Plate { thickness, flip, symmetric, profiles } => Self::Plate {
+                thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
+                flip: *flip,
+                symmetric: *symmetric,
+                profiles: profiles.clone(),
+            },
             Self::Sheet { thickness, radius, side, z0, z1, path, start } => Self::Sheet {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
@@ -367,7 +391,7 @@ impl Op {
                 h.update(face.as_bytes());
             }
             // `Debug` spells every field exactly, as for a sketch.
-            Self::Sheet { .. } => {
+            Self::Sheet { .. } | Self::Plate { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -404,7 +428,7 @@ impl Op {
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
-            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plane { .. } => Vec::new(),
+            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Plane { .. } => Vec::new(),
             _ => values
                 .iter()
                 .enumerate()
@@ -442,12 +466,21 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
-            Self::Sheet { thickness, radius, side, z0, z1, path, start } => {
-                let (Some(thickness), Some(radius)) = (thickness, radius) else {
-                    return Err(BrepError::Invalid(
-                        "sheet metal takes its thickness and bend radius from the part's sheet rule: give the part one".into(),
-                    ));
+            Self::Plate { thickness, flip, symmetric, profiles } => {
+                let Some(t) = thickness else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
+                let t = num(t)?;
+                if !(t > 0.0 && t.is_finite()) {
+                    return Err(BrepError::Degenerate(format!("a face of sheet metal needs a positive thickness, got {t}")));
+                }
+                let (a, b) = match (symmetric, flip) {
+                    (true, _) => (-0.5 * t, 0.5 * t),
+                    (false, false) => (0.0, t),
+                    (false, true) => (-t, 0.0),
                 };
+                extrude_sketch(feature, &*chosen(feature, sketch(0)?, profiles)?, a, b)?
+            }
+            Self::Sheet { thickness, radius, side, z0, z1, path, start } => {
+                let (Some(thickness), Some(radius)) = (thickness, radius) else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
             }

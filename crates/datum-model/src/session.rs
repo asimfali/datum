@@ -196,6 +196,25 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.sheet(p),
     },
     Command {
+        name: "plate",
+        description: "A face of sheet metal (D195) from the closed profiles of sketch `sketch` as feature `name`, a part of its own: \
+                      a plate as thick as `rule` (required, a sheet rule of the library) says, then and whenever the rule \
+                      changes; flanges go on its edges. `profiles`: curves of the sketch, each choosing the closed loop it is on \
+                      with its holes (a skeleton sketch holds many); none: every closed loop, open chains left out. On the \
+                      sketch's front, `flip`: its back, `symmetric`: half each way. The reply names the part and its rule.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "sketch": {"type": "string"},
+                "rule": {"type": "string"},
+                "profiles": {"type": "array", "items": {"type": "string"}},
+                "flip": {"type": "boolean"},
+                "symmetric": {"type": "boolean"}
+            }, "required": ["name", "sketch", "rule"], "additionalProperties": false})
+        },
+        run: |s, p| s.plate(p),
+    },
+    Command {
         name: "set_parameter",
         description: "Set a model parameter to a number or an expression of other parameters (e.g. {name: \"t\", value: \"w / 5\"}). \
                       Numbers of features and sketch dimensions may be expressions of parameters: `+ - * /`, parentheses, `pi`, \
@@ -1291,7 +1310,7 @@ impl Session {
             };
             match &mut op {
                 Op::Sheet { start, path, .. } => start.iter_mut().chain(path.iter_mut()).for_each(&mut follow),
-                Op::Extrude { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
+                Op::Extrude { profiles, .. } | Op::Plate { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
                 _ => {}
             }
             if op != n.op {

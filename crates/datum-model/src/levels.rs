@@ -287,7 +287,7 @@ impl Doc {
             .nodes()
             .iter()
             .enumerate()
-            .filter(|(_, n)| matches!(n.op, Op::Sheet { .. }))
+            .filter(|(_, n)| matches!(n.op, Op::Sheet { .. } | Op::Plate { .. }))
             .filter_map(|(ix, n)| Some((ix, self.rule(&n.name, level)?)))
             .collect();
         if sheets.is_empty() {
@@ -300,8 +300,10 @@ impl Doc {
             let Some(t) = rule.element["thickness"].as_f64() else { continue };
             let Ok(r) = crate::library::bend_radius(&rule.element["radius"], t) else { continue };
             let mut op = g.nodes()[ix].op.clone();
-            if let Op::Sheet { thickness, radius, .. } = &mut op {
-                (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r)));
+            match &mut op {
+                Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
+                Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
+                _ => {}
             }
             // The same operation with other numbers: its arity holds.
             let _ = out.set_op(ix as NodeIx, op);
@@ -309,11 +311,11 @@ impl Doc {
         Cow::Owned(out)
     }
 
-    /// The kind of part `part` (D179): `sheet` if its body began as sheet metal, else `part`. Set
-    /// by its first feature, it never changes.
+    /// The kind of part `part` (D179): `sheet` if its body began as sheet metal (from a path, or a
+    /// face of it, D195), else `part`. Set by its first feature, it never changes.
     pub fn kind(&self, part: &str) -> &'static str {
         match self.root.find(part).map(|i| &self.root.nodes()[i as usize].op) {
-            Some(Op::Sheet { .. }) => "sheet",
+            Some(Op::Sheet { .. } | Op::Plate { .. }) => "sheet",
             _ => "part",
         }
     }
