@@ -65,6 +65,6 @@ fn a_cut_pattern_moves_into_its_sketch() {
     assert_eq!(sketch.groups["perf_cell"], ["hole"]);
     let p = &sketch.patterns["perf"];
     assert_eq!((p.of.as_str(), p.count.clone()), ("perf_cell", Some([3.0.into(), 2.0.into()])));
-    let through = Op::Extrude { z0: 0.0.into(), z1: None, symmetric: false, mode: Mode::Cut, through: true };
+    let through = Op::Extrude { z0: 0.0.into(), z1: None, symmetric: false, mode: Mode::Cut, through: true, profiles: Vec::new() };
     assert_eq!(g.nodes()[1].op, through);
 }

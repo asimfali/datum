@@ -799,6 +799,13 @@ impl SketchEdit {
         Some(Taken::Region(regions.swap_remove(k)))
     }
 
+    /// The curves of the contour around the point `dx, dy` from the view's centre, if any.
+    pub fn contour_picks(&self, dx: f64, dy: f64, height: f64) -> Vec<Pick> {
+        let Ok(p) = &self.placed else { return Vec::new() };
+        let [x, y] = self.camera.at(dx, dy, height);
+        datum_ops::contour_at(self.context.id, p, datum_math::Vec2::new(x, y)).unwrap_or_default().into_iter().map(Pick::Curve).collect()
+    }
+
     /// Curve `name` of the placed sketch as a shape to measure, moved to a copy's `place`.
     fn shape(p: &Placed, name: &str, place: Option<&datum_ops::Place>) -> Option<Shape> {
         let at = |n: &str| {

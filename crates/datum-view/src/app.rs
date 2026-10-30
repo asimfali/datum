@@ -579,6 +579,8 @@ struct Viewer {
     plane_draft: Option<(Json, String)>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
+    /// "Select a contour, then E": where it shows, and since when (until a click or a few seconds).
+    contour_hint: Option<(egui::Pos2, std::time::Instant)>,
 }
 
 /// An extrusion of a whole sketch being set up: the form of depth, symmetry and mode, with the
@@ -588,6 +590,8 @@ struct Extrusion {
     sketch: Option<String>,
     /// The feature to make: the first free `extrudeN`.
     name: String,
+    /// The curves chosen in the sketch, each standing for the loop it lies on; none: every loop.
+    profiles: Vec<String>,
     depth: String,
     symmetric: bool,
     /// A cut through to the opposite face: no depth, no symmetry.
@@ -617,13 +621,16 @@ impl Extrusion {
             "new"
         };
         let mode = self.mode.unwrap_or(suggested);
-        let params = if self.through && mode == "cut" {
+        let mut params = if self.through && mode == "cut" {
             json!({"name": self.name, "sketch": sketch, "mode": mode, "through": true})
         } else if self.symmetric {
             json!({"name": self.name, "sketch": sketch, "mode": mode, "z1": depth, "symmetric": true})
         } else {
             json!({"name": self.name, "sketch": sketch, "mode": mode, "z1": depth})
         };
+        if !self.profiles.is_empty() {
+            params["profiles"] = json!(self.profiles);
+        }
         (mode, params)
     }
 }
@@ -724,6 +731,7 @@ impl Viewer {
             under: None,
             plane_draft: None,
             extrusion: None,
+            contour_hint: None,
         };
         if let Some(p) = path {
             v.open(p);
@@ -2680,6 +2688,29 @@ impl Viewer {
     /// used yet, else the one clicked in the tree.
     fn extrude(&mut self, at: egui::Pos2) {
         let open = self.sketch.as_ref().map(|s| s.feature.clone());
+        // The contours selected in the open sketch; with none selected and several regions, they
+        // are to be selected first.
+        let profiles: Vec<String> = self.sketch.as_ref().map_or_else(Vec::new, |sk| {
+            let keeps = |n: &str| {
+                sk.placed.as_ref().is_ok_and(|p| {
+                    p.lines
+                        .get(n)
+                        .map(|l| !l.construction)
+                        .or_else(|| p.arcs.get(n).map(|a| !a.construction))
+                        .or_else(|| p.circles.get(n).map(|c| !c.construction))
+                        .unwrap_or(false)
+                })
+            };
+            sk.selected.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n.clone()) } else { None }).filter(|n| keeps(n)).collect()
+        });
+        if profiles.is_empty()
+            && let Some(sk) = &self.sketch
+            && let Ok(p) = &sk.placed
+            && datum_ops::chosen(sk.context.id, p, &[]).and_then(|c| datum_ops::profile_regions(sk.context.id, &c)).is_ok_and(|r| r.len() > 1)
+        {
+            self.contour_hint = Some((at, std::time::Instant::now()));
+            return;
+        }
         self.leave();
         let Some(m) = &self.model else { return };
         let features = m.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
@@ -2691,8 +2722,18 @@ impl Viewer {
         let sketch = open.or_else(|| lone.map(String::from));
         let name =
             (1..).map(|k| format!("extrude{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default();
-        self.extrusion =
-            Some(Extrusion { sketch, name, depth: "10".into(), symmetric: false, through: false, mode: None, at, sent: None, selected: false });
+        self.extrusion = Some(Extrusion {
+            sketch,
+            name,
+            profiles,
+            depth: "10".into(),
+            symmetric: false,
+            through: false,
+            mode: None,
+            at,
+            sent: None,
+            selected: false,
+        });
     }
 
     /// Drops the extrusion form, and the preview it made.
@@ -2708,6 +2749,18 @@ impl Viewer {
     /// every change; Enter makes it once the preview of what it says now is not refused, Esc drops
     /// it. Without a sketch yet it only says to click one.
     fn extrusion_form(&mut self, ctx: &egui::Context) {
+        if let Some((at, since)) = self.contour_hint {
+            const SECONDS: u64 = 4;
+            if since.elapsed().as_secs() >= SECONDS || ctx.input(|i| i.pointer.any_pressed()) {
+                self.contour_hint = None;
+            } else {
+                let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(at) + egui::vec2(14.0, 14.0);
+                egui::Area::new(egui::Id::new("datum_contour_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(self.i18n.t("extrude-contour-hint", "Select a contour, then E")));
+                });
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            }
+        }
         let Some(x) = &mut self.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         let Some(sketch) = x.sketch.clone() else {
@@ -2764,6 +2817,9 @@ impl Viewer {
                         x.through = !x.through;
                     }
                 });
+                if !x.profiles.is_empty() {
+                    ui.weak(self.i18n.f("extrude-contour", "Contour: { $names }", &[("names", &x.profiles.join(", "))]));
+                }
                 match preview {
                     None => {
                         ui.weak("…");
@@ -3565,10 +3621,12 @@ impl Viewer {
                 }
             }
         } else if r.clicked() {
-            // A group's badge stands for what the group holds.
+            // A group's badge stands for what the group holds; inside a contour, off its curves,
+            // the click takes the contour (D191: then E extrudes it).
             let picks = match sk.hover.clone() {
                 Some(Pick::Group(g)) => sk.group_picks(&g),
                 Some(Pick::Pattern(n)) => sk.pattern_copies(&n),
+                None => offset.map_or_else(Vec::new, |(x, y)| sk.contour_picks(x, y, h)),
                 p => p.into_iter().collect(),
             };
             crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
@@ -4449,6 +4507,7 @@ mod tests {
             under: None,
             plane_draft: None,
             extrusion: None,
+            contour_hint: None,
         };
         (v, inbox)
     }
@@ -5849,6 +5908,60 @@ mod tests {
         assert!(h.state().extrusion.is_none());
     }
 
+    /// The sketch `outline` of `model` open for editing in the extruding harness.
+    fn extruding_in_sketch(model: &str) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer(model);
+        let mut session = Session::default();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
+        session.execute("open", &json!({"path": path.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                v.extrusion_form(ui.ctx());
+            },
+            v,
+        );
+        (h, inbox)
+    }
+
+    /// E with a curve selected in the open sketch extrudes the contour that curve lies on.
+    #[test]
+    fn e_extrudes_the_contour_selected() {
+        let (mut h, inbox) = extruding_in_sketch("symmetric_plate.json");
+        let name = h.state().sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.iter().find(|(_, l)| !l.construction).unwrap().0.clone();
+        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve(name.clone())];
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        assert!(h.state().sketch.is_none());
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(
+            sent.iter().any(|r| matches!(r, Request::Preview(Some(("extrude", p))) if p["profiles"] == json!([name]))),
+            "profiles in the preview: {sent:?}"
+        );
+    }
+
+    /// E with nothing selected, in a sketch of several regions, asks for a contour and starts nothing.
+    #[test]
+    fn e_in_a_sketch_of_two_regions_asks_for_a_contour() {
+        let (mut h, inbox) = extruding_in_sketch("symmetric_plate.json");
+        // A circle off by itself beside the plate's outline: two regions.
+        let p = h.state_mut().sketch.as_mut().unwrap().placed.as_mut().unwrap();
+        p.solved.points.insert("far".into(), datum_math::Vec2::new(500.0, 500.0));
+        p.circles.insert("far_circle".into(), serde_json::from_value(json!({"center": "far", "diameter": 5})).unwrap());
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        assert!(h.state().sketch.is_some() && h.state().extrusion.is_none());
+        assert!(h.state().contour_hint.is_some());
+        assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(_))));
+    }
+
     /// Esc drops the form and its preview, and makes nothing.
     #[test]
     fn esc_drops_the_extrusion() {
@@ -5921,5 +6034,23 @@ mod tests {
         let reply = json!({"failed": [{"feature": "extrude2", "error": "old"}, {"feature": "extrude3", "error": "crosses"}], "mode": "cut"});
         assert_eq!(previewed(reply.clone(), &json!("extrude3")), Err("crosses".into()));
         assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
+    }
+
+    /// A click inside a contour, off its curves, takes the contour; inside a hole, the hole.
+    #[test]
+    fn a_click_inside_takes_the_contour() {
+        let (h, _inbox) = extruding_in_sketch("symmetric_plate.json");
+        let sk = h.state().sketch.as_ref().unwrap();
+        let picks = |x: f64, y: f64| {
+            let (dx, dy) = sk.camera.offset([x, y], 400.0);
+            let mut names: Vec<String> =
+                sk.contour_picks(dx, dy, 400.0).into_iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n) } else { None }).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(picks(40.0, 10.0), ["bottom", "left", "right", "top"]);
+        let hole = sk.placed.as_ref().unwrap().solved.points["h1"];
+        assert_eq!(picks(hole.x, hole.y), ["left_hole"]);
+        assert!(picks(500.0, 500.0).is_empty());
     }
 }
