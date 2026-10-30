@@ -36,6 +36,9 @@ pub struct Node {
     /// Off (0, or a formula coming to 0): the feature passes its first input on unchanged, as if it
     /// were not there (D159). A variant turns a parent's feature off instead of removing it.
     pub enabled: Num,
+    /// What the engineer sees instead of the name, in any language; none: the name is shown. IDs
+    /// never derive from it, so it may change freely.
+    pub title: Option<String>,
 }
 
 /// The model as a DAG. Inputs always precede the node, so the graph is acyclic by construction.
@@ -100,6 +103,7 @@ impl Graph {
             op,
             inputs: inputs.to_vec(),
             enabled: Num::Value(1.0),
+            title: None,
         });
         self.by_name.insert(name.into(), ix);
         Ok(ix)
@@ -125,6 +129,10 @@ impl Graph {
     /// Turns a node on or off: a number (0: off) or a formula of the parameters.
     pub fn set_enabled(&mut self, ix: NodeIx, enabled: Num) {
         self.nodes[ix as usize].enabled = enabled;
+    }
+
+    pub fn set_title(&mut self, ix: NodeIx, title: Option<String>) {
+        self.nodes[ix as usize].title = title;
     }
 
     /// The features nothing else uses: what the model ends in (see [`Evaluation::final_values`]).

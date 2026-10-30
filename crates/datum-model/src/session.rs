@@ -214,6 +214,22 @@ const COMMANDS: &[Command] = &[
         },
     },
     Command {
+        name: "set_title",
+        description: "Give feature `name` (its key) a `title` shown instead of the key: any text in any language, unique in the model \
+                      and not another feature's key. Empty or null removes it. Commands always take the key.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "title": {"type": ["string", "null"]}}, "required": ["name"]}),
+        run: |s, p| {
+            let ix = s.find(text(p, "name")?)?;
+            let title = match p.get("title") {
+                None | Some(Value::Null) => None,
+                Some(Value::String(t)) => Some(t.clone()),
+                Some(_) => return Err("title must be a string".into()),
+            };
+            crate::set_title(&mut s.graph, ix, title.filter(|t| !t.trim().is_empty()))?;
+            Ok(s.rebuild_recording(ix))
+        },
+    },
+    Command {
         name: "edit_sketch",
         description: "Change part of a sketch feature `name` without rewriting it. `points`, `lines`, `arcs`, `circles`, `measures`, \
                       `groups` and `project` are merged by name: an entry replaces the one of that name, null removes it, and with it \
@@ -1278,7 +1294,10 @@ impl Session {
     }
 
     fn find(&self, name: &str) -> Result<NodeIx, String> {
-        self.graph.find(name).ok_or_else(|| format!("no feature named `{name}`"))
+        self.graph.find(name).ok_or_else(|| match self.graph.nodes().iter().find(|n| n.title.as_deref() == Some(name)) {
+            Some(n) => format!("no feature named `{name}`; it is the title of feature `{}`: commands take the key", n.name),
+            None => format!("no feature named `{name}`"),
+        })
     }
 
     /// The value of feature `name` in the last evaluation, or why there is none.

@@ -355,3 +355,16 @@ fn shape_changes_are_reported() {
     let r = execute(&mut s, "undo", json!({}));
     assert!(r.get("shape_changed").is_none(), "undo is no edit to report: {r}");
 }
+
+#[test]
+fn a_title_is_set_and_inspected() {
+    let mut s = Server::default();
+    let add = json!({"name": "plate", "op": "prism", "polygon": [[0, 0], [10, 0], [10, 5], [0, 5]], "z0": 0, "z1": 2});
+    tool(&mut s, "execute", json!({"command": "add", "params": add}));
+    let (err, _) = tool(&mut s, "execute", json!({"command": "set_title", "params": {"name": "plate", "title": "Пластина"}}));
+    assert!(!err);
+    let (_, m) = tool(&mut s, "inspect_model", json!({}));
+    assert_eq!(m["features"][0]["title"], "Пластина");
+    let (err, e) = tool(&mut s, "mass_properties", json!({"name": "Пластина"}));
+    assert!(err && e.as_str().unwrap().contains("title of feature `plate`"), "{e}");
+}

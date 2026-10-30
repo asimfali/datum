@@ -410,3 +410,18 @@ fn sets_switch_the_product() {
     assert_eq!(run(&mut t, "levels", json!({}))["sets"], json!(["Шкаф 2,5 м"]));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn a_level_changes_a_title() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Основание"}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    let title = |s: &mut Session, level: Value| run(s, "inspect", json!({"level": level}))["features"][1]["title"].clone();
+    assert_eq!(title(&mut s, json!("long")), json!("Основание"), "inherited");
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Длинное основание", "level": "long"}));
+    assert_eq!(title(&mut s, json!("long")), json!("Длинное основание"));
+    assert_eq!(title(&mut s, Value::Null), json!("Основание"));
+    run(&mut s, "set_title", json!({"name": "plate", "title": null, "level": "long"}));
+    assert_eq!(title(&mut s, json!("long")), Value::Null);
+}
