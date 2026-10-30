@@ -96,7 +96,7 @@ fn parameters_drive_the_model() {
         ]
     });
     run(&mut s, "add", json!({"name": "base", "op": "sketch", "sketch": square}));
-    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "inputs": ["base"], "z0": 0, "z1": "t"}));
+    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "mode": "new", "inputs": ["base"], "z0": 0, "z1": "t"}));
     run(&mut s, "add", json!({"name": "row", "op": "pattern_grid", "inputs": ["slab"], "count": ["n", 1], "step": [["w + 10", 0, 0], [0, 0, 0]]}));
     assert_eq!(volume(&mut s, "row"), 3.0 * 40.0 * 40.0 * 5.0);
     // A thicker slab: the sketch keeps its cache entry, slab and row are recomputed.
@@ -171,7 +171,7 @@ fn a_replaced_section_loses_only_its_own_faces() {
             "constraints": [{"type": "fix", "point": "p1"}, {"type": "length", "line": "l1", "value": 60}]
         }}),
     );
-    run(&mut s, "add", json!({"name": "body", "op": "extrude", "inputs": ["profile"], "z0": 0, "z1": 10}));
+    run(&mut s, "add", json!({"name": "body", "op": "extrude", "mode": "new", "inputs": ["profile"], "z0": 0, "z1": 10}));
     let face = |s: &mut Session, normal: [f64; 3]| {
         let r = run(s, "query_faces", json!({"name": "body", "normal": normal}));
         assert_eq!(r["count"].as_u64(), Some(1), "{r}");
@@ -485,4 +485,70 @@ fn modified_since_saved() {
     assert!(!modified(&mut s), "back to what was saved");
     run(&mut s, "open", json!({"path": path}));
     assert!(!modified(&mut s));
+}
+
+fn title_of(s: &mut Session, name: &str) -> Value {
+    run(s, "inspect", json!({}))["features"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap()["title"].clone()
+}
+
+#[test]
+fn a_title_is_shown_saved_and_undone() {
+    let mut s = Session::default();
+    plate(&mut s);
+    assert_eq!(title_of(&mut s, "plate"), Value::Null);
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Основание"}));
+    assert_eq!(title_of(&mut s, "plate"), json!("Основание"));
+    assert_eq!(title_of(&mut s, "moved"), Value::Null);
+    let path = std::env::temp_dir().join(format!("datum-title-{}.json", std::process::id()));
+    run(&mut s, "save", json!({"path": path}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path}));
+    std::fs::remove_file(&path).ok();
+    assert_eq!(title_of(&mut t, "plate"), json!("Основание"));
+    assert_eq!(t.graph(), s.graph());
+    run(&mut s, "set_title", json!({"name": "plate", "title": ""}));
+    assert_eq!(title_of(&mut s, "plate"), Value::Null);
+    run(&mut s, "undo", json!({}));
+    assert_eq!(title_of(&mut s, "plate"), json!("Основание"));
+    run(&mut s, "set_title", json!({"name": "plate", "title": null}));
+    assert_eq!(title_of(&mut s, "plate"), Value::Null);
+    run(&mut s, "undo", json!({}));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(title_of(&mut s, "plate"), Value::Null);
+    run(&mut s, "redo", json!({}));
+    assert_eq!(title_of(&mut s, "plate"), json!("Основание"));
+}
+
+#[test]
+fn titles_are_unique_and_not_keys() {
+    let mut s = Session::default();
+    plate(&mut s);
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Основание"}));
+    let e = s.execute("set_title", &json!({"name": "moved", "title": " Основание "})).unwrap_err();
+    assert!(e.contains("`moved`") && e.contains("`plate`"), "{e}");
+    let e = s.execute("set_title", &json!({"name": "moved", "title": "plate"})).unwrap_err();
+    assert!(e.contains("key") && e.contains("`plate`"), "{e}");
+    let e = s.execute("add", &json!({"name": "Основание", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 1]})).unwrap_err();
+    assert!(e.contains("title of feature `plate`"), "{e}");
+    let e =
+        s.execute("add", &json!({"name": "third", "title": "moved", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 1]})).unwrap_err();
+    assert!(e.contains("`third`") && e.contains("`moved`"), "{e}");
+    assert_eq!(s.graph().nodes().len(), 2);
+    let file = r#"{"format": "datum/1", "features": [
+        {"name": "a", "title": "Бобышка", "op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0, "z1": 1},
+        {"name": "b", "title": "Бобышка", "op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0, "z1": 1}]}"#;
+    let e = datum_model::parse(file).unwrap_err().to_string();
+    assert!(e.contains("`b`") && e.contains("`a`"), "{e}");
+}
+
+#[test]
+fn a_title_is_no_name_for_commands() {
+    let mut s = Session::default();
+    plate(&mut s);
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Карман"}));
+    let e = s.execute("mass_properties", &json!({"name": "Карман"})).unwrap_err();
+    assert!(e.contains("it is the title of feature `plate`") && e.contains("take the key"), "{e}");
+    let e = s.execute("edit", &json!({"name": "Карман", "z1": 4})).unwrap_err();
+    assert!(e.contains("`plate`"), "{e}");
+    assert_eq!(s.execute("mass_properties", &json!({"name": "nothing"})).unwrap_err(), "no feature named `nothing`");
 }

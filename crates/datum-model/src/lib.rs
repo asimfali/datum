@@ -173,12 +173,47 @@ pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<Node
         .map(|i| g.find(i).ok_or_else(|| format!("`{name}`: unknown input `{i}` (features come after their inputs)")))
         .collect::<Result<Vec<_>, _>>()?;
     let enabled = fields.remove("enabled").map(|v| enabled_of(&name, v)).transpose()?;
+    let title = fields.remove("title").map(|v| title_of(&name, v)).transpose()?.flatten();
+    if let Some(other) = g.nodes().iter().find(|n| n.title.as_deref() == Some(&name)) {
+        return Err(format!("`{name}`: the key is the title of feature `{}`", other.name));
+    }
     let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| format!("`{name}`: {e}"))?;
     let ix = g.add(&name, op, &inputs).map_err(|e| e.to_string())?;
     if let Some(e) = enabled {
         g.set_enabled(ix, e);
     }
+    if title.is_some() {
+        set_title(g, ix, title)?;
+    }
     Ok(ix)
+}
+
+/// Gives feature `ix` a title (none: removes it). A title is not empty, differs from every other
+/// feature's title and key (a command given it would be ambiguous), and no key of a later feature
+/// may equal it either: [`add_feature`] checks that when the key comes.
+pub fn set_title(g: &mut Graph, ix: NodeIx, title: Option<String>) -> Result<(), String> {
+    let title = title.map(|t| t.trim().to_string());
+    if let Some(t) = &title {
+        let name = &g.nodes()[ix as usize].name;
+        if t.is_empty() {
+            return Err(format!("`{name}`: the title is empty"));
+        }
+        if let Some(other) = g.nodes().iter().enumerate().find(|(i, n)| *i != ix as usize && (n.name == *t || n.title.as_deref() == Some(t))) {
+            let what = if other.1.name == *t { "the key" } else { "the title" };
+            return Err(format!("`{name}`: the title `{t}` is {what} of feature `{}`", other.1.name));
+        }
+    }
+    g.set_title(ix, title);
+    Ok(())
+}
+
+/// A feature's `title` (D188) as given: a string, or null for none.
+pub fn title_of(name: &str, v: Value) -> Result<Option<String>, String> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(t) => Ok(Some(t)),
+        _ => Err(format!("`{name}`: title must be a string")),
+    }
 }
 
 /// A feature's `enabled` (D159): `true`, `false`, a number (0: off) or a formula.
@@ -197,6 +232,9 @@ pub fn feature_json(g: &Graph, ix: NodeIx) -> Map<String, Value> {
         _ => Map::new(),
     };
     fields.insert("name".into(), Value::String(node.name.clone()));
+    if let Some(t) = &node.title {
+        fields.insert("title".into(), Value::String(t.clone()));
+    }
     if node.enabled != Num::Value(1.0) {
         fields.insert("enabled".into(), serde_json::to_value(&node.enabled).unwrap_or(Value::Null));
     }

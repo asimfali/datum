@@ -28,7 +28,7 @@ fn frame(s: &mut Session) {
                             {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"},
                             {"type": "length", "line": "bottom", "value": "w"}, {"type": "length", "line": "left", "value": 50}]}}),
     );
-    run(s, "add", json!({"name": "plate", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": "t"}));
+    run(s, "add", json!({"name": "plate", "op": "extrude", "mode": "new", "inputs": ["outline"], "z0": 0, "z1": "t"}));
 }
 
 /// A hole Ø10 at (20, 25), held by dimensions from the plate's corner.
@@ -209,8 +209,8 @@ fn the_product_is_each_part_in_its_chosen_variant() {
                         {"type": "length", "line": "bottom", "value": "w"}, {"type": "length", "line": "left", "value": 50}]}}),
     );
     // Two parts on one sketch, a plate and a lid 10 above it, and a helper body; the plate cut.
-    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": 2}));
-    run(&mut s, "add", json!({"name": "cover", "op": "extrude", "inputs": ["outline"], "z0": 10, "z1": 11}));
+    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "mode": "new", "inputs": ["outline"], "z0": 0, "z1": 2}));
+    run(&mut s, "add", json!({"name": "cover", "op": "extrude", "mode": "new", "inputs": ["outline"], "z0": 10, "z1": 11}));
     run(&mut s, "add", json!({"name": "helper", "op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0, "z1": 1}));
     run(&mut s, "add", json!({"name": "pin", "op": "prism", "polygon": [[10, 10], [20, 10], [20, 20], [10, 20]], "z0": -1, "z1": 5}));
     run(&mut s, "add", json!({"name": "drilled", "op": "boolean", "kind": "difference", "inputs": ["slab", "pin"]}));
@@ -409,4 +409,19 @@ fn sets_switch_the_product() {
     run(&mut t, "remove_set", json!({"name": "Шкаф 2 м"}));
     assert_eq!(run(&mut t, "levels", json!({}))["sets"], json!(["Шкаф 2,5 м"]));
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_level_changes_a_title() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Основание"}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    let title = |s: &mut Session, level: Value| run(s, "inspect", json!({"level": level}))["features"][1]["title"].clone();
+    assert_eq!(title(&mut s, json!("long")), json!("Основание"), "inherited");
+    run(&mut s, "set_title", json!({"name": "plate", "title": "Длинное основание", "level": "long"}));
+    assert_eq!(title(&mut s, json!("long")), json!("Длинное основание"));
+    assert_eq!(title(&mut s, Value::Null), json!("Основание"));
+    run(&mut s, "set_title", json!({"name": "plate", "title": null, "level": "long"}));
+    assert_eq!(title(&mut s, json!("long")), Value::Null);
 }

@@ -15,6 +15,8 @@ use serde_json::{Map, Value, json};
 use crate::levels::Doc;
 use crate::{SketchPatch, add_feature, feature_json, library, parse_doc, to_json_doc};
 
+mod extrude;
+
 /// The model being edited, its cache and its latest evaluation. Every edit re-evaluates; the
 /// cache makes that cost proportional to what changed.
 pub struct Session {
@@ -134,9 +136,35 @@ const COMMANDS: &[Command] = &[
                       exactly as a feature in the model file.",
         params: feature_schema,
         run: |s, p| {
+            if p.get("op").and_then(Value::as_str) == Some("extrude") && !p.contains_key("mode") {
+                return Err(extrude::MODE_REQUIRED.into());
+            }
             let ix = add_feature(&mut s.graph, p.clone())?;
             Ok(s.rebuild_recording(ix))
         },
+    },
+    Command {
+        name: "extrude",
+        description: "Extrude sketch `sketch` as feature `name` (D185). `mode` is required: `new` makes a body of its own; `join`, `cut` \
+                      and `intersect` change a target body: `body` (the feature that began it, or its last), else the body whose \
+                      face the sketch lies on, else the one the extrusion meets (several: give `body`). From a face of the target \
+                      the depth's sign is geometry, out of the body positive: a boss is `join` with `z1` > 0, a pocket `cut` with \
+                      `z1` < 0; `through: true` cuts through to the opposite face. Else `z0`, `z1` (either larger), `symmetric` \
+                      (`z1` deep, half each side), or `plane`: a work plane to go up to. The reply names the mode and the body.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "sketch": {"type": "string"},
+                "mode": {"type": "string", "enum": ["new", "join", "cut", "intersect"]},
+                "body": {"type": "string"},
+                "z0": {"type": ["number", "string"]},
+                "z1": {"type": ["number", "string"]},
+                "symmetric": {"type": "boolean"},
+                "through": {"type": "boolean"},
+                "plane": {"type": "string"}
+            }, "required": ["name", "sketch", "mode"], "additionalProperties": false})
+        },
+        run: |s, p| s.extrude(p),
     },
     Command {
         name: "set_parameter",
@@ -182,6 +210,18 @@ const COMMANDS: &[Command] = &[
             fields.extend(p.iter().filter(|(k, _)| *k != "name" && *k != "enabled").map(|(k, v)| (k.clone(), v.clone())));
             let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
+            Ok(s.rebuild_recording(ix))
+        },
+    },
+    Command {
+        name: "set_title",
+        description: "Give feature `name` (its key) a `title` shown instead of the key: any text in any language, unique in the model \
+                      and not another feature's key. Empty or null removes it. Commands always take the key.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "title": {"type": ["string", "null"]}}, "required": ["name"]}),
+        run: |s, p| {
+            let ix = s.find(text(p, "name")?)?;
+            let title = crate::title_of(text(p, "name")?, p.get("title").cloned().unwrap_or(Value::Null))?;
+            crate::set_title(&mut s.graph, ix, title.filter(|t| !t.trim().is_empty()))?;
             Ok(s.rebuild_recording(ix))
         },
     },
@@ -1250,7 +1290,10 @@ impl Session {
     }
 
     fn find(&self, name: &str) -> Result<NodeIx, String> {
-        self.graph.find(name).ok_or_else(|| format!("no feature named `{name}`"))
+        self.graph.find(name).ok_or_else(|| match self.graph.nodes().iter().find(|n| n.title.as_deref() == Some(name)) {
+            Some(n) => format!("no feature named `{name}`; it is the title of feature `{}`: commands take the key", n.name),
+            None => format!("no feature named `{name}`"),
+        })
     }
 
     /// The value of feature `name` in the last evaluation, or why there is none.

@@ -351,23 +351,19 @@ fn makes_body(op: &Op) -> bool {
     !matches!(op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. })
 }
 
+/// The features of the body feature `last` of graph `g` ends in, from `last` back to the one
+/// that began it: down its first inputs while they make bodies (a cut's body, a boolean's first).
+pub(crate) fn body_chain(g: &Graph, last: NodeIx) -> impl Iterator<Item = NodeIx> + '_ {
+    let nodes = g.nodes();
+    std::iter::successors(Some(last), |&at| nodes[at as usize].inputs.first().copied().filter(|&j| makes_body(&nodes[j as usize].op)))
+}
+
 /// The bodies of graph `g`, in the order they were begun: for each final body feature, the
-/// feature that began its body (down its first inputs while they make bodies: a cut's body, a
-/// boolean's first) and itself.
+/// feature that began its body (see [`body_chain`]) and itself.
 pub fn bodies(g: &Graph) -> Vec<(String, String)> {
     let nodes = g.nodes();
-    let mut out: Vec<(NodeIx, NodeIx)> = g
-        .finals()
-        .into_iter()
-        .filter(|&i| makes_body(&nodes[i as usize].op))
-        .map(|i| {
-            let mut at = i;
-            while let Some(&j) = nodes[at as usize].inputs.first().filter(|&&j| makes_body(&nodes[j as usize].op)) {
-                at = j;
-            }
-            (at, i)
-        })
-        .collect();
+    let mut out: Vec<(NodeIx, NodeIx)> =
+        g.finals().into_iter().filter(|&i| makes_body(&nodes[i as usize].op)).map(|i| (body_chain(g, i).last().unwrap_or(i), i)).collect();
     out.sort_unstable();
     out.into_iter().map(|(a, i)| (nodes[a as usize].name.clone(), nodes[i as usize].name.clone())).collect()
 }
