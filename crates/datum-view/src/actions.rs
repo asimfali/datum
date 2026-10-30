@@ -18,6 +18,7 @@ pub enum Act {
     Redo,
     SmoothEdges,
     NewSketch,
+    Extrude,
     Select,
     Line,
     Arc,
@@ -91,7 +92,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 40] = [
+pub const ACTIONS: [Action; 41] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -115,6 +116,14 @@ pub const ACTIONS: [Action; 40] = [
         "Then click an origin plane or a plane face; Enter or a right click: XY, picked from the start",
         plain(Key::S),
         Model,
+    ),
+    action(
+        Act::Extrude,
+        "part.extrude",
+        "Extrude",
+        "Extrude a sketch: the one open, else the only one not used yet, else the one clicked in the tree (E)",
+        plain(Key::E),
+        Anywhere,
     ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
