@@ -49,6 +49,7 @@ pub enum Act {
     ParameterTable,
     MaterialTable,
     RuleTable,
+    Rename,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -92,7 +93,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 41] = [
+pub const ACTIONS: [Action; 42] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -264,6 +265,14 @@ pub const ACTIONS: [Action; 41] = [
         Anywhere,
     ),
     action(Act::RuleTable, "view.rule_table", "Rules", "Rules of the library by material: sheet (thickness, bend radius) or part", None, Anywhere),
+    action(
+        Act::Rename,
+        "feature.rename",
+        "Rename",
+        "A feature's title in the tree: any text; the key stays (F2 or a second click on the row)",
+        plain(Key::F2),
+        Model,
+    ),
 ];
 
 impl Act {
