@@ -100,6 +100,10 @@ pub enum Op {
         mode: Mode,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         through: bool,
+        /// Through one wall only, the one the sketch lies on: sheet metal's cut, as the blank is
+        /// punched (D196). With `through`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        wall: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         profiles: Vec<String>,
     },
@@ -319,12 +323,13 @@ impl Op {
                 k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()?,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1, symmetric, mode, through, profiles } => Self::Extrude {
+            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles } => Self::Extrude {
                 z0: r(z0, "z0")?,
                 z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?,
                 symmetric: *symmetric,
                 mode: *mode,
                 through: *through,
+                wall: *wall,
                 profiles: profiles.clone(),
             },
             Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
@@ -496,8 +501,11 @@ impl Op {
 
 /// An extrusion (see [`Op::Extrude`]), its numbers evaluated.
 fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepError> {
-    let Op::Extrude { z0, z1, symmetric, mode, through, profiles } = op else { return Err(BrepError::Invalid("not an extrusion".into())) };
+    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles } = op else { return Err(BrepError::Invalid("not an extrusion".into())) };
     let (z0, z1, symmetric, mode, through) = (num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through);
+    if *wall && !through {
+        return Err(BrepError::Sketch("`wall` is a cut through one wall: with `through`".into()));
+    }
     // The target body first unless the extrusion makes a new one.
     let k = usize::from(mode != Mode::New);
     if values.len() < k + 1 || values.len() > k + 2 {
@@ -523,7 +531,10 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
         // else (a wall the profiles cross, a sketch off the body) by the general Boolean, the tool
         // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
         let local = match s.face {
+            // Sheet metal: through its thickness alone, made directly or refused.
+            Some(_) if *wall => return from_face(feature, t, s, Reach::Through),
             Some(_) => through_walls(feature, t, s),
+            None if *wall => return Err(BrepError::Sketch("a cut of sheet metal takes a sketch on a face of it".into())),
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),
         };
         return match local {
