@@ -235,10 +235,10 @@ impl Renderer {
                 view,
                 depth_slice: None,
                 resolve_target,
-                // Stored even when multisampled and resolved: discarded, on DX12 (Radeon RX550) the
-                // resolved picture stayed as it was, and a model opened showed nothing until the
-                // view moved and drew without multisampling.
-                ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }), store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a: 1.0 }),
+                    store: if resolve_target.is_some() { wgpu::StoreOp::Discard } else { wgpu::StoreOp::Store },
+                },
             })],
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
