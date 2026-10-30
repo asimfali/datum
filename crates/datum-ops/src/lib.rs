@@ -509,6 +509,20 @@ fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetr
             (Mode::Cut, true) => Err(BrepError::Sketch(
                 "cut: the extrusion goes out of the body, nothing to cut; a pocket goes into it, its depth negative, or cut `through`".into(),
             )),
+            (Mode::Cut, false) => match from_face(feature, t, s, Reach::Depth(depth)) {
+                // Into more than solid metal (a hole, walls beyond): the general Boolean
+                // operation, the tool from the floor out past the body, where there is nothing
+                // to cut, so no face of it lies on the sketch's (D186, D190).
+                Err(BrepError::Unsupported(why)) => {
+                    let out = t.vertices().iter().map(|v| (v.point - s.frame[0]).dot(s.frame[3])).fold(0.0, f64::max) - depth;
+                    let tool = extrude_sketch(feature, s, depth, out)?;
+                    boolean(feature, BooleanKind::Difference, None, &[t, &tool]).map_err(|e| match e {
+                        BrepError::Unsupported(all) => BrepError::Unsupported(format!("{why}; as a Boolean cut: {all}")),
+                        e => e,
+                    })
+                }
+                made => made,
+            },
             _ => from_face(feature, t, s, Reach::Depth(depth)),
         };
     }

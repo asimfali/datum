@@ -157,11 +157,12 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
         for &h in other.iter().filter(level) {
             let loops = outline(target, h, &frame)?;
             let meets = |p: &ProfileLoop| loops.iter().any(|l| p.touches(l) || l.winding(p.points[0]) != 0 || p.winding(l.points[0]) != 0);
+            // Degenerate, not unsupported: the general Boolean operation fails there too.
             if profiles.iter().any(meets) {
-                return Err(unsupported(if d < 0.0 {
-                    "its floor lies on a face of the body: make it shallower, or cut through".into()
+                return Err(BrepError::Degenerate(if d < 0.0 {
+                    format!("{what}: its floor lies on a face of the body: make it shallower, or cut through")
                 } else {
-                    "its top lies on a face of the body: make it lower or higher".into()
+                    format!("{what}: its top lies on a face of the body: make it lower or higher")
                 }));
             }
         }

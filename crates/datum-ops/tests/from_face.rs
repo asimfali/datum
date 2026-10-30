@@ -185,14 +185,9 @@ fn what_a_pocket_or_a_boss_refuses() {
         Err(BrepError::Unsupported(m)) => assert!(m.contains("inside another"), "{m}"),
         r => panic!("{:?}", r.map(|b| b.volume())),
     }
-    // The floor on the bottom face, or below it.
-    for depth in [-10.0, -15.0] {
-        let r = extrude("x", &plate, &top, circle(30.0, 30.0, 10.0), pocket_of(depth));
-        assert!(matches!(r, Err(BrepError::Unsupported(_))), "{depth}: {:?}", r.map(|b| b.volume()));
-    }
-    // On the bottom face exactly: said so, with what to do.
+    // The floor on the bottom face exactly: said so, with what to do.
     match extrude("x", &plate, &top, circle(30.0, 30.0, 10.0), pocket_of(-10.0)) {
-        Err(BrepError::Unsupported(m)) => assert!(m.contains("floor lies on a face of the body") && m.contains("cut through"), "{m}"),
+        Err(BrepError::Degenerate(m)) => assert!(m.contains("floor lies on a face of the body") && m.contains("cut through"), "{m}"),
         r => panic!("{:?}", r.map(|b| b.volume())),
     }
     // Over a hole made earlier, inside the profile.
@@ -281,8 +276,9 @@ mod random {
 }
 
 /// A tube 60 × 40 × 20 around a hole 20 × 20: a cut through it from its front, wider than the
-/// hole, goes through both walls and the side walls between (D186: the general Boolean operation
-/// where cutting one plate does not do); and from a sketch on a plane, off the body.
+/// hole, goes through both walls and the side walls between, and a pocket into it beyond its
+/// wall (D186, D190: the general Boolean operation where one plate's cut does not do); and a cut
+/// through from a sketch on a plane, off the body.
 #[test]
 fn through_all_of_a_tube() {
     let rect = |x0: f64, y0: f64, x1: f64, y1: f64, k: &str| {
@@ -309,6 +305,12 @@ fn through_all_of_a_tube() {
     let cut = extrude("window", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), through.clone()).unwrap();
     // 10 high: 20 wide through both walls (10 each), 5 + 5 wide through the 40 of the sides.
     assert_close(cut.volume(), 40_000.0 - 10.0 * (20.0 * 20.0 + 10.0 * 40.0));
+    // A pocket 20 deep from the front: through its wall into the hole, and 20 into the sides.
+    let pocket = extrude("pocket", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), pocket_of(-20.0)).unwrap();
+    assert_close(pocket.volume(), 40_000.0 - 10.0 * (20.0 * 10.0 + 10.0 * 20.0));
+    // Deeper than the tube: through, as a cut deeper than a plate is.
+    let deep = extrude("deep", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), pocket_of(-50.0)).unwrap();
+    assert_close(deep.volume(), cut.volume());
     // A sketch on the XY plane, off the body: through it along Z.
     let s: Op = serde_json::from_value(serde_json::json!({"op": "sketch", "sketch": rect(5.0, 5.0, 15.0, 35.0, "p")})).unwrap();
     let placed = s.eval(id("slot"), &[]).unwrap();
