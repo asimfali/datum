@@ -335,15 +335,17 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     let (graph, evaluation) = (session.graph(), session.evaluation());
     // In a variant, its part alone, the other parts as the product has them faded around it;
     // in the base, the product whole: every part in its chosen variant (D160, D169). The
-    // graph's own bodies of the parts are left out, the rest of it (sketches, a body no part)
-    // shown as it is.
+    // graph's own bodies of the parts shown otherwise (another variant, around, or hidden) are
+    // left out, the rest of it (a part as the base has it, sketches, a body no part) shown as it
+    // is: its faces are the ones a sketch is put on.
     let mine = session.active().and_then(|a| session.part_of(a));
     let product = session.product();
+    let own = |part: &str, level: &Option<String>| mine.is_none() && level.is_none() && session.visible(part);
     let skip: Vec<String> = datum_model::levels::bodies(graph)
         .into_iter()
         .filter(|(begun, _)| match &mine {
             Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
-            None => product.iter().any(|(q, _, _)| q == begun),
+            None => product.iter().any(|(q, level, _)| q == begun && !own(q, level)),
         })
         .map(|(_, last)| last)
         .collect();
@@ -357,7 +359,7 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
     let around: Vec<datum_graph::ValueRef> = product
         .into_iter()
-        .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
+        .filter(|(part, level, _)| Some(part) != mine.as_ref() && session.visible(part) && !own(part, level))
         .filter_map(|(_, _, bodies)| bodies.ok())
         .flatten()
         .map(|(_, v)| v)
@@ -5837,5 +5839,24 @@ mod tests {
         h.get_by_label("✔ other  ·  sketch").click();
         h.run();
         assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
+    }
+
+    /// In the base, a part as the base has it is a body of the scene, not around it: a ray from
+    /// above takes its top face, as S needs to put a sketch on it.
+    #[test]
+    fn the_bases_parts_are_picked() {
+        let mut s = Session::default();
+        let square = json!({"points": {"a": [0, 0], "b": [40, 0], "c": [40, 30], "d": [0, 30]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+        s.execute("add", &json!({"name": "outline", "op": "sketch", "sketch": square})).unwrap();
+        s.execute("extrude", &json!({"name": "plate", "sketch": "outline", "mode": "new", "z1": 10})).unwrap();
+        let p = picture(&s, None, &mut MeshCache::default());
+        assert_eq!(p.bodies, ["plate"]);
+        let down = datum_math::Vec3::new(0.0, 0.0, -1.0);
+        let hit = p.scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).expect("the top face");
+        assert_eq!((hit.distance, p.bodies[hit.body].as_str()), (90.0, "plate"));
+        // Hidden, it is neither drawn nor picked.
+        s.execute("show", &json!({"part": "plate", "visible": false})).unwrap();
+        assert!(picture(&s, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
     }
 }
