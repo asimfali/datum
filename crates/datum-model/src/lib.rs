@@ -173,11 +173,7 @@ pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<Node
         .map(|i| g.find(i).ok_or_else(|| format!("`{name}`: unknown input `{i}` (features come after their inputs)")))
         .collect::<Result<Vec<_>, _>>()?;
     let enabled = fields.remove("enabled").map(|v| enabled_of(&name, v)).transpose()?;
-    let title = match fields.remove("title") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(t)) => Some(t),
-        Some(_) => return Err(format!("`{name}`: title must be a string")),
-    };
+    let title = fields.remove("title").map(|v| title_of(&name, v)).transpose()?.flatten();
     if let Some(other) = g.nodes().iter().find(|n| n.title.as_deref() == Some(&name)) {
         return Err(format!("`{name}`: the key is the title of feature `{}`", other.name));
     }
@@ -209,6 +205,15 @@ pub fn set_title(g: &mut Graph, ix: NodeIx, title: Option<String>) -> Result<(),
     }
     g.set_title(ix, title);
     Ok(())
+}
+
+/// A feature's `title` (D188) as given: a string, or null for none.
+pub fn title_of(name: &str, v: Value) -> Result<Option<String>, String> {
+    match v {
+        Value::Null => Ok(None),
+        Value::String(t) => Ok(Some(t)),
+        _ => Err(format!("`{name}`: title must be a string")),
+    }
 }
 
 /// A feature's `enabled` (D159): `true`, `false`, a number (0: off) or a formula.

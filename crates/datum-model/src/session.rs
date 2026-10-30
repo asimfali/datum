@@ -220,11 +220,7 @@ const COMMANDS: &[Command] = &[
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "title": {"type": ["string", "null"]}}, "required": ["name"]}),
         run: |s, p| {
             let ix = s.find(text(p, "name")?)?;
-            let title = match p.get("title") {
-                None | Some(Value::Null) => None,
-                Some(Value::String(t)) => Some(t.clone()),
-                Some(_) => return Err("title must be a string".into()),
-            };
+            let title = crate::title_of(text(p, "name")?, p.get("title").cloned().unwrap_or(Value::Null))?;
             crate::set_title(&mut s.graph, ix, title.filter(|t| !t.trim().is_empty()))?;
             Ok(s.rebuild_recording(ix))
         },
