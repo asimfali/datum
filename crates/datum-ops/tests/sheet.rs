@@ -86,7 +86,7 @@ fn cut(b: &Body, on: &str, sketch: serde_json::Value, extra: serde_json::Value) 
         s.extend(e.clone());
     }
     let placed = op(s).eval(id(&format!("{on}.sketch")), &[&target]).unwrap();
-    let r = op(serde_json::json!({"op": "cut"})).eval(id(&format!("{on}.cut")), &[&target, &placed]).unwrap();
+    let r = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true})).eval(id(&format!("{on}.cut")), &[&target, &placed]).unwrap();
     r.body().unwrap().clone()
 }
 

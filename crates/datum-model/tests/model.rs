@@ -3,6 +3,7 @@
 use datum_graph::{Graph, Op};
 use datum_math::{Vec2, Vec3};
 use datum_model::{ModelError, parse, to_json};
+use datum_ops::Mode;
 
 fn sample() -> Graph {
     let mut g = Graph::default();
@@ -52,7 +53,8 @@ fn mistakes_are_reported_with_the_feature() {
 }
 
 /// A file from before patterns in sketches (D128): a cut's `pattern` becomes a pattern of its
-/// sketch, named after the cut, copying a group of all the sketch's profile curves.
+/// sketch, named after the cut, copying a group of all the sketch's profile curves; and from
+/// before extrusion modes (D187), the cut an extrusion cutting through.
 #[test]
 fn a_cut_pattern_moves_into_its_sketch() {
     let old = r#"{"format": "datum/1", "features": [
@@ -63,5 +65,6 @@ fn a_cut_pattern_moves_into_its_sketch() {
     assert_eq!(sketch.groups["perf_cell"], ["hole"]);
     let p = &sketch.patterns["perf"];
     assert_eq!((p.of.as_str(), p.count.clone()), ("perf_cell", Some([3.0.into(), 2.0.into()])));
-    assert_eq!(g.nodes()[1].op, Op::Cut {});
+    let through = Op::Extrude { z0: 0.0.into(), z1: None, symmetric: false, mode: Mode::Cut, through: true };
+    assert_eq!(g.nodes()[1].op, through);
 }

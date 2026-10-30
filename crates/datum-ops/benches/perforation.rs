@@ -83,7 +83,7 @@ fn round_holes(c: &mut Criterion) {
             "patterns": {"grid": {"of": "hole", "count": [n, n], "step": [[10, 0], [0, 10]]}}}}),
     );
     let sketch = sketch.eval(TopoId::derive("holes").finish(), &[&sheet]).expect("sketch");
-    let cut = json(serde_json::json!({"op": "cut"}));
+    let cut = json(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}));
     let mut group = c.benchmark_group("cut_round_10000");
     group.sample_size(10);
     for (name, pool) in pools() {
@@ -112,7 +112,7 @@ fn rolled_holes(c: &mut Criterion) {
             "patterns": {"grid": {"of": "hole", "count": [100, 100], "step": [[10, 0], [0, 10]]}}}}))
     .eval(TopoId::derive("holes").finish(), &[&sheet])
     .expect("sketch");
-    let cut = json(serde_json::json!({"op": "cut"}));
+    let cut = json(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}));
     let mut group = c.benchmark_group("cut_rolled_10000");
     group.sample_size(10);
     for (name, pool) in pools() {
