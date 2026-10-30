@@ -29,6 +29,9 @@ pub struct Level {
     /// the root; the levels below it are of its part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part: Option<String>,
+    /// The rule (D179, D189) its part takes in it; none: the parent's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
     /// Parameters it sets: the parent's given other values, or its own.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub parameters: BTreeMap<String, Num>,
@@ -41,13 +44,16 @@ pub struct Level {
     pub output: Option<Vec<String>>,
 }
 
-/// What a body is as a part (D169): its name (none: the feature that began it). Its sheet metal
-/// rule, material and designation come here.
+/// What a body is as a part (D169): its name (none: the feature that began it) and its rule
+/// (D179, D189: a library rule by name, its material the part's; none: a part of no material).
+/// Its designation comes here.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PartInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
 }
 
 /// A product variant (D169): the variant of each part and the parts hidden, under a name, to
@@ -254,6 +260,31 @@ impl Doc {
         self.parts.get(part).cloned().flatten().and_then(|p| p.name).unwrap_or_else(|| part.to_string())
     }
 
+    /// What body `part` is as a part: a part as any other is not written down.
+    pub fn put_part(&mut self, part: &str, entry: Option<PartInfo>) {
+        if entry == Some(PartInfo::default()) {
+            self.parts.remove(part);
+        } else {
+            self.parts.insert(part.to_string(), entry);
+        }
+    }
+
+    /// The rule of part `part` in level `level` (none: the root): the nearest level's on the way
+    /// up that gives one, else the part's own.
+    pub fn rule(&self, part: &str, level: Option<&str>) -> Option<String> {
+        let up = std::iter::successors(level.map(String::from), |l| self.levels.get(l).and_then(|l| l.parent.clone()));
+        up.filter_map(|l| self.levels.get(&l)?.rule.clone()).next().or_else(|| self.parts.get(part).cloned().flatten()?.rule)
+    }
+
+    /// The kind of part `part` (D179): `sheet` if its body began as sheet metal, else `part`. Set
+    /// by its first feature, it never changes.
+    pub fn kind(&self, part: &str) -> &'static str {
+        match self.root.find(part).map(|i| &self.root.nodes()[i as usize].op) {
+            Some(Op::Sheet { .. }) => "sheet",
+            _ => "part",
+        }
+    }
+
     /// The part level `name` is a variant of.
     pub fn part_of(&self, name: &str) -> Result<String, String> {
         self.chain_check(name)?;
@@ -396,7 +427,7 @@ impl Doc {
             let Some(first) = made.first().cloned() else { return Err(format!("part `{name}` makes no body")) };
             for (k, b) in made.iter().enumerate() {
                 let named = if k == 0 { name.clone() } else { format!("{name} {}", k + 1) };
-                self.parts.insert(b.clone(), Some(PartInfo { name: Some(named) }));
+                self.parts.insert(b.clone(), Some(PartInfo { name: Some(named), ..PartInfo::default() }));
             }
             let keep = !changed.is_empty() || !level.parameters.is_empty();
             if keep {

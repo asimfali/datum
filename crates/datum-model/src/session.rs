@@ -150,7 +150,8 @@ const COMMANDS: &[Command] = &[
                       face the sketch lies on, else the one the extrusion meets (several: give `body`). From a face of the target \
                       the depth's sign is geometry, out of the body positive: a boss is `join` with `z1` > 0, a pocket `cut` with \
                       `z1` < 0; `through: true` cuts through to the opposite face. Else `z0`, `z1` (either larger), `symmetric` \
-                      (`z1` deep, half each side), or `plane`: a work plane to go up to. The reply names the mode and the body.",
+                      (`z1` deep, half each side), or `plane`: a work plane to go up to. `rule`: the part's rule, as `set_part` \
+                      gives it. The reply names the mode, the body and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -161,7 +162,8 @@ const COMMANDS: &[Command] = &[
                 "z1": {"type": ["number", "string"]},
                 "symmetric": {"type": "boolean"},
                 "through": {"type": "boolean"},
-                "plane": {"type": "string"}
+                "plane": {"type": "string"},
+                "rule": {"type": ["string", "null"]}
             }, "required": ["name", "sketch", "mode"], "additionalProperties": false})
         },
         run: |s, p| s.extrude(p),
@@ -629,15 +631,21 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "set_part",
         description: "Body `body` (the feature that began it) as a part: `name` its name (null: the feature's), `part` false: no part \
-                      (an envelope, a surface to cut by; not in the product's list, no flat), true: a part again. Saved with the model.",
+                      (an envelope, a surface to cut by; not in the product's list, no flat), true: a part again. `rule`: a library \
+                      rule (`library` with level `rule`) of the part's kind, its material the part's; null: none, a part of no \
+                      material. With `level`, a variant of the part takes that rule instead (null: its parent's). Saved with the model.",
         params: || {
-            json!({"type": "object", "properties": {"body": {"type": "string"}, "name": {"type": ["string", "null"]}, "part": {"type": "boolean"}},
-                   "required": ["body"]})
+            json!({"type": "object", "properties": {
+                "body": {"type": "string"}, "name": {"type": ["string", "null"]}, "part": {"type": "boolean"}, "rule": {"type": ["string", "null"]}
+            }, "required": ["body"]})
         },
         run: |s, p| {
             let body = text(p, "body")?;
             if !crate::levels::bodies(&s.doc.root).iter().any(|(b, _)| b == body) {
                 return Err(format!("no body begun by `{body}` in the root"));
+            }
+            if let Some(r) = p.get("rule") {
+                s.set_rule(body, r.as_str().map(String::from))?;
             }
             let mut entry = s.doc.parts.get(body).cloned().unwrap_or(Some(crate::levels::PartInfo::default()));
             if let Some(n) = p.get("name") {
@@ -650,11 +658,7 @@ const COMMANDS: &[Command] = &[
                 let part = part.as_bool().ok_or("`part` must be true or false")?;
                 entry = if part { Some(entry.unwrap_or_default()) } else { None };
             }
-            if entry == Some(crate::levels::PartInfo::default()) {
-                s.doc.parts.remove(body);
-            } else {
-                s.doc.parts.insert(body.to_string(), entry);
-            }
+            s.doc.put_part(body, entry);
             Ok(s.levels())
         },
     },
@@ -689,22 +693,32 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "product",
-        description: "The product: each part in its chosen variant (`choose`; null: the root's own), with its body (volume, centre of mass).",
+        description: "The product: each part in its chosen variant (`choose`; null: the root's own), with its body (volume, centre of mass), \
+                      its `rule` there, the rule's `material` and the part's `mass` in kg (null: no rule, or the library lacks what it \
+                      needs; `rule_missing`: the rule is not in the library).",
         params: no_params,
         run: |s, _| {
+            let rules = library::load("rule", s.project().as_deref());
+            let materials = library::load("material", s.project().as_deref());
             let parts: Vec<Value> = s
                 .product()
                 .into_iter()
                 .map(|(part, level, bodies)| {
+                    let mut volume = 0.0;
                     let out: Vec<Value> = match bodies {
                         Ok(b) => b
                             .iter()
                             .filter_map(|(n, v)| v.body().map(|b| (n, b.mass_properties())))
-                            .map(|(n, m)| json!({"name": n, "volume": m.volume, "centroid": m.centroid}))
+                            .map(|(n, m)| {
+                                volume += m.volume;
+                                json!({"name": n, "volume": m.volume, "centroid": m.centroid})
+                            })
                             .collect(),
                         Err(e) => vec![json!({"error": e})],
                     };
-                    json!({"part": part, "name": s.doc.part_name(&part), "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out})
+                    let mut v = json!({"part": part, "name": s.doc.part_name(&part), "level": level, "visible": !s.doc.hidden.contains(&part), "bodies": out});
+                    rule_report(&mut v, s.doc.rule(&part, level.as_deref()), &rules, &materials, volume);
+                    v
                 })
                 .collect();
             Ok(json!({ "parts": parts }))
@@ -854,6 +868,20 @@ fn feature_schema() -> Value {
         "required": ["name", "op"],
         "allOf": [schemars::schema_for!(Op)]
     })
+}
+
+/// Sets `rule`, `material` and `mass` (kg, from `volume` in mm³) of a part in `v`, null where the
+/// library lacks what they need or the part has no body; `rule_missing` when it lacks the rule.
+fn rule_report(v: &mut Value, rule: Option<String>, rules: &library::Library, materials: &library::Library, volume: f64) {
+    let found = rule.as_deref().and_then(|r| rules.get(r));
+    let material = found.and_then(|r| r.element["material"].as_str());
+    let density = material.and_then(|m| materials.get(m)).and_then(|m| m.element["density"].as_f64());
+    if rule.is_some() && found.is_none() {
+        v["rule_missing"] = json!(true);
+    }
+    v["mass"] = json!(density.filter(|_| volume > 0.0).map(|d| volume * d * 1e-9));
+    v["material"] = json!(material);
+    v["rule"] = json!(rule);
 }
 
 fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
@@ -1110,7 +1138,10 @@ impl Session {
             .doc
             .parts()
             .into_iter()
-            .map(|p| json!({"part": p, "name": self.doc.part_name(&p), "chosen": self.doc.chosen(&p), "visible": !self.doc.hidden.contains(&p)}))
+            .map(|p| {
+                json!({"part": p, "name": self.doc.part_name(&p), "chosen": self.doc.chosen(&p), "visible": !self.doc.hidden.contains(&p),
+                                "rule": self.doc.rule(&p, None)})
+            })
             .collect();
         let sets: Vec<&String> = self.doc.sets.keys().collect();
         json!({"active": self.active, "parts": parts, "levels": list, "sets": sets, "set": self.doc.current_set()})
@@ -1287,6 +1318,39 @@ impl Session {
             .iter()
             .zip(&self.last.results)
             .filter_map(|(n, r)| r.as_ref().err().map(|e| json!({"feature": n.name, "error": e.to_string()})))
+    }
+
+    /// Gives part `part` rule `rule` (none: no rule), or, in a variant of it, gives the variant
+    /// that rule (none: its parent's). The rule must be in the library, of the part's kind; sheet
+    /// metal rules come with sheet metal parts (0.4.6).
+    fn set_rule(&mut self, part: &str, rule: Option<String>) -> Result<(), String> {
+        if let Some(r) = &rule {
+            let rules = library::load("rule", self.project().as_deref());
+            let e = rules.get(r).ok_or_else(|| format!("no rule `{r}` in the library (`library` with level `rule`)"))?;
+            let (kind, of) = (e.element["kind"].as_str().unwrap_or_default(), self.doc.kind(part));
+            if kind != of {
+                let word = |k: &str| if k == "sheet" { "a sheet metal" } else { "an ordinary" };
+                return Err(format!("rule `{r}` is for {} part; `{part}` is {} part, as its first feature made it", word(kind), word(of)));
+            }
+            if kind == "sheet" {
+                return Err(format!("rule `{r}`: sheet metal rules come with sheet metal parts (0.4.6)"));
+            }
+        }
+        match self.active.clone() {
+            None => {
+                let mut entry = self.doc.parts.get(part).cloned().unwrap_or(Some(crate::levels::PartInfo::default()));
+                entry.get_or_insert_default().rule = rule;
+                self.doc.put_part(part, entry);
+            }
+            Some(level) => {
+                let of = self.doc.part_of(&level)?;
+                if of != part {
+                    return Err(format!("level `{level}` is a variant of `{of}`, not of `{part}`"));
+                }
+                self.doc.levels.get_mut(&level).ok_or_else(|| format!("no level `{level}`"))?.rule = rule;
+            }
+        }
+        Ok(())
     }
 
     fn find(&self, name: &str) -> Result<NodeIx, String> {
