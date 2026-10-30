@@ -315,7 +315,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let (picture, preview) = match &previewing {
             None => (picture(&session, &mut meshes), None),
             Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
-                Ok((p, reply)) => (p, Some((params.clone(), Ok(reply)))),
+                Ok((p, reply)) => (p, Some((params.clone(), previewed(reply, &params["name"])))),
                 Err(e) => (picture(&session, &mut meshes), Some((params.clone(), Err(e)))),
             },
         };
@@ -328,6 +328,15 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             return;
         }
         ctx.request_repaint();
+    }
+}
+
+/// A command's reply as a preview: made, but its feature `name` failing when the model is
+/// evaluated (the command itself succeeds), it is refused with that feature's error.
+fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
+    match reply["failed"].as_array().into_iter().flatten().find(|f| f["feature"] == *name) {
+        Some(f) => Err(f["error"].as_str().unwrap_or_default().to_string()),
+        None => Ok(reply),
     }
 }
 
@@ -5901,5 +5910,13 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         let through = json!({"name": "extrude1", "sketch": "extra", "mode": "cut", "through": true});
         assert!(matches!(sent.last(), Some(Request::Preview(Some(("extrude", p)))) if *p == through), "{sent:?}");
+    }
+
+    /// A preview whose feature fails is refused with its error; others failing do not matter.
+    #[test]
+    fn a_failing_feature_refuses_its_preview() {
+        let reply = json!({"failed": [{"feature": "extrude2", "error": "old"}, {"feature": "extrude3", "error": "crosses"}], "mode": "cut"});
+        assert_eq!(previewed(reply.clone(), &json!("extrude3")), Err("crosses".into()));
+        assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
     }
 }
