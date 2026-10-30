@@ -277,8 +277,9 @@ impl Doc {
         up.filter_map(|l| self.levels.get(&l)?.rule.clone()).next().or_else(|| self.parts.get(part).cloned().flatten()?.rule)
     }
 
-    /// Graph `g` of level `level` (none: the root) as it is built (D193): each sheet metal part's
-    /// thickness and bend radius from its rule (the library of `project`), their only place. A
+    /// Graph `g` of level `level` (none: the root) as it is built (D193, D197): each sheet metal
+    /// part's thickness and bend radius from its rule (the library of `project`), their only
+    /// place, and its K-factor, if the rule gives one, into the sketches on faces of its body. A
     /// part without a rule, or whose rule the library lacks, keeps the feature as it is: a file
     /// from before rules has its own numbers, a new one fails asking for a rule. The library is
     /// read only when a sheet metal part has a rule.
@@ -295,8 +296,12 @@ impl Doc {
         }
         let rules = crate::library::load("rule", project);
         let mut out = g.clone();
+        let mut ks = std::collections::BTreeMap::new();
         for (ix, rule) in sheets {
             let Some(rule) = rules.get(&rule) else { continue };
+            if let Some(k) = rule.element["k_factor"].as_f64() {
+                ks.insert(ix as NodeIx, k);
+            }
             let Some(t) = rule.element["thickness"].as_f64() else { continue };
             let Ok(r) = crate::library::bend_radius(&rule.element["radius"], t) else { continue };
             let mut op = g.nodes()[ix].op.clone();
@@ -306,6 +311,17 @@ impl Doc {
                 _ => {}
             }
             // The same operation with other numbers: its arity holds.
+            let _ = out.set_op(ix as NodeIx, op);
+        }
+        // A sketch on a face of a part's body lays its bends flat with the rule's K.
+        for (ix, n) in g.nodes().iter().enumerate() {
+            let Op::Sketch { face: Some(_), .. } = &n.op else { continue };
+            let Some(&body) = n.inputs.first() else { continue };
+            let Some(&k) = body_chain(g, body).last().and_then(|begun| ks.get(&begun)) else { continue };
+            let mut op = n.op.clone();
+            if let Op::Sketch { k_factor, .. } = &mut op {
+                *k_factor = Some(Num::Value(k));
+            }
             let _ = out.set_op(ix as NodeIx, op);
         }
         Cow::Owned(out)

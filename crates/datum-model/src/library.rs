@@ -195,16 +195,16 @@ fn check_material(e: &Value) -> Result<(), String> {
 /// A rule (D179, D180): its `name`, `kind` (`sheet` or `part`), the `material` it is of (by
 /// name; a rule is never without one) and a `description`; a sheet rule's `thickness` in mm
 /// (the part's: its only place, D193) and inner bend `radius`: mm, or a formula of the
-/// thickness `t` (`t`, `1.5 * t`).
+/// thickness `t` (`t`, `1.5 * t`), and optionally the `k_factor` of its bends, 0 to 1 (D197).
 fn check_rule(e: &Value) -> Result<(), String> {
-    let o = fields("rule", e, &["name", "kind", "material", "thickness", "radius", "description"], &["kind", "material", "description"])?;
+    let o = fields("rule", e, &["name", "kind", "material", "thickness", "radius", "k_factor", "description"], &["kind", "material", "description"])?;
     if !o.get("material").and_then(Value::as_str).is_some_and(|m| !m.trim().is_empty()) {
         return Err("a rule needs the `material` it is of".into());
     }
     match o.get("kind").and_then(Value::as_str) {
         Some("sheet") => {}
         Some("part") => {
-            if let Some(k) = ["thickness", "radius"].into_iter().find(|k| o.contains_key(*k)) {
+            if let Some(k) = ["thickness", "radius", "k_factor"].into_iter().find(|k| o.contains_key(*k)) {
                 return Err(format!("a part's rule has no `{k}`: that of a `sheet` rule"));
             }
             return Ok(());
@@ -214,6 +214,9 @@ fn check_rule(e: &Value) -> Result<(), String> {
     let Some(t) = o.get("thickness").and_then(Value::as_f64).filter(|t| *t > 0.0) else {
         return Err("a sheet rule's `thickness`: mm, above zero".into());
     };
+    if o.get("k_factor").is_some_and(|k| !k.as_f64().is_some_and(|k| (0.0..=1.0).contains(&k))) {
+        return Err("a sheet rule's `k_factor`: a number from 0 to 1".into());
+    }
     match o.get("radius").map(|r| bend_radius(r, t)) {
         Some(Ok(r)) if r > 0.0 => Ok(()),
         _ => Err("a sheet rule's bend `radius`: mm above zero, or a formula of the thickness `t`".into()),

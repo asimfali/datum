@@ -171,14 +171,12 @@ fn what_a_rolled_cut_refuses() {
     // Copies that overlap.
     let tight = serde_json::json!({"count": [2, 1], "step": [[8, 0], [0, 10]]});
     assert!(matches!(cut_by("c", &s, &out, 0.5, circle(30.0, 30.0, 10.0), tight), Err(BrepError::Degenerate(_))));
-    // Without a K-factor, or with one on a plane face.
+    // Without a K-factor, or with one off any face (on a plane face it lays bends flat, D197).
     let target = Value::Body(s.clone());
     let no_k = op(serde_json::json!({"op": "sketch", "face": out, "sketch": circle(30.0, 30.0, 10.0)})).eval(id("s"), &[&target]);
     assert!(matches!(no_k, Err(BrepError::Sketch(ref m)) if m.contains("k_factor")), "{no_k:?}");
-    let cap = s.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap();
-    let k_on_plane = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", cap.id), "k_factor": 0.5, "sketch": circle(30.0, 30.0, 10.0)}))
-        .eval(id("s"), &[&target]);
-    assert!(matches!(k_on_plane, Err(BrepError::Sketch(_))), "{k_on_plane:?}");
+    let k_off_face = op(serde_json::json!({"op": "sketch", "k_factor": 0.5, "sketch": circle(30.0, 30.0, 10.0)})).eval(id("s"), &[]);
+    assert!(matches!(k_off_face, Err(BrepError::Sketch(_))), "{k_off_face:?}");
     // A tube has no edge to unroll from.
     let rings =
         serde_json::json!({"points": {"o": [0, 0]}, "circles": {"out": {"center": "o", "diameter": 106}, "in": {"center": "o", "diameter": 100}}});

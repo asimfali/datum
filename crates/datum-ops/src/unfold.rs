@@ -12,10 +12,34 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 use std::fmt::Write;
 
-use datum_brep::{Body, BrepError, Curve, Ix, Surface};
+use datum_brep::{Body, BrepError, Curve, Ix, ProfileArc, Rolled, Surface, TopoId};
 use datum_math::{Vec2, Vec3};
 
 use crate::sketch::{find_face, opposite_cylinder};
+
+/// The radius of the neutral layer of a bend between faces of radii `a` and `b`: `k` of the
+/// thickness from the inside.
+pub(crate) fn neutral(a: f64, b: f64, k: f64) -> f64 {
+    a.min(b) + k * (a - b).abs()
+}
+
+/// The centre on a blank of the arc `pa` of rolled piece `piece`, whose development's origin lies
+/// at `origin` on the blank, and whether it turns counterclockwise there: the blank's X grows as
+/// the development's `u` turns about `along`, its Y along `up`. Lengths of a development are the
+/// blank's, so the centre is found on it, not through space (one beyond the bend would wrap round
+/// its cylinder); every arc of one development about one centre gets the same.
+pub(crate) fn rolled_center(piece: &Rolled, pa: ProfileArc, origin: Vec2, along: Vec3, up: Vec3) -> (Vec2, bool) {
+    let su = if piece.dev.axis.dot(along) > 0.0 { 1.0 } else { -1.0 };
+    let sv = if piece.dev.axis.dot(up) > 0.0 { 1.0 } else { -1.0 };
+    (Vec2::new(origin.x + su * pa.center.x, origin.y + sv * pa.center.y), pa.ccw == (su * sv > 0.0))
+}
+
+/// The wall of the piece after the one with wall `w` along a curve of a cut's profile: a curve
+/// across bend lines is cut into pieces, a circle's arcs follow one another (D197). The blank
+/// joins such pieces back into the curve.
+pub(crate) fn next_piece(w: TopoId) -> TopoId {
+    TopoId::derive("cut.piece").id(w).finish()
+}
 /// A piece of a flat blank's outline or of a cut: arcs run counterclockwise from `start` to
 /// `end` (radians); a hole cut by a circle is one.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,10 +104,11 @@ impl Laid {
     }
 }
 
-/// The faces that go on smoothly from `x` across an edge of its outline, each with the half-edge
-/// it is across: outward normals agree along the edge (a bend line), where an end or a cap of the
-/// sheet turns by a right angle.
+/// The faces that go on smoothly from `x` across an edge of its outline, each once with the first
+/// half-edge it is across (a cut across the bend line breaks it into several): outward normals
+/// agree along the edge (a bend line), where an end or a cap of the sheet turns by a right angle.
 fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
+    let mut seen = BTreeSet::new();
     let he = |h: Ix| body.half_edges()[h as usize];
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
     let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
@@ -93,12 +118,13 @@ fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
             let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
             (y != x && normal(x, m).dot(normal(y, m)) > 0.5).then_some((y, h))
         })
+        .filter(|&(y, _)| seen.insert(y))
         .collect()
 }
 
 /// The chain of faces through `f`: on from it each way while one face goes on, in order along the
 /// sheet (not yet turned the way it is laid).
-fn chain_through(body: &Body, f: Ix) -> Result<Vec<Ix>, BrepError> {
+pub(crate) fn chain_through(body: &Body, f: Ix) -> Result<Vec<Ix>, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
     let ways = smooth(body, f);
     if ways.len() > 2 {
@@ -242,7 +268,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 let w = from - c.origin;
                 let start = unit(w - c.axis * w.dot(c.axis));
                 let (_, other) = opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-                let neutral = c.radius.min(other.radius) + k * (c.radius - other.radius).abs();
+                let neutral = neutral(c.radius, other.radius, k);
                 Lay::Bend { origin: c.origin, axis: unit(turn), start, span, neutral }
             }
             Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
@@ -281,10 +307,10 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 match piece.arc {
                     None => FlatPiece::Line(from, to),
                     Some(pa) => {
-                        // The blank's X turns with the development's `u` from the convex side, against it from the other.
-                        let c3 = piece.dev.point(pa.center, *neutral);
-                        let convex = matches!(body.faces()[l.face as usize].surface, Surface::Cylinder(c) if c.convex);
-                        arc_piece(Vec2::new(l.x(c3), y(c3)), from, to, pa.ccw == convex)
+                        let Lay::Bend { axis, .. } = &l.lay else { unreachable!("matched a bend") };
+                        let o = piece.dev.point(Vec2::new(0.0, 0.0), *neutral);
+                        let (center, ccw) = rolled_center(&piece, pa, Vec2::new(l.x(o), y(o)), *axis, a);
+                        arc_piece(center, from, to, ccw)
                     }
                 }
             }
@@ -313,28 +339,15 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let mut outline: Vec<FlatPiece> = Vec::new();
     while let Some((&v0, _)) = edges.iter().next() {
         let mut v = v0;
-        let mut run: Option<(Vec2, Vec2, Ix)> = None;
+        let mut cycle: Vec<(FlatPiece, Vec2, Ix)> = Vec::new();
         while let Some((to, p, beside)) = edges.remove(&v) {
-            match (p, &mut run) {
-                (FlatPiece::Line(_, b), Some((_, end, side))) if *side == beside => *end = b,
-                (p, _) => {
-                    if let Some((a, b, _)) = run.take() {
-                        outline.push(FlatPiece::Line(a, b));
-                    }
-                    match p {
-                        FlatPiece::Line(a, b) => run = Some((a, b, beside)),
-                        p => outline.push(p),
-                    }
-                }
-            }
+            cycle.push((p, at[&v], beside));
             v = to;
-        }
-        if let Some((a, b, _)) = run {
-            outline.push(FlatPiece::Line(a, b));
         }
         if v != v0 {
             return Err(BrepError::Invalid("unfold: the outline does not close".into()));
         }
+        joined(body, cycle, &mut outline);
     }
     // The corner of the outline at the origin.
     let corners = outline.iter().flat_map(|p| match *p {
@@ -378,6 +391,46 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         bytes.extend(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
     }
     Ok(Flat { pieces, size: Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, hash: *blake3::hash(&bytes).as_bytes() })
+}
+
+/// The pieces of a closed run of the outline, each with where it starts and the face beside it,
+/// as the blank has them: a run of lines along one face of the body (a cap, an end) is one line,
+/// and so are the pieces of one curve of a cut across bend lines (see [`next_piece`]); such a
+/// curve's arcs all round are one circle.
+fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<FlatPiece>) {
+    let id = |x: Ix| body.faces()[x as usize].id;
+    let n = cycle.len();
+    // Either way round: the sketch's side runs its outline against the profile.
+    let linked = |a: Ix, b: Ix| next_piece(id(a)) == id(b) || next_piece(id(b)) == id(a);
+    // A curve across bend lines starts the run, not a piece of it.
+    if let Some(first) = (0..n).find(|&i| linked(cycle[(i + n - 1) % n].2, cycle[i].2) && !linked(cycle[(i + n - 2) % n].2, cycle[(i + n - 1) % n].2))
+    {
+        cycle.rotate_left((first + n - 1) % n);
+    }
+    let mut k = 0;
+    while k < n {
+        let (p, from, beside) = cycle[k];
+        let mut last = k;
+        while last + 1 < n {
+            let (q, _, next) = cycle[last + 1];
+            let line = matches!((p, q), (FlatPiece::Line(..), FlatPiece::Line(..)));
+            let arc = matches!((p, q), (FlatPiece::Arc { .. }, FlatPiece::Arc { .. }));
+            if (line && next == beside) || ((line || arc) && linked(cycle[last].2, next)) {
+                last += 1;
+            } else {
+                break;
+            }
+        }
+        let to = cycle.get(last + 1).map_or(cycle[0].1, |e| e.1);
+        out.push(match p {
+            _ if last == k => p,
+            FlatPiece::Line(..) => FlatPiece::Line(from, to),
+            FlatPiece::Arc { center, radius, .. } if k == 0 && last == n - 1 => FlatPiece::Circle { center, radius },
+            FlatPiece::Arc { center, start, .. } => arc_piece(center, from, to, libm::atan2(from.y - center.y, from.x - center.x) == start),
+            FlatPiece::Circle { .. } => p,
+        });
+        k = last + 1;
+    }
 }
 
 /// An arc around `center` from `from` to `to`, turning counterclockwise if `ccw`.

@@ -26,7 +26,7 @@ fn project(name: &str, sketch: Value) -> Session {
     run(
         &mut s,
         "put_library",
-        json!({"level": "rule", "element": {"name": "Лист", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t"}}),
+        json!({"level": "rule", "element": {"name": "Лист", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t", "k_factor": 0.44}}),
     );
     run(&mut s, "add", json!({"name": "path", "op": "sketch", "sketch": sketch}));
     s
@@ -114,4 +114,205 @@ fn a_cut_across_a_bend_is_refused() {
     let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
     let e = r["failed"][0]["error"].as_str().unwrap_or_else(|| panic!("{r}"));
     assert!(e.contains("across a bend"), "{e}");
+}
+
+// Cuts across bend lines (D197): the profile is punched through the blank, and the blank shows it
+// as drawn.
+
+/// Where a sketch of a cut across a bend lies: the sketch is on the outer face of the first wall
+/// of a sheet 40 wide, whose flat part is `flat` long; the sketch maps (along the wall, z) to its
+/// own (x, y).
+struct Wall {
+    id: String,
+    flat: f64,
+    origin: [f64; 3],
+    x: [f64; 3],
+    y: [f64; 3],
+}
+
+impl Wall {
+    /// The sketch's coordinates of the point `along` the wall (world Y) at height `z`.
+    fn at(&self, along: f64, z: f64) -> [f64; 2] {
+        let (dy, dz) = (along - self.origin[1], z - self.origin[2]);
+        let (a, b, c, d) = (self.x[1], self.y[1], self.x[2], self.y[2]);
+        let det = a * d - b * c;
+        [(dy * d - b * dz) / det, (a * dz - c * dy) / det]
+    }
+}
+
+fn vec3(v: &Value) -> [f64; 3] {
+    [v[0].as_f64().unwrap(), v[1].as_f64().unwrap(), v[2].as_f64().unwrap()]
+}
+
+/// The outer face (looking along −x) of the first wall of the sheet `name`, laid along world Y.
+fn first_wall(s: &mut Session, name: &str) -> Wall {
+    let faces = run(s, "query_faces", json!({"name": name, "normal": [-1, 0, 0]}));
+    let f = &faces["faces"][0];
+    let axes = &f["sketch_axes"];
+    Wall {
+        id: f["id"].as_str().unwrap().to_string(),
+        flat: f["area"].as_f64().unwrap() / 40.0,
+        origin: vec3(&axes["origin"]),
+        x: vec3(&axes["x"]),
+        y: vec3(&axes["y"]),
+    }
+}
+
+/// A sheet `name` of 40 wide along `chain` (points `a`, `b`, `c`…), with the project `project`
+/// would make; the sketch `path` is replaced.
+fn sheet_along(project_name: &str, points: &[[f64; 2]]) -> Session {
+    let names = ["a", "b", "c", "d", "e"];
+    let pts: serde_json::Map<String, Value> = points.iter().enumerate().map(|(i, p)| (names[i].to_string(), json!(p))).collect();
+    let lines: serde_json::Map<String, Value> =
+        (1..points.len()).map(|i| (format!("{}{}", names[i - 1], names[i]), json!({"from": names[i - 1], "to": names[i]}))).collect();
+    let mut s = project(project_name, json!({"points": pts, "lines": lines}));
+    run(&mut s, "sheet", json!({"name": "l", "sketch": "path", "rule": "Лист", "side": "left", "z1": 40}));
+    s
+}
+
+/// An L: up 60, then along +x 80.
+fn l_sheet(name: &str) -> Session {
+    sheet_along(name, &[[0.0, 0.0], [0.0, 60.0], [80.0, 60.0]])
+}
+
+/// A sketch `name` of one circle of `diameter` at (`along`, `z`) of the first wall of `base`, with
+/// the sketch's K-factor from the rule; and the cut by `<name>_cut`. Returns the cut's result.
+fn punch_circle(s: &mut Session, base: &str, name: &str, along: f64, z: f64, diameter: f64) -> Value {
+    let wall = first_wall(s, base);
+    let c = wall.at(along, z);
+    let sketch = json!({"points": {"h": c}, "circles": {"c": {"center": "h", "diameter": diameter}}});
+    run(s, "add", json!({"name": name, "op": "sketch", "inputs": [base], "face": wall.id, "sketch": sketch}));
+    run(s, "extrude", json!({"name": format!("{name}_cut"), "sketch": name, "mode": "cut", "through": true, "wall": true}))
+}
+
+fn assert_cut(r: &Value) {
+    assert!(r.get("failed").is_none_or(|f| f.as_array().is_some_and(Vec::is_empty)), "{r}");
+}
+
+fn failure(r: &Value) -> &str {
+    r["failed"][0]["error"].as_str().unwrap_or_else(|| panic!("{r}"))
+}
+
+/// The count of lines, arcs and circles of the blank of `name`.
+fn pieces(s: &mut Session, name: &str) -> [u64; 3] {
+    let r = run(s, "flats", json!({}));
+    let f = r["flats"].as_array().unwrap().iter().find(|f| f["feature"] == name).unwrap_or_else(|| panic!("{r}"));
+    assert!(f.get("error").is_none(), "{f}");
+    let p = &f["pieces"];
+    [p["lines"].as_u64().unwrap(), p["arcs"].as_u64().unwrap(), p["circles"].as_u64().unwrap()]
+}
+
+const FULL_HOLE: f64 = HOLE * 2.0;
+
+/// A hole across a bend: one circle in the blank, of the radius drawn, and the sheet lighter by
+/// about the hole's volume.
+#[test]
+fn a_hole_across_a_bend_is_one_circle() {
+    let mut s = l_sheet("bend_cut_circle");
+    let whole = volume(&mut s, "l");
+    let wall = first_wall(&mut s, "l");
+    assert!((wall.flat - 58.0).abs() < 1e-9, "{}", wall.flat);
+    let r = punch_circle(&mut s, "l", "hole", wall.flat - 2.0, 20.0, 10.0);
+    assert_cut(&r);
+    let v = volume(&mut s, "hole_cut");
+    let lost = whole - v;
+    assert!(lost > 0.8 * FULL_HOLE && lost < 1.2 * FULL_HOLE, "{lost} against {FULL_HOLE}");
+    assert_eq!(pieces(&mut s, "hole_cut"), [4, 0, 1]);
+    let dxf = std::env::temp_dir().join("datum_bend_cut_circle.dxf");
+    run(&mut s, "export_dxf", json!({"name": "hole_cut", "path": dxf}));
+    let text = std::fs::read_to_string(&dxf).unwrap();
+    let _ = std::fs::remove_file(&dxf);
+    assert_eq!(text.matches("CIRCLE").count(), 1, "{text}");
+    // The radius as drawn, to its last digit (as a hole within a wall has it).
+    let radius: f64 =
+        text.split("CIRCLE").nth(1).and_then(|c| c.split("\n40\n").nth(1)).and_then(|r| r.lines().next()).unwrap().trim().parse().unwrap();
+    assert!((radius - 5.0).abs() <= 4.0 * f64::EPSILON * 5.0, "{radius}");
+}
+
+/// A rectangle across a bend keeps its four sides: each one line in the blank.
+#[test]
+fn a_rectangle_across_a_bend_keeps_its_lines() {
+    let mut s = l_sheet("bend_cut_rectangle");
+    let outline = pieces(&mut s, "l");
+    assert_eq!(outline[1] + outline[2], 0);
+    let wall = first_wall(&mut s, "l");
+    let (along, z) = (wall.flat, 20.0);
+    let corners = [(-4.0, -3.0), (4.0, -3.0), (4.0, 3.0), (-4.0, 3.0)];
+    let points: serde_json::Map<String, Value> =
+        corners.iter().enumerate().map(|(i, (da, dz))| (format!("p{i}"), json!(wall.at(along + da, z + dz)))).collect();
+    let lines: serde_json::Map<String, Value> =
+        (0..4).map(|i| (format!("l{i}"), json!({"from": format!("p{i}"), "to": format!("p{}", (i + 1) % 4)}))).collect();
+    run(&mut s, "add", json!({"name": "rect", "op": "sketch", "inputs": ["l"], "face": wall.id, "sketch": {"points": points, "lines": lines}}));
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "rect", "mode": "cut", "through": true, "wall": true}));
+    assert_cut(&r);
+    assert_eq!(pieces(&mut s, "cut"), [outline[0] + 4, 0, 0]);
+}
+
+/// A hole over a whole short middle wall and both its bends would divide the wall's face in two:
+/// refused for now.
+#[test]
+fn a_hole_across_two_bends_is_refused() {
+    let mut s = sheet_along("bend_cut_two", &[[0.0, 0.0], [0.0, 60.0], [12.0, 60.0], [12.0, 0.0]]);
+    let wall = first_wall(&mut s, "l");
+    // The bend's neutral layer: a quarter turn at radius r + k t.
+    let bend = std::f64::consts::FRAC_PI_2 * (2.0 + 0.44 * 2.0);
+    // Ø24 over the end of the wall, the bend, the middle wall's flat 8, the next bend, and on.
+    let r = punch_circle(&mut s, "l", "hole", wall.flat + bend + 4.0, 20.0, 24.0);
+    assert!(failure(&r).contains("divides a face"), "{r}");
+}
+
+/// Two holes along the same bend line, one after the other.
+#[test]
+fn a_second_hole_along_the_same_bend() {
+    let mut s = l_sheet("bend_cut_second");
+    let whole = volume(&mut s, "l");
+    let flat = first_wall(&mut s, "l").flat;
+    assert_cut(&punch_circle(&mut s, "l", "first", flat - 2.0, 10.0, 6.0));
+    let one = volume(&mut s, "first_cut");
+    assert_cut(&punch_circle(&mut s, "first_cut", "second", flat - 1.0, 30.0, 6.0));
+    let two = volume(&mut s, "second_cut");
+    assert!(whole > one && one > two, "{whole} {one} {two}");
+    assert!(((whole - one) - (one - two)).abs() < 0.1 * (whole - one), "{whole} {one} {two}");
+    assert_eq!(pieces(&mut s, "second_cut")[2], 2);
+}
+
+/// A hole across a bend and the sheet's edge is refused, not cut.
+#[test]
+fn a_hole_across_a_bend_and_an_edge_is_refused() {
+    let mut s = l_sheet("bend_cut_edge");
+    let flat = first_wall(&mut s, "l").flat;
+    let r = punch_circle(&mut s, "l", "hole", flat - 2.0, 3.0, 10.0);
+    assert!(failure(&r).contains("edge of the sheet"), "{r}");
+}
+
+/// A slot from one end of the bend to the other reaches the sheet's edges.
+#[test]
+fn a_slot_along_the_whole_bend_is_refused() {
+    let mut s = l_sheet("bend_cut_slot");
+    let wall = first_wall(&mut s, "l");
+    let (a, b) = (wall.at(wall.flat - 3.0, -1.0), wall.at(wall.flat + 3.0, 41.0));
+    let c = [wall.at(wall.flat + 3.0, -1.0), wall.at(wall.flat - 3.0, 41.0)];
+    let sketch = json!({"points": {"a": a, "b": c[0], "c": b, "d": c[1]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    run(&mut s, "add", json!({"name": "slot", "op": "sketch", "inputs": ["l"], "face": wall.id, "sketch": sketch}));
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "slot", "mode": "cut", "through": true, "wall": true}));
+    assert!(failure(&r).contains("edge"), "{r}");
+}
+
+/// A rule without a K-factor: a cut across a bend asks for one.
+#[test]
+fn a_cut_across_a_bend_needs_a_k_factor() {
+    let mut s = project(
+        "bend_cut_no_k",
+        json!({"points": {"a": [0, 0], "b": [0, 60], "c": [80, 60]}, "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}}),
+    );
+    run(
+        &mut s,
+        "put_library",
+        json!({"level": "rule", "element": {"name": "Без K", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t"}}),
+    );
+    run(&mut s, "sheet", json!({"name": "l", "sketch": "path", "rule": "Без K", "side": "left", "z1": 40}));
+    let flat = first_wall(&mut s, "l").flat;
+    let r = punch_circle(&mut s, "l", "hole", flat - 2.0, 20.0, 10.0);
+    assert!(failure(&r).contains("k_factor"), "{r}");
 }
