@@ -654,15 +654,7 @@ pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, B
 /// an error, as lines of a skeleton do not cross. A pattern stays when every curve of its cell
 /// does.
 pub fn chosen<'s>(feature: TopoId, s: &'s Placed, names: &[String]) -> Result<Cow<'s, Placed>, BrepError> {
-    let keep = |_: &str, construction: bool| !construction;
-    let found = contours(&s.lines, &s.arcs, &keep);
-    if let Some(p) = found.branches.first() {
-        return Err(BrepError::Sketch(format!("the profile branches at point `{p}`")));
-    }
-    let loops = rings(feature, s, &found.loops, &keep);
-    // The curves of each loop, in the order of `loops`: the chains, then the circles.
-    let circles = s.circles.iter().filter(|(_, c)| !c.construction).map(|(n, _)| vec![n.as_str()]);
-    let curves: Vec<Vec<&str>> = found.loops.iter().map(|c| c.iter().map(|st| st.curve).collect()).chain(circles).collect();
+    let (found, loops, curves) = named_loops(feature, s)?;
     if loops.is_empty() {
         return Err(BrepError::Sketch(match found.ends.first() {
             Some(p) => format!("the sketch has no closed profile: it is open at point `{p}`"),
@@ -706,6 +698,32 @@ pub fn chosen<'s>(feature: TopoId, s: &'s Placed, names: &[String]) -> Result<Co
     out.circles.retain(|n, c| c.construction || kept.contains(n.as_str()));
     out.patterns.retain(|p| p.cell.iter().all(|c| kept.contains(c.as_str())));
     Ok(Cow::Owned(out))
+}
+
+/// The chains of the profile curves of `s`, its closed loops (the chains', then the circles') and
+/// the curves of each; a branch is an error.
+type Named<'s> = (datum_sketch::Contours<'s>, Vec<Found>, Vec<Vec<&'s str>>);
+
+fn named_loops(feature: TopoId, s: &Placed) -> Result<Named<'_>, BrepError> {
+    let keep = |_: &str, construction: bool| !construction;
+    let found = contours(&s.lines, &s.arcs, &keep);
+    if let Some(p) = found.branches.first() {
+        return Err(BrepError::Sketch(format!("the profile branches at point `{p}`")));
+    }
+    let loops = rings(feature, s, &found.loops, &keep);
+    let circles = s.circles.iter().filter(|(_, c)| !c.construction).map(|(n, _)| vec![n.as_str()]);
+    let curves = found.loops.iter().map(|c| c.iter().map(|st| st.curve).collect()).chain(circles).collect();
+    Ok((found, loops, curves))
+}
+
+/// The curves of the innermost closed loop of `s` around point `p` (D191: a click inside a
+/// contour chooses it), if any.
+pub fn contour_at(feature: TopoId, s: &Placed, p: Vec2) -> Option<Vec<String>> {
+    let (_, loops, curves) = named_loops(feature, s).ok()?;
+    let around: Vec<usize> = (0..loops.len()).filter(|&k| loops[k].ring.winding(p) != 0).collect();
+    // The innermost: inside every other one around the point.
+    let inner = around.iter().copied().find(|&k| around.iter().all(|&a| a == k || loops[a].ring.winding(loops[k].ring.points[0]) != 0))?;
+    Some(curves[inner].iter().map(|c| c.to_string()).collect())
 }
 
 /// The closed loops of the curves `keep` keeps (construction ones too if `construction`), an

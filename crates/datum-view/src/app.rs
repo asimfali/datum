@@ -3621,10 +3621,12 @@ impl Viewer {
                 }
             }
         } else if r.clicked() {
-            // A group's badge stands for what the group holds.
+            // A group's badge stands for what the group holds; inside a contour, off its curves,
+            // the click takes the contour (D191: then E extrudes it).
             let picks = match sk.hover.clone() {
                 Some(Pick::Group(g)) => sk.group_picks(&g),
                 Some(Pick::Pattern(n)) => sk.pattern_copies(&n),
+                None => offset.map_or_else(Vec::new, |(x, y)| sk.contour_picks(x, y, h)),
                 p => p.into_iter().collect(),
             };
             crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
@@ -6032,5 +6034,23 @@ mod tests {
         let reply = json!({"failed": [{"feature": "extrude2", "error": "old"}, {"feature": "extrude3", "error": "crosses"}], "mode": "cut"});
         assert_eq!(previewed(reply.clone(), &json!("extrude3")), Err("crosses".into()));
         assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
+    }
+
+    /// A click inside a contour, off its curves, takes the contour; inside a hole, the hole.
+    #[test]
+    fn a_click_inside_takes_the_contour() {
+        let (h, _inbox) = extruding_in_sketch("symmetric_plate.json");
+        let sk = h.state().sketch.as_ref().unwrap();
+        let picks = |x: f64, y: f64| {
+            let (dx, dy) = sk.camera.offset([x, y], 400.0);
+            let mut names: Vec<String> =
+                sk.contour_picks(dx, dy, 400.0).into_iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n) } else { None }).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(picks(40.0, 10.0), ["bottom", "left", "right", "top"]);
+        let hole = sk.placed.as_ref().unwrap().solved.points["h1"];
+        assert_eq!(picks(hole.x, hole.y), ["left_hole"]);
+        assert!(picks(500.0, 500.0).is_empty());
     }
 }

@@ -25,7 +25,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, sheet};
 pub use sketch::{
-    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, depth_to, extrude_sketch, face_plane, place, profile_regions,
+    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, contour_at, depth_to, extrude_sketch, face_plane, place, profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, sheet_sides, unfold, unfold_side};
 

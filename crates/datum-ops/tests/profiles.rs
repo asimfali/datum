@@ -80,3 +80,19 @@ fn what_cannot_be_chosen() {
         r => panic!("{r:?}"),
     }
 }
+
+/// A click inside a contour chooses it: the innermost loop around the point.
+#[test]
+fn the_contour_around_a_point() {
+    let Value::Sketch(s) = skeleton() else { panic!("a sketch") };
+    let at = |x: f64, y: f64| datum_ops::contour_at(id("skeleton"), &s, datum_math::Vec2::new(x, y));
+    let names = |k: &str| (0..4).map(|i| format!("{k}{i}")).collect::<Vec<_>>();
+    let sorted = |mut v: Vec<String>| {
+        v.sort();
+        v
+    };
+    assert_eq!(at(10.0, 10.0).map(sorted), Some(names("a")));
+    assert_eq!(at(50.0, 25.0).map(sorted), Some(names("h")));
+    assert_eq!(at(130.0, 10.0).map(sorted), Some(names("b")));
+    assert_eq!(at(30.0, 100.0), None, "beside the open chain, in no loop");
+}
