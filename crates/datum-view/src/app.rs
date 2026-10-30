@@ -1458,15 +1458,6 @@ impl Viewer {
         }
     }
 
-    /// While the background thread works, the window looks for its model every 50 ms. Its own
-    /// call to repaint can be lost: on Windows, sent while a blocking file dialog (Ctrl+O) holds
-    /// the frame, the model opened stayed unseen until the mouse moved.
-    fn keep_awake(&self, ctx: &egui::Context) {
-        if self.busy {
-            ctx.request_repaint_after(std::time::Duration::from_millis(50));
-        }
-    }
-
     fn receive(&mut self) {
         while let Ok(m) = self.models.try_recv() {
             self.busy = false;
@@ -4310,8 +4301,6 @@ impl eframe::App for Viewer {
                 .show_inside(ui, &mut Tabs { v: self, rs: frame.wgpu_render_state() });
             self.dock = dock;
         });
-        // Last: what this frame sent (a model opened from a dialog) is waited for.
-        self.keep_awake(ui.ctx());
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
     }
 
@@ -5869,16 +5858,5 @@ mod tests {
         // Hidden, it is neither drawn nor picked.
         s.execute("show", &json!({"part": "plate", "visible": false})).unwrap();
         assert!(picture(&s, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
-    }
-
-    /// Waiting for the background thread, the window wakes up by itself; idle, it settles.
-    #[test]
-    fn busy_keeps_the_window_awake() {
-        let (mut v, _inbox) = viewer("symmetric_plate.json");
-        v.busy = false;
-        let mut h = egui_kittest::Harness::builder().build_ui_state(|ui, v: &mut Viewer| v.keep_awake(ui.ctx()), v);
-        assert!(h.try_run().is_ok(), "idle, no frame is asked for");
-        h.state_mut().busy = true;
-        assert!(h.try_run().is_err(), "busy, frames keep coming");
     }
 }
