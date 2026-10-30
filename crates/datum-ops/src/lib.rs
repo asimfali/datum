@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
 pub use copies::{Copies, Place};
-use cut::{Reach, from_face};
+use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
@@ -462,9 +462,25 @@ fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetr
     let s = values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("extrude takes a sketch, input {} is a body", k + 1)))?;
     let plane = values.get(k + 1).map(|v| v.plane());
     if through {
-        return match target {
-            Some(t) if mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none() => from_face(feature, t, s, Reach::Through),
-            _ => Err(BrepError::Sketch("`through` is a cut from a face of the target: no `z0`, `z1`, `symmetric` or plane".into())),
+        let Some(t) = target.filter(|_| mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
+            return Err(BrepError::Sketch("`through` is a cut of the target along the sketch's normal: no `z0`, `z1`, `symmetric` or plane".into()));
+        };
+        // Through the walls from a face, one plate after another, made directly; through anything
+        // else (a wall the profiles cross, a sketch off the body) by the general Boolean, the tool
+        // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
+        let local = match s.face {
+            Some(_) => through_walls(feature, t, s),
+            None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),
+        };
+        return match local {
+            Err(BrepError::Unsupported(why)) => {
+                let tool = extrude_sketch(feature, s, 0.0, 1.0)?;
+                boolean(feature, BooleanKind::Difference, Some(s.frame[3]), &[t, &tool]).map_err(|e| match e {
+                    BrepError::Unsupported(all) => BrepError::Unsupported(format!("{why}; through all of the body: {all}")),
+                    e => e,
+                })
+            }
+            made => made,
         };
     }
     let (a, b) = match (plane, z1, symmetric) {
@@ -493,6 +509,20 @@ fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetr
             (Mode::Cut, true) => Err(BrepError::Sketch(
                 "cut: the extrusion goes out of the body, nothing to cut; a pocket goes into it, its depth negative, or cut `through`".into(),
             )),
+            (Mode::Cut, false) => match from_face(feature, t, s, Reach::Depth(depth)) {
+                // Into more than solid metal (a hole, walls beyond): the general Boolean
+                // operation, the tool from the floor out past the body, where there is nothing
+                // to cut, so no face of it lies on the sketch's (D186, D190).
+                Err(BrepError::Unsupported(why)) => {
+                    let out = t.vertices().iter().map(|v| (v.point - s.frame[0]).dot(s.frame[3])).fold(0.0, f64::max) - depth;
+                    let tool = extrude_sketch(feature, s, depth, out)?;
+                    boolean(feature, BooleanKind::Difference, None, &[t, &tool]).map_err(|e| match e {
+                        BrepError::Unsupported(all) => BrepError::Unsupported(format!("{why}; as a Boolean cut: {all}")),
+                        e => e,
+                    })
+                }
+                made => made,
+            },
             _ => from_face(feature, t, s, Reach::Depth(depth)),
         };
     }

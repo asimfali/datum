@@ -226,8 +226,9 @@ struct Model {
     flats: Vec<(String, Result<Arc<datum_ops::Flat>, String>)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
     editing: Option<(String, Context)>,
-    /// The reply of the command previewed, or why it is refused; the scene shows its result.
-    preview: Option<Result<Json, String>>,
+    /// The params of the command previewed and its reply, or why it is refused; the scene shows
+    /// its result.
+    preview: Option<(Json, Result<Json, String>)>,
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -314,8 +315,8 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let (picture, preview) = match &previewing {
             None => (picture(&session, &mut meshes), None),
             Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
-                Ok((p, reply)) => (p, Some(Ok(reply))),
-                Err(e) => (picture(&session, &mut meshes), Some(Err(e))),
+                Ok((p, reply)) => (p, Some((params.clone(), previewed(reply, &params["name"])))),
+                Err(e) => (picture(&session, &mut meshes), Some((params.clone(), Err(e)))),
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
@@ -327,6 +328,15 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             return;
         }
         ctx.request_repaint();
+    }
+}
+
+/// A command's reply as a preview: made, but its feature `name` failing when the model is
+/// evaluated (the command itself succeeds), it is refused with that feature's error.
+fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
+    match reply["failed"].as_array().into_iter().flatten().find(|f| f["feature"] == *name) {
+        Some(f) => Err(f["error"].as_str().unwrap_or_default().to_string()),
+        None => Ok(reply),
     }
 }
 
@@ -580,6 +590,8 @@ struct Extrusion {
     name: String,
     depth: String,
     symmetric: bool,
+    /// A cut through to the opposite face: no depth, no symmetry.
+    through: bool,
     /// What the engineer chose; none: suggested from the depth and where the sketch lies.
     mode: Option<&'static str>,
     /// Where the form (or the hint) is, by the cursor of the key or the click that asked.
@@ -590,7 +602,7 @@ struct Extrusion {
     selected: bool,
 }
 
-/// The modes of an extrusion a click goes through.
+/// The modes of an extrusion, as the form offers them.
 const EXTRUDE_MODES: [&str; 3] = ["new", "join", "cut"];
 
 impl Extrusion {
@@ -605,10 +617,13 @@ impl Extrusion {
             "new"
         };
         let mode = self.mode.unwrap_or(suggested);
-        let mut params = json!({"name": self.name, "sketch": sketch, "mode": mode, "z1": depth});
-        if self.symmetric {
-            params["symmetric"] = json!(true);
-        }
+        let params = if self.through && mode == "cut" {
+            json!({"name": self.name, "sketch": sketch, "mode": mode, "through": true})
+        } else if self.symmetric {
+            json!({"name": self.name, "sketch": sketch, "mode": mode, "z1": depth, "symmetric": true})
+        } else {
+            json!({"name": self.name, "sketch": sketch, "mode": mode, "z1": depth})
+        };
         (mode, params)
     }
 }
@@ -2676,7 +2691,8 @@ impl Viewer {
         let sketch = open.or_else(|| lone.map(String::from));
         let name =
             (1..).map(|k| format!("extrude{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default();
-        self.extrusion = Some(Extrusion { sketch, name, depth: "10".into(), symmetric: false, mode: None, at, sent: None, selected: false });
+        self.extrusion =
+            Some(Extrusion { sketch, name, depth: "10".into(), symmetric: false, through: false, mode: None, at, sent: None, selected: false });
     }
 
     /// Drops the extrusion form, and the preview it made.
@@ -2689,7 +2705,8 @@ impl Viewer {
     }
 
     /// The extrusion's form by the cursor: depth, symmetry and mode, the command previewed at
-    /// every change; Enter makes it (not while the preview is refused), Esc drops it. Without a sketch yet it only says to click one.
+    /// every change; Enter makes it once the preview of what it says now is not refused, Esc drops
+    /// it. Without a sketch yet it only says to click one.
     fn extrusion_form(&mut self, ctx: &egui::Context) {
         let Some(x) = &mut self.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
@@ -2707,16 +2724,17 @@ impl Viewer {
         let on_face = self.model.as_ref().is_some_and(|m| {
             m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"].as_str() == Some(sketch.as_str()) && !f["face"].is_null())
         });
-        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref());
-        // Refused as it stands: Enter keeps the form, the reason on it.
-        let refused = matches!(preview, Some(Err(_)));
-        let shown = x.params(&sketch, on_face).0;
+        // The preview of what the form says now; until it comes, none (a reply to an earlier
+        // depth must not let Enter make this one).
+        let (shown, params) = x.params(&sketch, on_face);
+        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
+                let through = x.through && shown == "cut";
                 ui.horizontal(|ui| {
                     ui.label(self.i18n.t("extrude-depth", "Depth"));
                     let id = egui::Id::new("datum_extrusion_depth");
-                    let mut out = egui::TextEdit::singleline(&mut x.depth).id(id).desired_width(90.0).show(ui);
+                    let mut out = egui::TextEdit::singleline(&mut x.depth).id(id).desired_width(90.0).interactive(!through).show(ui);
                     // Typed over at once.
                     if !x.selected {
                         x.selected = true;
@@ -2729,15 +2747,27 @@ impl Viewer {
                     out.response.request_focus();
                 });
                 ui.horizontal(|ui| {
-                    if ui.selectable_label(x.symmetric, self.i18n.t("extrude-symmetric", "Symmetric")).clicked() {
+                    let symmetric =
+                        ui.add_enabled_ui(!through, |ui| ui.selectable_label(x.symmetric && !through, self.i18n.t("extrude-symmetric", "Symmetric")));
+                    if symmetric.inner.clicked() {
                         x.symmetric = !x.symmetric;
                     }
-                    if ui.button(mode_name(&self.i18n, shown)).clicked() {
-                        let next = EXTRUDE_MODES.iter().position(|m| *m == shown).map_or(0, |i| (i + 1) % EXTRUDE_MODES.len());
-                        x.mode = Some(EXTRUDE_MODES[next]);
+                    // Every mode at once, the one in force lit: a click chooses that one.
+                    ui.separator();
+                    for mode in EXTRUDE_MODES {
+                        if ui.selectable_label(shown == mode, mode_name(&self.i18n, mode)).clicked() {
+                            x.mode = Some(mode);
+                        }
+                    }
+                    // Through: a cut's only (D187).
+                    if shown == "cut" && ui.selectable_label(x.through, self.i18n.t("extrude-through", "Through")).clicked() {
+                        x.through = !x.through;
                     }
                 });
                 match preview {
+                    None => {
+                        ui.weak("…");
+                    }
                     Some(Ok(reply)) => {
                         let (mode, body) = (reply["mode"].as_str().unwrap_or_default(), reply["body"].as_str().unwrap_or_default());
                         ui.label(self.i18n.f("extrude-preview", "{ $mode } · { $body }", &[("mode", mode_name(&self.i18n, mode)), ("body", body)]));
@@ -2745,14 +2775,13 @@ impl Viewer {
                     Some(Err(why)) => {
                         ui.colored_label(ui.visuals().error_fg_color, why);
                     }
-                    None => {}
                 }
             });
         });
         let params = x.params(&sketch, on_face).1;
         if esc {
             self.close_extrusion();
-        } else if enter && !refused {
+        } else if enter && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params) {
             self.close_extrusion();
             self.send(Request::Command("extrude", params));
         } else if x.sent.as_ref() != Some(&params) {
@@ -5803,10 +5832,18 @@ mod tests {
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
         h.get_all_by_value("10").next().unwrap().type_text("7");
         h.run();
+        let params = json!({"name": "extrude1", "sketch": "extra", "mode": "new", "z1": 7.0});
+        // The preview of the depth before is no leave to make this one: Enter waits.
+        let reply = Ok(json!({"mode": "new", "body": "extrude1"}));
+        h.state_mut().model.as_mut().unwrap().preview =
+            Some((json!({"name": "extrude1", "sketch": "extra", "mode": "new", "z1": 10.0}), reply.clone()));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(h.state().extrusion.is_some(), "a preview of 10 does not let 7 be made");
+        h.state_mut().model.as_mut().unwrap().preview = Some((params.clone(), reply));
         h.key_press(egui::Key::Enter);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
-        let params = json!({"name": "extrude1", "sketch": "extra", "mode": "new", "z1": 7.0});
         assert!(matches!(sent.first(), Some(Request::Preview(Some(("extrude", p)))) if p["z1"] == 10.0), "the default depth previewed first");
         assert!(matches!(&sent[sent.len() - 2..], [Request::Preview(None), Request::Command("extrude", p)] if *p == params), "made: {sent:?}");
         assert!(h.state().extrusion.is_none());
@@ -5858,5 +5895,31 @@ mod tests {
         // Hidden, it is neither drawn nor picked.
         s.execute("show", &json!({"part": "plate", "visible": false})).unwrap();
         assert!(picture(&s, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
+    }
+
+    /// Through, offered in a cut, sends no depth and takes no symmetry.
+    #[test]
+    fn a_cut_goes_through() {
+        let (mut h, inbox) = extruding(false);
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        // A click chooses the mode it is on; Through comes with Cut.
+        assert!(h.query_by_label("Through").is_none());
+        h.get_by_label("Cut").click();
+        h.run();
+        h.get_by_label("Through").click();
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let through = json!({"name": "extrude1", "sketch": "extra", "mode": "cut", "through": true});
+        assert!(matches!(sent.last(), Some(Request::Preview(Some(("extrude", p)))) if *p == through), "{sent:?}");
+    }
+
+    /// A preview whose feature fails is refused with its error; others failing do not matter.
+    #[test]
+    fn a_failing_feature_refuses_its_preview() {
+        let reply = json!({"failed": [{"feature": "extrude2", "error": "old"}, {"feature": "extrude3", "error": "crosses"}], "mode": "cut"});
+        assert_eq!(previewed(reply.clone(), &json!("extrude3")), Err("crosses".into()));
+        assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
     }
 }

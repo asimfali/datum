@@ -377,6 +377,7 @@ constrain-fix-what = точка, удерживаемая на месте
 extrude-pick = Щёлкните эскиз в дереве
 extrude-depth = Глубина
 extrude-symmetric = Симметрично
+extrude-through = Насквозь
 extrude-new = Новое тело
 extrude-join = Добавление
 extrude-cut = Вырез

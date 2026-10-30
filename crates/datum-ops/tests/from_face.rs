@@ -185,10 +185,10 @@ fn what_a_pocket_or_a_boss_refuses() {
         Err(BrepError::Unsupported(m)) => assert!(m.contains("inside another"), "{m}"),
         r => panic!("{:?}", r.map(|b| b.volume())),
     }
-    // The floor on the bottom face, or below it.
-    for depth in [-10.0, -15.0] {
-        let r = extrude("x", &plate, &top, circle(30.0, 30.0, 10.0), pocket_of(depth));
-        assert!(matches!(r, Err(BrepError::Unsupported(_))), "{depth}: {:?}", r.map(|b| b.volume()));
+    // The floor on the bottom face exactly: said so, with what to do.
+    match extrude("x", &plate, &top, circle(30.0, 30.0, 10.0), pocket_of(-10.0)) {
+        Err(BrepError::Degenerate(m)) => assert!(m.contains("floor lies on a face of the body") && m.contains("cut through"), "{m}"),
+        r => panic!("{:?}", r.map(|b| b.volume())),
     }
     // Over a hole made earlier, inside the profile.
     let through = serde_json::json!({"mode": "cut", "through": true});
@@ -273,4 +273,52 @@ mod random {
             prop_assert_eq!(b.faces().len(), 6 + 4);
         }
     }
+}
+
+/// A tube 60 × 40 × 20 around a hole 20 × 20: a cut through it from its front, wider than the
+/// hole, goes through both walls and the side walls between, and a pocket into it beyond its
+/// wall (D186, D190: the general Boolean operation where one plate's cut does not do); and a cut
+/// through from a sketch on a plane, off the body.
+#[test]
+fn through_all_of_a_tube() {
+    let rect = |x0: f64, y0: f64, x1: f64, y1: f64, k: &str| {
+        let p = |i: usize| format!("{k}{i}");
+        serde_json::json!({
+            "points": {p(0): [x0, y0], p(1): [x1, y0], p(2): [x1, y1], p(3): [x0, y1]},
+            "lines": {p(4): {"from": p(0), "to": p(1)}, p(5): {"from": p(1), "to": p(2)}, p(6): {"from": p(2), "to": p(3)}, p(7): {"from": p(3), "to": p(0)}}
+        })
+    };
+    let mut outline = rect(0.0, 0.0, 60.0, 40.0, "o");
+    let hole = rect(20.0, 10.0, 40.0, 30.0, "h");
+    for key in ["points", "lines"] {
+        let more = hole[key].as_object().unwrap().clone();
+        outline[key].as_object_mut().unwrap().extend(more);
+    }
+    let sketch: Op = serde_json::from_value(serde_json::json!({"op": "sketch", "sketch": outline})).unwrap();
+    let placed = sketch.eval(id("outline"), &[]).unwrap();
+    let op: Op = serde_json::from_value(serde_json::json!({"op": "extrude", "z1": 20})).unwrap();
+    let tube = op.eval(id("tube"), &[&placed]).unwrap().body().unwrap().clone();
+    assert_close(tube.volume(), 2000.0 * 20.0);
+    // On the front (−Y) the sketch's X runs along X, its Y along Z.
+    let front = face(&tube, Vec3::new(0.0, -1.0, 0.0));
+    let through = serde_json::json!({"mode": "cut", "through": true});
+    let cut = extrude("window", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), through.clone()).unwrap();
+    // 10 high: 20 wide through both walls (10 each), 5 + 5 wide through the 40 of the sides.
+    assert_close(cut.volume(), 40_000.0 - 10.0 * (20.0 * 20.0 + 10.0 * 40.0));
+    // A pocket 20 deep from the front: through its wall into the hole, and 20 into the sides.
+    let pocket = extrude("pocket", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), pocket_of(-20.0)).unwrap();
+    assert_close(pocket.volume(), 40_000.0 - 10.0 * (20.0 * 10.0 + 10.0 * 20.0));
+    // Deeper than the tube: through, as a cut deeper than a plate is.
+    let deep = extrude("deep", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), pocket_of(-50.0)).unwrap();
+    assert_close(deep.volume(), cut.volume());
+    // A circle within the hole's width: through the front wall, then the back one.
+    let round = extrude("round", &tube, &front, circle(30.0, 10.0, 10.0), through.clone()).unwrap();
+    assert_close(round.volume(), 40_000.0 - 25.0 * PI * 20.0);
+    // A sketch on the XY plane, off the body: through it along Z.
+    let s: Op = serde_json::from_value(serde_json::json!({"op": "sketch", "sketch": rect(5.0, 5.0, 15.0, 35.0, "p")})).unwrap();
+    let placed = s.eval(id("slot"), &[]).unwrap();
+    let op: Op = serde_json::from_value(serde_json::json!({"op": "extrude", "mode": "cut", "through": true})).unwrap();
+    let slot = op.eval(id("slot_cut"), &[&Value::Body(tube.clone()), &placed]).unwrap().body().unwrap().clone();
+    slot.validate().unwrap();
+    assert_close(slot.volume(), 40_000.0 - 10.0 * 30.0 * 20.0);
 }
