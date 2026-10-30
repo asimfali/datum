@@ -506,6 +506,60 @@ struct Viewer {
     under: Option<Under>,
     /// A work plane being made: its base (the feature's fields) and the offset typed.
     plane_draft: Option<(Json, String)>,
+    /// An extrusion being asked for: its form by the cursor (D185 item 4).
+    extrusion: Option<Extrusion>,
+}
+
+/// An extrusion of a whole sketch being set up: the form of depth, symmetry and mode, with the
+/// command previewed at every change.
+struct Extrusion {
+    /// The sketch to extrude; none while the engineer is to click one in the tree.
+    sketch: Option<String>,
+    /// The feature to make: the first free `extrudeN`.
+    name: String,
+    depth: String,
+    symmetric: bool,
+    /// What the engineer chose; none: suggested from the depth and where the sketch lies.
+    mode: Option<&'static str>,
+    /// Where the form (or the hint) is, by the cursor of the key or the click that asked.
+    at: egui::Pos2,
+    /// The params last sent to preview.
+    sent: Option<Json>,
+    /// Whether the depth's text has been selected (on the form's first frame).
+    selected: bool,
+}
+
+/// The modes of an extrusion a click goes through.
+const EXTRUDE_MODES: [&str; 3] = ["new", "join", "cut"];
+
+impl Extrusion {
+    /// The mode in force and the params of the command, for `sketch` (`on_face`: it lies on a face).
+    fn params(&self, sketch: &str, on_face: bool) -> (&'static str, Json) {
+        let depth = value_of(&self.depth);
+        let suggested = if depth.as_f64().is_some_and(|d| d < 0.0) {
+            "cut"
+        } else if on_face {
+            "join"
+        } else {
+            "new"
+        };
+        let mode = self.mode.unwrap_or(suggested);
+        let mut params = json!({"name": self.name, "sketch": sketch, "mode": mode, "z1": depth});
+        if self.symmetric {
+            params["symmetric"] = json!(true);
+        }
+        (mode, params)
+    }
+}
+
+/// An extrusion mode in words.
+fn mode_name<'a>(i18n: &'a crate::i18n::I18n, mode: &'a str) -> &'a str {
+    match mode {
+        "new" => i18n.t("extrude-new", "New body"),
+        "join" => i18n.t("extrude-join", "Join"),
+        "cut" => i18n.t("extrude-cut", "Cut"),
+        other => other,
+    }
 }
 
 impl Viewer {
@@ -592,6 +646,7 @@ impl Viewer {
             picking: None,
             under: None,
             plane_draft: None,
+            extrusion: None,
         };
         if let Some(p) = path {
             v.open(p);
@@ -1204,6 +1259,7 @@ impl Viewer {
 
     /// Starts editing sketch feature `name`, once the model brings its context.
     fn enter(&mut self, name: String) {
+        self.close_extrusion();
         self.picking = None;
         self.sketch = None;
         self.send(Request::Editing(Some(name.clone())));
@@ -1211,6 +1267,7 @@ impl Viewer {
     }
 
     fn leave(&mut self) {
+        self.close_extrusion();
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
         if let Some(sk) = &self.sketch {
@@ -1315,9 +1372,13 @@ impl Viewer {
             }
             ui.separator();
             // Icons, as undo and redo: the name and what it does on hover.
-            for (act, icon) in
-                [(Act::NewSketch, Icon::NewSketch), (Act::WorkPlane, Icon::WorkPlane), (Act::LookAt, Icon::LookAt), (Act::Measure, Icon::Measure)]
-            {
+            for (act, icon) in [
+                (Act::NewSketch, Icon::NewSketch),
+                (Act::Extrude, Icon::Extrude),
+                (Act::WorkPlane, Icon::WorkPlane),
+                (Act::LookAt, Icon::LookAt),
+                (Act::Measure, Icon::Measure),
+            ] {
                 if act == Act::Measure {
                     ui.separator();
                 }
@@ -1976,6 +2037,9 @@ impl Viewer {
         let (mut export, mut edit, mut enter) = (None, None, None);
         let mut toggle: Option<(String, Json)> = None;
         let mut show_flat: Option<String> = None;
+        // A sketch row clicked while an extrusion waits for one, and where.
+        let waiting = self.extrusion.as_ref().is_some_and(|x| x.sketch.is_none());
+        let mut picked: Option<(String, egui::Pos2)> = None;
         // Out of `self` while the rows borrow it.
         let mut offsets = std::mem::take(&mut self.offsets);
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -2048,7 +2112,11 @@ impl Viewer {
                     }
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
-                            ui.label(format!("✔ {name}  ·  {op}"));
+                            let sense = if waiting { egui::Sense::click() } else { egui::Sense::hover() };
+                            let label = ui.add(egui::Label::new(format!("✔ {name}  ·  {op}")).sense(sense));
+                            if label.clicked() {
+                                picked = Some((bare.to_string(), label.interact_pointer_pos().unwrap_or(label.rect.center())));
+                            }
                             if crate::icons::button(
                                 ui,
                                 crate::icons::Icon::Edit,
@@ -2117,6 +2185,10 @@ impl Viewer {
         if let Some(f) = show_flat {
             self.flat.chosen = Some(f);
             crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+        }
+        if let (Some((sketch, at)), Some(x)) = (picked, &mut self.extrusion) {
+            x.sketch = Some(sketch);
+            x.at = at;
         }
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
@@ -2486,6 +2558,106 @@ impl Viewer {
             self.send(r);
         }
         self.table = (!closed).then_some((source, editor));
+    }
+
+    /// E: the form of an extrusion at `at`, for the sketch open (left), else the only one not
+    /// used yet, else the one clicked in the tree.
+    fn extrude(&mut self, at: egui::Pos2) {
+        let open = self.sketch.as_ref().map(|s| s.feature.clone());
+        self.leave();
+        let Some(m) = &self.model else { return };
+        let features = m.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
+        let used = |name: &str| {
+            features.iter().any(|f| f["op"] != "sketch" && f["inputs"].as_array().is_some_and(|i| i.iter().any(|n| n.as_str() == Some(name))))
+        };
+        let mut unused = features.iter().filter(|f| f["op"] == "sketch").filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
+        let lone = unused.next().filter(|_| unused.next().is_none());
+        let sketch = open.or_else(|| lone.map(String::from));
+        let name =
+            (1..).map(|k| format!("extrude{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default();
+        self.extrusion = Some(Extrusion { sketch, name, depth: "10".into(), symmetric: false, mode: None, at, sent: None, selected: false });
+    }
+
+    /// Drops the extrusion form, and the preview it made.
+    fn close_extrusion(&mut self) {
+        if let Some(x) = self.extrusion.take()
+            && x.sent.is_some()
+        {
+            self.send(Request::Preview(None));
+        }
+    }
+
+    /// The extrusion's form by the cursor: depth, symmetry and mode, the command previewed at
+    /// every change; Enter makes it (not while the preview is refused), Esc drops it. Without a sketch yet it only says to click one.
+    fn extrusion_form(&mut self, ctx: &egui::Context) {
+        let Some(x) = &mut self.extrusion else { return };
+        let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        let Some(sketch) = x.sketch.clone() else {
+            if esc {
+                self.extrusion = None;
+                return;
+            }
+            let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(x.at) + egui::vec2(14.0, 14.0);
+            egui::Area::new(egui::Id::new("datum_extrusion_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(self.i18n.t("extrude-pick", "Click a sketch in the tree")));
+            });
+            return;
+        };
+        let on_face = self.model.as_ref().is_some_and(|m| {
+            m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"].as_str() == Some(sketch.as_str()) && !f["face"].is_null())
+        });
+        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref());
+        // Refused as it stands: Enter keeps the form, the reason on it.
+        let refused = matches!(preview, Some(Err(_)));
+        let shown = x.params(&sketch, on_face).0;
+        egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("extrude-depth", "Depth"));
+                    let id = egui::Id::new("datum_extrusion_depth");
+                    let mut out = egui::TextEdit::singleline(&mut x.depth).id(id).desired_width(90.0).show(ui);
+                    // Typed over at once.
+                    if !x.selected {
+                        x.selected = true;
+                        out.state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                            egui::text::CCursor::new(0),
+                            egui::text::CCursor::new(x.depth.chars().count()),
+                        )));
+                        out.state.store(ui.ctx(), id);
+                    }
+                    out.response.request_focus();
+                });
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(x.symmetric, self.i18n.t("extrude-symmetric", "Symmetric")).clicked() {
+                        x.symmetric = !x.symmetric;
+                    }
+                    if ui.button(mode_name(&self.i18n, shown)).clicked() {
+                        let next = EXTRUDE_MODES.iter().position(|m| *m == shown).map_or(0, |i| (i + 1) % EXTRUDE_MODES.len());
+                        x.mode = Some(EXTRUDE_MODES[next]);
+                    }
+                });
+                match preview {
+                    Some(Ok(reply)) => {
+                        let (mode, body) = (reply["mode"].as_str().unwrap_or_default(), reply["body"].as_str().unwrap_or_default());
+                        ui.label(self.i18n.f("extrude-preview", "{ $mode } · { $body }", &[("mode", mode_name(&self.i18n, mode)), ("body", body)]));
+                    }
+                    Some(Err(why)) => {
+                        ui.colored_label(ui.visuals().error_fg_color, why);
+                    }
+                    None => {}
+                }
+            });
+        });
+        let params = x.params(&sketch, on_face).1;
+        if esc {
+            self.close_extrusion();
+        } else if enter && !refused {
+            self.close_extrusion();
+            self.send(Request::Command("extrude", params));
+        } else if x.sent.as_ref() != Some(&params) {
+            x.sent = Some(params.clone());
+            self.send(Request::Preview(Some(("extrude", params))));
+        }
     }
 
     /// The offset of a new work plane, asked once its base is picked: a number or a formula;
@@ -3560,6 +3732,7 @@ impl Viewer {
             | Act::MaterialTable
             | Act::RuleTable => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
+            Act::Extrude => self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch")),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
@@ -3576,6 +3749,7 @@ impl Viewer {
             Act::SmoothEdges => self.smooth,
             Act::NewSketch => self.picking == Some(Purpose::Sketch),
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
+            Act::Extrude => self.extrusion.is_some(),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
@@ -3622,6 +3796,10 @@ impl Viewer {
                 self.start_sketch();
             }
             Act::LookAt => self.pick(Purpose::Look),
+            Act::Extrude => {
+                let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                self.extrude(at);
+            }
             Act::WorkPlane => {
                 self.leave();
                 self.pick(Purpose::Plane);
@@ -3796,6 +3974,7 @@ impl Viewer {
         ui.menu_button(self.i18n.t("menu-sketch", "Sketch").to_string(), |ui| {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::WorkPlane, true);
+            self.item(ui, Act::Extrude, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group]) {
                 self.item(ui, act, true);
@@ -4005,6 +4184,7 @@ impl eframe::App for Viewer {
         }
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
+        self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
         self.settings_said(ui.ctx());
         // The panes, docked where the engineer put them (D161).
@@ -4071,6 +4251,7 @@ mod tests {
                 bodies: Vec::new(),
                 flats: Vec::new(),
                 editing: None,
+                preview: None,
             }),
             busy: false,
             camera: Camera::default(),
@@ -4133,6 +4314,7 @@ mod tests {
             picking: None,
             under: None,
             plane_draft: None,
+            extrusion: None,
         };
         (v, inbox)
     }
@@ -5402,5 +5584,73 @@ mod tests {
             matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "back", "offset": "-gap - 5"})),
             "an edit of the offset"
         );
+    }
+    /// The plate's model with a sketch nothing uses yet, `extra`, and a harness of the side bar
+    /// with the keys and the extrusion form.
+    fn extruding(second: bool) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        features.push(json!({"name": "extra", "op": "sketch", "inputs": []}));
+        if second {
+            features.push(json!({"name": "other", "op": "sketch", "inputs": []}));
+        }
+        let h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+                v.extrusion_form(ui.ctx());
+            },
+            v,
+        );
+        (h, inbox)
+    }
+
+    /// E with one sketch unused asks for the depth at once; Enter previews no more and makes
+    /// the extrusion, a new body.
+    #[test]
+    fn e_extrudes_the_sketch_nothing_uses() {
+        let (mut h, inbox) = extruding(false);
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+        h.get_all_by_value("10").next().unwrap().type_text("7");
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let params = json!({"name": "extrude1", "sketch": "extra", "mode": "new", "z1": 7.0});
+        assert!(matches!(sent.first(), Some(Request::Preview(Some(("extrude", p)))) if p["z1"] == 10.0), "the default depth previewed first");
+        assert!(matches!(&sent[sent.len() - 2..], [Request::Preview(None), Request::Command("extrude", p)] if *p == params), "made: {sent:?}");
+        assert!(h.state().extrusion.is_none());
+    }
+
+    /// Esc drops the form and its preview, and makes nothing.
+    #[test]
+    fn esc_drops_the_extrusion() {
+        let (mut h, inbox) = extruding(false);
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(sent.last(), Some(Request::Preview(None))));
+        assert!(!sent.iter().any(|r| matches!(r, Request::Command(..))));
+        assert!(h.state().extrusion.is_none());
+    }
+
+    /// With two sketches unused, E waits for a click in the tree.
+    #[test]
+    fn with_two_sketches_e_waits_for_the_tree() {
+        let (mut h, _inbox) = extruding(true);
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        h.get_by_label("Click a sketch in the tree");
+        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
+        h.get_by_label("✔ other  ·  sketch").click();
+        h.run();
+        assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
     }
 }
