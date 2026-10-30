@@ -2,7 +2,10 @@
 //! plane face cut perpendicular to the face through to the opposite one, or of a sketch in the
 //! development of a cylinder face cut along the radius through the sheet (as a hole punched in
 //! the blank before rolling); a pattern of the sketch's (D128) gives many profiles at once
-//! (punches of a turret press, PAINS P4).
+//! (punches of a turret press, PAINS P4). From a plane face the profiles also go a depth along
+//! its normal (D187): into the body, a pocket with a new plane floor; out of it, a boss with a
+//! new plane top. The face's own plane is known from where the sketch lies, so no Boolean
+//! operation meets coplanar faces or arcs (D185 item 7).
 //!
 //! Every decision is a 2D one in the sketch's coordinates, by exact predicates on segments and
 //! arcs: a profile lies inside the entry face and inside the exit face, touches neither their
@@ -17,11 +20,28 @@ use datum_brep::{
 use datum_math::{Rigid, Vec2, Vec3};
 use rayon::prelude::*;
 
-use crate::sketch::{Developed, Placed, coaxial, opposite_cylinder, profile_loops};
+use crate::sketch::{Developed, Found, Placed, coaxial, opposite_cylinder, profile_loops, profile_regions};
 
-/// The profiles of `sketch`, which lies on a face of `target`, cut through `target`.
-pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, BrepError> {
-    let unsupported = |m: String| BrepError::Unsupported(format!("cut: {m}"));
+/// How far the profiles of a sketch on a face go.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Reach {
+    /// Into the body through to the opposite face.
+    Through,
+    /// Along the face's normal, out of the body: a negative depth makes a pocket, a positive
+    /// one a boss.
+    Depth(f64),
+}
+
+/// The profiles of `sketch`, which lies on a face of `target`, cut into `target` or added to it
+/// as far as `reach` says.
+pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) -> Result<Body, BrepError> {
+    let what = match reach {
+        Reach::Through => "cut",
+        Reach::Depth(d) if d < 0.0 => "pocket",
+        Reach::Depth(d) if d > 0.0 => "boss",
+        Reach::Depth(_) => return Err(BrepError::Degenerate("an extrusion from a face of zero depth".into())),
+    };
+    let unsupported = |m: String| BrepError::Unsupported(format!("{what}: {m}"));
     let id = sketch.face.ok_or_else(|| BrepError::Sketch("a cut takes a sketch placed on a face of its body".into()))?;
     let f = target.faces().binary_search_by_key(&id, |f| f.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the body")))?;
     let frame = match (target.faces()[f].surface, sketch.developed.as_deref().copied()) {
@@ -29,12 +49,24 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
             let [o, x, y, z] = sketch.frame;
             Frame::Plane { o, x, y, z }
         }
-        (Surface::Cylinder(c), Some(d)) => Frame::Rolled { d, radius: c.radius, side: if c.convex { 1.0 } else { -1.0 } },
+        (Surface::Cylinder(c), Some(d)) if reach == Reach::Through => Frame::Rolled { d, radius: c.radius, side: if c.convex { 1.0 } else { -1.0 } },
+        (Surface::Cylinder(_), Some(_)) => return Err(unsupported("a sketch on a rolled sheet cuts through it".into())),
         _ => return Err(BrepError::Invalid("the sketch does not lie on its face".into())),
+    };
+    // A pocket's floor and a boss's top take the far caps of an extrusion of the sketch: the
+    // regions its profiles bound, none inside another.
+    let (found, ends): (Vec<Found>, Vec<TopoId>) = match reach {
+        Reach::Through => (profile_loops(feature, sketch)?, Vec::new()),
+        Reach::Depth(_) => {
+            let regions = profile_regions(feature, sketch)?;
+            if regions.iter().any(|r| !r.holes.is_empty()) {
+                return Err(unsupported("a profile inside another".into()));
+            }
+            regions.into_iter().map(|r| (Found { ring: r.outer, name: String::new(), copy: None }, r.caps[1])).unzip()
+        }
     };
     // The profiles, counterclockwise in the sketch; a pattern's copies among them, each turning
     // as its loop of the cell does (found once).
-    let found = profile_loops(feature, sketch)?;
     let mut turns: std::collections::BTreeMap<(usize, usize), bool> = std::collections::BTreeMap::new();
     let ccw: Vec<bool> = found
         .iter()
@@ -69,9 +101,10 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
     }
 
     // The exit: on a plane, the nearest face below facing exactly the other way that holds the
-    // first profile; on a cylinder, the face across the sheet.
-    let exit = match &frame {
-        Frame::Plane { z, .. } => {
+    // first profile; on a cylinder, the face across the sheet. A pocket and a boss have none.
+    let exit = match (reach, &frame) {
+        (Reach::Depth(d), _) => Some((None, d)),
+        (Reach::Through, Frame::Plane { z, .. }) => {
             let first = profiles[0].points[0];
             let faces = (0..target.faces().len() as Ix).filter_map(|g| {
                 let Surface::Plane(p) = target.faces()[g as usize].surface else { return None };
@@ -81,16 +114,16 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
                 let holds = || outline(target, g, &frame).is_ok_and(|ls| ls.iter().map(|l| l.winding(first)).sum::<i32>() != 0);
                 (opposite && d < 0.0 && holds()).then_some((g, d))
             });
-            faces.max_by(|a, b| a.1.total_cmp(&b.1))
+            faces.max_by(|a, b| a.1.total_cmp(&b.1)).map(|(g, d)| (Some(g), d))
         }
-        Frame::Rolled { radius, side, .. } => opposite_cylinder(target, f).map(|(g, c)| (g, (c.radius - radius) * side)),
+        (Reach::Through, Frame::Rolled { radius, side, .. }) => opposite_cylinder(target, f).map(|(g, c)| (Some(g), (c.radius - radius) * side)),
     };
-    let Some((g, bottom)) = exit else {
+    let Some((g, end)) = exit else {
         return Err(unsupported("no face opposite the sketch's face holds the profiles: a cut goes through a plate".into()));
     };
 
     // Inside both faces, clear of their edges and of their holes.
-    for (face, name) in [(f as Ix, "entry"), (g, "exit")] {
+    for (face, name) in std::iter::once((f as Ix, "entry")).chain(g.map(|g| (g, "exit"))) {
         let loops = outline(target, face, &frame)?;
         let loop_boxes: Vec<Box2> = loops.iter().map(ProfileLoop::bounds).collect();
         let pairs = between(&boxes, &loop_boxes);
@@ -112,12 +145,17 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
         }
     }
 
-    // No other face crosses the cut between the two.
-    let other: Vec<Ix> = (0..target.faces().len() as Ix).filter(|&h| h as usize != f && h != g).collect();
+    // No other face crosses the cut between the two, or reaches a pocket's floor or a boss's top.
+    let other: Vec<Ix> = (0..target.faces().len() as Ix).filter(|&h| h as usize != f && Some(h) != g).collect();
+    let span = match reach {
+        Reach::Through => Span { lo: end, hi: 0.0, closed: [false, false] },
+        Reach::Depth(d) if d < 0.0 => Span { lo: d, hi: 0.0, closed: [true, false] },
+        Reach::Depth(d) => Span { lo: 0.0, hi: d, closed: [false, true] },
+    };
     let crossing = match &frame {
-        Frame::Plane { .. } => plane_neighbours(target, &other, &frame, &boxes, bottom)?,
+        Frame::Plane { .. } => plane_neighbours(target, &other, &frame, &boxes, span)?,
         Frame::Rolled { d, radius, side } => {
-            let radii = [*radius, radius + side * bottom];
+            let radii = [*radius, radius + side * end];
             let Surface::Cylinder(entry) = &target.faces()[f].surface else {
                 return Err(BrepError::Invalid("the sketch does not lie on its face".into()));
             };
@@ -128,47 +166,60 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
     in_order(between(&boxes, &crossing_boxes).into_par_iter().map(|(p, l)| {
         let (lp, along) = (&crossing[l].0, crossing[l].1);
         let inside = profiles[p].winding(lp.points[0]) != 0 || (!along && lp.winding(profiles[p].points[0]) != 0);
-        if inside || profiles[p].touches(lp) { Err(unsupported("another face of the body crosses the cut".into())) } else { Ok(()) }
+        if inside || profiles[p].touches(lp) { Err(unsupported(format!("another face of the body meets the {what}"))) } else { Ok(()) }
     }))?;
 
-    // The body: the profiles as holes of both faces, walls between them.
+    // The body: the profiles as holes of the sketch's face, walls along them, and holes of the
+    // exit face or new faces at the far end. A boss's walls face away from its profiles, the
+    // walls of a hole into them.
+    let outward = matches!(reach, Reach::Depth(d) if d > 0.0);
     let at = |p: Vec2, d: f64| frame.point(p, d);
     let mut vertices: Vec<Vertex> = target.vertices().to_vec();
     let mut curves = target.curve_specs();
-    let mut faces: Vec<FaceSpec> = (0..target.faces().len() as Ix).filter(|&h| h as usize != f && h != g).map(|h| target.face_spec(h)).collect();
-    let (mut top, mut low) = (target.face_spec(f as Ix), target.face_spec(g));
-    for l in &profiles {
+    let mut faces: Vec<FaceSpec> = other.iter().map(|&h| target.face_spec(h)).collect();
+    let mut top = target.face_spec(f as Ix);
+    let mut low = g.map(|g| target.face_spec(g));
+    for (i, l) in profiles.iter().enumerate() {
         let n = l.points.len();
         // Holes run clockwise seen from outside: against the profile on the entry face, along
-        // it on the exit face, which faces the other way.
+        // it on the exit face, which faces the other way. A floor or a top faces out along the
+        // normal: the profile runs counterclockwise on it.
         top.loops.push(l.vertices.iter().rev().map(|v| v[0]).collect());
-        low.loops.push(l.vertices.iter().map(|v| v[1]).collect());
+        let far: Vec<TopoId> = l.vertices.iter().map(|v| v[1]).collect();
+        match &mut low {
+            Some(low) => low.loops.push(far),
+            None => {
+                let Frame::Plane { z, .. } = &frame else { return Err(BrepError::Invalid("a pocket in a development".into())) };
+                faces.push(FaceSpec { id: ends[i], surface: Surface::Plane(Plane { origin: at(l.points[0], end), normal: *z }), loops: vec![far] });
+            }
+        }
         for k in 0..n {
             let (a, b) = (l.points[k], l.points[(k + 1) % n]);
             let (v, w) = (l.vertices[k], l.vertices[(k + 1) % n]);
             vertices.push(Vertex { id: v[0], point: at(a, 0.0) });
-            vertices.push(Vertex { id: v[1], point: at(a, bottom) });
+            vertices.push(Vertex { id: v[1], point: at(a, end) });
             let surface = match &frame {
                 Frame::Plane { z, .. } => match l.arc(k) {
                     None => {
                         let d = at(b, 0.0) - at(a, 0.0);
-                        Surface::Plane(Plane { origin: at(a, 0.0), normal: z.cross(d) })
+                        let normal = z.cross(d);
+                        Surface::Plane(Plane { origin: at(a, 0.0), normal: if outward { -normal } else { normal } })
                     }
                     Some(arc) => {
                         let radius = libm::hypot(a.x - arc.center.x, a.y - arc.center.y);
                         let axis = if arc.ccw { *z } else { -*z };
-                        for (layer, depth) in [(0, 0.0), (1, bottom)] {
+                        for (layer, depth) in [(0, 0.0), (1, end)] {
                             let arc = Arc { center: at(arc.center, depth), axis, radius };
                             curves.push(CurveSpec { from: v[layer], to: w[layer], curve: Curve::Arc(arc) });
                         }
                         // The body is outside the hole: an arc turning left (around the hole) is
-                        // concave from the body.
-                        Surface::Cylinder(Cylinder { origin: at(arc.center, bottom), axis: *z, radius, convex: !arc.ccw })
+                        // concave from the body, and convex around a boss.
+                        Surface::Cylinder(Cylinder { origin: at(arc.center, end), axis: *z, radius, convex: arc.ccw == outward })
                     }
                 },
                 Frame::Rolled { d, radius, side } => {
                     let piece = Rolled { dev: d.dev, from: d.uv(a), to: d.uv(b), arc: l.arc(k).map(|arc| d.arc(arc)) };
-                    for (layer, depth) in [(0, 0.0), (1, bottom)] {
+                    for (layer, depth) in [(0, 0.0), (1, end)] {
                         curves.push(CurveSpec { from: v[layer], to: w[layer], curve: Curve::Rolled { piece, radius: radius + side * depth } });
                     }
                     // Into the hole is left of the profile in the sketch; mirrored, right in the
@@ -180,8 +231,25 @@ pub fn cut(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, Brep
         }
     }
     faces.push(top);
-    faces.push(low);
+    faces.extend(low);
     build_with_curves(vertices, faces, curves)
+}
+
+/// The depths a cut spans along the normal of its sketch's face, each end in it or not.
+#[derive(Clone, Copy)]
+struct Span {
+    lo: f64,
+    hi: f64,
+    closed: [bool; 2],
+}
+
+impl Span {
+    /// Whether the depths from `lo` to `hi` meet the span.
+    fn meets(&self, lo: f64, hi: f64) -> bool {
+        let above = if self.closed[0] { hi >= self.lo } else { hi > self.lo };
+        let below = if self.closed[1] { lo <= self.hi } else { lo < self.hi };
+        above && below
+    }
 }
 
 /// The sketch's coordinates in space: `depth` runs out of the body from its face.
@@ -218,11 +286,11 @@ impl Frame {
     }
 }
 
-/// Outlines of the faces among `other` that reach between the sketch's face and `bottom` (with
+/// Outlines of the faces among `other` that meet the cut's `span` of depths (with
 /// `true` if a face runs along the cut), on a plane: a face along the cut shows as its edges, one
 /// across it covers an area. A curved face across the cut (a bend of a sheet) is known by its box
 /// in the sketch's axes: it must keep clear of every profile's (`boxes`).
-fn plane_neighbours(target: &Body, other: &[Ix], frame: &Frame, boxes: &[Box2], bottom: f64) -> Result<Vec<(ProfileLoop, bool)>, BrepError> {
+fn plane_neighbours(target: &Body, other: &[Ix], frame: &Frame, boxes: &[Box2], span: Span) -> Result<Vec<(ProfileLoop, bool)>, BrepError> {
     let Frame::Plane { o, x, y, z } = *frame else { return Err(BrepError::Invalid("a plane cut in a development".into())) };
     // Faces by outline (`Some(along)`), curved faces across the cut by their boxes (`None`).
     let kinds: Vec<Option<(Ix, Option<bool>)>> = in_order(other.par_iter().map(|&h| {
@@ -237,20 +305,22 @@ fn plane_neighbours(target: &Body, other: &[Ix], frame: &Frame, boxes: &[Box2], 
         }
         let depths = target.face_loops(h).flat_map(|l| target.loop_points(l)).map(|p| frame.depth(p));
         let (lo, hi) = depths.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| (lo.min(d), hi.max(d)));
-        Ok((hi > bottom && lo < 0.0).then_some((h, Some(along))))
+        Ok(span.meets(lo, hi).then_some((h, Some(along))))
     }))?;
-    let cuts: Vec<(Vec3, Vec3)> = boxes.iter().map(|&(lo, hi)| (Vec3::new(lo.x, lo.y, bottom), Vec3::new(hi.x, hi.y, 0.0))).collect();
-    keep_clear(target, &kinds, &Rigid::into_frame(o, x, y, z), &cuts)?;
+    let cuts: Vec<(Vec3, Vec3)> = boxes.iter().map(|&(lo, hi)| (Vec3::new(lo.x, lo.y, span.lo), Vec3::new(hi.x, hi.y, span.hi))).collect();
+    keep_clear(target, &kinds, &Rigid::into_frame(o, x, y, z), &cuts, span.closed)?;
     exact_outlines(target, kinds, frame)
 }
 
 /// Faces known only by their boxes (`None` in `kinds`) must keep clear of every profile's cut
-/// (`cuts`, boxes in the axes of `local`): a box that reaches one refuses the cut.
-fn keep_clear(target: &Body, kinds: &[Option<(Ix, Option<bool>)>], local: &Rigid, cuts: &[(Vec3, Vec3)]) -> Result<(), BrepError> {
+/// (`cuts`, boxes in the axes of `local`, their ends along Z in them or not as `closed` says): a
+/// box that reaches one refuses the cut.
+fn keep_clear(target: &Body, kinds: &[Option<(Ix, Option<bool>)>], local: &Rigid, cuts: &[(Vec3, Vec3)], closed: [bool; 2]) -> Result<(), BrepError> {
     let boxed: Vec<(Vec3, Vec3)> = kinds.iter().flatten().filter(|k| k.1.is_none()).map(|&(h, _)| target.face_bounds(h, local)).collect();
     let flat = |b: &(Vec3, Vec3)| (Vec2::new(b.0.x, b.0.y), Vec2::new(b.1.x, b.1.y));
     let (cut_xy, boxed_xy): (Vec<Box2>, Vec<Box2>) = (cuts.iter().map(flat).collect(), boxed.iter().map(flat).collect());
-    if between(&cut_xy, &boxed_xy).into_iter().any(|(c, f)| cuts[c].0.z < boxed[f].1.z && boxed[f].0.z < cuts[c].1.z) {
+    let meets = |c: usize, f: usize| Span { lo: cuts[c].0.z, hi: cuts[c].1.z, closed }.meets(boxed[f].0.z, boxed[f].1.z);
+    if between(&cut_xy, &boxed_xy).into_iter().any(|(c, f)| meets(c, f)) {
         return Err(BrepError::Unsupported("cut: a face of the body runs close to the cut".into()));
     }
     Ok(())
@@ -312,7 +382,7 @@ fn rolled_neighbours(
             (Vec3::new(a.x, a.y, v0.min(v1)), Vec3::new(b.x, b.y, v0.max(v1)))
         })
         .collect();
-    keep_clear(target, &kinds, &local, &cuts)?;
+    keep_clear(target, &kinds, &local, &cuts, [false, false])?;
     exact_outlines(target, kinds, frame)
 }
 

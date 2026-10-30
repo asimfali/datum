@@ -32,7 +32,7 @@ fn cut_by(name: &str, plate: &Body, on: &str, sketch: serde_json::Value, pattern
     let target = Value::Body(plate.clone());
     let placed =
         op(serde_json::json!({"op": "sketch", "face": on, "sketch": patterned(sketch, pattern)})).eval(id(&format!("{name}.sketch")), &[&target])?;
-    let c = serde_json::json!({"op": "cut"});
+    let c = serde_json::json!({"op": "extrude", "mode": "cut", "through": true});
     let v = op(c).eval(id(name), &[&target, &placed])?;
     let b = v.body().unwrap().clone();
     b.validate().unwrap();

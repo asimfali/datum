@@ -115,14 +115,19 @@ pub fn parse_doc(json: &str) -> Result<levels::Doc, ModelError> {
     Ok(doc)
 }
 
-/// Files from before patterns in sketches (D128) gave a cut a `pattern`: it becomes a pattern
-/// of the cut's sketch named after the cut, its cell a group `<cut>_cell` of every profile curve
-/// of the sketch, as the cut copied them all.
+/// Files from before extrusion modes (D187) have a cut through as its own operation `cut`: it
+/// becomes an extrusion cutting `through`, its inputs the same. Files from before patterns in
+/// sketches (D128) also gave a cut a `pattern`: it becomes a pattern of the cut's sketch named
+/// after the cut, its cell a group `<cut>_cell` of every profile curve of the sketch, as the cut
+/// copied them all.
 fn migrate(features: &mut [Map<String, Value>]) -> Result<(), String> {
     for k in 0..features.len() {
         if features[k].get("op").and_then(Value::as_str) != Some("cut") {
             continue;
         }
+        features[k].insert("op".into(), "extrude".into());
+        features[k].insert("mode".into(), "cut".into());
+        features[k].insert("through".into(), true.into());
         let Some(pattern) = features[k].remove("pattern") else { continue };
         let cut = features[k].get("name").and_then(Value::as_str).unwrap_or_default().to_string();
         let of = features[k].get("inputs").and_then(|i| i.get(1)).and_then(Value::as_str).unwrap_or_default().to_string();

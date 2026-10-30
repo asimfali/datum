@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
 pub use copies::{Copies, Place};
-pub use cut::cut;
+use cut::{Reach, from_face};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
@@ -76,10 +76,15 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         project: BTreeMap<String, Projection>,
     },
-    /// The closed profiles of the input sketch swept from `z0` to `z1` along its normal; a loop
-    /// inside another is a hole. `symmetric`: `z1` deep, half on each side of the sketch. Up to
-    /// a plane (D150): the work plane as a second input instead of `z1`, parallel to the
-    /// sketch. One input, a sketch, or the sketch and the plane.
+    /// The closed profiles of the input sketch swept from `z0` to `z1` along its normal (either
+    /// may be the larger); a loop inside another is a hole. `symmetric`: `z1` deep, half on each
+    /// side of the sketch. Up to a plane (D150): the work plane as the last input instead of
+    /// `z1`, parallel to the sketch. `mode` (D185, D187): a new body (the default), or added to
+    /// (`join`), cut from (`cut`) or intersected with (`intersect`) the target body, the first
+    /// input. From a face of the target the depth's sign is geometry: out of the body positive,
+    /// into it negative; a boss is a join out of the face, a pocket a cut into it. `through`: a
+    /// cut from a face of the target through to the opposite face, without `z1`. Inputs: the
+    /// target unless new, the sketch, then the plane if any.
     Extrude {
         #[serde(default = "zero")]
         z0: Num,
@@ -87,6 +92,10 @@ pub enum Op {
         z1: Option<Num>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         symmetric: bool,
+        #[serde(default, skip_serializing_if = "Mode::is_new")]
+        mode: Mode,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        through: bool,
     },
     /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
     /// given), from the input work plane, or from plane face `face` of the input body. Sketches
@@ -99,11 +108,6 @@ pub enum Op {
         #[serde(default = "zero")]
         offset: Num,
     },
-    /// The closed profiles of a sketch on a plane face of the body cut through the body,
-    /// perpendicular to the face, to the opposite face: holes, slots, any outline of lines and
-    /// arcs; the copies of the sketch's patterns too, as punches on a turret press. Two inputs:
-    /// the body, then the sketch.
-    Cut {},
     /// Sheet metal from the input sketch's path: its lines (an open chain, from point `start` or
     /// else from its end named first) given `thickness` on `side` of the path (looking along it),
     /// bent at every corner with inner `radius`, and extruded from `z0` to `z1` along the sketch's
@@ -122,6 +126,32 @@ pub enum Op {
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
     /// from that face's side, its corner at the origin. Exported as DXF. One input: the body.
     Unfold { face: String, k_factor: Num },
+}
+
+/// What an extrusion does with its target body (D185).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    New,
+    Join,
+    Cut,
+    Intersect,
+}
+
+impl Mode {
+    fn is_new(&self) -> bool {
+        *self == Self::New
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Join => "join",
+            Self::Cut => "cut",
+            Self::Intersect => "intersect",
+        }
+    }
 }
 
 fn zero() -> Num {
@@ -221,7 +251,6 @@ impl Op {
             Self::Terrain { .. } => "terrain",
             Self::Sketch { .. } => "sketch",
             Self::Extrude { .. } => "extrude",
-            Self::Cut { .. } => "cut",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
             Self::Plane { .. } => "plane",
@@ -233,10 +262,9 @@ impl Op {
         match self {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
             Self::Sketch { .. } | Self::Plane { .. } => 0..=1,
-            Self::Extrude { .. } => 1..=2,
+            Self::Extrude { .. } => 1..=3,
             Self::Transform { .. } | Self::PatternGrid { .. } | Self::Unfold { .. } | Self::Sheet { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
-            Self::Cut { .. } => 2..=2,
         }
     }
 
@@ -260,11 +288,14 @@ impl Op {
                 k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()?,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1, symmetric } => {
-                Self::Extrude { z0: r(z0, "z0")?, z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?, symmetric: *symmetric }
-            }
+            Self::Extrude { z0, z1, symmetric, mode, through } => Self::Extrude {
+                z0: r(z0, "z0")?,
+                z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?,
+                symmetric: *symmetric,
+                mode: *mode,
+                through: *through,
+            },
             Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
-            Self::Cut {} => Self::Cut {},
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Sheet { thickness, radius, side, z0, z1, start } => Self::Sheet {
                 thickness: r(thickness, "thickness")?,
@@ -316,7 +347,6 @@ impl Op {
             Self::Extrude { .. } | Self::Plane { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
-            Self::Cut {} => {}
             Self::Unfold { face, k_factor } => {
                 num(value(k_factor));
                 h.update(face.as_bytes());
@@ -355,14 +385,11 @@ impl Op {
             }
             return Ok(Value::Sketch(place(sketch, Some(on), None, None, None, project)?));
         }
-        // Every operation but `extrude`, `sheet` and `cut` takes bodies; a cut takes a body and a sketch.
+        // Every operation but `extrude` and `sheet` takes bodies.
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
             Self::Extrude { .. } | Self::Sheet { .. } | Self::Plane { .. } => Vec::new(),
-            Self::Cut { .. } => {
-                vec![values[0].body().ok_or_else(|| BrepError::Sketch("cut takes a body first, then a sketch on one of its faces".into()))?]
-            }
             _ => values
                 .iter()
                 .enumerate()
@@ -399,28 +426,13 @@ impl Op {
                 return Ok(Value::Sketch(place(sketch, plane.as_ref(), inputs.first().copied(), face.as_deref(), k, project)?));
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
-            Self::Extrude { z0, z1, symmetric } => {
-                let s = sketch(0)?;
-                let (a, b) = match (values.get(1).map(|v| v.plane()), z1, symmetric) {
-                    (None, Some(z1), false) => (num(z0)?, num(z1)?),
-                    (None, Some(depth), true) if num(z0)? == 0.0 => (-num(depth)? * 0.5, num(depth)? * 0.5),
-                    (None, Some(_), true) => return Err(BrepError::Sketch("a symmetric extrusion takes its depth as `z1`, no `z0`".into())),
-                    // The plane says which side: behind the sketch, the extrusion goes back.
-                    (Some(Some(p)), None, false) => {
-                        let (a, b) = (num(z0)?, depth_to(s, p)?);
-                        (a.min(b), a.max(b))
-                    }
-                    (Some(None), ..) => return Err(BrepError::Sketch("an extrusion goes up to a work plane: the second input is not one".into())),
-                    (None, None, _) => return Err(BrepError::Sketch("an extrusion needs `z1` or a plane to go up to".into())),
-                    (Some(_), ..) => return Err(BrepError::Sketch("up to a plane: no `z1`, not symmetric".into())),
-                };
-                extrude_sketch(feature, s, a, b)?
+            Self::Extrude { z0, z1, symmetric, mode, through } => {
+                extrude(feature, values, num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through)?
             }
             Self::Sheet { thickness, radius, side, z0, z1, start } => {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
-            Self::Cut {} => cut(feature, inputs[0], sketch(1)?)?,
             // Made above, before inputs are taken as bodies.
             Self::Plane { .. } => return Err(BrepError::Invalid("a plane is no body".into())),
         };
@@ -429,6 +441,67 @@ impl Op {
         }
         Ok(Value::Body(body))
     }
+}
+
+/// An extrusion (see [`Op::Extrude`]) of numbers evaluated.
+fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetric: bool, mode: Mode, through: bool) -> Result<Body, BrepError> {
+    // The target body first unless the extrusion makes a new one.
+    let k = usize::from(mode != Mode::New);
+    if values.len() < k + 1 || values.len() > k + 2 {
+        let target = if k == 0 { "" } else { "the target body, " };
+        return Err(BrepError::Invalid(format!(
+            "extrude `{}` takes {target}the sketch and maybe a plane, got {} input(s)",
+            mode.name(),
+            values.len()
+        )));
+    }
+    let target = match k {
+        0 => None,
+        _ => Some(values[0].body().ok_or_else(|| BrepError::Sketch(format!("extrude `{}` takes the target body first", mode.name())))?),
+    };
+    let s = values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("extrude takes a sketch, input {} is a body", k + 1)))?;
+    let plane = values.get(k + 1).map(|v| v.plane());
+    if through {
+        return match target {
+            Some(t) if mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none() => from_face(feature, t, s, Reach::Through),
+            _ => Err(BrepError::Sketch("`through` is a cut from a face of the target: no `z0`, `z1`, `symmetric` or plane".into())),
+        };
+    }
+    let (a, b) = match (plane, z1, symmetric) {
+        (None, Some(z1), false) => (z0.min(z1), z0.max(z1)),
+        (None, Some(depth), true) if z0 == 0.0 => (-depth * 0.5, depth * 0.5),
+        (None, Some(_), true) => return Err(BrepError::Sketch("a symmetric extrusion takes its depth as `z1`, no `z0`".into())),
+        // The plane says which side: behind the sketch, the extrusion goes back.
+        (Some(Some(p)), None, false) => {
+            let b = depth_to(s, p)?;
+            (z0.min(b), z0.max(b))
+        }
+        (Some(None), ..) => return Err(BrepError::Sketch("an extrusion goes up to a work plane: the last input is not one".into())),
+        (None, None, _) => return Err(BrepError::Sketch("an extrusion needs `z1` or a plane to go up to".into())),
+        (Some(_), ..) => return Err(BrepError::Sketch("up to a plane: no `z1`, not symmetric".into())),
+    };
+    let Some(t) = target else { return extrude_sketch(feature, s, a, b) };
+    // From a face of the target, out of it or into it: made directly (D185 item 7), with no
+    // Boolean operation meeting the face's plane.
+    let on_face = s.face.is_some_and(|f| t.faces().binary_search_by_key(&f, |g| g.id).is_ok());
+    if on_face && (a == 0.0 || b == 0.0) && mode != Mode::Intersect {
+        let depth = a + b;
+        return match (mode, depth > 0.0) {
+            (Mode::Join, false) => Err(BrepError::Sketch(
+                "join: the extrusion goes into the body, nothing to add; a boss goes out of the face, its depth positive".into(),
+            )),
+            (Mode::Cut, true) => Err(BrepError::Sketch(
+                "cut: the extrusion goes out of the body, nothing to cut; a pocket goes into it, its depth negative, or cut `through`".into(),
+            )),
+            _ => from_face(feature, t, s, Reach::Depth(depth)),
+        };
+    }
+    let kind = match mode {
+        Mode::Join => BooleanKind::Union,
+        Mode::Cut => BooleanKind::Difference,
+        _ => BooleanKind::Intersection,
+    };
+    boolean(feature, kind, None, &[t, &extrude_sketch(feature, s, a, b)?])
 }
 
 /// `"1"`, `"2–4"` or `"at least 2"`.

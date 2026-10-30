@@ -206,7 +206,9 @@
     },
     {
       "name": "perforated",
-      "op": "cut",
+      "op": "extrude",
+      "mode": "cut",
+      "through": true,
       "inputs": [
         "sheet",
         "holes"
@@ -346,7 +348,9 @@
     },
     {
       "name": "slotted",
-      "op": "cut",
+      "op": "extrude",
+      "mode": "cut",
+      "through": true,
       "inputs": [
         "perforated",
         "slots"
