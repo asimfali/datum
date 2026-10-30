@@ -32,6 +32,49 @@ pub enum Reach {
     Depth(f64),
 }
 
+/// The profiles of `sketch`, which lies on a plane face of `target`, cut through all of it wall
+/// by wall: each cut through one plate, then on through the next face along the way that holds
+/// them (the far wall of a tube, beyond its hole), until none does. A wall they do not fit is
+/// refused as one plate's cut refuses it.
+pub fn through_walls(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Body, BrepError> {
+    let mut body = from_face(feature, target, sketch, Reach::Through)?;
+    if sketch.developed.is_some() {
+        return Ok(body);
+    }
+    let [o, x, y, z] = sketch.frame;
+    let frame = Frame::Plane { o, x, y, z };
+    // Found only once a face below faces as the sketch's does: a plate has none.
+    let mut ring: Option<ProfileLoop> = None;
+    for k in 1.. {
+        let below: Vec<(Ix, f64)> = (0..body.faces().len() as Ix)
+            .filter_map(|h| {
+                let Surface::Plane(p) = body.faces()[h as usize].surface else { return None };
+                let d = frame.depth(body.loop_points(body.face_loops(h).next()?).next()?);
+                (p.normal.cross(z) == Vec3::ZERO && p.normal.dot(z) > 0.0 && d < 0.0).then_some((h, d))
+            })
+            .collect();
+        if below.is_empty() {
+            return Ok(body);
+        }
+        let ring = match &ring {
+            Some(r) => r,
+            None => ring.insert(profile_loops(feature, sketch)?.swap_remove(0).ring),
+        };
+        // The nearest of them holding a profile, not cut by it yet (then its edge runs along it).
+        let holds = |h: Ix| {
+            outline(&body, h, &frame)
+                .is_ok_and(|ls| ls.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() != 0 && !ls.iter().any(|l| l.touches(ring)))
+        };
+        let next = below.into_iter().filter(|&(h, _)| holds(h)).max_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((h, d)) = next else { return Ok(body) };
+        let mut wall = sketch.clone();
+        wall.frame[0] = o + z * d;
+        wall.face = Some(body.faces()[h as usize].id);
+        body = from_face(TopoId::derive("cut.wall").id(feature).index(k).finish(), &body, &wall, Reach::Through)?;
+    }
+    Ok(body)
+}
+
 /// The profiles of `sketch`, which lies on a face of `target`, cut into `target` or added to it
 /// as far as `reach` says.
 pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) -> Result<Body, BrepError> {

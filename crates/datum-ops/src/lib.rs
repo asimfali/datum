@@ -16,7 +16,7 @@ use std::ops::RangeInclusive;
 
 pub use boolean::{BooleanKind, boolean};
 pub use copies::{Copies, Place};
-use cut::{Reach, from_face};
+use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
@@ -465,11 +465,11 @@ fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetr
         let Some(t) = target.filter(|_| mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
             return Err(BrepError::Sketch("`through` is a cut of the target along the sketch's normal: no `z0`, `z1`, `symmetric` or plane".into()));
         };
-        // Through one plate from a face of it, made directly; through anything else (walls
-        // beyond a hole, a sketch off the body) by the general Boolean operation, the tool
+        // Through the walls from a face, one plate after another, made directly; through anything
+        // else (a wall the profiles cross, a sketch off the body) by the general Boolean, the tool
         // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
         let local = match s.face {
-            Some(_) => from_face(feature, t, s, Reach::Through),
+            Some(_) => through_walls(feature, t, s),
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),
         };
         return match local {

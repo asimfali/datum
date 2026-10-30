@@ -311,6 +311,9 @@ fn through_all_of_a_tube() {
     // Deeper than the tube: through, as a cut deeper than a plate is.
     let deep = extrude("deep", &tube, &front, rect(15.0, 5.0, 45.0, 15.0, "w"), pocket_of(-50.0)).unwrap();
     assert_close(deep.volume(), cut.volume());
+    // A circle within the hole's width: through the front wall, then the back one.
+    let round = extrude("round", &tube, &front, circle(30.0, 10.0, 10.0), through.clone()).unwrap();
+    assert_close(round.volume(), 40_000.0 - 25.0 * PI * 20.0);
     // A sketch on the XY plane, off the body: through it along Z.
     let s: Op = serde_json::from_value(serde_json::json!({"op": "sketch", "sketch": rect(5.0, 5.0, 15.0, 35.0, "p")})).unwrap();
     let placed = s.eval(id("slot"), &[]).unwrap();
