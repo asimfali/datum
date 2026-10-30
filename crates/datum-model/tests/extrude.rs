@@ -88,3 +88,21 @@ fn the_mode_is_given() {
     let e = s.execute("extrude", &json!({"name": "x", "sketch": "plate", "mode": "new", "z1": 3})).unwrap_err();
     assert!(e.contains("not a sketch"), "{e}");
 }
+
+/// A preview (D185 item 4): the extrusion seen, then gone without a trace; undo still undoes the
+/// last change made.
+#[test]
+fn a_trial_leaves_no_trace() {
+    let mut s = two_bodies();
+    on_xy(&mut s, "rib_outline", rectangle(10.0, 10.0, 20.0, 40.0));
+    let params = json!({"name": "rib", "sketch": "rib_outline", "mode": "join", "z0": 5, "z1": 20});
+    let seen = s.trial("extrude", &params, |s, reply| (s.graph().find("rib").is_some(), reply["body"].clone())).unwrap();
+    assert_eq!(seen, (true, json!("plate")));
+    assert!(s.graph().find("rib").is_none());
+    assert!(s.trial("extrude", &json!({"name": "x", "sketch": "rib_outline", "z1": 3}), |_, _| ()).unwrap_err().contains("needs `mode`"));
+    run(&mut s, "undo", json!({}));
+    assert!(s.graph().find("rib_outline").is_none(), "the sketch added last is undone");
+    run(&mut s, "redo", json!({}));
+    run(&mut s, "extrude", params);
+    assert!((volume(&mut s, "rib") - (50_000.0 + 3_000.0)).abs() < 1e-6);
+}

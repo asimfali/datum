@@ -123,6 +123,9 @@ pub(crate) enum Request {
     Command(&'static str, Json),
     /// The sketch feature edited in the window, if any: its context comes with every model.
     Editing(Option<String>),
+    /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
+    /// model until `None`.
+    Preview(Option<(&'static str, Json)>),
 }
 
 /// What a plane or a face is picked for.
@@ -223,6 +226,18 @@ struct Model {
     flats: Vec<(String, Result<Arc<datum_ops::Flat>, String>)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
     editing: Option<(String, Context)>,
+    /// The reply of the command previewed, or why it is refused; the scene shows its result.
+    preview: Option<Result<Json, String>>,
+}
+
+/// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
+/// sketch edited with its context, and `inspect`.
+struct Picture {
+    scene: Scene,
+    geometry: Arc<Geometry>,
+    bodies: Vec<String>,
+    editing: Option<(String, Context)>,
+    inspect: Json,
 }
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
@@ -238,6 +253,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut session = Session::default();
     let mut meshes = MeshCache::default();
     let mut editing: Option<String> = None;
+    let mut previewing: Option<(&'static str, Json)> = None;
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
         pending.extend(requests.try_iter());
@@ -282,6 +298,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                     }
                 },
                 Request::Editing(name) => editing = name,
+                Request::Preview(p) => previewing = p,
             }
         }
         for (name, value) in latest {
@@ -293,55 +310,69 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = std::time::Instant::now();
         let flats = session.flats();
-        let (graph, evaluation) = (session.graph(), session.evaluation());
-        // In a variant, its part alone, the other parts as the product has them faded around it;
-        // in the base, the product whole: every part in its chosen variant (D160, D169). The
-        // graph's own bodies of the parts are left out, the rest of it (sketches, a body no part)
-        // shown as it is.
-        let mine = session.active().and_then(|a| session.part_of(a));
-        let product = session.product();
-        let skip: Vec<String> = datum_model::levels::bodies(graph)
-            .into_iter()
-            .filter(|(begun, _)| match &mine {
-                Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
-                None => product.iter().any(|(q, _, _)| q == begun),
-            })
-            .map(|(_, last)| last)
-            .collect();
-        let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing.as_deref())
-            .into_iter()
-            .map(|i| (graph.nodes()[i as usize].name.as_str(), i))
-            .filter(|(n, _)| !skip.iter().any(|s| s == n))
-            .filter_map(|(n, i)| Some((n, evaluation.results[i as usize].as_deref().ok()?)))
-            .collect();
-        let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
-        let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
-        let around: Vec<datum_graph::ValueRef> = product
-            .into_iter()
-            .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
-            .filter_map(|(_, _, bodies)| bodies.ok())
-            .flatten()
-            .map(|(_, v)| v)
-            .collect();
-        let context: Vec<&datum_brep::Body> = around.iter().filter_map(|v| v.body()).collect();
-        let scene = Scene::new(&finals, &mut meshes).with_context(&context, session.active().is_some(), &mut meshes);
-        meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().copied()).collect::<Vec<_>>());
-        let context = editing.as_ref().and_then(|name| {
-            let node = graph.nodes().iter().position(|n| &n.name == name)?;
-            let input = graph.nodes()[node].inputs.first().and_then(|&i| evaluation.results[i as usize].as_ref().ok().cloned());
-            Some((name.clone(), Context { id: graph.nodes()[node].id, input }))
-        });
-        let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
+        let picture = |session: &Session, meshes: &mut MeshCache| picture(session, editing.as_deref(), meshes);
+        let (picture, preview) = match &previewing {
+            None => (picture(&session, &mut meshes), None),
+            Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
+                Ok((p, reply)) => (p, Some(Ok(reply))),
+                Err(e) => (picture(&session, &mut meshes), Some(Err(e))),
+            },
+        };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let inspect = session.execute("inspect", &json!({})).unwrap_or_default();
+        let Picture { scene, geometry, bodies, editing: context, inspect } = picture;
         if models
-            .send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, flats, editing: context })
+            .send(Model { inspect, scene, geometry, error, notes, opened, closed, rebuild_ms, scene_ms, bodies, flats, editing: context, preview })
             .is_err()
         {
             return;
         }
         ctx.request_repaint();
     }
+}
+
+/// The picture of the model `session` holds, sketch `editing` drawn by the window.
+fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> Picture {
+    let (graph, evaluation) = (session.graph(), session.evaluation());
+    // In a variant, its part alone, the other parts as the product has them faded around it;
+    // in the base, the product whole: every part in its chosen variant (D160, D169). The
+    // graph's own bodies of the parts are left out, the rest of it (sketches, a body no part)
+    // shown as it is.
+    let mine = session.active().and_then(|a| session.part_of(a));
+    let product = session.product();
+    let skip: Vec<String> = datum_model::levels::bodies(graph)
+        .into_iter()
+        .filter(|(begun, _)| match &mine {
+            Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
+            None => product.iter().any(|(q, _, _)| q == begun),
+        })
+        .map(|(_, last)| last)
+        .collect();
+    let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing)
+        .into_iter()
+        .map(|i| (graph.nodes()[i as usize].name.as_str(), i))
+        .filter(|(n, _)| !skip.iter().any(|s| s == n))
+        .filter_map(|(n, i)| Some((n, evaluation.results[i as usize].as_deref().ok()?)))
+        .collect();
+    let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
+    let bodies = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
+    let around: Vec<datum_graph::ValueRef> = product
+        .into_iter()
+        .filter(|(part, _, _)| Some(part) != mine.as_ref() && session.visible(part))
+        .filter_map(|(_, _, bodies)| bodies.ok())
+        .flatten()
+        .map(|(_, v)| v)
+        .collect();
+    let context: Vec<&datum_brep::Body> = around.iter().filter_map(|v| v.body()).collect();
+    let scene = Scene::new(&finals, meshes).with_context(&context, session.active().is_some(), meshes);
+    meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().copied()).collect::<Vec<_>>());
+    let context = editing.and_then(|name| {
+        let node = graph.nodes().iter().position(|n| n.name == name)?;
+        let input = graph.nodes()[node].inputs.first().and_then(|&i| evaluation.results[i as usize].as_ref().ok().cloned());
+        Some((name.to_string(), Context { id: graph.nodes()[node].id, input }))
+    });
+    let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
+    let inspect = session.inspect();
+    Picture { scene, geometry, bodies, editing: context, inspect }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window

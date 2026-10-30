@@ -909,6 +909,19 @@ impl Session {
         Ok(reply)
     }
 
+    /// Command `command` tried, not made (a window's preview, D185 item 4): `look` sees the model
+    /// as the command would leave it, with its reply; then the model, its history and its file
+    /// state are as they were. What the command computed stays cached for when it is made.
+    pub fn trial<T>(&mut self, command: &str, params: &Value, look: impl FnOnce(&Self, &Value) -> T) -> Result<T, String> {
+        let (doc, active, graph, undo, redo) = (self.doc.clone(), self.active.clone(), self.graph.clone(), self.undo.len(), self.redo.clone());
+        let seen = self.execute(command, params).map(|r| look(self, &r));
+        (self.doc, self.active, self.graph, self.redo) = (doc, active, graph, redo);
+        self.undo.truncate(undo);
+        // Evaluated again from the cache: nothing is computed.
+        self.rebuild();
+        seen
+    }
+
     /// The last evaluation: a result per feature.
     pub fn evaluation(&self) -> &Evaluation {
         &self.last
@@ -1370,7 +1383,8 @@ impl Session {
         self.value(name)?.body().ok_or_else(|| format!("`{name}` is not a body"))
     }
 
-    fn inspect(&self) -> Value {
+    /// What the `inspect` command replies.
+    pub fn inspect(&self) -> Value {
         let levels = self.levels();
         let features: Vec<Value> = (0..self.graph.nodes().len() as NodeIx)
             .zip(&self.last.results)
