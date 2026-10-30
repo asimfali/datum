@@ -1,0 +1,229 @@
+{
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "arcs": {
+          "corner": {
+            "center": "m",
+            "from": "e",
+            "to": "f"
+          }
+        },
+        "lines": {
+          "bottom": {
+            "from": "a",
+            "to": "b"
+          },
+          "left": {
+            "from": "f",
+            "to": "a"
+          },
+          "right": {
+            "from": "b",
+            "to": "c"
+          },
+          "top": {
+            "from": "c",
+            "to": "e"
+          }
+        },
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            100,
+            0
+          ],
+          "c": [
+            100,
+            60
+          ],
+          "e": [
+            10,
+            60
+          ],
+          "f": [
+            0,
+            50
+          ],
+          "m": [
+            10,
+            50
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "outline"
+      ],
+      "name": "plate",
+      "op": "extrude",
+      "z0": 0,
+      "z1": 10
+    },
+    {
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "inputs": [
+        "plate"
+      ],
+      "name": "holes_sketch",
+      "op": "sketch",
+      "sketch": {
+        "circles": {
+          "hole": {
+            "center": "c",
+            "diameter": 6
+          }
+        },
+        "groups": {
+          "cell": [
+            "hole"
+          ]
+        },
+        "patterns": {
+          "grid": {
+            "count": [
+              3,
+              2
+            ],
+            "of": "cell",
+            "step": [
+              [
+                20,
+                0
+              ],
+              [
+                0,
+                15
+              ]
+            ]
+          }
+        },
+        "points": {
+          "c": [
+            30,
+            15
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "plate",
+        "holes_sketch"
+      ],
+      "mode": "cut",
+      "name": "pockets",
+      "op": "extrude",
+      "z0": 0,
+      "z1": -4
+    },
+    {
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "inputs": [
+        "pockets"
+      ],
+      "name": "slot_sketch",
+      "op": "sketch",
+      "sketch": {
+        "arcs": {
+          "left": {
+            "center": "l",
+            "from": "d",
+            "to": "a"
+          },
+          "right": {
+            "center": "r",
+            "from": "b",
+            "to": "c"
+          }
+        },
+        "lines": {
+          "high": {
+            "from": "c",
+            "to": "d"
+          },
+          "low": {
+            "from": "a",
+            "to": "b"
+          }
+        },
+        "points": {
+          "a": [
+            40,
+            41
+          ],
+          "b": [
+            70,
+            41
+          ],
+          "c": [
+            70,
+            49
+          ],
+          "d": [
+            40,
+            49
+          ],
+          "l": [
+            40,
+            45
+          ],
+          "r": [
+            70,
+            45
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "pockets",
+        "slot_sketch"
+      ],
+      "mode": "join",
+      "name": "boss",
+      "op": "extrude",
+      "z0": 0,
+      "z1": 5
+    },
+    {
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "inputs": [
+        "boss"
+      ],
+      "name": "window_sketch",
+      "op": "sketch",
+      "sketch": {
+        "circles": {
+          "hole": {
+            "center": "c",
+            "diameter": 8
+          }
+        },
+        "points": {
+          "c": [
+            85,
+            45
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "boss",
+        "window_sketch"
+      ],
+      "mode": "cut",
+      "name": "window",
+      "op": "extrude",
+      "through": true
+    }
+  ],
+  "format": "datum/1"
+}

@@ -98,6 +98,16 @@
     "pins": "d9cdb53129b97334522846d183551ae2dfefb1a2eab11a86d95a8f986c377ad5",
     "plate": "39072f351ebabf2590a8622e909a436ef31a2ff434450244e43a6f5c805421d9"
   },
+  "pocket_boss.json": {
+    "boss": "626125b0d296c012d9110424f97674906854b96135228a89149419efce745553",
+    "holes_sketch": "b36e14b89c70da9aa3c94be894cffac3c222994d6098d4bb26b6eb95ccc68635",
+    "outline": "e0fa40708cb8b4dde55959c9c7a9e9bcfb72f1fb5a19b14d7463878d1ef58fa3",
+    "plate": "acbb92623952f866c3e56dc71161010f7e88d4c139dc40ed754a788dee949d60",
+    "pockets": "ad0f824df86e195373f035026b9ead9578e3b99e2ef72d093425f8cea17ffd7b",
+    "slot_sketch": "39c6d8d8152f52f8bb885abf9f9d98d5fbcf2e62bdbbe1f6b54a826b2369b40a",
+    "window": "f9857d10a45d22979916bed9a4c9ae1ce6d03fefa8196c501f79d797495939ad",
+    "window_sketch": "f7c22a72d8ac747c246628677be64d215dda847b981c66ffbaf7d2c15dab28dd"
+  },
   "projected_hole.json": {
     "drilled": "a3591556a0b80d9f13ed6f01f3647e0b3220a403ac31c0238c3ee6e4f23d4c51",
     "hole_sketch": "0a467550af23475b56543986f23e0fd8cfefe7b3ee91f75182b4bca43a6b347a",

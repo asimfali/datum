@@ -187,7 +187,9 @@
     },
     {
       "name": "perforated",
-      "op": "cut",
+      "op": "extrude",
+      "mode": "cut",
+      "through": true,
       "inputs": [
         "panel",
         "holes"

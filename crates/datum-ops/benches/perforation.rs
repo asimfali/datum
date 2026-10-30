@@ -70,8 +70,8 @@ fn punched(c: &mut Criterion) {
     }
 }
 
-/// The sheet of `sheet_and_punches` with an `n × n` grid of Ø5 holes at pitch 10, cut by one
-/// circle of a sketch on its top face.
+/// The sheet of `sheet_and_punches` with an `n × n` grid of Ø5 holes at pitch 10, made by one
+/// circle of a sketch on its top face: cut through it, or pocketed half its thickness deep.
 fn round_holes(c: &mut Criterion) {
     let n = 100;
     let side = 10.0 * f64::from(n) + 20.0;
@@ -83,13 +83,17 @@ fn round_holes(c: &mut Criterion) {
             "patterns": {"grid": {"of": "hole", "count": [n, n], "step": [[10, 0], [0, 10]]}}}}),
     );
     let sketch = sketch.eval(TopoId::derive("holes").finish(), &[&sheet]).expect("sketch");
-    let cut = json(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}));
-    let mut group = c.benchmark_group("cut_round_10000");
-    group.sample_size(10);
-    for (name, pool) in pools() {
-        group.bench_function(&name, |b| b.iter(|| pool.install(|| cut.eval(TopoId::derive("cut").finish(), &[&sheet, &sketch]).expect("cut"))));
+    for (name, cut) in [
+        ("cut_round_10000", json(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}))),
+        ("pocket_round_10000", json(serde_json::json!({"op": "extrude", "mode": "cut", "z1": -1.5}))),
+    ] {
+        let mut group = c.benchmark_group(name);
+        group.sample_size(10);
+        for (name, pool) in pools() {
+            group.bench_function(&name, |b| b.iter(|| pool.install(|| cut.eval(TopoId::derive("cut").finish(), &[&sheet, &sketch]).expect("cut"))));
+        }
+        group.finish();
     }
-    group.finish();
 }
 
 /// The same grid of holes in a quarter of a tube 3 thick, inner radius 700, 1100 long, cut in its
