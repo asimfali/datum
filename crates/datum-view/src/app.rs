@@ -2387,11 +2387,16 @@ impl Viewer {
             let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
             self.under = offset.and_then(|(x, y)| {
                 let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
-                // The nearest along the ray: a face, an origin plane or a work plane.
-                let face = m.scene.pick(origin, dir).map(|f| (f.distance, Under::Face(f)));
-                let first = crate::origin::hit(&crate::origin::origin_squares(), origin, dir, size).map(|(t, k)| (t, Under::Origin(k)));
-                let planes = crate::origin::hit(&squares, origin, dir, size).map(|(t, k)| (t, Under::Work(k)));
-                [face, first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
+                // A face of a body; off the bodies, the nearest origin or work plane along the ray.
+                // The planes are larger than the model: the nearest would be a plane in front of
+                // the face aimed at, and there is room to take a plane beside the bodies.
+                if let Some(f) = m.scene.pick(origin, dir) {
+                    return Some(Under::Face(f));
+                }
+                let first = crate::origin::hit(&crate::origin::origin_squares(), origin, dir, size);
+                let planes = crate::origin::hit(&squares, origin, dir, size);
+                let (first, planes) = (first.map(|(t, k)| (t, Under::Origin(k))), planes.map(|(t, k)| (t, Under::Work(k))));
+                [first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
             });
             if r.clicked() {
                 chosen = self.under.map(|u| (purpose, u));
