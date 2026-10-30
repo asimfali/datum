@@ -37,6 +37,8 @@ impl Session {
         fields.insert("name".into(), name.into());
         fields.insert("inputs".into(), json!([sketch]));
         let ix = add_feature(&mut self.graph, fields)?;
+        // The rule is of the part's kind, which the document learns from its first feature.
+        self.doc.store(self.active.as_deref(), &self.graph)?;
         self.set_rule(name, Some(rule.to_string()))?;
         let mut reply = self.rebuild_recording(ix);
         reply["rule"] = self.doc.rule(name, self.active.as_deref()).into();
