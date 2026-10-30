@@ -113,7 +113,7 @@ fn lost_face_and_bad_profiles() {
     });
     let s = eval(&sketch_op(open, serde_json::json!({})), "s", &[]).unwrap();
     match eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 1})), "x", &[&s]) {
-        Err(BrepError::Sketch(m)) => assert!(m.contains("open or branches at point `a`"), "{m}"),
+        Err(BrepError::Sketch(m)) => assert!(m.contains("no closed profile: it is open at point `a`"), "{m}"),
         r => panic!("expected an open profile, got {r:?}"),
     }
     // Inputs of the wrong kind are named.

@@ -151,7 +151,8 @@ const COMMANDS: &[Command] = &[
                       the depth's sign is geometry, out of the body positive: a boss is `join` with `z1` > 0, a pocket `cut` with \
                       `z1` < 0; `through: true` cuts through to the opposite face. Else `z0`, `z1` (either larger), `symmetric` \
                       (`z1` deep, half each side), or `plane`: a work plane to go up to. `rule`: the part's rule, as `set_part` \
-                      gives it. The reply names the mode, the body and its rule.",
+                      gives it. `profiles`: curves of the sketch, each choosing the closed loop it is on with its holes \
+                      (a skeleton sketch holds many); none: every closed loop, open chains left out. The reply names the mode, the body and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -163,7 +164,8 @@ const COMMANDS: &[Command] = &[
                 "symmetric": {"type": "boolean"},
                 "through": {"type": "boolean"},
                 "plane": {"type": "string"},
-                "rule": {"type": ["string", "null"]}
+                "rule": {"type": ["string", "null"]},
+                "profiles": {"type": "array", "items": {"type": "string"}}
             }, "required": ["name", "sketch", "mode"], "additionalProperties": false})
         },
         run: |s, p| s.extrude(p),

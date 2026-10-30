@@ -24,7 +24,9 @@ pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, sheet};
-pub use sketch::{Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, depth_to, extrude_sketch, face_plane, place, profile_regions};
+pub use sketch::{
+    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, depth_to, extrude_sketch, face_plane, place, profile_regions,
+};
 pub use unfold::{Flat, FlatPiece, sheet_sides, unfold, unfold_side};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
@@ -83,8 +85,10 @@ pub enum Op {
     /// (`join`), cut from (`cut`) or intersected with (`intersect`) the target body, the first
     /// input. From a face of the target the depth's sign is geometry: out of the body positive,
     /// into it negative; a boss is a join out of the face, a pocket a cut into it. `through`: a
-    /// cut from a face of the target through to the opposite face, without `z1`. Inputs: the
-    /// target unless new, the sketch, then the plane if any.
+    /// cut from a face of the target through to the opposite face, without `z1`. `profiles`
+    /// (D191): curves of the sketch, each choosing the closed loop it is on with its holes; none:
+    /// every closed loop; open chains are left out. Inputs: the target unless new, the sketch,
+    /// then the plane if any.
     Extrude {
         #[serde(default = "zero")]
         z0: Num,
@@ -96,6 +100,8 @@ pub enum Op {
         mode: Mode,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         through: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        profiles: Vec<String>,
     },
     /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
     /// given), from the input work plane, or from plane face `face` of the input body. Sketches
@@ -288,12 +294,13 @@ impl Op {
                 k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()?,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1, symmetric, mode, through } => Self::Extrude {
+            Self::Extrude { z0, z1, symmetric, mode, through, profiles } => Self::Extrude {
                 z0: r(z0, "z0")?,
                 z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?,
                 symmetric: *symmetric,
                 mode: *mode,
                 through: *through,
+                profiles: profiles.clone(),
             },
             Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
@@ -426,9 +433,7 @@ impl Op {
                 return Ok(Value::Sketch(place(sketch, plane.as_ref(), inputs.first().copied(), face.as_deref(), k, project)?));
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
-            Self::Extrude { z0, z1, symmetric, mode, through } => {
-                extrude(feature, values, num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through)?
-            }
+            Self::Extrude { .. } => extrude(feature, values, self)?,
             Self::Sheet { thickness, radius, side, z0, z1, start } => {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, start.as_deref(), dims, num(z0)?, num(z1)?)?
@@ -443,8 +448,10 @@ impl Op {
     }
 }
 
-/// An extrusion (see [`Op::Extrude`]) of numbers evaluated.
-fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetric: bool, mode: Mode, through: bool) -> Result<Body, BrepError> {
+/// An extrusion (see [`Op::Extrude`]), its numbers evaluated.
+fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepError> {
+    let Op::Extrude { z0, z1, symmetric, mode, through, profiles } = op else { return Err(BrepError::Invalid("not an extrusion".into())) };
+    let (z0, z1, symmetric, mode, through) = (num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through);
     // The target body first unless the extrusion makes a new one.
     let k = usize::from(mode != Mode::New);
     if values.len() < k + 1 || values.len() > k + 2 {
@@ -460,6 +467,7 @@ fn extrude(feature: TopoId, values: &[&Value], z0: f64, z1: Option<f64>, symmetr
         _ => Some(values[0].body().ok_or_else(|| BrepError::Sketch(format!("extrude `{}` takes the target body first", mode.name())))?),
     };
     let s = values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("extrude takes a sketch, input {} is a body", k + 1)))?;
+    let s = &*chosen(feature, s, profiles)?;
     let plane = values.get(k + 1).map(|v| v.plane());
     if through {
         let Some(t) = target.filter(|_| mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
