@@ -246,7 +246,7 @@ fn patterns_around_and_along_follow_renames() {
 fn rename_keeps_downstream_references() {
     let mut s = Server::default();
     execute(&mut s, "add", rectangle());
-    execute(&mut s, "add", json!({"name": "plate", "op": "extrude", "inputs": ["outline"], "z0": 0, "z1": 3}));
+    execute(&mut s, "add", json!({"name": "plate", "op": "extrude", "mode": "new", "inputs": ["outline"], "z0": 0, "z1": 3}));
     let (_, q) = tool(&mut s, "query_topology", json!({"name": "plate", "normal": [-1, 0, 0]}));
     let side = q["faces"][0]["id"].as_str().unwrap().to_string();
     let edges = execute(&mut s, "query_edges", json!({"name": "plate", "face": side.clone()}));

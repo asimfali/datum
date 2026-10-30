@@ -96,7 +96,7 @@ fn parameters_drive_the_model() {
         ]
     });
     run(&mut s, "add", json!({"name": "base", "op": "sketch", "sketch": square}));
-    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "inputs": ["base"], "z0": 0, "z1": "t"}));
+    run(&mut s, "add", json!({"name": "slab", "op": "extrude", "mode": "new", "inputs": ["base"], "z0": 0, "z1": "t"}));
     run(&mut s, "add", json!({"name": "row", "op": "pattern_grid", "inputs": ["slab"], "count": ["n", 1], "step": [["w + 10", 0, 0], [0, 0, 0]]}));
     assert_eq!(volume(&mut s, "row"), 3.0 * 40.0 * 40.0 * 5.0);
     // A thicker slab: the sketch keeps its cache entry, slab and row are recomputed.
@@ -171,7 +171,7 @@ fn a_replaced_section_loses_only_its_own_faces() {
             "constraints": [{"type": "fix", "point": "p1"}, {"type": "length", "line": "l1", "value": 60}]
         }}),
     );
-    run(&mut s, "add", json!({"name": "body", "op": "extrude", "inputs": ["profile"], "z0": 0, "z1": 10}));
+    run(&mut s, "add", json!({"name": "body", "op": "extrude", "mode": "new", "inputs": ["profile"], "z0": 0, "z1": 10}));
     let face = |s: &mut Session, normal: [f64; 3]| {
         let r = run(s, "query_faces", json!({"name": "body", "normal": normal}));
         assert_eq!(r["count"].as_u64(), Some(1), "{r}");
