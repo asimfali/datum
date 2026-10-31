@@ -876,7 +876,7 @@ fn rules_of<'a>(rules: &'a [Json], material: Option<&str>, kind: Option<&str>) -
 
 /// Whether the sketch feature `sketch` lies on a face of a sheet metal part: the body its first
 /// input belongs to began with a `sheet` or a `plate`. Extrusions that changed a body (any mode
-/// but `new`) lead down to the body's first input.
+/// but `new`) and flanges lead down to the body's first input.
 fn on_sheet(features: &[Json], sketch: &str) -> bool {
     let first_input = |f: &Json| f["inputs"][0].as_str().map(String::from);
     let by_name = |name: &str| features.iter().find(|f| f["name"].as_str() == Some(name));
@@ -884,7 +884,8 @@ fn on_sheet(features: &[Json], sketch: &str) -> bool {
     // A chain is no longer than the features; the bound only stops a malformed model.
     for _ in features {
         let Some(f) = at.as_deref().and_then(by_name) else { return false };
-        if f["op"] == "extrude" && f["mode"].as_str().is_some_and(|m| m != "new") {
+        // An extrusion into the body or a flange on it (D205): the same sheet beneath.
+        if (f["op"] == "extrude" && f["mode"].as_str().is_some_and(|m| m != "new")) || f["op"] == "flange" {
             at = first_input(f);
         } else {
             return matches!(f["op"].as_str(), Some("sheet" | "plate"));
@@ -7146,6 +7147,17 @@ mod tests {
             through_points(&spots),
             json!({"inputs": ["s", "box"], "points": [{"input": 0, "point": "a"}, {"input": 1, "vertex": "ab"}, {"input": 0, "point": "b"}]})
         );
+    }
+
+    /// A sketch on a face of a flange is on the sheet beneath it: E makes a cut of sheet metal.
+    #[test]
+    fn a_sketch_on_a_flange_is_on_the_sheet() {
+        let features = [
+            json!({"name": "s", "op": "sheet", "inputs": ["path"]}),
+            json!({"name": "f", "op": "flange", "inputs": ["s"]}),
+            json!({"name": "k", "op": "sketch", "inputs": ["f"]}),
+        ];
+        assert!(on_sheet(&features, "k"));
     }
 
     /// A warning is said by its code in the window's language; one the window does not know, as

@@ -490,6 +490,37 @@ fn a_hole_beside_a_side_flange_still_cuts() {
     assert_eq!((counts[2], bends), (1, 6));
 }
 
+/// A hole in a side flange's wall, on its face: cut through the flange's thickness, and the blank
+/// has it, laid with the flange (D205).
+#[test]
+fn a_hole_in_a_side_flange() {
+    let u = u_of(MID);
+    let b = side_of(&u, &[wall_edge(&u, 1, 62.0, 0.0)], serde_json::json!({}));
+    let target = Value::Body(b.clone());
+    let old: Vec<_> = u.faces().iter().map(|f| f.id).collect();
+    // The flange's wall: its largest new flat face.
+    let (x, wall) = (0..b.faces().len())
+        .filter(|&x| !old.contains(&b.faces()[x].id) && matches!(b.faces()[x].surface, Surface::Plane(_)))
+        .map(|x| (x, b.faces()[x].id))
+        .max_by(|p, q| b.face_area(p.0 as u32).total_cmp(&b.face_area(q.0 as u32)))
+        .unwrap();
+    let middle = b.loop_points(b.faces()[x].first_loop).fold(datum_math::Vec3::ZERO, |m, p| m + p) * 0.25;
+    let on_face = |at: [f64; 2]| {
+        let sketch = serde_json::json!({"points": {"h": at}, "circles": {"c": {"center": "h", "diameter": 6}}});
+        op(serde_json::json!({"op": "sketch", "face": format!("{wall:?}"), "k_factor": K, "sketch": sketch})).eval(id("hole"), &[&target]).unwrap()
+    };
+    // The hole at the wall's middle, in the sketch's own axes.
+    let [o, ax, ay, _] = on_face([0.0, 0.0]).sketch().unwrap().frame;
+    let placed = on_face([(middle - o).dot(ax), (middle - o).dot(ay)]);
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id("cut"), &[&target, &placed]).unwrap().body().unwrap().clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    assert!(close(b.volume() - r.volume(), std::f64::consts::PI * 9.0 * T), "{}", b.volume() - r.volume());
+    let (_, counts, _) = blank(&r);
+    assert_eq!(counts[2], 1);
+}
+
 /// A hole on a leg across the edge where its side flange stands reaches the flange: refused.
 #[test]
 fn a_hole_reaching_a_side_flange_is_refused() {

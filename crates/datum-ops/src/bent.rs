@@ -33,6 +33,11 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
     if sketch.developed.is_some() {
         return within();
     }
+    // On a flange on the sheet's side (D205), laid off the sheet's own blank: a cut within its
+    // face, through its thickness.
+    if crate::unfold::branches(target).contains(&(f as Ix)) {
+        return within();
+    }
     let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return within() };
     let profiles = blank.laid(feature, sketch)?;
     let loops = blank.outline(target)?;
