@@ -332,3 +332,128 @@ fn work_planes_and_extents() {
     assert!(matches!(up_to(&[&sketch, &back], serde_json::json!({"z1": 6})), Err(BrepError::Sketch(_))));
     assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "base": "xy"})), "two", &[&front]), Err(BrepError::Sketch(_))));
 }
+
+fn rect(w: f64, h: f64) -> serde_json::Value {
+    serde_json::json!({
+        "points": {"a": [0, 0], "b": [w, 0], "c": [w, h], "d": [0, h]},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "a"}}
+    })
+}
+
+/// A box 100 x 60 x 10 from a sketch of a rectangle.
+fn slab() -> Value {
+    let s = eval(&sketch_op(rect(100.0, 60.0), serde_json::json!({})), "box_sketch", &[]).unwrap();
+    eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 10})), "slab", &[&s]).unwrap()
+}
+
+fn vertex_at(v: &Value, p: Vec3) -> String {
+    let b = v.body().unwrap();
+    format!("{:?}", b.vertices().iter().find(|x| x.point == p).unwrap().id)
+}
+
+fn dist(plane: &datum_ops::SketchPlane, p: Vec3) -> f64 {
+    (p - plane.origin).dot(plane.normal).abs()
+}
+
+/// A plane through three vertices of a body (D204): origin the first, X toward the second.
+#[test]
+fn plane_through_three_vertices() {
+    let slab = slab();
+    let (p1, p2, p3) = (Vec3::new(100.0, 0.0, 0.0), Vec3::new(0.0, 60.0, 0.0), Vec3::new(0.0, 0.0, 10.0));
+    let points = serde_json::json!([
+        {"input": 0, "vertex": vertex_at(&slab, p1)},
+        {"input": 0, "vertex": vertex_at(&slab, p2)},
+        {"input": 0, "vertex": vertex_at(&slab, p3)},
+    ]);
+    let v = eval(&op(serde_json::json!({"op": "plane", "points": points})), "oblique", &[&slab, &slab, &slab]).unwrap();
+    let p = v.plane().unwrap();
+    let (u, w) = (p2 - p1, p3 - p1);
+    let cross = u.cross(w);
+    assert_eq!(p.origin, p1);
+    assert_eq!(p.x_axis, u * (1.0 / u.dot(u).sqrt()));
+    assert_eq!(p.normal, cross * (1.0 / cross.dot(cross).sqrt()));
+    for q in [p1, p2, p3] {
+        assert!(dist(p, q) <= 1e-9 * 100.0, "{q:?}");
+    }
+}
+
+/// Points of a sketch are placed by its frame, on an origin plane and on a work plane too.
+#[test]
+fn plane_through_sketch_points() {
+    let tri = serde_json::json!({"points": {"a": [0, 0], "b": [10, 0], "c": [0, 20]}});
+    let s = eval(&sketch_op(tri.clone(), serde_json::json!({})), "t", &[]).unwrap();
+    let points = serde_json::json!([{"input": 0, "point": "a"}, {"input": 0, "point": "b"}, {"input": 0, "point": "c"}]);
+    let v = eval(&op(serde_json::json!({"op": "plane", "points": points})), "p", &[&s, &s, &s]).unwrap();
+    let p = v.plane().unwrap();
+    assert_eq!((p.origin, p.x_axis, p.normal), (Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)));
+
+    // On the XZ plane, 5 in front of it: the sketch's Y is the model's Z.
+    let front = eval(&op(serde_json::json!({"op": "plane", "base": "xz", "offset": 5})), "front", &[]).unwrap();
+    let on = eval(&sketch_op(tri, serde_json::json!({})), "t2", &[&front]).unwrap();
+    let frame = on.sketch().unwrap().frame;
+    let at = |x: f64, y: f64| frame[0] + frame[1] * x + frame[2] * y;
+    let points = serde_json::json!([{"input": 0, "point": "c"}, {"input": 0, "point": "a"}, {"input": 0, "point": "b"}]);
+    let v = eval(&op(serde_json::json!({"op": "plane", "points": points})), "p2", &[&on, &on, &on]).unwrap();
+    let p = v.plane().unwrap();
+    let (c, a, b) = (at(0.0, 20.0), at(0.0, 0.0), at(10.0, 0.0));
+    assert_eq!(p.origin, c);
+    for q in [a, b, c] {
+        assert!(dist(p, q) <= 1e-9 * 20.0, "{q:?}");
+    }
+}
+
+/// `{}` is the model's origin; `offset` moves the plane along its normal.
+#[test]
+fn plane_through_the_origin_and_offset() {
+    let tri = serde_json::json!({"points": {"a": [10, 0], "b": [0, 20]}});
+    let s = eval(&sketch_op(tri, serde_json::json!({})), "t", &[]).unwrap();
+    let points = serde_json::json!([{}, {"input": 0, "point": "a"}, {"input": 0, "point": "b"}]);
+    let plain = eval(&op(serde_json::json!({"op": "plane", "points": points})), "p", &[&s]).unwrap();
+    let moved = eval(&op(serde_json::json!({"op": "plane", "points": points, "offset": 5})), "p", &[&s]).unwrap();
+    let (a, b) = (plain.plane().unwrap(), moved.plane().unwrap());
+    assert_eq!(a.origin, Vec3::ZERO);
+    assert_eq!(b.origin, a.normal * 5.0);
+    assert_eq!((a.x_axis, a.normal), (b.x_axis, b.normal));
+}
+
+/// Collinear points, a wrong count, mixed ways of placing, lost and wrong-kind references.
+#[test]
+fn plane_through_points_refused() {
+    let line = serde_json::json!({"points": {"a": [0, 0], "b": [10, 0], "c": [20, 0], "d": [0, 5]}});
+    let s = eval(&sketch_op(line, serde_json::json!({})), "t", &[]).unwrap();
+    let spot = |n: &str| serde_json::json!({"input": 0, "point": n});
+    let plane = |extra: serde_json::Value| {
+        let mut o = serde_json::json!({"op": "plane"});
+        o.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        eval(&op(o), "p", &[&s])
+    };
+    assert!(plane(serde_json::json!({"points": [spot("a"), spot("b"), spot("d")]})).is_ok());
+    assert!(matches!(plane(serde_json::json!({"points": [spot("a"), spot("b"), spot("c")]})), Err(BrepError::Degenerate(_))));
+    assert!(matches!(plane(serde_json::json!({"points": [spot("a"), spot("a"), spot("d")]})), Err(BrepError::Degenerate(_))));
+    assert!(matches!(plane(serde_json::json!({"points": [spot("a"), spot("b")]})), Err(BrepError::Sketch(_))));
+    let all = serde_json::json!([spot("a"), spot("b"), spot("d")]);
+    assert!(matches!(plane(serde_json::json!({"points": all, "base": "xy"})), Err(BrepError::Sketch(_))));
+    assert!(matches!(plane(serde_json::json!({"points": [spot("a"), spot("b"), spot("zz")]})), Err(BrepError::LostReference(_))));
+
+    let slab = slab();
+    let known = vertex_at(&slab, Vec3::ZERO);
+    let lost = serde_json::json!([{"input": 0, "vertex": known}, {"input": 0, "vertex": "0123"}, {}]);
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "points": lost})), "p", &[&slab]), Err(BrepError::LostReference(_))));
+    let of_body = serde_json::json!([{"input": 0, "point": "a"}, {}, {"input": 0, "vertex": known}]);
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "points": of_body})), "p", &[&slab]), Err(BrepError::Sketch(_))));
+}
+
+/// A sketch on a three-point plane and an extrusion of it: volume is area times depth.
+#[test]
+fn extrude_on_a_plane_through_points() {
+    let slab = slab();
+    let points = serde_json::json!([
+        {"input": 0, "vertex": vertex_at(&slab, Vec3::new(100.0, 0.0, 0.0))},
+        {"input": 0, "vertex": vertex_at(&slab, Vec3::new(0.0, 60.0, 0.0))},
+        {"input": 0, "vertex": vertex_at(&slab, Vec3::new(0.0, 0.0, 10.0))},
+    ]);
+    let plane = eval(&op(serde_json::json!({"op": "plane", "points": points})), "oblique", &[&slab, &slab, &slab]).unwrap();
+    let s = eval(&sketch_op(rect(20.0, 10.0), serde_json::json!({})), "on", &[&plane]).unwrap();
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 5})), "x", &[&s]).unwrap();
+    assert_close(body(&v).volume(), 20.0 * 10.0 * 5.0);
+}

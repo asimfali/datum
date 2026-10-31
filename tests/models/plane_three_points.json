@@ -1,0 +1,55 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "boss": 5
+  },
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {"a": [0, 0], "b": [100, 0], "c": [100, 60], "d": [0, 60]},
+        "lines": {
+          "ab": {"from": "a", "to": "b"},
+          "bc": {"from": "b", "to": "c"},
+          "cd": {"from": "c", "to": "d"},
+          "da": {"from": "d", "to": "a"}
+        }
+      }
+    },
+    {
+      "name": "box",
+      "op": "extrude",
+      "inputs": ["outline"],
+      "mode": "new",
+      "z0": 0,
+      "z1": 10
+    },
+    {
+      "name": "corner",
+      "op": "plane",
+      "inputs": ["box", "box", "box"],
+      "points": [
+        {"input": 0, "vertex": "d399d7c6f98c2c68e8127e1159c7c00b"},
+        {"input": 1, "vertex": "1cf1cdfc60ec627b1083f8ea07d708f2"},
+        {"input": 2, "vertex": "af8920b6f71357f801b13abdfea0ce54"}
+      ]
+    },
+    {
+      "name": "mark",
+      "op": "sketch",
+      "inputs": ["corner"],
+      "sketch": {
+        "points": {"m": [30, 15]},
+        "circles": {"ring": {"center": "m", "diameter": 12}}
+      }
+    },
+    {
+      "name": "stud",
+      "op": "extrude",
+      "inputs": ["mark"],
+      "mode": "new",
+      "z1": "boss"
+    }
+  ]
+}

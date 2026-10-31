@@ -1316,7 +1316,7 @@ impl Session {
         self.doc.patches_of(&below, feature, |p| rename_names(p, &renamed));
         let mut ops: Vec<(NodeIx, Op)> = vec![(ix, serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?)];
         // What a feature of this sketch names in it: a sheet's start point and path, an
-        // extrusion's profiles (D191).
+        // extrusion's profiles (D191), a plane's points (D204).
         for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1).filter(|(_, n)| n.inputs.contains(&ix)) {
             let mut op = n.op.clone();
             let mut follow = |name: &mut String| {
@@ -1327,6 +1327,11 @@ impl Session {
             match &mut op {
                 Op::Sheet { start, path, .. } => start.iter_mut().chain(path.iter_mut()).for_each(&mut follow),
                 Op::Extrude { profiles, .. } | Op::Plate { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
+                // A plane through points of this sketch (D204).
+                Op::Plane { points, .. } => {
+                    let k = n.inputs.iter().position(|&i| i == ix);
+                    points.iter_mut().filter(|p| p.input == k).filter_map(|p| p.point.as_mut()).for_each(&mut follow);
+                }
                 _ => {}
             }
             if op != n.op {

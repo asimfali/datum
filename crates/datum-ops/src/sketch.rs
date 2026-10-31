@@ -258,7 +258,7 @@ pub(crate) fn find_face(body: &Body, id: &str) -> Result<(usize, TopoId), BrepEr
 }
 
 /// Whether `a` and `b` lie along one line, exactly: every 2 × 2 minor of the pair is zero.
-fn parallel(a: Vec3, b: Vec3) -> bool {
+pub(crate) fn parallel(a: Vec3, b: Vec3) -> bool {
     let minor = |i: usize, j: usize| {
         let (a, b) = (a.to_array(), b.to_array());
         orient2d(Vec2::new(0.0, 0.0), Vec2::new(a[i], a[j]), Vec2::new(b[i], b[j]))
