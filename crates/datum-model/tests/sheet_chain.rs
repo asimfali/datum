@@ -115,3 +115,19 @@ fn renames_carry_path_start_and_profiles() {
     assert_eq!(feature(&mut s, "slab")["profiles"], json!(["bottom"]));
     assert!(volume(&mut s, "slab") > 0.0);
 }
+
+/// Renaming a sketch point: a plane through three points of the sketch (D204) follows, and builds.
+#[test]
+fn a_rename_follows_into_a_plane_through_points() {
+    let mut s = Session::default();
+    run(&mut s, "add", json!({"name": "tri", "op": "sketch", "sketch": {"points": {"a": [0, 0], "b": [10, 0], "c": [0, 20]}}}));
+    let points = json!([{"input": 0, "point": "a"}, {"input": 0, "point": "b"}, {"input": 0, "point": "c"}]);
+    run(&mut s, "add", json!({"name": "slope", "op": "plane", "inputs": ["tri", "tri", "tri"], "points": points}));
+    run(&mut s, "rename_in_sketch", json!({"name": "tri", "from": "a", "to": "corner"}));
+    let f = feature(&mut s, "slope");
+    assert_eq!(f["points"][0]["point"], "corner", "{f}");
+    assert_eq!((f["points"][1]["point"].as_str(), f["points"][2]["point"].as_str()), (Some("b"), Some("c")), "{f}");
+    assert!(f.get("error").is_none(), "{f}");
+    let all = run(&mut s, "inspect", json!({}));
+    assert!(all["features"].as_array().unwrap().iter().all(|f| f.get("error").is_none()), "{all}");
+}

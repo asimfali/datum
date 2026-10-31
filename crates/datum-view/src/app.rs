@@ -148,6 +148,8 @@ enum Under {
     /// Work plane `k` of [`Viewer::work_planes`].
     Work(usize),
     Face(crate::scene::Hit),
+    /// Point `k` of the model's spots: a work plane through three of them (D204).
+    Spot(usize),
 }
 
 /// A selection being kept in the library (D98): the element it makes, why the last change or
@@ -233,6 +235,9 @@ struct Model {
     /// The params of the command previewed and its reply, or why it is refused; the scene shows
     /// its result.
     preview: Option<(Json, Result<Json, String>)>,
+    /// The points a work plane may go through (D204): each as a plane's point names it (`of` a
+    /// feature, a `vertex` or a `point`; nothing: the origin) and where it is.
+    spots: Vec<(Json, datum_math::Vec3)>,
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -244,6 +249,7 @@ struct Picture {
     begun: Vec<String>,
     editing: Option<(String, Context)>,
     inspect: Json,
+    spots: Vec<(Json, datum_math::Vec3)>,
 }
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
@@ -325,7 +331,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, editing: context, inspect } = picture;
+        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots } = picture;
         if models
             .send(Model {
                 inspect,
@@ -342,6 +348,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 flats,
                 editing: context,
                 preview,
+                spots,
             })
             .is_err()
         {
@@ -392,6 +399,31 @@ fn navigation(ui: &egui::Ui, r: &egui::Response, touchpad: bool) -> Nav {
         zoom *= libm::exp(-f64::from(scroll.y) * 0.002);
     }
     Nav { pan, zoom, space }
+}
+
+/// A work plane's fields through three of the model's spots (D204): the features they are of as
+/// its inputs, each point by the input it is of.
+fn through_points(spots: &[(Json, datum_math::Vec3)]) -> Json {
+    let mut inputs: Vec<Json> = Vec::new();
+    let points: Vec<Json> = spots
+        .iter()
+        .map(|(s, _)| {
+            let mut p = s.clone();
+            if let Some(of) = p.as_object_mut().and_then(|o| o.remove("of")) {
+                let k = inputs.iter().position(|i| *i == of).unwrap_or_else(|| {
+                    inputs.push(of);
+                    inputs.len() - 1
+                });
+                p["input"] = json!(k);
+            }
+            p
+        })
+        .collect();
+    let mut fields = json!({"points": points});
+    if !inputs.is_empty() {
+        fields["inputs"] = json!(inputs);
+    }
+    fields
 }
 
 fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
@@ -447,7 +479,19 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     });
     let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
     let inspect = session.inspect();
-    Picture { scene, geometry, bodies, begun, editing: context, inspect }
+    // What a work plane may go through: the origin, the corners of the bodies shown, the points of
+    // the sketches shown.
+    let mut spots = vec![(json!({}), datum_math::Vec3::ZERO)];
+    for (name, v) in &shown {
+        if let Some(b) = v.body() {
+            spots.extend(b.vertices().iter().map(|w| (json!({"of": name, "vertex": format!("{:?}", w.id)}), w.point)));
+        } else if let Some(sk) = v.sketch().filter(|sk| sk.developed.is_none()) {
+            let [o, x, y, _] = sk.frame;
+            let points = sk.solved.points.iter().filter(|(n, _)| n.as_str() != datum_ops::ORIGIN);
+            spots.extend(points.map(|(n, p)| (json!({"of": name, "point": n}), o + x * p.x + y * p.y)));
+        }
+    }
+    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -652,6 +696,8 @@ struct Viewer {
     under: Option<Under>,
     /// A work plane being made: its base (the feature's fields) and the offset typed.
     plane_draft: Option<(Json, String)>,
+    /// The points a work plane through three is picked by so far (D204), as the model's spots.
+    plane_points: Vec<(Json, datum_math::Vec3)>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
     /// "Select a contour or a chain, then E": where it shows, and since when (until a click or a few seconds).
@@ -951,6 +997,7 @@ impl Viewer {
             picking: None,
             under: None,
             plane_draft: None,
+            plane_points: Vec::new(),
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -2784,6 +2831,19 @@ impl Viewer {
         }
         if self.sketch.is_none() {
             crate::origin::paint_origin(&painter, clip, screen, size);
+            // The points of the sketches shown, as their lines are; while a work plane is picked
+            // through points (D204), every corner of the bodies too.
+            let corners = self.picking == Some(Purpose::Plane);
+            for (spot, p) in &m.spots {
+                let (sketch, vertex) = (spot.get("point").is_some(), spot.get("vertex").is_some());
+                if !(sketch || (corners && vertex)) {
+                    continue;
+                }
+                if let Some(at) = on_screen(&view_projection, *p - anchor, rect) {
+                    let colour = if sketch { egui::Color32::from_rgb(40, 90, 200) } else { egui::Color32::from_rgb(90, 95, 105) };
+                    painter.circle_filled(at, if sketch { 3.0 } else { 2.5 }, colour);
+                }
+            }
         }
         if let Some(purpose) = self.picking {
             if let Some(Under::Face(f)) = self.under {
@@ -2801,10 +2861,33 @@ impl Viewer {
                 }
                 painter.add(egui::Shape::mesh(tint));
             }
+            // A plane through points (D204): those picked, numbered, and the one under the cursor.
+            if purpose == Purpose::Plane {
+                let orange = egui::Color32::from_rgb(235, 110, 20);
+                for (k, (_, p)) in self.plane_points.iter().enumerate() {
+                    if let Some(at) = on_screen(&view_projection, *p - anchor, rect) {
+                        painter.circle_filled(at, 5.0, orange);
+                        painter.text(
+                            at + egui::vec2(7.0, -7.0),
+                            egui::Align2::LEFT_BOTTOM,
+                            (k + 1).to_string(),
+                            egui::FontId::proportional(13.0),
+                            orange,
+                        );
+                    }
+                }
+                if let Some(Under::Spot(k)) = self.under
+                    && let Some(at) = m.spots.get(k).and_then(|(_, p)| on_screen(&view_projection, *p - anchor, rect))
+                {
+                    painter.circle_stroke(at, 7.0, egui::Stroke::new(2.0, orange));
+                }
+            }
             let hint = match purpose {
                 Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
                 Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
-                Purpose::Plane => "Click an origin plane, a work plane or a plane face to offset the new plane from · Esc: cancel",
+                Purpose::Plane => {
+                    "Click an origin plane, a work plane or a plane face to offset the new plane from, or three points (corners, sketch points, the origin) for a plane through them · Esc: cancel"
+                }
             };
             painter.text(
                 rect.center_bottom() - egui::vec2(0.0, 12.0),
@@ -2848,7 +2931,27 @@ impl Viewer {
             let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
             let size = crate::origin::half(m.scene.bounds);
             let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
+            // A work plane through points: the point nearest the cursor within a few pixels.
+            let spot = match (purpose, offset) {
+                (Purpose::Plane, Some((x, y))) => {
+                    let (lo, hi) = crate::origin::held(m.scene.bounds);
+                    let anchor = m.scene.anchor();
+                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let cursor = rect.center() + egui::vec2(x as f32, y as f32);
+                    m.spots
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(k, (_, p))| Some((k, on_screen(&vp, *p - anchor, rect)?.distance(cursor))))
+                        .filter(|&(_, d)| d < 8.0)
+                        .min_by(|a, b| a.1.total_cmp(&b.1))
+                        .map(|(k, _)| k)
+                }
+                _ => None,
+            };
             self.under = offset.and_then(|(x, y)| {
+                if let Some(k) = spot {
+                    return Some(Under::Spot(k));
+                }
                 let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
                 // A face of a body; off the bodies, the nearest origin or work plane along the ray.
                 // The planes are larger than the model: the nearest would be a plane in front of
@@ -2868,6 +2971,7 @@ impl Viewer {
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.picking = None;
+                self.plane_points.clear();
             }
         }
         // A click on a body in 3D (no pick asked for) takes its part for the toolbar's material and
@@ -2898,13 +3002,29 @@ impl Viewer {
                 let fields = json!({"inputs": [body(self, f)], "face": format!("{:?}", f.face)});
                 self.new_sketch(fields);
             }
+            // A third point picked: the plane through the three, its offset 0.
+            Some((Purpose::Plane, Under::Spot(k))) => {
+                let Some(spot) = self.model.as_ref().and_then(|m| m.spots.get(k).cloned()) else { return };
+                if !self.plane_points.iter().any(|(s, _)| *s == spot.0) {
+                    self.plane_points.push(spot);
+                }
+                if self.plane_points.len() == 3 {
+                    self.plane_draft = Some((through_points(&self.plane_points), "0".into()));
+                    self.plane_points.clear();
+                    self.picking = None;
+                }
+            }
+            // Points are picked for a work plane alone.
+            Some((Purpose::Sketch | Purpose::Look, Under::Spot(_))) => {}
             Some((Purpose::Plane, under)) => {
                 let from = match under {
                     Under::Origin(k) => json!({"base": datum_ops::OriginPlane::ALL[k]}),
                     Under::Work(k) => json!({"inputs": [work[k].0]}),
                     Under::Face(f) => json!({"inputs": [body(self, f)], "face": format!("{:?}", f.face)}),
+                    Under::Spot(_) => return,
                 };
                 self.plane_draft = Some((from, "10".into()));
+                self.plane_points.clear();
                 self.picking = None;
             }
             Some((Purpose::Look, under)) => {
@@ -2913,6 +3033,7 @@ impl Viewer {
                     Under::Face(f) => f.normal,
                     Under::Origin(k) => crate::origin::origin_squares()[k].normal_towards(forward),
                     Under::Work(k) => work[k].1.normal_towards(forward),
+                    Under::Spot(_) => return,
                 };
                 self.turn = Some(crate::cube::Turn::toward(&self.camera, normal, ui.input(|i| i.time), false));
                 self.picking = None;
@@ -4887,6 +5008,7 @@ mod tests {
                 flats: Vec::new(),
                 editing: None,
                 preview: None,
+                spots: Vec::new(),
             }),
             busy: false,
             camera: Camera::default(),
@@ -4951,6 +5073,7 @@ mod tests {
             picking: None,
             under: None,
             plane_draft: None,
+            plane_points: Vec::new(),
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -6729,6 +6852,20 @@ mod tests {
         let reply = json!({"failed": [{"feature": "extrude2", "error": "old"}, {"feature": "extrude3", "error": "crosses"}], "mode": "cut"});
         assert_eq!(previewed(reply.clone(), &json!("extrude3")), Err("crosses".into()));
         assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
+    }
+
+    /// Three points picked for a work plane (D204): the features they are of become its inputs,
+    /// each once, in order; the origin is of none.
+    #[test]
+    fn a_plane_through_three_picked_points() {
+        let at = datum_math::Vec3::ZERO;
+        let spots = [(json!({"of": "box", "vertex": "ab"}), at), (json!({}), at), (json!({"of": "box", "vertex": "cd"}), at)];
+        assert_eq!(through_points(&spots), json!({"inputs": ["box"], "points": [{"input": 0, "vertex": "ab"}, {}, {"input": 0, "vertex": "cd"}]}));
+        let spots = [(json!({"of": "s", "point": "a"}), at), (json!({"of": "box", "vertex": "ab"}), at), (json!({"of": "s", "point": "b"}), at)];
+        assert_eq!(
+            through_points(&spots),
+            json!({"inputs": ["s", "box"], "points": [{"input": 0, "point": "a"}, {"input": 1, "vertex": "ab"}, {"input": 0, "point": "b"}]})
+        );
     }
 
     /// A warning is said by its code in the window's language; one the window does not know, as

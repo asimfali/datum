@@ -111,13 +111,17 @@ pub enum Op {
         profiles: Vec<String>,
     },
     /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
-    /// given), from the input work plane, or from plane face `face` of the input body. Sketches
-    /// lie on it (as their input), extrusions go up to it. No input, the plane, or the body.
+    /// given), from the input work plane, from plane face `face` of the input body, or through
+    /// three `points` (D204): its origin the first, its X toward the second, its normal by the
+    /// right hand from the second to the third. Sketches lie on it (as their input), extrusions go
+    /// up to it. No input, the plane, the body, or what the points are of (up to three).
     Plane {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<OriginPlane>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         face: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        points: Vec<Spot>,
         #[serde(default = "zero")]
         offset: Num,
     },
@@ -301,7 +305,8 @@ impl Op {
     pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
-            Self::Sketch { .. } | Self::Plane { .. } => 0..=1,
+            Self::Sketch { .. } => 0..=1,
+            Self::Plane { .. } => 0..=3,
             Self::Extrude { .. } => 1..=3,
             Self::Transform { .. } | Self::PatternGrid { .. } | Self::Unfold { .. } | Self::Sheet { .. } | Self::Plate { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
@@ -337,7 +342,9 @@ impl Op {
                 wall: *wall,
                 profiles: profiles.clone(),
             },
-            Self::Plane { base, face, offset } => Self::Plane { base: *base, face: face.clone(), offset: r(offset, "offset")? },
+            Self::Plane { base, face, points, offset } => {
+                Self::Plane { base: *base, face: face.clone(), points: points.clone(), offset: r(offset, "offset")? }
+            }
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Plate { thickness, flip, symmetric, profiles } => Self::Plate {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
@@ -414,8 +421,14 @@ impl Op {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
         }
         // A work plane, and a sketch on one, take no body.
-        if let Self::Plane { base, face, offset } = self {
+        if let Self::Plane { base, face, points, offset } = self {
             let from = match (values.first(), face) {
+                _ if !points.is_empty() => {
+                    if base.is_some() || face.is_some() {
+                        return Err(BrepError::Sketch("a plane through points takes no `base` or `face`".into()));
+                    }
+                    through(points, values)?
+                }
                 (None, None) => base.unwrap_or_default().plane(),
                 (Some(v), None) if base.is_none() => {
                     *v.plane().ok_or_else(|| BrepError::Sketch("a plane takes a work plane as its input, or a body with `face`".into()))?
@@ -423,6 +436,7 @@ impl Op {
                 (Some(v), Some(f)) if base.is_none() => {
                     face_plane(v.body().ok_or_else(|| BrepError::Sketch("a plane on a face takes the body as its input".into()))?, f)?
                 }
+                _ if values.len() > 1 => return Err(BrepError::Sketch("a plane takes more than one input only through `points`".into())),
                 _ => return Err(BrepError::Sketch("a plane is offset from one thing: an origin plane (`base`), a work plane, or a face".into())),
             };
             let n = from.normal * (1.0 / from.normal.dot(from.normal).sqrt());
@@ -502,6 +516,65 @@ impl Op {
         }
         Ok(Value::Body(body))
     }
+}
+
+/// A point a work plane goes through (D204): a vertex of an input body by its ID, a point of an
+/// input sketch by its name, or, with neither, the model's origin.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Spot {
+    /// The input it is of, from 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vertex: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<String>,
+}
+
+impl Spot {
+    /// Where it is, of `values`.
+    fn at(&self, values: &[&Value]) -> Result<Vec3, BrepError> {
+        let of = |k: usize| {
+            values.get(k).copied().ok_or_else(|| BrepError::Sketch(format!("a plane's point is of input {k}, there are {}", values.len())))
+        };
+        match (self.input, &self.vertex, &self.point) {
+            (None, None, None) => Ok(Vec3::ZERO),
+            (Some(k), Some(id), None) => {
+                let body = of(k)?.body().ok_or_else(|| BrepError::Sketch(format!("a vertex of input {k}, which is no body")))?;
+                let id = u128::from_str_radix(id, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{id}` is not a vertex ID")))?;
+                let v = body
+                    .vertices()
+                    .binary_search_by_key(&id, |v| v.id)
+                    .map_err(|_| BrepError::LostReference(format!("vertex {id:?} is not in input {k}")))?;
+                Ok(body.vertices()[v].point)
+            }
+            (Some(k), None, Some(name)) => {
+                let s = of(k)?.sketch().ok_or_else(|| BrepError::Sketch(format!("a point of input {k}, which is no sketch")))?;
+                if s.developed.is_some() {
+                    return Err(BrepError::Unsupported("a plane through a point of a sketch on a cylinder face".into()));
+                }
+                let p = s.solved.points.get(name).ok_or_else(|| BrepError::LostReference(format!("no point `{name}` in the sketch of input {k}")))?;
+                let [o, x, y, _] = s.frame;
+                Ok(o + x * p.x + y * p.y)
+            }
+            _ => Err(BrepError::Sketch("a plane's point is a `vertex` or a `point` of an `input`, or neither of them: the origin".into())),
+        }
+    }
+}
+
+/// The plane through three points of `values` (D204): origin the first, X toward the second,
+/// normal `(b − a) × (c − a)`. Points on one line, decided exactly, have no plane.
+fn through(points: &[Spot], values: &[&Value]) -> Result<SketchPlane, BrepError> {
+    let [a, b, c] = points else { return Err(BrepError::Sketch(format!("a plane goes through three points, got {}", points.len()))) };
+    let (a, b, c) = (a.at(values)?, b.at(values)?, c.at(values)?);
+    let (u, w) = (b - a, c - a);
+    if sketch::parallel(u, w) {
+        return Err(BrepError::Degenerate("a plane's three points lie on one line".into()));
+    }
+    let x = u * (1.0 / u.dot(u).sqrt());
+    let n = u.cross(w);
+    Ok(SketchPlane { origin: a, x_axis: x, normal: n * (1.0 / n.dot(n).sqrt()) })
 }
 
 /// The profiles of feature `op`, a cut of sheet metal (`wall`), that lie closer to a bend than
