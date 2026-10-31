@@ -241,7 +241,7 @@ struct Model {
     /// feature, a `vertex` or a `point`; nothing: the origin) and where it is.
     spots: Vec<(Json, datum_math::Vec3)>,
     /// The faces of the bodies shown a flange may stand on (D205).
-    ends: Vec<datum_brep::TopoId>,
+    ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -254,7 +254,7 @@ struct Picture {
     editing: Option<(String, Context)>,
     inspect: Json,
     spots: Vec<(Json, datum_math::Vec3)>,
-    ends: Vec<datum_brep::TopoId>,
+    ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
 }
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
@@ -497,7 +497,13 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
             spots.extend(points.map(|(n, p)| (json!({"of": name, "point": n}), o + x * p.x + y * p.y)));
         }
     }
-    let ends = shown.iter().filter_map(|(_, v)| v.body()).flat_map(datum_ops::flange_ends).collect();
+    // The ends a flange may stand on, by their long edges: the body's place among the bodies shown.
+    let ends = shown
+        .iter()
+        .filter_map(|(_, v)| v.body())
+        .enumerate()
+        .flat_map(|(k, b)| datum_ops::flange_edges(b).into_iter().map(move |(f, e)| (k, f, e)))
+        .collect();
     Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, ends }
 }
 
@@ -2889,6 +2895,13 @@ impl Viewer {
                 }
             }
             painter.add(egui::Shape::mesh(tint));
+            // An end's long edges too: it is picked by them.
+            for (_, _, [a, b]) in m.ends.iter().filter(|e| e.0 == body && e.1 == face) {
+                if let (Some(a), Some(b)) = (on_screen(&view_projection, *a - anchor, rect), on_screen(&view_projection, *b - anchor, rect)) {
+                    painter
+                        .line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgba_unmultiplied(235, 110, 20, alpha.saturating_add(80))));
+                }
+            }
         };
         if self.sketch.is_none() {
             for (feature, face) in &self.flange_faces {
@@ -2927,7 +2940,7 @@ impl Viewer {
             let hint = match purpose {
                 Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
                 Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
-                Purpose::Flange => "Click ends of the sheet for flanges · Shift or Ctrl adds · Enter: the flange · Esc: cancel",
+                Purpose::Flange => "Click edges of the sheet for flanges · Shift or Ctrl adds · Enter: the flange · Esc: cancel",
                 Purpose::Plane => {
                     "Click an origin plane, a work plane or a plane face to offset the new plane from, or three points (corners, sketch points, the origin) for a plane through them · Esc: cancel"
                 }
@@ -3002,7 +3015,27 @@ impl Viewer {
                 }
                 let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
                 if purpose == Purpose::Flange {
-                    return m.scene.pick(origin, dir).filter(|f| m.ends.contains(&f.face)).map(Under::Face);
+                    // An end by its edge, within a few pixels, as a flange is picked in Inventor;
+                    // else the narrow end face itself under the cursor.
+                    let (lo, hi) = crate::origin::held(m.scene.bounds);
+                    let anchor = m.scene.anchor();
+                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let cursor = rect.center() + egui::vec2(x as f32, y as f32);
+                    let near = m
+                        .ends
+                        .iter()
+                        .filter_map(|(k, face, [a, b])| {
+                            let (a, b) = (on_screen(&vp, *a - anchor, rect)?, on_screen(&vp, *b - anchor, rect)?);
+                            let d = b - a;
+                            let t = ((cursor - a).dot(d) / d.length_sq().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+                            Some((*k, *face, (a + d * t).distance(cursor)))
+                        })
+                        .filter(|e| e.2 < 6.0)
+                        .min_by(|a, b| a.2.total_cmp(&b.2));
+                    if let Some((body, face, _)) = near {
+                        return Some(Under::Face(crate::scene::Hit { distance: 0.0, body, face, normal: datum_math::Vec3::ZERO }));
+                    }
+                    return m.scene.pick(origin, dir).filter(|f| m.ends.iter().any(|e| e.1 == f.face)).map(Under::Face);
                 }
                 // A face of a body; off the bodies, the nearest origin or work plane along the ray.
                 // The planes are larger than the model: the nearest would be a plane in front of
@@ -3447,7 +3480,8 @@ impl Viewer {
             }
             let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(x.at) + egui::vec2(14.0, 14.0);
             egui::Area::new(egui::Id::new("datum_extrusion_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(self.i18n.t("extrude-pick", "Click a sketch in the tree")));
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| ui.label(self.i18n.t("extrude-pick", "Click a sketch in the tree, or an edge of the sheet for a flange")));
             });
             return;
         };
@@ -7018,7 +7052,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        h.get_by_label("Click a sketch in the tree");
+        h.get_by_label("Click a sketch in the tree, or an edge of the sheet for a flange");
         assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
         h.get_by_label("✔ other  ·  sketch").click();
         h.run();

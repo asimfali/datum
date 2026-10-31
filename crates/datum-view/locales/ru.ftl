@@ -381,7 +381,7 @@ constrain-symmetric-what = две точки, затем отрезок, отн�
 constrain-fix = Фиксация
 constrain-fix-what = точка, удерживаемая на месте
 
-extrude-pick = Щёлкните эскиз в дереве
+extrude-pick = Щёлкните эскиз в дереве или ребро листа — для фланца
 extrude-contour-hint = Выделите контур или цепочку, затем E
 extrude-contour = Контур: { $names }
 extrude-depth = Глубина

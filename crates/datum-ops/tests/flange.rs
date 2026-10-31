@@ -120,6 +120,22 @@ fn ends_of_a_u_are_its_two_ends() {
     assert_eq!(found.len(), 2);
 }
 
+/// A flange is picked by an end's long edges: two for each end, the width long, at its sides.
+#[test]
+fn an_end_is_picked_by_its_two_long_edges() {
+    let u = u_sheet();
+    let edges = datum_ops::flange_edges(&u);
+    assert_eq!(edges.len(), 4);
+    for id in flange_ends(&u) {
+        let mine: Vec<_> = edges.iter().filter(|e| e.0 == id).collect();
+        assert_eq!(mine.len(), 2);
+        for (_, [a, b]) in mine {
+            let d = *b - *a;
+            assert!((d.dot(d).sqrt() - WIDTH).abs() < 1e-9 * WIDTH, "{d:?}");
+        }
+    }
+}
+
 #[test]
 fn ends_of_a_plate_are_its_four_sides() {
     let p = plate();

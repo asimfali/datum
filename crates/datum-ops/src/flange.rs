@@ -63,6 +63,21 @@ pub fn flange_ends(body: &Body) -> Vec<TopoId> {
     (0..body.faces().len() as Ix).filter(|x| !on_sides.contains(x) && end_of(body, *x).is_some()).map(|x| body.faces()[x as usize].id).collect()
 }
 
+/// The edges a flange is picked by, as in Inventor (D205): each end's two long edges, where it
+/// meets the sheet's sides, with the end they belong to.
+pub fn flange_edges(body: &Body) -> Vec<(TopoId, [Vec3; 2])> {
+    let he = |h: Ix| body.half_edges()[h as usize];
+    flange_ends(body)
+        .into_iter()
+        .filter_map(|id| {
+            let f = body.faces().binary_search_by_key(&id, |f| f.id).ok()? as Ix;
+            let (long, _) = end_of(body, f)?;
+            Some(long.map(|h| (id, [body.point(he(h).origin), body.point(he(body.next(h)).origin)])))
+        })
+        .flatten()
+        .collect()
+}
+
 /// Face `f` of `body` as an end a flange stands on: its two long half-edges and two short ones;
 /// none if it is not one.
 fn end_of(body: &Body, f: Ix) -> Option<([Ix; 2], [Ix; 2])> {
