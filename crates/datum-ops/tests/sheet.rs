@@ -174,10 +174,10 @@ fn names_stay_and_bad_paths_are_refused() {
         serde_json::json!({"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}}),
     );
     assert!(matches!(refused(straight, 2.0), BrepError::Degenerate(m) if m.contains("one line")));
-    // An arc meeting a line not tangent to it: a bend next to an arc comes later (D200).
+    // A line going back the way the arc came: a cusp.
     let kinked = serde_json::json!({"points": {"o": [0, 0], "a": [10, 0], "b": [0, 10], "c": [20, 10]},
         "arcs": {"r": {"center": "o", "from": "a", "to": "b"}}, "lines": {"l": {"from": "b", "to": "c"}}});
-    assert!(matches!(refused(kinked, 2.0), BrepError::Unsupported(m) if m.contains("make them tangent")));
+    assert!(matches!(refused(kinked, 2.0), BrepError::Degenerate(m) if m.contains("turns back")));
     // An arc tighter than the sheet is thick.
     let tight = serde_json::json!({"points": {"o": [0, 0], "a": [1, 0], "b": [0, 1]}, "arcs": {"r": {"center": "o", "from": "a", "to": "b"}}});
     assert!(matches!(refused(tight, 2.0), BrepError::Degenerate(m) if m.contains("too tight")));
@@ -300,10 +300,121 @@ fn two_tangent_arcs_make_an_s() {
     assert!(close(flat.size.x, want), "{} vs {want}", flat.size.x);
 }
 
-/// Without the tangent constraints the arc is not known to join its lines smoothly.
+/// Without the tangent constraints the arc still lies tangent to its lines by its geometry: no
+/// corner for a bend, and the sketch is asked to say they are tangent.
 #[test]
-fn an_arc_without_tangent_constraints_is_refused() {
+fn an_arc_tangent_without_the_constraint_is_asked_for_it() {
     let mut path = rolled_path(100.0);
     path.as_object_mut().unwrap().remove("constraints");
-    assert!(matches!(sheet_of(path, "left", 2.0, 2.0, 200.0), Err(BrepError::Unsupported(m)) if m.contains("make them tangent")));
+    assert!(matches!(sheet_of(path, "left", 2.0, 2.0, 200.0), Err(BrepError::Degenerate(m)) if m.contains("make them tangent")));
+}
+
+/// The author's sketch: a vertical line, a bend, a rolled arc tangent to the next line, a bend.
+/// `drop` shifts everything after the first line's end down.
+fn bend_next_to_arc(drop: f64) -> serde_json::Value {
+    let d = |x: f64, y: f64| serde_json::json!([x, y - drop]);
+    serde_json::json!({
+        "points": {"p1": [100.00000000000003, 0.0], "p2": d(100.00000000000003, 300.0), "p3": d(-90.65700102425025, 354.2561581670471),
+            "p4": d(-16.142677125116293, 253.9867320754302), "p5": d(-169.07603649291042, 295.9797559122828),
+            "p6": d(-180.29286974428322, 317.25305650446967), "o": [0, 0]},
+        "lines": {"l1": {"from": "o", "to": "p1"}, "l2": {"from": "p1", "to": "p2"}, "l3": {"from": "p3", "to": "p5"}, "l4": {"from": "p5", "to": "p6"}},
+        "arcs": {"a1": {"center": "p4", "from": "p2", "to": "p3"}},
+        "constraints": [{"line": "l1", "type": "length", "value": 100.0}, {"line": "l1", "type": "horizontal"},
+            {"line": "l2", "type": "length", "value": 300.0 - drop}, {"line": "l2", "type": "vertical"}, {"curves": ["a1", "l3"], "type": "tangent"}]
+    })
+}
+
+fn cylinders_of(b: &Body, radius: f64) -> usize {
+    b.faces().iter().filter(|f| matches!(f.surface, Surface::Cylinder(c) if close(c.radius, radius))).count()
+}
+
+/// Where a line meets an arc without a tangent constraint there is a bend too.
+#[test]
+fn a_bend_next_to_an_arc() {
+    use datum_ops::unfold_side;
+    for side in ["left", "right", "middle"] {
+        let b = sheet_of(bend_next_to_arc(0.0), side, 2.0, 2.0, 10.0).unwrap();
+        let flat = unfold_side(&b, false, 0.44).unwrap();
+        assert_eq!(flat.counts(), [4, 0, 0], "{side}");
+        assert_eq!(flat.bends.len(), 7, "{side}");
+        // Three bends of the rule's radius, inside and out; the rolled section has other radii.
+        assert_eq!((cylinders_of(&b, 2.0), cylinders_of(&b, 4.0)), (3, 3), "{side}");
+    }
+}
+
+/// Each bend meets its neighbours square: the normals of the two faces at an edge are parallel.
+#[test]
+fn bends_meet_their_neighbours_smoothly() {
+    let b = sheet_of(bend_next_to_arc(0.0), "left", 2.0, 2.0, 10.0).unwrap();
+    let face_of = |h: usize| b.loops()[b.half_edges()[h].loop_ix as usize].face as usize;
+    let is_cap = |f: usize| b.faces()[f].surface.plane().is_some_and(|p| p.normal.x == 0.0 && p.normal.y == 0.0);
+    let is_cyl = |f: usize| matches!(b.faces()[f].surface, Surface::Cylinder(_));
+    let mut checked = 0;
+    for h in 0..b.half_edges().len() {
+        let (x, y) = (face_of(h), face_of(b.half_edges()[h].twin as usize));
+        if x == y || is_cap(x) || is_cap(y) || !(is_cyl(x) || is_cyl(y)) {
+            continue;
+        }
+        let next = b.next(h as u32) as usize;
+        for v in [b.half_edges()[h].origin, b.half_edges()[next].origin] {
+            let p = b.point(v);
+            let (n1, n2) = (b.faces()[x].surface.normal_at(p), b.faces()[y].surface.normal_at(p));
+            let sin = n1.cross(n2).dot(n1.cross(n2)).sqrt() / (n1.dot(n1) * n2.dot(n2)).sqrt();
+            assert!(sin < 1e-9, "faces {x} and {y} at {p:?}: {sin}");
+        }
+        checked += 1;
+    }
+    assert!(checked >= 12, "{checked}");
+}
+
+/// The two arcs with a line at each end.
+fn with_lines(mut path: serde_json::Value) -> serde_json::Value {
+    path["points"]["o"] = serde_json::json!([200, 0]);
+    path["points"]["q"] = serde_json::json!([-100, 250]);
+    path["lines"] = serde_json::json!({"l1": {"from": "o", "to": "p1"}, "l2": {"from": "p3", "to": "q"}});
+    path
+}
+
+/// Two arcs meeting at a corner, not tangent, bend too.
+#[test]
+fn a_bend_between_two_arcs() {
+    let path = serde_json::json!({
+        "points": {"c1": [0, 0], "p1": [100, 0], "p2": [0, 100], "c2": [-100, 100], "p3": [-100, 200]},
+        "lines": {},
+        "arcs": {"a1": {"center": "c1", "from": "p1", "to": "p2"}, "a2": {"center": "c2", "from": "p2", "to": "p3"}}
+    });
+    for side in ["left", "right"] {
+        let b = sheet_of(path.clone(), side, 2.0, 2.0, 10.0).unwrap();
+        assert_eq!(cylinders_of(&b, 2.0), 1, "{side}");
+        // With a line at each end, two more corners.
+        let b = sheet_of(with_lines(path.clone()), side, 2.0, 2.0, 10.0).unwrap();
+        assert_eq!(cylinders_of(&b, 2.0), 3, "{side}");
+    }
+}
+
+/// A short arc between two corners has no room for both bends.
+#[test]
+fn an_arc_too_short_for_its_bends_is_refused() {
+    let a = 0.01_f64;
+    let path = serde_json::json!({
+        "points": {"o": [0, -100], "p1": [100, 0], "c": [100, 100], "p2": [100.0 + 100.0 * libm::sin(a), 100.0 - 100.0 * libm::cos(a)], "q": [200, 50]},
+        "lines": {"l1": {"from": "o", "to": "p1"}, "l2": {"from": "p2", "to": "q"}},
+        "arcs": {"a1": {"center": "c", "from": "p1", "to": "p2"}}
+    });
+    for side in ["left", "right"] {
+        assert!(matches!(sheet_of(path.clone(), side, 2.0, 2.0, 10.0), Err(BrepError::Degenerate(m)) if m.contains("do not fit")), "{side}");
+    }
+}
+
+/// Moving the shape keeps every face's name.
+#[test]
+fn faces_next_to_an_arc_keep_their_names() {
+    let ids = |b: &Body| {
+        let mut v: Vec<_> = b.faces().iter().map(|f| f.id).collect();
+        v.sort();
+        v
+    };
+    let a = sheet_of(bend_next_to_arc(0.0), "left", 2.0, 2.0, 10.0).unwrap();
+    let b = sheet_of(bend_next_to_arc(50.0), "left", 2.0, 2.0, 10.0).unwrap();
+    assert_eq!(ids(&a), ids(&b));
 }
