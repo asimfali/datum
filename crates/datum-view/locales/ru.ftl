@@ -389,6 +389,8 @@ sheet-rule-needed = Выберите листовое правило в верх
 sheet-preview = Лист · { $body } · { $rule }
 plate-thickness = Толщина — из правила { $rule }
 sheet-cut = Вырез листа — насквозь по толщине
+warn-near-bend = Вырезов ближе 2t + R = { $clearance } мм к линии гиба: { $n } (ближайший — { $distance } мм): отверстие исказится при гибке
+warn-across-bend = Вырезов через гиб: { $n }: отверстие исказится при гибке
 plate-flip = ⇄ Другая сторона
 plate-preview = Грань · { $body } · { $rule }
 toolbar-material = Материал

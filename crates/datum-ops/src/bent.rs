@@ -12,6 +12,7 @@
 //! curve drawn, a hole across a bend into one circle.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::f64::consts::{PI, TAU};
 
 use datum_brep::{
     Arc, Body, BrepError, Curve, CurveSpec, Cylinder, Development, FaceSpec, Ix, Plane, ProfileArc, ProfileLoop, Rolled, Surface, TopoId, Vertex,
@@ -33,17 +34,7 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
         return within();
     }
     let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return within() };
-    let [_, x, y, _] = sketch.frame;
-    let turn = |p: Vec2| Vec2::new(p.x * x.dot(blank.e) + p.y * y.dot(blank.e), p.x * x.dot(blank.a) + p.y * y.dot(blank.a));
-    let profiles: Vec<ProfileLoop> = profile_loops(feature, sketch)?
-        .into_iter()
-        .map(|l| {
-            let mut ring = if l.ring.counterclockwise() { l.ring } else { l.ring.reversed() };
-            ring.points.iter_mut().for_each(|p| *p = turn(*p));
-            ring.arcs.iter_mut().flatten().for_each(|a| a.center = turn(a.center));
-            ring
-        })
-        .collect();
+    let profiles = blank.laid(feature, sketch)?;
     // Within the sketch's face, a cut as before.
     let home = &blank.strips[blank.home];
     let inside = |p: &Vec2| home.lo < p.x && p.x < home.hi;
@@ -144,6 +135,68 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
     }
     faces.extend((0..target.faces().len() as Ix).filter(|x| !rebuilt.contains(x)).map(|x| target.face_spec(x)));
     build_with_curves(vertices, faces, curves)
+}
+
+/// How close a profile of a cut of sheet metal comes to a bend: `distance` on the blank from it
+/// to the bend's nearer bend line, or none when it reaches into the bend; under `clearance`,
+/// 2t + R (R the bend's inner radius). Closer than that a hole distorts on bending, as process
+/// engineers check before a blank is cut.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NearBend {
+    pub distance: Option<f64>,
+    pub clearance: f64,
+}
+
+/// The profiles of `sketch`, a cut of sheet metal `target`, closer to a bend than [`NearBend`]
+/// allows; none on a sheet without bends or on a rolled one's development.
+pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Vec<NearBend>, BrepError> {
+    let (Some(id), None) = (sketch.face, &sketch.developed) else { return Ok(Vec::new()) };
+    let Ok(f) = target.faces().binary_search_by_key(&id, |f| f.id) else { return Ok(Vec::new()) };
+    let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return Ok(Vec::new()) };
+    let mut near = Vec::new();
+    for l in blank.laid(feature, sketch)? {
+        let (lo, hi) = reach(&l);
+        let nearest = blank
+            .strips
+            .iter()
+            .filter_map(|s| match s.lay {
+                Lay::Bend { radii, .. } => Some(((s.lo - hi).max(lo - s.hi), 2.0 * blank.thickness + radii[0].min(radii[1]))),
+                Lay::Plane { .. } => None,
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        match nearest {
+            Some((gap, clearance)) if gap <= 0.0 => near.push(NearBend { distance: None, clearance }),
+            Some((gap, clearance)) if gap < clearance => near.push(NearBend { distance: Some(gap), clearance }),
+            _ => {}
+        }
+    }
+    Ok(near)
+}
+
+/// How far loop `l` reaches along X: its points and the extremes of its arcs.
+fn reach(l: &ProfileLoop) -> (f64, f64) {
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    let n = l.points.len();
+    for (k, &a) in l.points.iter().enumerate() {
+        (lo, hi) = (lo.min(a.x), hi.max(a.x));
+        let Some(arc) = l.arc(k) else { continue };
+        let (c, b) = (arc.center, l.points[(k + 1) % n]);
+        let angle = |p: Vec2| libm::atan2(p.y - c.y, p.x - c.x);
+        // The turn from `a` toward `b` the arc's way, and whether it passes direction `t`.
+        let turn = |from: f64, to: f64| {
+            let d = if arc.ccw { to - from } else { from - to };
+            if d <= 0.0 { d + TAU } else { d }
+        };
+        let (start, sweep) = (angle(a), turn(angle(a), angle(b)));
+        let r = libm::hypot(a.x - c.x, a.y - c.y);
+        if turn(start, 0.0) <= sweep {
+            hi = hi.max(c.x + r);
+        }
+        if turn(start, PI) <= sweep {
+            lo = lo.min(c.x - r);
+        }
+    }
+    (lo, hi)
 }
 
 /// Whether arc `k` of `l` stays between the bend lines of `strip`: it crosses neither.
@@ -323,6 +376,21 @@ impl Blank {
             })
             .unwrap_or(0.0);
         Ok(Some(Self { o, a, e, thickness, strips, home }))
+    }
+
+    /// The profiles of `sketch` on the blank, counterclockwise.
+    fn laid(&self, feature: TopoId, sketch: &Placed) -> Result<Vec<ProfileLoop>, BrepError> {
+        let [_, x, y, _] = sketch.frame;
+        let turn = |p: Vec2| Vec2::new(p.x * x.dot(self.e) + p.y * y.dot(self.e), p.x * x.dot(self.a) + p.y * y.dot(self.a));
+        Ok(profile_loops(feature, sketch)?
+            .into_iter()
+            .map(|l| {
+                let mut ring = if l.ring.counterclockwise() { l.ring } else { l.ring.reversed() };
+                ring.points.iter_mut().for_each(|p| *p = turn(*p));
+                ring.arcs.iter_mut().flatten().for_each(|a| a.center = turn(a.center));
+                ring
+            })
+            .collect())
     }
 
     /// The point at `p` of the blank on strip `i`, on the sketch's side (`layer` 0) or the other.

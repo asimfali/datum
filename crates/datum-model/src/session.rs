@@ -809,7 +809,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "inspect",
         description: "The feature history with each feature's status: volume, element counts and hash, or why it failed; \
-                      `modified`: whether the model differs from its file as last opened or saved.",
+                      `warnings` of a feature built but worth a word (a cut of sheet metal near a bend: `code`, numbers, \
+                      `message`); `modified`: whether the model differs from its file as last opened or saved.",
         params: no_params,
         run: |s, _| Ok(s.inspect()),
     },
@@ -1275,7 +1276,8 @@ impl Session {
     fn rebuild(&mut self) -> Value {
         self.last = self.evaluator.evaluate(&self.doc.built(&self.graph, self.active.as_deref(), self.project().as_deref()));
         let failed: Vec<Value> = self.failures().collect();
-        json!({"features": self.graph.nodes().len(), "computed": self.last.computed, "reused": self.last.reused, "failed": failed})
+        let warnings: Vec<Value> = self.warnings().collect();
+        json!({"features": self.graph.nodes().len(), "computed": self.last.computed, "reused": self.last.reused, "failed": failed, "warnings": warnings})
     }
 
     fn rename_in_sketch(&mut self, feature: &str, from: &str, to: &str) -> Result<Value, String> {
@@ -1406,6 +1408,44 @@ impl Session {
         summary
     }
 
+    /// What feature `i` does that the engineer should know of, though it was built (D198): codes
+    /// with parameters, the window says them in its language; `message` in English.
+    fn warnings_of(&self, i: NodeIx) -> Vec<Value> {
+        let node = &self.graph.nodes()[i as usize];
+        let ok = |j: NodeIx| self.last.results[j as usize].as_ref().ok();
+        let (Some(v), Some(inputs)) = (ok(i), node.inputs.iter().map(|&j| ok(j).map(|v| v.as_ref())).collect::<Option<Vec<_>>>()) else {
+            return Vec::new();
+        };
+        // Off: it passed its target on, cut nothing.
+        if inputs.first().is_some_and(|t| t.hash() == v.hash()) {
+            return Vec::new();
+        }
+        let Ok(near) = datum_ops::near_bends(node.id, &inputs, &node.op) else { return Vec::new() };
+        let mut out = Vec::new();
+        let across = near.iter().filter(|n| n.distance.is_none()).count();
+        if let Some(n) = near.iter().find(|n| n.distance.is_none()) {
+            out.push(json!({"code": "sheet.cut.across_bend", "profiles": across, "clearance": n.clearance,
+                "message": format!("{across} cut(s) across a bend: a hole there distorts on bending")}));
+        }
+        let closer = near.iter().filter_map(|n| Some((n.distance?, n.clearance))).min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((d, c)) = closer {
+            let n = near.len() - across;
+            out.push(json!({"code": "sheet.cut.near_bend", "profiles": n, "distance": d, "clearance": c,
+                "message": format!("{n} cut(s) closer to a bend line than 2t + R = {c} mm (nearest {d:.2} mm): a hole there distorts on bending")}));
+        }
+        out
+    }
+
+    /// Every feature's warnings, each with the feature's name.
+    fn warnings(&self) -> impl Iterator<Item = Value> + '_ {
+        (0..self.graph.nodes().len() as NodeIx).flat_map(move |i| {
+            self.warnings_of(i).into_iter().map(move |mut w| {
+                w["feature"] = json!(self.graph.nodes()[i as usize].name);
+                w
+            })
+        })
+    }
+
     fn failures(&self) -> impl Iterator<Item = Value> + '_ {
         self.graph
             .nodes()
@@ -1510,6 +1550,10 @@ impl Session {
                             Feature::Plane(p) => json!({"plane": {"origin": p.origin, "x_axis": p.x_axis, "normal": p.normal}, "hash": hash}),
                         };
                         f.insert("status".into(), status);
+                        let warnings = self.warnings_of(i);
+                        if !warnings.is_empty() {
+                            f.insert("warnings".into(), json!(warnings));
+                        }
                     }
                     Err(e) => {
                         f.insert("error".into(), Value::String(e.to_string()));
