@@ -3852,6 +3852,7 @@ impl Viewer {
         if sk.draft.tool != Tool::Select {
             let free = ui.input(|i| i.modifiers.shift);
             let mut draft = std::mem::take(&mut sk.draft);
+            let before = draft.chain.as_ref().map(|c| c.at);
             // As in Inventor: a drag from the chain's end draws a tangent arc.
             if r.drag_started_by(egui::PointerButton::Primary)
                 && let (Some(c), Some(o)) = (&draft.chain, ui.input(|i| i.pointer.press_origin()))
@@ -3995,6 +3996,10 @@ impl Viewer {
             // Esc, or a right click (a right drag pans): the mouse alone ends the command too.
             if (!typing && !typing_field && ui.input(|i| i.key_pressed(egui::Key::Escape))) || picker_esc || r.secondary_clicked() {
                 draft.escape();
+            }
+            // A point put out of sight (a length typed): the view follows it, the command goes on.
+            if let Some(at) = draft.chain.as_ref().map(|c| c.at).filter(|at| Some(*at) != before) {
+                sk.camera.follow(at, f64::from(rect.width()), h);
             }
             sk.draft = draft;
             for r in sent {

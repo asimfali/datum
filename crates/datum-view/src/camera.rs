@@ -300,6 +300,17 @@ impl SketchCamera {
         self.center = [self.center[0] - dx * k, self.center[1] + dy * k];
     }
 
+    /// Brings sketch point `p` back into a picture `width` × `height` when it lies at its edge or
+    /// beyond: moved the least that puts it within the middle half, the scale kept.
+    pub fn follow(&mut self, p: [f64; 2], width: f64, height: f64) {
+        let (dx, dy) = self.offset(p, height);
+        if dx.abs() < 0.45 * width && dy.abs() < 0.45 * height {
+            return;
+        }
+        let over = |d: f64, size: f64| d - d.clamp(-0.25 * size, 0.25 * size);
+        self.pan(-over(dx, width), -over(dy, height), height);
+    }
+
     /// Zooms by `factor` (< 1: closer), keeping the sketch point under pixel offset `(dx, dy)`
     /// where it is.
     pub fn zoom_at(&mut self, factor: f64, dx: f64, dy: f64, height: f64) {
@@ -337,6 +348,19 @@ impl SketchCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A point put beyond the picture's edge comes back within its middle half, the least move,
+    /// the scale kept; one well inside moves nothing.
+    #[test]
+    fn the_sketch_view_follows_a_point_out_of_sight() {
+        let mut c = SketchCamera { frame: [Vec3::ZERO; 4], center: [0.0, 0.0], half_height: 50.0 };
+        c.follow([30.0, 10.0], 800.0, 400.0);
+        assert_eq!(c.center, [0.0, 0.0]);
+        // 100 to the right: 400 px, beyond the 400 px half width.
+        c.follow([100.0, 0.0], 800.0, 400.0);
+        let (dx, dy) = c.offset([100.0, 0.0], 400.0);
+        assert!((dx - 200.0).abs() < 1e-9 && dy.abs() < 1e-9 && c.half_height == 50.0, "{dx} {dy}");
+    }
 
     /// From the front's top edge to the back's, the turn goes over the top, about X, and ends
     /// upside down as the way there leaves it, not spun about the vertical; then on to the top,
