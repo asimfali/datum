@@ -1,0 +1,71 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            0,
+            60
+          ],
+          "c": [
+            20,
+            60
+          ],
+          "d": [
+            20,
+            0
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          }
+        }
+      }
+    },
+    {
+      "name": "l",
+      "op": "sheet",
+      "inputs": [
+        "path"
+      ],
+      "thickness": 2,
+      "radius": 2,
+      "side": "left",
+      "z0": 0,
+      "z1": 40
+    },
+    {
+      "name": "flanged",
+      "op": "flange",
+      "inputs": [
+        "l"
+      ],
+      "height": 20,
+      "radius": 2,
+      "edges": [
+        "a304f7b49ba0b7a052f8822b21966e7f",
+        "f3f37f85c3b2f0de86159dad048c2c65",
+        "50aa8b1c1e7b3bc280f9f1c19683e1c3",
+        "57d1637d92516c79f5c92461395c34d2"
+      ]
+    }
+  ]
+}

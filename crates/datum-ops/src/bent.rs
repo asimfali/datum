@@ -33,7 +33,12 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
     if sketch.developed.is_some() {
         return within();
     }
-    let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return within() };
+    // On the wall of a flange on the sheet's side (D205), laid off the sheet's own blank: a blank of
+    // that wall alone, as a plate's.
+    let flanges = crate::unfold::branches(target);
+    let blank =
+        if flanges.contains(&(f as Ix)) { Blank::flange_wall(target, f as Ix, &flanges, sketch) } else { Blank::new(target, f as Ix, sketch)? };
+    let Some(blank) = blank else { return within() };
     let profiles = blank.laid(feature, sketch)?;
     let loops = blank.outline(target)?;
     // The blank's outline: the loop round the others (the cuts in it).
@@ -165,6 +170,11 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
     vertices.extend(
         new.into_iter().filter(|(id, _)| target.vertices().binary_search_by_key(id, |v| v.id).is_err()).map(|(id, point)| Vertex { id, point }),
     );
+    // A flange on the sheet's side (D205) is laid off the blank: a cut reaching it comes later.
+    let flanges = crate::unfold::branches(target);
+    if rims.iter().any(|r| flanges.contains(&r.beyond)) || gone.iter().any(|t| flanges.contains(t)) {
+        return Err(unsupported("a cut reaching a flange on the sheet's side comes later"));
+    }
     let cuts = Cuts { open: !rims.is_empty() || !gone.is_empty(), pieces, seams, rims, profiles };
     // The curves of curved edges cut in pieces, a piece each.
     let mut split: Vec<CurveSpec> = Vec::new();
@@ -581,12 +591,13 @@ impl Blank {
     fn new(target: &Body, f: Ix, sketch: &Placed) -> Result<Option<Self>, BrepError> {
         let unsupported = |m: &str| BrepError::Unsupported(format!("cut across a bend: {m}"));
         let surface = |x: Ix| target.faces()[x as usize].surface;
-        let mut front = chain_through(target, f)?;
+        let skip = crate::unfold::branches(target);
+        let mut front = chain_through(target, f, &skip)?;
         let Some(bend) = front.iter().position(|s| matches!(surface(s[0]), Surface::Cylinder(_))) else { return Self::plate(target, &front, sketch) };
         let Surface::Cylinder(c0) = surface(front[bend][0]) else { return Ok(None) };
         let (across, _) =
             opposite_cylinder(target, front[bend][0] as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-        let mut back = chain_through(target, across)?;
+        let mut back = chain_through(target, across, &skip)?;
         // The other side strip by strip: a bend across each bend, a wall across each wall.
         let paired = |back: &[Vec<Ix>]| {
             back.len() == front.len()
@@ -707,9 +718,31 @@ impl Blank {
         let Surface::Plane(q) = target.faces()[other as usize].surface else { return Ok(None) };
         let [o, x, y, z] = sketch.frame;
         let n = unit(p.normal);
-        let back = chain_through(target, other)?.concat();
+        let back = chain_through(target, other, &crate::unfold::branches(target))?.concat();
         let strip = Strip { faces: [home.clone(), back], lo: f64::NEG_INFINITY, hi: f64::INFINITY, lay: Lay::Plane { n: z, e: x, base: o, at: 0.0 } };
         Ok(Some(Self { o, a: y, e: x, thickness: (p.origin - q.origin).dot(n), strips: vec![strip], home: 0 }))
+    }
+
+    /// The blank of wall `f` of a flange on the sheet's side (D205): one strip, laid in the
+    /// sketch's own axes; its other side the flange's face parallel to it, nearest. None for a
+    /// face that is no flange's flat wall.
+    fn flange_wall(target: &Body, f: Ix, flanges: &BTreeSet<Ix>, sketch: &Placed) -> Option<Self> {
+        let plane = |x: Ix| match target.faces()[x as usize].surface {
+            Surface::Plane(p) => Some(p),
+            _ => None,
+        };
+        let p = plane(f)?;
+        let n = unit(p.normal);
+        let (other, t) = flanges
+            .iter()
+            .filter(|&&x| x != f)
+            .filter_map(|&x| plane(x).filter(|q| crate::sketch::parallel(q.normal, p.normal)).map(|q| (x, (p.origin - q.origin).dot(n))))
+            .filter(|(_, t)| *t > 0.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))?;
+        let [o, x, y, z] = sketch.frame;
+        let strip =
+            Strip { faces: [vec![f], vec![other]], lo: f64::NEG_INFINITY, hi: f64::INFINITY, lay: Lay::Plane { n: z, e: x, base: o, at: 0.0 } };
+        Some(Self { o, a: y, e: x, thickness: t, strips: vec![strip], home: 0 })
     }
 
     /// The profiles of `sketch` on the blank, counterclockwise.

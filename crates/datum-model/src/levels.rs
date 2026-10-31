@@ -284,12 +284,20 @@ impl Doc {
     /// from before rules has its own numbers, a new one fails asking for a rule. The library is
     /// read only when a sheet metal part has a rule.
     pub fn built<'g>(&self, g: &'g Graph, level: Option<&str>, project: Option<&std::path::Path>) -> Cow<'g, Graph> {
+        // A sheet or a face of sheet metal by its part's rule; a flange by the rule of the part
+        // whose body it is on (D205).
         let sheets: Vec<(usize, String)> = g
             .nodes()
             .iter()
             .enumerate()
-            .filter(|(_, n)| matches!(n.op, Op::Sheet { .. } | Op::Plate { .. }))
-            .filter_map(|(ix, n)| Some((ix, self.rule(&n.name, level)?)))
+            .filter_map(|(ix, n)| match n.op {
+                Op::Sheet { .. } | Op::Plate { .. } => Some((ix, self.rule(&n.name, level)?)),
+                Op::Flange { .. } => {
+                    let begun = body_chain(g, ix as NodeIx).last()?;
+                    Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
+                }
+                _ => None,
+            })
             .collect();
         if sheets.is_empty() {
             return Cow::Borrowed(g);
@@ -308,6 +316,7 @@ impl Doc {
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
+                Op::Flange { radius, .. } => *radius = Some(Num::Value(r)),
                 _ => {}
             }
             // The same operation with other numbers: its arity holds.

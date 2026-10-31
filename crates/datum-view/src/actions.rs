@@ -36,6 +36,7 @@ pub enum Act {
     Home,
     LookAt,
     WorkPlane,
+    Flange,
     SideBar,
     SideBarRight,
     FlatPane,
@@ -94,7 +95,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 43] = [
+pub const ACTIONS: [Action; 44] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -185,6 +186,14 @@ pub const ACTIONS: [Action; 43] = [
         "Plane",
         "A work plane: click an origin plane, a work plane or a plane face, then type its offset (a number or a formula)",
         plain(Key::CloseBracket),
+        Model,
+    ),
+    action(
+        Act::Flange,
+        "sheet.flange",
+        "Flange",
+        "A bend and a wall on edges of sheet metal: its ends or its walls along its sides; click the edges (Shift adds), Enter",
+        None,
         Model,
     ),
     action(Act::SideBar, "view.side_bar", "Side bar", "The sections of the icon chosen on the activity bar", ctrl(Key::B), Anywhere),

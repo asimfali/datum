@@ -138,6 +138,8 @@ enum Purpose {
     Look,
     /// A work plane offset from it.
     Plane,
+    /// Ends of sheet metal a flange stands on (D205).
+    Flange,
 }
 
 /// What is under the cursor while picking.
@@ -238,6 +240,8 @@ struct Model {
     /// The points a work plane may go through (D204): each as a plane's point names it (`of` a
     /// feature, a `vertex` or a `point`; nothing: the origin) and where it is.
     spots: Vec<(Json, datum_math::Vec3)>,
+    /// The faces of the bodies shown a flange may stand on (D205).
+    ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -250,6 +254,7 @@ struct Picture {
     editing: Option<(String, Context)>,
     inspect: Json,
     spots: Vec<(Json, datum_math::Vec3)>,
+    ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
 }
 
 /// The session lives on its own thread; requests come in, models go out. Requests that pile up
@@ -331,7 +336,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots } = picture;
+        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, ends } = picture;
         if models
             .send(Model {
                 inspect,
@@ -349,6 +354,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 editing: context,
                 preview,
                 spots,
+                ends,
             })
             .is_err()
         {
@@ -491,7 +497,14 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
             spots.extend(points.map(|(n, p)| (json!({"of": name, "point": n}), o + x * p.x + y * p.y)));
         }
     }
-    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots }
+    // The ends a flange may stand on, by their long edges: the body's place among the bodies shown.
+    let ends = shown
+        .iter()
+        .filter_map(|(_, v)| v.body())
+        .enumerate()
+        .flat_map(|(k, b)| datum_ops::flange_edges(b).into_iter().map(move |(f, e)| (k, f, e)))
+        .collect();
+    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, ends }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -698,6 +711,10 @@ struct Viewer {
     plane_draft: Option<(Json, String)>,
     /// The points a work plane through three is picked by so far (D204), as the model's spots.
     plane_points: Vec<(Json, datum_math::Vec3)>,
+    /// The ends of sheet metal picked for a flange (D205): the body's feature and the face.
+    flange_edges: Vec<(String, datum_brep::TopoId)>,
+    /// A flange being asked for: its form.
+    flange: Option<FlangeForm>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
     /// "Select a contour or a chain, then E": where it shows, and since when (until a click or a few seconds).
@@ -710,6 +727,22 @@ struct Viewer {
     material: Option<(Option<String>, String)>,
     /// The viewport's rectangle at the last frame: where the sketch's pixels are.
     viewport: egui::Rect,
+}
+
+/// The form of a flange: its name, height and angle as typed, the side, the preview sent last.
+struct FlangeForm {
+    name: String,
+    height: String,
+    angle: String,
+    flip: bool,
+    /// The height is typed over at once, the first frame only.
+    fresh: bool,
+    sent: Option<Json>,
+}
+
+/// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
+fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool) -> Json {
+    json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip})
 }
 
 /// What the form of E makes, decided when it opens.
@@ -843,7 +876,7 @@ fn rules_of<'a>(rules: &'a [Json], material: Option<&str>, kind: Option<&str>) -
 
 /// Whether the sketch feature `sketch` lies on a face of a sheet metal part: the body its first
 /// input belongs to began with a `sheet` or a `plate`. Extrusions that changed a body (any mode
-/// but `new`) lead down to the body's first input.
+/// but `new`) and flanges lead down to the body's first input.
 fn on_sheet(features: &[Json], sketch: &str) -> bool {
     let first_input = |f: &Json| f["inputs"][0].as_str().map(String::from);
     let by_name = |name: &str| features.iter().find(|f| f["name"].as_str() == Some(name));
@@ -851,7 +884,8 @@ fn on_sheet(features: &[Json], sketch: &str) -> bool {
     // A chain is no longer than the features; the bound only stops a malformed model.
     for _ in features {
         let Some(f) = at.as_deref().and_then(by_name) else { return false };
-        if f["op"] == "extrude" && f["mode"].as_str().is_some_and(|m| m != "new") {
+        // An extrusion into the body or a flange on it (D205): the same sheet beneath.
+        if (f["op"] == "extrude" && f["mode"].as_str().is_some_and(|m| m != "new")) || f["op"] == "flange" {
             at = first_input(f);
         } else {
             return matches!(f["op"].as_str(), Some("sheet" | "plate"));
@@ -998,6 +1032,8 @@ impl Viewer {
             under: None,
             plane_draft: None,
             plane_points: Vec::new(),
+            flange_edges: Vec::new(),
+            flange: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -2821,7 +2857,7 @@ impl Viewer {
         }
         // The origin planes while picking, and with no body yet: what work planes and sketches
         // are placed by.
-        if self.picking.is_some() || (self.sketch.is_none() && m.scene.bodies.is_empty()) {
+        if self.picking.is_some_and(|p| p != Purpose::Flange) || (self.sketch.is_none() && m.scene.bodies.is_empty()) {
             let lit = self.picking.and_then(|purpose| match self.under {
                 Some(Under::Origin(k)) => Some(k),
                 Some(_) => None,
@@ -2845,22 +2881,42 @@ impl Viewer {
                 }
             }
         }
-        if let Some(purpose) = self.picking {
-            if let Some(Under::Face(f)) = self.under {
-                let mesh = &m.scene.bodies[f.body];
-                let mut tint = egui::Mesh::default();
-                for t in mesh.triangles.iter().zip(&mesh.faces).filter(|(_, id)| **id == f.face).map(|(t, _)| t) {
-                    let corners: Option<Vec<egui::Pos2>> = t.iter().map(|&q| on_screen(&view_projection, q - anchor, rect)).collect();
-                    if let Some(c) = corners {
-                        let base = tint.vertices.len() as u32;
-                        for p in c {
-                            tint.colored_vertex(p, egui::Color32::from_rgba_unmultiplied(235, 110, 20, 90));
-                        }
-                        tint.add_triangle(base, base + 1, base + 2);
+        // The ends picked for a flange, and the face under the cursor while one is asked for.
+        let tint = |face: datum_brep::TopoId, body: usize, alpha: u8| {
+            let mesh = &m.scene.bodies[body];
+            let mut tint = egui::Mesh::default();
+            for t in mesh.triangles.iter().zip(&mesh.faces).filter(|(_, id)| **id == face).map(|(t, _)| t) {
+                let corners: Option<Vec<egui::Pos2>> = t.iter().map(|&q| on_screen(&view_projection, q - anchor, rect)).collect();
+                if let Some(c) = corners {
+                    let base = tint.vertices.len() as u32;
+                    for p in c {
+                        tint.colored_vertex(p, egui::Color32::from_rgba_unmultiplied(235, 110, 20, alpha));
                     }
+                    tint.add_triangle(base, base + 1, base + 2);
                 }
-                painter.add(egui::Shape::mesh(tint));
             }
+            painter.add(egui::Shape::mesh(tint));
+            // An end's long edges too: it is picked by them.
+            for (_, _, [a, b]) in m.ends.iter().filter(|e| e.0 == body && e.1 == face) {
+                if let (Some(a), Some(b)) = (on_screen(&view_projection, *a - anchor, rect), on_screen(&view_projection, *b - anchor, rect)) {
+                    painter
+                        .line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgba_unmultiplied(235, 110, 20, alpha.saturating_add(80))));
+                }
+            }
+        };
+        if self.sketch.is_none() {
+            for (feature, face) in &self.flange_edges {
+                if let Some(body) = m.bodies.iter().position(|b| b == feature) {
+                    tint(*face, body, 150);
+                }
+            }
+        }
+        if (self.picking.is_some() || self.waits_for_sketch())
+            && let Some(Under::Face(f)) = self.under
+        {
+            tint(f.face, f.body, if self.picking.is_some_and(|p| p != Purpose::Flange) { 90 } else { 70 });
+        }
+        if let Some(purpose) = self.picking {
             // A plane through points (D204): those picked, numbered, and the one under the cursor.
             if purpose == Purpose::Plane {
                 let orange = egui::Color32::from_rgb(235, 110, 20);
@@ -2885,6 +2941,7 @@ impl Viewer {
             let hint = match purpose {
                 Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
                 Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
+                Purpose::Flange => "Click edges of the sheet for flanges · Shift or Ctrl adds · Enter: the flange · Esc: cancel",
                 Purpose::Plane => {
                     "Click an origin plane, a work plane or a plane face to offset the new plane from, or three points (corners, sketch points, the origin) for a plane through them · Esc: cancel"
                 }
@@ -2927,7 +2984,12 @@ impl Viewer {
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
         let mut chosen = None;
         let work = self.work_planes();
-        if let (Some(purpose), Some(m)) = (self.picking, &self.model) {
+        // The extrusion's wait for a sketch also takes an end of sheet metal clicked: a flange.
+        let waiting = self.waits_for_sketch();
+        if self.picking.is_none() && !waiting {
+            self.under = None;
+        }
+        if let (Some(purpose), Some(m)) = (self.picking.or(waiting.then_some(Purpose::Flange)), &self.model) {
             let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
             let size = crate::origin::half(m.scene.bounds);
             let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
@@ -2953,6 +3015,29 @@ impl Viewer {
                     return Some(Under::Spot(k));
                 }
                 let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
+                if purpose == Purpose::Flange {
+                    // An end by its edge, within a few pixels, as a flange is picked in Inventor;
+                    // else the narrow end face itself under the cursor.
+                    let (lo, hi) = crate::origin::held(m.scene.bounds);
+                    let anchor = m.scene.anchor();
+                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let cursor = rect.center() + egui::vec2(x as f32, y as f32);
+                    let near = m
+                        .ends
+                        .iter()
+                        .filter_map(|(k, face, [a, b])| {
+                            let (a, b) = (on_screen(&vp, *a - anchor, rect)?, on_screen(&vp, *b - anchor, rect)?);
+                            let d = b - a;
+                            let t = ((cursor - a).dot(d) / d.length_sq().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+                            Some((*k, *face, (a + d * t).distance(cursor)))
+                        })
+                        .filter(|e| e.2 < 6.0)
+                        .min_by(|a, b| a.2.total_cmp(&b.2));
+                    if let Some((body, face, _)) = near {
+                        return Some(Under::Face(crate::scene::Hit { distance: 0.0, body, face, normal: datum_math::Vec3::ZERO }));
+                    }
+                    return m.scene.pick(origin, dir).filter(|f| m.ends.iter().any(|e| e.1 == f.face)).map(Under::Face);
+                }
                 // A face of a body; off the bodies, the nearest origin or work plane along the ray.
                 // The planes are larger than the model: the nearest would be a plane in front of
                 // the face aimed at, and there is room to take a plane beside the bodies.
@@ -2972,6 +3057,9 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.picking = None;
                 self.plane_points.clear();
+                self.flange_edges.clear();
+            } else if self.picking == Some(Purpose::Flange) && !self.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.open_flange();
             }
         }
         // A click on a body in 3D (no pick asked for) takes its part for the toolbar's material and
@@ -3016,6 +3104,25 @@ impl Viewer {
             }
             // Points are picked for a work plane alone.
             Some((Purpose::Sketch | Purpose::Look, Under::Spot(_))) => {}
+            // An end clicked: alone it is the selection; with Shift or Ctrl it is added or left.
+            Some((Purpose::Flange, Under::Face(f))) => {
+                let Some(feature) = body(self, f) else { return };
+                if self.extrusion.is_some() {
+                    self.extrusion = None;
+                    self.flange_edges.clear();
+                }
+                self.picking = Some(Purpose::Flange);
+                let pick = (feature, f.face);
+                let same_body = self.flange_edges.first().is_none_or(|(b, _)| *b == pick.0);
+                if !crate::select::adding(&ui.input(|i| i.modifiers)) || !same_body {
+                    self.flange_edges = vec![pick];
+                } else if let Some(k) = self.flange_edges.iter().position(|p| *p == pick) {
+                    self.flange_edges.remove(k);
+                } else {
+                    self.flange_edges.push(pick);
+                }
+            }
+            Some((Purpose::Flange, _)) => {}
             Some((Purpose::Plane, under)) => {
                 let from = match under {
                     Under::Origin(k) => json!({"base": datum_ops::OriginPlane::ALL[k]}),
@@ -3041,6 +3148,11 @@ impl Viewer {
             }
             None => {}
         }
+    }
+
+    /// Whether the extrusion form waits for a sketch to be clicked in the tree.
+    fn waits_for_sketch(&self) -> bool {
+        self.picking.is_none() && self.extrusion.as_ref().is_some_and(|x| x.sketch.is_none())
     }
 
     /// The model's work planes (D150) that are made, by feature, as squares about the model.
@@ -3158,6 +3270,11 @@ impl Viewer {
     /// E: the form of an extrusion at `at`, for the sketch open (left), else the only one not
     /// used yet, else the one clicked in the tree.
     fn extrude(&mut self, at: egui::Pos2) {
+        // Ends of sheet metal picked: a flange on them, not an extrusion.
+        if self.sketch.is_none() && !self.flange_edges.is_empty() {
+            self.open_flange();
+            return;
+        }
         let open = self.sketch.as_ref().map(|s| s.feature.clone());
         // The contours selected in the open sketch; with none selected and several regions, they
         // are to be selected first.
@@ -3192,7 +3309,11 @@ impl Viewer {
         let used = |name: &str| {
             features.iter().any(|f| f["op"] != "sketch" && f["inputs"].as_array().is_some_and(|i| i.iter().any(|n| n.as_str() == Some(name))))
         };
-        let mut unused = features.iter().filter(|f| f["op"] == "sketch").filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
+        // A sketch of points alone (where a work plane goes through) has nothing to extrude.
+        let drawn = |f: &Json| {
+            ["lines", "arcs", "circles"].iter().any(|k| f["sketch"][k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)))
+        };
+        let mut unused = features.iter().filter(|f| f["op"] == "sketch" && drawn(f)).filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
         let lone = unused.next().filter(|_| unused.next().is_none());
         let sketch = open.or_else(|| lone.map(String::from));
         let kind = match chain {
@@ -3248,6 +3369,82 @@ impl Viewer {
         (1..).map(|k| format!("{command}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
     }
 
+    /// Opens the form of a flange on the ends picked, and stops picking.
+    fn open_flange(&mut self) {
+        self.picking = None;
+        self.under = None;
+        self.flange =
+            Some(FlangeForm { name: self.feature_name("flange"), height: "20".into(), angle: "90".into(), flip: false, fresh: true, sent: None });
+    }
+
+    /// The flange form: height and angle (numbers or formulas), the side; the command previewed at
+    /// every change, Enter or OK makes it once the preview of what it says now is not refused,
+    /// Esc or Cancel drops it.
+    fn flange_window(&mut self, ctx: &egui::Context) {
+        let Some(f) = &mut self.flange else { return };
+        let Some((body, _)) = self.flange_edges.first().cloned() else {
+            self.flange = None;
+            return;
+        };
+        let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
+        let params = flange_params(&f.name, &body, &edges, &f.height, &f.angle, f.flip);
+        // The preview of what the form says now; until it comes, none.
+        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let ok = preview.is_some_and(Result::is_ok);
+        let (mut add, mut cancel) = (false, false);
+        egui::Window::new(self.i18n.label(Act::Flange))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("flange-height", "Height"));
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut f.height)
+                            .desired_width(120.0)
+                            .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
+                    );
+                    // Typed at once, as a sketch's dimension is.
+                    if std::mem::take(&mut f.fresh) {
+                        r.request_focus();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("flange-angle", "Angle"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut f.angle)
+                            .desired_width(120.0)
+                            .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
+                    );
+                });
+                if ui.button(self.i18n.t("flange-flip", "⇄ Other side")).clicked() {
+                    f.flip = !f.flip;
+                }
+                if let Some(Err(why)) = preview {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
+                }
+                ui.horizontal(|ui| {
+                    add = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK"))).clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
+                });
+            });
+        let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if cancel || esc {
+            self.flange = None;
+            self.flange_edges.clear();
+            self.send(Request::Preview(None));
+        } else if (add || enter) && ok {
+            self.flange = None;
+            self.flange_edges.clear();
+            self.send(Request::Preview(None));
+            self.send(Request::Command("add", params));
+        } else if f.sent.as_ref() != Some(&params) {
+            let params = flange_params(&f.name, &body, &edges, &f.height, &f.angle, f.flip);
+            f.sent = Some(params.clone());
+            self.send(Request::Preview(Some(("add", params))));
+        }
+    }
+
     /// Drops the extrusion form, and the preview it made.
     fn close_extrusion(&mut self) {
         if let Some(x) = self.extrusion.take()
@@ -3288,7 +3485,8 @@ impl Viewer {
             }
             let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(x.at) + egui::vec2(14.0, 14.0);
             egui::Area::new(egui::Id::new("datum_extrusion_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(self.i18n.t("extrude-pick", "Click a sketch in the tree")));
+                egui::Frame::popup(ui.style())
+                    .show(ui, |ui| ui.label(self.i18n.t("extrude-pick", "Click a sketch in the tree, or an edge of the sheet for a flange")));
             });
             return;
         };
@@ -4501,6 +4699,7 @@ impl Viewer {
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::Extrude => self.extrusion.is_some(),
             Act::LookAt => self.picking == Some(Purpose::Look),
+            Act::Flange => self.picking == Some(Purpose::Flange),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
@@ -4555,6 +4754,10 @@ impl Viewer {
             Act::WorkPlane => {
                 self.leave();
                 self.pick(Purpose::Plane);
+            }
+            Act::Flange => {
+                self.leave();
+                self.pick(Purpose::Flange);
             }
             Act::Rectangle => {
                 if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
@@ -4729,6 +4932,7 @@ impl Viewer {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::WorkPlane, true);
             self.item(ui, Act::Extrude, true);
+            self.item(ui, Act::Flange, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group]) {
                 self.item(ui, act, true);
@@ -4938,6 +5142,7 @@ impl eframe::App for Viewer {
         }
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
+        self.flange_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
         self.settings_said(ui.ctx());
@@ -5009,6 +5214,7 @@ mod tests {
                 editing: None,
                 preview: None,
                 spots: Vec::new(),
+                ends: Vec::new(),
             }),
             busy: false,
             camera: Camera::default(),
@@ -5074,6 +5280,8 @@ mod tests {
             under: None,
             plane_draft: None,
             plane_points: Vec::new(),
+            flange_edges: Vec::new(),
+            flange: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -6509,9 +6717,10 @@ mod tests {
     fn extruding(second: bool) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
         let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
-        features.push(json!({"name": "extra", "op": "sketch", "inputs": []}));
+        let drawn = json!({"lines": {"l": {"from": "a", "to": "b"}}});
+        features.push(json!({"name": "extra", "op": "sketch", "inputs": [], "sketch": drawn}));
         if second {
-            features.push(json!({"name": "other", "op": "sketch", "inputs": []}));
+            features.push(json!({"name": "other", "op": "sketch", "inputs": [], "sketch": drawn}));
         }
         let h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -6632,6 +6841,57 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("sheet", p) if p == flipped)));
+    }
+
+    /// The flange feature's fields as the model takes them.
+    #[test]
+    fn flange_params_are_the_features_fields() {
+        let faces = ["ab".to_string(), "cd".to_string()];
+        assert_eq!(
+            flange_params("flange1", "sheet1", &faces, "20", "h + 5", true),
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true})
+        );
+    }
+
+    /// With ends picked, the flange form previews, and Enter on a fresh preview makes it.
+    #[test]
+    fn enter_makes_a_flange_on_a_fresh_preview() {
+        let (v, inbox) = viewer("symmetric_plate.json");
+        let face = datum_brep::TopoId(0xab);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.flange_window(ui.ctx()), v);
+        h.state_mut().flange_edges = vec![("sheet1".into(), face)];
+        h.state_mut().open_flange();
+        h.run();
+        h.get_by_label("Height");
+        let params = flange_params("flange1", "sheet1", &[format!("{face:?}")], "20", "90", false);
+        let previews: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect();
+        assert_eq!(previews.last(), Some(&params));
+        h.state_mut().model.as_mut().unwrap().preview = Some((params.clone(), Ok(json!({"body": "flange1"}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let made = sent.iter().find_map(|r| if let Request::Command("add", p) = r { Some(p) } else { None }).expect("the flange");
+        assert_eq!((&made["op"], &made["edges"]), (&json!("flange"), &json!([format!("{face:?}")])));
+        assert!(h.state().flange.is_none() && h.state().flange_edges.is_empty());
+    }
+
+    /// Esc while ends are picked for a flange drops them and stops picking.
+    #[test]
+    fn escape_drops_the_ends_picked() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.pick(Purpose::Flange);
+        v.flange_edges = vec![("sheet1".into(), datum_brep::TopoId(0xab))];
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                v.pick_input(ui, rect, &r, None);
+            },
+            v,
+        );
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.state().picking.is_none() && h.state().flange_edges.is_empty());
     }
 
     /// An arc on the chain (a rolled section, D200): E on it asks for sheet metal along the
@@ -6791,6 +7051,27 @@ mod tests {
         assert!(h.state().extrusion.is_none());
     }
 
+    /// A sketch of points alone (for a work plane) is no sketch to extrude: E does not take it, it
+    /// waits for a click in the tree or on an edge of the sheet.
+    #[test]
+    fn e_leaves_a_sketch_of_points_alone() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        features.push(json!({"name": "marks", "op": "sketch", "inputs": [], "sketch": {"points": {"p1": [1, 2]}}}));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+                v.extrusion_form(ui.ctx());
+            },
+            v,
+        );
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()), "waits");
+    }
+
     /// With two sketches unused, E waits for a click in the tree.
     #[test]
     fn with_two_sketches_e_waits_for_the_tree() {
@@ -6798,7 +7079,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        h.get_by_label("Click a sketch in the tree");
+        h.get_by_label("Click a sketch in the tree, or an edge of the sheet for a flange");
         assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
         h.get_by_label("✔ other  ·  sketch").click();
         h.run();
@@ -6866,6 +7147,17 @@ mod tests {
             through_points(&spots),
             json!({"inputs": ["s", "box"], "points": [{"input": 0, "point": "a"}, {"input": 1, "vertex": "ab"}, {"input": 0, "point": "b"}]})
         );
+    }
+
+    /// A sketch on a face of a flange is on the sheet beneath it: E makes a cut of sheet metal.
+    #[test]
+    fn a_sketch_on_a_flange_is_on_the_sheet() {
+        let features = [
+            json!({"name": "s", "op": "sheet", "inputs": ["path"]}),
+            json!({"name": "f", "op": "flange", "inputs": ["s"]}),
+            json!({"name": "k", "op": "sketch", "inputs": ["f"]}),
+        ];
+        assert!(on_sheet(&features, "k"));
     }
 
     /// A warning is said by its code in the window's language; one the window does not know, as
