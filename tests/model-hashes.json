@@ -170,6 +170,12 @@
     "path": "1e6a99a0f7af1c468116455f9e34802b60581707f14a03f38c0bcc9e150f1f9c",
     "rolled": "a740bd237fe6fc3236a1f1b571e7d0d5df1c9ce61fb9d9af3f485e4ecb5cada6"
   },
+  "sheet_slot_through.json": {
+    "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
+    "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42",
+    "slot_sketch": "99bb82f11f1447335705df1541997524eed930362a0ab651c8aea74da5c6ceac",
+    "slotted": "e07e6ada828f4f29811c2fbade047a8362a4457a0c46711b943597d584e9f78c"
+  },
   "sketch_plate.json": {
     "base": "bc0240d91308ec8390b59d730aacd5db534e6e28dcf31bd5d246b470cb1b7fd9",
     "cut": "6393b23bc0ea945b444ac861177815e275823ef3a15b11318ef0b7e9bc7400da",

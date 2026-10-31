@@ -135,13 +135,14 @@ fn an_inclined_wall_is_cut() {
     assert!((whole - v - HOLE * 2.0).abs() < 1e-6, "one wall's hole: {whole} − {v}");
 }
 
-/// A circle reaching onto the bend is refused, not cut half through.
+/// A circle over the whole of a short bend divides the bend's faces (D201): cut, and told of.
 #[test]
-fn a_cut_across_a_bend_is_refused() {
-    let (mut s, _) = inclined("sheet_cut_bend", |flat| flat - 2.0);
+fn a_hole_over_a_whole_bend_is_cut() {
+    let (mut s, whole) = inclined("sheet_cut_bend", |flat| flat - 2.0);
     let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
-    let e = r["failed"][0]["error"].as_str().unwrap_or_else(|| panic!("{r}"));
-    assert!(e.contains("across a bend"), "{e}");
+    assert!(r["failed"].as_array().is_some_and(Vec::is_empty), "{r}");
+    assert_eq!(r["warnings"][0]["code"], "sheet.cut.across_bend", "{r}");
+    assert!(volume(&mut s, "cut") < whole);
 }
 
 // Cuts across bend lines (D197): the profile is punched through the blank, and the blank shows it
@@ -276,17 +277,18 @@ fn a_rectangle_across_a_bend_keeps_its_lines() {
     assert_eq!(pieces(&mut s, "cut"), [outline[0] + 4, 0, 0]);
 }
 
-/// A hole over a whole short middle wall and both its bends would divide the wall's face in two:
-/// refused for now.
+/// A hole over a whole short middle wall and both its bends divides the wall's faces in two
+/// (D201); the blank has it as one circle.
 #[test]
-fn a_hole_across_two_bends_is_refused() {
+fn a_hole_across_two_bends_is_cut() {
     let mut s = sheet_along("bend_cut_two", &[[0.0, 0.0], [0.0, 60.0], [12.0, 60.0], [12.0, 0.0]]);
     let wall = first_wall(&mut s, "l");
     // The bend's neutral layer: a quarter turn at radius r + k t.
     let bend = std::f64::consts::FRAC_PI_2 * (2.0 + 0.44 * 2.0);
     // Ø24 over the end of the wall, the bend, the middle wall's flat 8, the next bend, and on.
     let r = punch_circle(&mut s, "l", "hole", wall.flat + bend + 4.0, 20.0, 24.0);
-    assert!(failure(&r).contains("divides a face"), "{r}");
+    assert_cut(&r);
+    assert_eq!(pieces(&mut s, "hole_cut"), [4, 0, 1]);
 }
 
 /// Two holes along the same bend line, one after the other.

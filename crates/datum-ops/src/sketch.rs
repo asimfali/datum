@@ -169,8 +169,9 @@ pub(crate) fn coaxial(a: &Cylinder, b: &Cylinder) -> bool {
 }
 
 /// The face across a rolled sheet from cylinder face `f`: the nearest coaxial cylinder face
-/// facing the other way, on the side of the body.
-/// None if there is none, or two at the same distance.
+/// facing the other way, on the side of the body; of the pieces a cut divided it into (one
+/// surface, bit for bit, D201), the first. None if there is none, or two cylinders at the same
+/// distance.
 pub(crate) fn opposite_cylinder(body: &Body, f: usize) -> Option<(Ix, Cylinder)> {
     let Surface::Cylinder(c) = body.faces()[f].surface else { return None };
     let mut found: Vec<(Ix, Cylinder)> = (0..body.faces().len())
@@ -180,11 +181,8 @@ pub(crate) fn opposite_cylinder(body: &Body, f: usize) -> Option<(Ix, Cylinder)>
         })
         .collect();
     found.sort_by(|a, b| (a.1.radius - c.radius).abs().total_cmp(&(b.1.radius - c.radius).abs()));
-    match found[..] {
-        [one] => Some(one),
-        [a, b, ..] if a.1.radius != b.1.radius => Some(a),
-        _ => None,
-    }
+    let first = *found.first()?;
+    found.iter().take_while(|o| o.1.radius == first.1.radius).all(|o| o.1 == first.1).then_some(first)
 }
 
 /// Where a sketch on cylinder face `f` lies, its neutral layer at `k` of the thickness from the
