@@ -18,7 +18,7 @@ use datum_brep::{
     Arc, Body, BrepError, Curve, CurveSpec, Cylinder, Development, FaceSpec, Ix, Plane, ProfileArc, ProfileLoop, Rolled, Surface, TopoId, Vertex,
     build_with_curves,
 };
-use datum_math::{Vec2, Vec3};
+use datum_math::{Sign, Vec2, Vec3, orient2d};
 
 use crate::cut::{Reach, between, from_face};
 use crate::sketch::{Placed, opposite_cylinder, profile_loops};
@@ -35,10 +35,21 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
     }
     let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return within() };
     let profiles = blank.laid(feature, sketch)?;
+    let loops = blank.outline(target)?;
+    // The blank's outline: the loop round the others (the cuts in it).
+    let outer = (0..loops.len())
+        .max_by(|&a, &b| loops[a].ring.area().abs().total_cmp(&loops[b].ring.area().abs()))
+        .ok_or_else(|| BrepError::Invalid("cut across a bend: the blank has no outline".into()))?;
+    // Without a K-factor the bends lie flat at no length: the outline beyond the sketch's face is
+    // no blank, and a cut off it is refused below.
+    let laid = blank.strips.iter().all(|s| !matches!(s.lay, Lay::Bend { neutral: None, .. }));
+    let open = laid && profiles.iter().any(|l| l.touches(&loops[outer].ring));
     // Within the sketch's face, a cut as before.
     let home = &blank.strips[blank.home];
     let inside = |p: &Vec2| home.lo < p.x && p.x < home.hi;
-    if profiles.iter().all(|l| l.points.iter().all(inside) && (0..l.points.len()).all(|k| l.arc(k).is_none_or(|a| arc_within(l, k, a, home)))) {
+    if !open
+        && profiles.iter().all(|l| l.points.iter().all(inside) && (0..l.points.len()).all(|k| l.arc(k).is_none_or(|a| arc_within(l, k, a, home))))
+    {
         return within();
     }
     let unsupported = |m: &str| BrepError::Unsupported(format!("cut across a bend: {m}"));
@@ -58,37 +69,54 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
             return Err(unsupported("a profile inside another"));
         }
     }
-    let edges = blank.outline(target)?;
-    let edge_boxes: Vec<_> = edges.iter().map(ProfileLoop::bounds).collect();
-    let mut winding = vec![0i32; profiles.len()];
+    let edge_boxes: Vec<_> = loops.iter().map(|l| l.ring.bounds()).collect();
     for (p, e) in between(&boxes, &edge_boxes) {
-        if profiles[p].touches(&edges[e]) {
-            return Err(unsupported("a profile meets an edge of the sheet or of another cut: a cut open to the edge comes later"));
+        let edge = &loops[e].ring;
+        if e == outer {
+            // Open to the edge of the sheet (D202): along its straight edges only.
+            if profiles[p].touches(edge) && edge.arcs.iter().any(Option::is_some) {
+                return Err(unsupported("a profile meets a rounded edge of the sheet: comes later"));
+            }
+            continue;
         }
-        if profiles[p].winding(edges[e].points[0]) != 0 {
+        if profiles[p].touches(edge) {
+            return Err(unsupported("a profile meets another cut: a cut over another comes later"));
+        }
+        if profiles[p].winding(edge.points[0]) != 0 {
             return Err(unsupported("a cut of the sheet lies inside a profile"));
         }
-        winding[p] += edges[e].winding(profiles[p].points[0]);
     }
-    if winding.contains(&0) {
-        return Err(unsupported("a profile leaves the sheet"));
+    if profiles.iter().any(|l| !l.touches(&loops[outer].ring) && loops[outer].ring.winding(l.points[0]) == 0) {
+        return Err(unsupported("a profile lies off the sheet"));
     }
 
-    // The pieces, and where they cross each bend line.
+    // The pieces on the sheet, and where they cross each bend line and each edge of the sheet.
     let mut pieces: Vec<Piece> = Vec::new();
     let mut seams: Vec<Vec<(f64, [TopoId; 2])>> = vec![Vec::new(); blank.strips.len() - 1];
+    let mut crossings: Vec<Vec<(Vec2, [TopoId; 2])>> = vec![Vec::new(); loops[outer].edges.len()];
     for l in &profiles {
-        blank.split(feature, l, &mut pieces, &mut seams)?;
+        blank.split(feature, l, &loops[outer], &mut pieces, &mut seams, &mut crossings)?;
     }
+    let he = |h: Ix| target.half_edges()[h as usize];
+    let rims: Vec<Rim> = loops[outer]
+        .edges
+        .iter()
+        .zip(crossings)
+        .filter(|(_, c)| !c.is_empty())
+        .map(|(&(h, strip), crossings)| Rim { h, strip, beyond: target.loops()[he(he(h).twin).loop_ix as usize].face, crossings })
+        .collect();
 
     // The body: new vertices and curves, the walls, the faces crossed built anew.
     let mut vertices: Vec<Vertex> = target.vertices().to_vec();
+    // Each new vertex once: a piece's start, or its end where the next piece is off the sheet.
+    let mut new: BTreeMap<TopoId, Vec3> = BTreeMap::new();
     let mut curves = target.curve_specs();
     let mut faces: Vec<FaceSpec> = Vec::new();
     for p in &pieces {
         let st = &blank.strips[p.strip];
         for layer in 0..2 {
-            vertices.push(Vertex { id: p.ends[0][layer], point: blank.point(p.strip, p.from, layer) });
+            new.insert(p.ends[0][layer], blank.point(p.strip, p.from, layer));
+            new.insert(p.ends[1][layer], blank.point(p.strip, p.to, layer));
         }
         let (v, w) = (p.ends[0], p.ends[1]);
         let surface = match &st.lay {
@@ -125,15 +153,43 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
         };
         faces.push(FaceSpec { id: p.wall, surface, loops: vec![vec![v[0], w[0], w[1], v[1]]] });
     }
-    let crossed: BTreeSet<usize> = pieces.iter().map(|p| p.strip).collect();
+    // Vertices of the body are kept as they are; a new one is a new point.
+    vertices.extend(
+        new.into_iter().filter(|(id, _)| target.vertices().binary_search_by_key(id, |v| v.id).is_err()).map(|(id, point)| Vertex { id, point }),
+    );
+    let cuts = Cuts { pieces, seams, rims, profiles };
+    let crossed: BTreeSet<usize> = cuts.pieces.iter().map(|p| p.strip).chain(cuts.rims.iter().map(|r| r.strip)).collect();
     let mut rebuilt: BTreeSet<Ix> = BTreeSet::new();
     for &i in &crossed {
         for side in 0..2 {
-            faces.extend(blank.rebuilt(target, i, side, &pieces, &seams, &profiles)?);
+            faces.extend(blank.rebuilt(target, i, side, &cuts)?);
             rebuilt.extend(blank.strips[i].faces[side].iter().copied());
         }
     }
+    // The faces across the sheet's thickness the profiles cross: its edges and ends.
+    let beyond: BTreeSet<Ix> = cuts.rims.iter().map(|r| r.beyond).collect();
+    for &t in &beyond {
+        faces.extend(blank.rim_face(target, t, &cuts)?);
+        rebuilt.insert(t);
+    }
     faces.extend((0..target.faces().len() as Ix).filter(|x| !rebuilt.contains(x)).map(|x| target.face_spec(x)));
+    if !cuts.rims.is_empty() {
+        // What a profile took whole: its vertices and curves go with it.
+        let mut used: BTreeSet<TopoId> = BTreeSet::new();
+        let mut edges: BTreeSet<(TopoId, TopoId)> = BTreeSet::new();
+        for l in faces.iter().flat_map(|f| f.loops.iter()) {
+            for (k, &v) in l.iter().enumerate() {
+                let w = l[(k + 1) % l.len()];
+                used.insert(v);
+                edges.insert((v.min(w), v.max(w)));
+            }
+        }
+        vertices.retain(|v| used.contains(&v.id));
+        curves.retain(|c| edges.contains(&(c.from.min(c.to), c.from.max(c.to))));
+    }
+    if !whole(&faces) {
+        return Err(unsupported("the cut divides the sheet into two parts: comes later"));
+    }
     build_with_curves(vertices, faces, curves)
 }
 
@@ -199,6 +255,106 @@ fn reach(l: &ProfileLoop) -> (f64, f64) {
     (lo, hi)
 }
 
+/// A line a profile is cut at: a bend line, or an edge of the blank's outline.
+#[derive(Clone, Copy)]
+enum Line {
+    Bend(usize),
+    Rim(usize),
+}
+
+/// Where segment `a`–`b` crosses segment `p`–`q`: its share of the way from `a`, and the point.
+/// Which side each end lies on is decided exactly; an end on the other segment, or the two along
+/// one line, is a contact the cut does not resolve.
+fn segment_crossing(a: Vec2, b: Vec2, p: Vec2, q: Vec2) -> Result<Option<(f64, Vec2)>, BrepError> {
+    let (sa, sb, sp, sq) = (orient2d(p, q, a), orient2d(p, q, b), orient2d(a, b, p), orient2d(a, b, q));
+    let apart = |x: Sign, y: Sign| x != Sign::Zero && y != Sign::Zero && x != y;
+    if apart(sa, sb) && apart(sp, sq) {
+        let (d, e) = (Vec2::new(b.x - a.x, b.y - a.y), Vec2::new(q.x - p.x, q.y - p.y));
+        let t = ((p.x - a.x) * e.y - (p.y - a.y) * e.x) / (d.x * e.y - d.y * e.x);
+        return Ok(Some((t, Vec2::new(a.x + d.x * t, a.y + d.y * t))));
+    }
+    // An end of the profile's segment on the edge is a corner of the profile there: see
+    // [`on_edge`].
+    let on = |s: Sign, x: Sign, y: Sign| s == Sign::Zero && x != y;
+    if on(sp, sa, sb) || on(sq, sa, sb) || [sa, sb, sp, sq].iter().all(|&s| s == Sign::Zero) {
+        let boxes = |u: Vec2, v: Vec2| (Vec2::new(u.x.min(v.x), u.y.min(v.y)), Vec2::new(u.x.max(v.x), u.y.max(v.y)));
+        if datum_brep::overlap(boxes(a, b), boxes(p, q)) {
+            return Err(BrepError::Degenerate("a profile touches an edge of the sheet at a corner, or runs along it".into()));
+        }
+    }
+    Ok(None)
+}
+
+/// Where the arc from `a` to `b` (of radius `r`) crosses segment `p`–`q`: each point with its
+/// share of the arc's turn from `a`. A tangent, or a crossing at an end of either, is a contact
+/// the cut does not resolve.
+fn arc_segment_crossings(a: Vec2, b: Vec2, arc: ProfileArc, r: f64, p: Vec2, q: Vec2) -> Result<Vec<(f64, Vec2)>, BrepError> {
+    let touch = || BrepError::Degenerate("a profile touches an edge of the sheet".into());
+    let (u, c) = (Vec2::new(q.x - p.x, q.y - p.y), arc.center);
+    let l2 = u.x * u.x + u.y * u.y;
+    let f = ((c.x - p.x) * u.x + (c.y - p.y) * u.y) / l2;
+    let foot = Vec2::new(p.x + u.x * f, p.y + u.y * f);
+    let d2 = (c.x - foot.x).powi(2) + (c.y - foot.y).powi(2);
+    if d2 > r * r {
+        return Ok(Vec::new());
+    }
+    if d2 == r * r {
+        return Err(touch());
+    }
+    let h = ((r * r - d2) / l2).sqrt();
+    let total = arc.turn(a, b);
+    let mut found: Vec<(f64, Vec2)> = [f - h, f + h].into_iter().map(|s| (s, Vec2::new(p.x + u.x * s, p.y + u.y * s))).collect();
+    // An end of the arc on the edge's line is one of the two: a corner of the profile there (see
+    // [`on_edge`]), not a crossing.
+    for end in [a, b] {
+        if orient2d(p, q, end) == Sign::Zero {
+            let near = (0..found.len()).min_by(|&i, &j| dist(found[i].1, end).total_cmp(&dist(found[j].1, end)));
+            if let Some(i) = near {
+                found.remove(i);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (s, x) in found {
+        if !(0.0..=1.0).contains(&s) {
+            continue;
+        }
+        let t = arc.turn(a, x) / total;
+        if t < 1.0 {
+            if s == 0.0 || s == 1.0 {
+                return Err(touch());
+            }
+            out.push((t, x));
+        }
+    }
+    Ok(out)
+}
+
+fn dist(a: Vec2, b: Vec2) -> f64 {
+    libm::hypot(a.x - b.x, a.y - b.y)
+}
+
+/// The edge of the outline `outer` corner `a` of a profile lies on, exactly; a corner on a corner
+/// of the outline is a contact the cut does not resolve.
+fn on_edge(a: Vec2, outer: &ProfileLoop) -> Result<Option<usize>, BrepError> {
+    let m = outer.points.len();
+    for e in (0..m).filter(|&e| outer.arc(e).is_none()) {
+        let (p, q) = (outer.points[e], outer.points[(e + 1) % m]);
+        if orient2d(p, q, a) != Sign::Zero {
+            continue;
+        }
+        let along = (a.x - p.x) * (q.x - p.x) + (a.y - p.y) * (q.y - p.y);
+        let length = (q.x - p.x).powi(2) + (q.y - p.y).powi(2);
+        if a == p || a == q {
+            return Err(BrepError::Degenerate("a corner of a profile lies on a corner of the sheet".into()));
+        }
+        if 0.0 < along && along < length {
+            return Ok(Some(e));
+        }
+    }
+    Ok(None)
+}
+
 /// Whether arc `k` of `l` stays between the bend lines of `strip`: it crosses neither.
 fn arc_within(l: &ProfileLoop, k: usize, arc: ProfileArc, strip: &Strip) -> bool {
     let (a, b) = (l.points[k], l.points[(k + 1) % l.points.len()]);
@@ -259,6 +415,32 @@ enum Lay {
     Bend { dev: Development, sign: f64, radii: [f64; 2], neutral: Option<f64> },
 }
 
+/// A closed loop of the blank's edges (its outline or a cut in it), and for each edge the
+/// half-edge of a face of the sketch's side it is and that face's strip.
+struct Outline {
+    ring: ProfileLoop,
+    edges: Vec<(Ix, usize)>,
+}
+
+/// Where profiles cross an edge of the blank's outline (D202): the half-edge of the sketch's
+/// side, its strip, the face beyond it (an edge or end of the sheet, across its thickness), and
+/// the crossings, each with its vertices on both sides of the sheet.
+struct Rim {
+    h: Ix,
+    strip: usize,
+    beyond: Ix,
+    crossings: Vec<(Vec2, [TopoId; 2])>,
+}
+
+/// What the profiles do to the sheet: their pieces on it, where they cross each bend line and
+/// each edge of the sheet, and the profiles themselves (on the blank).
+struct Cuts {
+    pieces: Vec<Piece>,
+    seams: Vec<Vec<(f64, [TopoId; 2])>>,
+    rims: Vec<Rim>,
+    profiles: Vec<ProfileLoop>,
+}
+
 /// The sheet laid flat from the sketch's face: its faces in order of `s`.
 struct Blank {
     o: Vec3,
@@ -276,7 +458,7 @@ impl Blank {
         let unsupported = |m: &str| BrepError::Unsupported(format!("cut across a bend: {m}"));
         let surface = |x: Ix| target.faces()[x as usize].surface;
         let mut front = chain_through(target, f)?;
-        let Some(bend) = front.iter().position(|s| matches!(surface(s[0]), Surface::Cylinder(_))) else { return Ok(None) };
+        let Some(bend) = front.iter().position(|s| matches!(surface(s[0]), Surface::Cylinder(_))) else { return Self::plate(target, &front, sketch) };
         let Surface::Cylinder(c0) = surface(front[bend][0]) else { return Ok(None) };
         let (across, _) =
             opposite_cylinder(target, front[bend][0] as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
@@ -391,6 +573,21 @@ impl Blank {
         Ok(Some(Self { o, a, e, thickness, strips, home }))
     }
 
+    /// The blank of a sheet without bends (a face of sheet metal, D195; D202): one strip, laid in
+    /// the sketch's own axes; the other side the sheet's other side. None for anything else.
+    fn plate(target: &Body, front: &[Vec<Ix>], sketch: &Placed) -> Result<Option<Self>, BrepError> {
+        let [home] = front else { return Ok(None) };
+        let Surface::Plane(p) = target.faces()[home[0] as usize].surface else { return Ok(None) };
+        let Ok(sides) = crate::unfold::sheet_sides(target) else { return Ok(None) };
+        let Some(&other) = sides.iter().find(|x| !home.contains(x)) else { return Ok(None) };
+        let Surface::Plane(q) = target.faces()[other as usize].surface else { return Ok(None) };
+        let [o, x, y, z] = sketch.frame;
+        let n = unit(p.normal);
+        let back = chain_through(target, other)?.concat();
+        let strip = Strip { faces: [home.clone(), back], lo: f64::NEG_INFINITY, hi: f64::INFINITY, lay: Lay::Plane { n: z, e: x, base: o, at: 0.0 } };
+        Ok(Some(Self { o, a: y, e: x, thickness: (p.origin - q.origin).dot(n), strips: vec![strip], home: 0 }))
+    }
+
     /// The profiles of `sketch` on the blank, counterclockwise.
     fn laid(&self, feature: TopoId, sketch: &Placed) -> Result<Vec<ProfileLoop>, BrepError> {
         let [_, x, y, _] = sketch.frame;
@@ -454,11 +651,11 @@ impl Blank {
 
     /// The edges of the blank on the sketch's side as closed loops: its outline and every cut in
     /// it, the bend lines left out.
-    fn outline(&self, target: &Body) -> Result<Vec<ProfileLoop>, BrepError> {
+    fn outline(&self, target: &Body) -> Result<Vec<Outline>, BrepError> {
         let he = |h: Ix| target.half_edges()[h as usize];
         let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
         let strip_of: BTreeMap<Ix, usize> = self.strips.iter().enumerate().flat_map(|(i, s)| s.faces[0].iter().map(move |&x| (x, i))).collect();
-        let mut next: BTreeMap<Ix, (Ix, Vec2, Option<ProfileArc>)> = BTreeMap::new();
+        let mut next: BTreeMap<Ix, (Ix, Vec2, Option<ProfileArc>, Ix, usize)> = BTreeMap::new();
         for (&x, &i) in &strip_of {
             for l in target.face_loops(x) {
                 for h in target.loop_half_edges(l) {
@@ -466,66 +663,98 @@ impl Blank {
                         continue;
                     }
                     let (v, w) = (he(h).origin, he(target.next(h)).origin);
-                    next.insert(v, (w, self.flat(i, target.point(v)), self.arc_of(target, i, h)?));
+                    next.insert(v, (w, self.flat(i, target.point(v)), self.arc_of(target, i, h)?, h, i));
                 }
             }
         }
         let mut loops = Vec::new();
         while let Some((&v0, _)) = next.iter().next() {
             let mut ring = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };
+            let mut edges = Vec::new();
             let mut v = v0;
-            while let Some((w, p, arc)) = next.remove(&v) {
+            while let Some((w, p, arc, h, i)) = next.remove(&v) {
                 ring.points.push(p);
                 ring.arcs.push(arc);
+                edges.push((h, i));
                 v = w;
             }
             if v != v0 {
                 return Err(BrepError::Invalid("cut across a bend: the blank's outline does not close".into()));
             }
-            loops.push(ring);
+            loops.push(Outline { ring, edges });
         }
         Ok(loops)
     }
 
-    /// Profile `l` cut into pieces at the bend lines, each crossing kept with its line.
-    fn split(&self, feature: TopoId, l: &ProfileLoop, pieces: &mut Vec<Piece>, seams: &mut [Vec<(f64, [TopoId; 2])>]) -> Result<(), BrepError> {
+    /// Profile `l` cut into pieces at the bend lines and at the edges of the blank's outline
+    /// `outer` (D202), each crossing kept with its line or edge; the pieces off the sheet left
+    /// out.
+    fn split(
+        &self,
+        feature: TopoId,
+        l: &ProfileLoop,
+        outer: &Outline,
+        pieces: &mut Vec<Piece>,
+        seams: &mut [Vec<(f64, [TopoId; 2])>],
+        rims: &mut [Vec<(Vec2, [TopoId; 2])>],
+    ) -> Result<(), BrepError> {
         let lines: Vec<f64> = self.strips[..self.strips.len() - 1].iter().map(|s| s.hi).collect();
         let n = l.points.len();
         let mut last: Option<TopoId> = None;
+        // Corners of the profile on an edge of the sheet, and whether each segment's first and
+        // last pieces are on the sheet.
+        let corners: Vec<Option<usize>> = l.points.iter().map(|&a| on_edge(a, &outer.ring)).collect::<Result<_, _>>()?;
+        let mut ends: Vec<[bool; 2]> = Vec::with_capacity(n);
         for k in 0..n {
+            let mut on_sheet = [false; 2];
             let (a, b, arc) = (l.points[k], l.points[(k + 1) % n], l.arc(k));
             if lines.contains(&a.x) {
                 return Err(BrepError::Degenerate("a corner of a profile lies on a bend line".into()));
             }
             let radius = arc.map_or(0.0, |c| libm::hypot(a.x - c.center.x, a.y - c.center.y));
-            let mut cuts: Vec<(f64, Vec2, usize)> = Vec::new();
+            let mut cuts: Vec<(f64, Vec2, Line)> = Vec::new();
             for (j, &s) in lines.iter().enumerate() {
                 match arc {
                     None => {
                         let (da, db) = (a.x - s, b.x - s);
                         if (da < 0.0) != (db < 0.0) {
                             let t = da / (da - db);
-                            cuts.push((t, Vec2::new(s, a.y + t * (b.y - a.y)), j));
+                            cuts.push((t, Vec2::new(s, a.y + t * (b.y - a.y)), Line::Bend(j)));
                         }
                     }
                     Some(c) => {
                         if (s - c.center.x).abs() == radius {
                             return Err(BrepError::Degenerate("a profile touches a bend line".into()));
                         }
-                        cuts.extend(arc_crossings(a, b, c, radius, s).into_iter().map(|(t, p)| (t, p, j)));
+                        cuts.extend(arc_crossings(a, b, c, radius, s).into_iter().map(|(t, p)| (t, p, Line::Bend(j))));
                     }
                 }
+            }
+            // The edges of the sheet it crosses: straight on the blank (its sides and ends).
+            let m = outer.ring.points.len();
+            for e in 0..m {
+                let (p, q) = (outer.ring.points[e], outer.ring.points[(e + 1) % m]);
+                let found = match (arc, outer.ring.arc(e)) {
+                    (None, None) => segment_crossing(a, b, p, q)?.into_iter().collect(),
+                    (Some(c), None) => arc_segment_crossings(a, b, c, radius, p, q)?,
+                    (_, Some(_)) => Vec::new(),
+                };
+                cuts.extend(found.into_iter().map(|(t, x)| (t, x, Line::Rim(e))));
             }
             cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
             let cross = |m: usize| [0, 1].map(|layer| TopoId::derive("cut.cross").id(feature).id(l.sides[k]).index(m as u64).index(layer).finish());
             let mut points = vec![(a, l.vertices[k])];
-            for (m, &(_, p, j)) in cuts.iter().enumerate() {
+            for (m, &(_, p, line)) in cuts.iter().enumerate() {
                 points.push((p, cross(m)));
-                seams[j].push((p.y, cross(m)));
+                match line {
+                    Line::Bend(j) => seams[j].push((p.y, cross(m))),
+                    Line::Rim(e) => rims[e].push((p, cross(m))),
+                }
             }
             points.push((b, l.vertices[(k + 1) % n]));
             // A circle's next arc goes on as its first did.
             let goes_on = k > 0 && matches!((l.arc(k - 1), arc), (Some(p), Some(q)) if p == q);
+            let count = points.len() - 1;
             for (i, w) in points.windows(2).enumerate() {
                 let ((from, v), (to, u)) = (w[0], w[1]);
                 let middle = match arc {
@@ -541,7 +770,29 @@ impl Blank {
                     _ => l.sides[k],
                 };
                 last = Some(wall);
+                // Off the sheet: no wall there.
+                let on = outer.ring.winding(middle) != 0;
+                if i == 0 {
+                    on_sheet[0] = on;
+                }
+                if i + 1 == count {
+                    on_sheet[1] = on;
+                }
+                if !on {
+                    continue;
+                }
                 pieces.push(Piece { from, to, middle, arc, radius, strip: self.strip(middle.x), ends: [v, u], wall });
+            }
+            ends.push(on_sheet);
+        }
+        // A corner on an edge where the profile goes off the sheet or onto it crosses the edge
+        // there; one with the sheet on both sides only touches it.
+        for (k, e) in corners.into_iter().enumerate() {
+            let Some(e) = e else { continue };
+            match (ends[(k + n - 1) % n][1], ends[k][0]) {
+                (true, true) => return Err(BrepError::Degenerate("a profile touches an edge of the sheet from inside".into())),
+                (false, false) => {}
+                _ => rims[e].push((l.points[k], l.vertices[k])),
             }
         }
         Ok(())
@@ -552,15 +803,8 @@ impl Blank {
     /// profile within it a hole. A face the profiles cross from one bend line to the other comes
     /// out in pieces (D201): the piece with the face's first vertex keeps its ID, the others take
     /// one from it and their lowest vertex; every hole goes to the piece around it.
-    fn rebuilt(
-        &self,
-        target: &Body,
-        i: usize,
-        side: usize,
-        pieces: &[Piece],
-        seams: &[Vec<(f64, [TopoId; 2])>],
-        profiles: &[ProfileLoop],
-    ) -> Result<Vec<FaceSpec>, BrepError> {
+    fn rebuilt(&self, target: &Body, i: usize, side: usize, cuts: &Cuts) -> Result<Vec<FaceSpec>, BrepError> {
+        let Cuts { pieces, seams, rims, profiles } = cuts;
         let members = &self.strips[i].faces[side];
         let he = |h: Ix| target.half_edges()[h as usize];
         let id = |v: Ix| target.vertices()[v as usize].id;
@@ -593,7 +837,25 @@ impl Blank {
                     None
                 };
                 let Some(j) = line else {
-                    link(id(u), id(v), at(u), self.arc_of(target, i, h)?)?;
+                    // An edge of the sheet, broken where profiles cross it (D202): the stretches
+                    // outside them.
+                    let cuts = self.on_rim(target, rims, i, side, h);
+                    if cuts.is_empty() {
+                        // Kept whole, unless a profile takes it whole.
+                        let middle = Vec2::new(0.5 * (at(u).x + at(v).x), 0.5 * (at(u).y + at(v).y));
+                        if rims.is_empty() || profiles.iter().all(|p| p.winding(middle) == 0) {
+                            link(id(u), id(v), at(u), self.arc_of(target, i, h)?)?;
+                        }
+                        continue;
+                    }
+                    let stops: Vec<(Vec2, TopoId)> =
+                        std::iter::once((at(u), id(u))).chain(cuts.iter().map(|c| (c.0, c.1[side]))).chain([(at(v), id(v))]).collect();
+                    for w in stops.windows(2) {
+                        let middle = Vec2::new(0.5 * (w[0].0.x + w[1].0.x), 0.5 * (w[0].0.y + w[1].0.y));
+                        if profiles.iter().all(|p| p.winding(middle) == 0) {
+                            link(w[0].1, w[1].1, w[0].0, None)?;
+                        }
+                    }
                     continue;
                 };
                 // Along the bend line, from crossing to crossing: the stretches outside the profiles.
@@ -674,6 +936,126 @@ impl Blank {
         Ok(out)
     }
 
+    /// Where profiles cross half-edge `h` of a face of side `side` of strip `i`, an edge of the
+    /// sheet: in order from its start, each with its vertices on both sides. On the sketch's side
+    /// the crossings found on `h` itself; across the sheet those of the same edge of the sheet
+    /// (the face beyond, the strip) that lie on `h` as the blank has it.
+    fn on_rim(&self, target: &Body, rims: &[Rim], i: usize, side: usize, h: Ix) -> Vec<(Vec2, [TopoId; 2])> {
+        let he = |h: Ix| target.half_edges()[h as usize];
+        let beyond = target.loops()[he(he(h).twin).loop_ix as usize].face;
+        let (u, v) = (self.flat(i, target.point(he(h).origin)), self.flat(i, target.point(he(target.next(h)).origin)));
+        let d = Vec2::new(v.x - u.x, v.y - u.y);
+        let along = |p: Vec2| ((p.x - u.x) * d.x + (p.y - u.y) * d.y) / (d.x * d.x + d.y * d.y);
+        let mut out: Vec<(f64, Vec2, [TopoId; 2])> = rims
+            .iter()
+            .filter(|r| if side == 0 { r.h == h } else { r.beyond == beyond && r.strip == i })
+            .flat_map(|r| r.crossings.iter())
+            .map(|&(p, ids)| (along(p), p, ids))
+            .filter(|c| side == 0 || (0.0 < c.0 && c.0 < 1.0))
+            .collect();
+        out.sort_by(|a, b| a.0.total_cmp(&b.0));
+        out.into_iter().map(|(_, p, ids)| (p, ids)).collect()
+    }
+
+    /// Face `t` across the sheet's thickness (an edge or an end of the sheet) with the profiles
+    /// crossing it (D202): its edges along the sheet's sides broken as theirs are, and across the
+    /// thickness at each crossing an edge the cut's wall shares. Cut in pieces, the one with its
+    /// first vertex keeps its ID, the others take one from it and their lowest vertex.
+    fn rim_face(&self, target: &Body, t: Ix, cuts: &Cuts) -> Result<Vec<FaceSpec>, BrepError> {
+        let Cuts { rims, profiles, .. } = cuts;
+        let spec = target.face_spec(t);
+        let he = |h: Ix| target.half_edges()[h as usize];
+        let id = |v: Ix| target.vertices()[v as usize].id;
+        let mut next: BTreeMap<TopoId, TopoId> = BTreeMap::new();
+        let link = |next: &mut BTreeMap<TopoId, TopoId>, from: TopoId, to: TopoId| match next.insert(from, to) {
+            Some(_) => Err(BrepError::Invalid("cut to the edge: two edges leave one vertex of a face".into())),
+            None => Ok(()),
+        };
+        let mut pairs: Vec<[TopoId; 2]> = Vec::new();
+        // Where each vertex of the sheet's faces is on the blank.
+        let mut on_blank: BTreeMap<Ix, Vec2> = BTreeMap::new();
+        for (i, st) in self.strips.iter().enumerate() {
+            for &x in st.faces.iter().flatten() {
+                for v in target.loop_half_edges(target.faces()[x as usize].first_loop).map(|h| he(h).origin) {
+                    on_blank.entry(v).or_insert_with(|| self.flat(i, target.point(v)));
+                }
+            }
+        }
+        let taken = |p: Vec2| profiles.iter().any(|l| l.winding(p) != 0);
+        for l in target.face_loops(t) {
+            for g in target.loop_half_edges(l) {
+                let (a, b) = (he(g).origin, he(target.next(g)).origin);
+                let twin = he(g).twin;
+                let face = target.loops()[he(twin).loop_ix as usize].face;
+                let found = self.strips.iter().enumerate().find_map(|(i, st)| (0..2).find(|&s| st.faces[s].contains(&face)).map(|s| (i, s)));
+                let cuts = found.map(|(i, s)| (i, s, self.on_rim(target, rims, i, s, twin))).filter(|c| !c.2.is_empty());
+                let Some((i, side, mut cuts)) = cuts else {
+                    // Kept whole, unless a profile takes it: along the sheet its middle, across the
+                    // thickness the point of the blank it stands at.
+                    let gone = match (on_blank.get(&a), on_blank.get(&b)) {
+                        (Some(&p), Some(&q)) if found.is_some() => taken(Vec2::new(0.5 * (p.x + q.x), 0.5 * (p.y + q.y))),
+                        (Some(&p), _) | (_, Some(&p)) => taken(p),
+                        _ => false,
+                    };
+                    if !gone {
+                        link(&mut next, id(a), id(b))?;
+                    }
+                    continue;
+                };
+                // The sheet's face runs the edge the other way.
+                cuts.reverse();
+                pairs.extend(cuts.iter().map(|c| c.1));
+                let at = |v: Ix| self.flat(i, target.point(v));
+                let stops: Vec<(Vec2, TopoId)> =
+                    std::iter::once((at(a), id(a))).chain(cuts.iter().map(|c| (c.0, c.1[side]))).chain([(at(b), id(b))]).collect();
+                for w in stops.windows(2) {
+                    let middle = Vec2::new(0.5 * (w[0].0.x + w[1].0.x), 0.5 * (w[0].0.y + w[1].0.y));
+                    if profiles.iter().all(|p| p.winding(middle) == 0) {
+                        link(&mut next, w[0].1, w[1].1)?;
+                    }
+                }
+            }
+        }
+        // Across the thickness where a stretch ends at a crossing and the other side's begins;
+        // each crossing is met on both sides.
+        pairs.sort();
+        pairs.dedup();
+        let ends: Vec<TopoId> = pairs.iter().flatten().copied().filter(|c| !next.contains_key(c)).collect();
+        for [c0, c1] in pairs {
+            if ends.contains(&c0) {
+                link(&mut next, c0, c1)?;
+            } else if ends.contains(&c1) {
+                link(&mut next, c1, c0)?;
+            }
+        }
+        let first = spec.loops[0][0];
+        let mut out = Vec::new();
+        while let Some((&v0, _)) = next.iter().next() {
+            let mut cycle = Vec::new();
+            let mut v = v0;
+            while let Some(w) = next.remove(&v) {
+                cycle.push(v);
+                v = w;
+            }
+            if v != v0 {
+                return Err(BrepError::Invalid("cut to the edge: a face's outline does not close".into()));
+            }
+            out.push(cycle);
+        }
+        let several = out.len() > 1;
+        Ok(out
+            .into_iter()
+            .map(|cycle| {
+                let face = if !several || cycle.contains(&first) {
+                    spec.id
+                } else {
+                    TopoId::derive("sheet.divided").id(spec.id).id(cycle.iter().min().copied().unwrap_or(spec.id)).finish()
+                };
+                FaceSpec { id: face, surface: spec.surface, loops: vec![cycle] }
+            })
+            .collect())
+    }
+
     /// Loop `l` of a face of strip `i` as the blank has it, its arcs too.
     fn region(&self, target: &Body, i: usize, l: Ix) -> Result<ProfileLoop, BrepError> {
         let mut ring = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };
@@ -683,6 +1065,36 @@ impl Blank {
         }
         Ok(ring)
     }
+}
+
+/// Whether every face is reached from the first across the edges they share: one piece.
+fn whole(faces: &[FaceSpec]) -> bool {
+    let mut by_edge: BTreeMap<(TopoId, TopoId), Vec<usize>> = BTreeMap::new();
+    for (x, f) in faces.iter().enumerate() {
+        for l in &f.loops {
+            for (k, &v) in l.iter().enumerate() {
+                let w = l[(k + 1) % l.len()];
+                by_edge.entry((v.min(w), v.max(w))).or_default().push(x);
+            }
+        }
+    }
+    let mut seen = vec![false; faces.len()];
+    let mut todo = vec![0];
+    seen[0] = !faces.is_empty();
+    while let Some(x) = todo.pop() {
+        for l in &faces[x].loops {
+            for (k, &v) in l.iter().enumerate() {
+                let w = l[(k + 1) % l.len()];
+                for &y in &by_edge[&(v.min(w), v.max(w))] {
+                    if !seen[y] {
+                        seen[y] = true;
+                        todo.push(y);
+                    }
+                }
+            }
+        }
+    }
+    seen.into_iter().all(|s| s)
 }
 
 fn unit(v: Vec3) -> Vec3 {

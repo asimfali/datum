@@ -306,16 +306,19 @@ fn a_second_hole_along_the_same_bend() {
     assert_eq!(pieces(&mut s, "second_cut")[2], 2);
 }
 
-/// A hole across a bend and the sheet's edge is refused, not cut.
+/// A hole across a bend and the sheet's edge is a notch there (D202): cut, the blank's edge broken
+/// by its arcs.
 #[test]
-fn a_hole_across_a_bend_and_an_edge_is_refused() {
+fn a_hole_across_a_bend_and_an_edge_is_cut() {
     let mut s = l_sheet("bend_cut_edge");
     let flat = first_wall(&mut s, "l").flat;
     let r = punch_circle(&mut s, "l", "hole", flat - 2.0, 3.0, 10.0);
-    assert!(failure(&r).contains("edge of the sheet"), "{r}");
+    assert_cut(&r);
+    let [lines, arcs, circles] = pieces(&mut s, "hole_cut");
+    assert!(lines == 5 && arcs >= 1 && circles == 0, "{lines} {arcs} {circles}");
 }
 
-/// A slot from one end of the bend to the other reaches the sheet's edges.
+/// A slot from one end of the bend to the other cuts the sheet in two: refused for now (D202).
 #[test]
 fn a_slot_along_the_whole_bend_is_refused() {
     let mut s = l_sheet("bend_cut_slot");
@@ -326,7 +329,7 @@ fn a_slot_along_the_whole_bend_is_refused() {
         "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
     run(&mut s, "add", json!({"name": "slot", "op": "sketch", "inputs": ["l"], "face": wall.id, "sketch": sketch}));
     let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "slot", "mode": "cut", "through": true, "wall": true}));
-    assert!(failure(&r).contains("edge"), "{r}");
+    assert!(failure(&r).contains("two parts"), "{r}");
 }
 
 /// A rule without a K-factor: a cut across a bend asks for one.
