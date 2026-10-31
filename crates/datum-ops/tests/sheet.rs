@@ -174,8 +174,13 @@ fn names_stay_and_bad_paths_are_refused() {
         serde_json::json!({"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}}),
     );
     assert!(matches!(refused(straight, 2.0), BrepError::Degenerate(m) if m.contains("one line")));
-    let rolled = serde_json::json!({"points": {"o": [0, 0], "a": [10, 0], "b": [0, 10]}, "arcs": {"r": {"center": "o", "from": "a", "to": "b"}}});
-    assert!(matches!(refused(rolled, 2.0), BrepError::Unsupported(_)));
+    // An arc meeting a line not tangent to it: a bend next to an arc comes later (D200).
+    let kinked = serde_json::json!({"points": {"o": [0, 0], "a": [10, 0], "b": [0, 10], "c": [20, 10]},
+        "arcs": {"r": {"center": "o", "from": "a", "to": "b"}}, "lines": {"l": {"from": "b", "to": "c"}}});
+    assert!(matches!(refused(kinked, 2.0), BrepError::Unsupported(m) if m.contains("make them tangent")));
+    // An arc tighter than the sheet is thick.
+    let tight = serde_json::json!({"points": {"o": [0, 0], "a": [1, 0], "b": [0, 1]}, "arcs": {"r": {"center": "o", "from": "a", "to": "b"}}});
+    assert!(matches!(refused(tight, 2.0), BrepError::Degenerate(m) if m.contains("too tight")));
 }
 
 fn plate_with_hole() -> Body {
@@ -222,4 +227,83 @@ fn a_sheets_sides_and_bend_lines() {
     let cube =
         op(serde_json::json!({"op": "prism", "polygon": [[0, 0], [10, 0], [10, 10], [0, 10]], "z0": 0, "z1": 10})).eval(id("cube"), &[]).unwrap();
     assert!(matches!(sheet_sides(cube.body().unwrap()), Err(BrepError::Unsupported(_))));
+}
+
+/// The author's shape: a line, a bend, a line, a rolled section of radius `big`, a line, a bend, a
+/// line. The arc is tangent to both its neighbours by constraint.
+fn rolled_path(big: f64) -> serde_json::Value {
+    let (cx, top) = (100.0 - big, 300.0 + big);
+    serde_json::json!({
+        "points": {"o": [0, 0], "p1": [100, 0], "p2": [100, 300], "c": [cx, 300], "p3": [cx, top],
+            "p5": [cx - 150.0, top], "p6": [cx - 170.0, top + 20.0]},
+        "lines": {"l1": {"from": "o", "to": "p1"}, "l2": {"from": "p1", "to": "p2"}, "l3": {"from": "p3", "to": "p5"}, "l4": {"from": "p5", "to": "p6"}},
+        "arcs": {"a1": {"center": "c", "from": "p2", "to": "p3"}},
+        "constraints": [{"type": "tangent", "curves": ["l2", "a1"]}, {"type": "tangent", "curves": ["a1", "l3"]}]
+    })
+}
+
+/// A path with an arc rolls: the blank is the lines less the bends' set-backs, each bend and the
+/// rolled section by its neutral arc, on either side.
+#[test]
+fn a_path_with_a_tangent_arc_rolls() {
+    use datum_ops::unfold_side;
+    let (t, r, k, big, width) = (2.0, 2.0, 0.44, 100.0, 200.0);
+    for (side, want) in [("left", 730.7335979232028), ("right", 736.2183363273002)] {
+        let b = sheet_of(rolled_path(big), side, t, r, width).unwrap();
+        let flat = unfold_side(&b, false, k).unwrap();
+        // The material is left of the path or right of it; the path turns left at the first bend
+        // and the rolled section, right at the last.
+        let (d0, d1) = if side == "left" { (0.0, t) } else { (-t, 0.0) };
+        let (first, last) = (r + d1, r - d0);
+        let (phi_last, lines) = (FRAC_PI_4, [100.0, 300.0, 150.0, 800.0_f64.sqrt()]);
+        let back_last = last * libm::tan(0.5 * phi_last);
+        let straight = lines[0] - first + lines[1] - first + lines[2] - back_last + lines[3] - back_last;
+        let neutral = FRAC_PI_2 * (r + k * t) + FRAC_PI_2 * (big - d1 + k * t) + phi_last * (r + k * t);
+        let w = straight + neutral;
+        assert!(close(w, want), "{side}: {w} vs {want}");
+        assert!(close(flat.size.x, w) && close(flat.size.y, width), "{side}: {:?} vs {w}", flat.size);
+        assert_eq!(flat.counts(), [4, 0, 0], "{side}");
+        assert_eq!(flat.bends.len(), 6, "{side}");
+    }
+}
+
+/// The rolled section's radius is a dimension: changing it keeps every face's name.
+#[test]
+fn a_rolled_sections_faces_keep_their_names() {
+    let ids = |b: &Body| b.faces().iter().map(|f| f.id).collect::<Vec<_>>();
+    let a = sheet_of(rolled_path(100.0), "left", 2.0, 2.0, 200.0).unwrap();
+    let b = sheet_of(rolled_path(80.0), "left", 2.0, 2.0, 200.0).unwrap();
+    assert_eq!(ids(&a), ids(&b));
+    assert_ne!(a.hash(), b.hash());
+    // The rolled section's two faces are cylinders.
+    assert!(a.faces().iter().filter(|f| matches!(f.surface, Surface::Cylinder(_))).count() >= 4);
+}
+
+/// An arc turning left, then one turning right: an S between two lines.
+#[test]
+fn two_tangent_arcs_make_an_s() {
+    use datum_ops::unfold_side;
+    let path = serde_json::json!({
+        "points": {"o": [0, 0], "p1": [100, 0], "c1": [100, 50], "p2": [150, 50], "c2": [200, 50], "p3": [200, 100], "p4": [300, 100]},
+        "lines": {"l1": {"from": "o", "to": "p1"}, "l2": {"from": "p3", "to": "p4"}},
+        "arcs": {"a1": {"center": "c1", "from": "p1", "to": "p2"}, "a2": {"center": "c2", "from": "p3", "to": "p2"}},
+        "constraints": [
+            {"type": "tangent", "curves": ["l1", "a1"]}, {"type": "tangent", "curves": ["a1", "a2"]}, {"type": "tangent", "curves": ["a2", "l2"]}
+        ]
+    });
+    let b = sheet_of(path, "left", 2.0, 2.0, 100.0).unwrap();
+    let flat = unfold_side(&b, false, 0.44).unwrap();
+    assert_eq!(flat.counts(), [4, 0, 0]);
+    // Two lines of 100 and two quarter turns of the path's radius 50: the inner face of the left
+    // turn is at 48, of the right turn, at 50; neutral radii add K·t to it.
+    let want = 200.0 + FRAC_PI_2 * (48.0 + 0.88) + FRAC_PI_2 * (50.0 + 0.88);
+    assert!(close(flat.size.x, want), "{} vs {want}", flat.size.x);
+}
+
+/// Without the tangent constraints the arc is not known to join its lines smoothly.
+#[test]
+fn an_arc_without_tangent_constraints_is_refused() {
+    let mut path = rolled_path(100.0);
+    path.as_object_mut().unwrap().remove("constraints");
+    assert!(matches!(sheet_of(path, "left", 2.0, 2.0, 200.0), Err(BrepError::Unsupported(m)) if m.contains("make them tangent")));
 }

@@ -1,0 +1,95 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [
+            0,
+            0
+          ],
+          "p1": [
+            100,
+            0
+          ],
+          "p2": [
+            100,
+            300
+          ],
+          "c": [
+            0,
+            300
+          ],
+          "p3": [
+            0,
+            400
+          ],
+          "p5": [
+            -150,
+            400
+          ],
+          "p6": [
+            -170,
+            420
+          ]
+        },
+        "lines": {
+          "l1": {
+            "from": "o",
+            "to": "p1"
+          },
+          "l2": {
+            "from": "p1",
+            "to": "p2"
+          },
+          "l3": {
+            "from": "p3",
+            "to": "p5"
+          },
+          "l4": {
+            "from": "p5",
+            "to": "p6"
+          }
+        },
+        "arcs": {
+          "a1": {
+            "center": "c",
+            "from": "p2",
+            "to": "p3"
+          }
+        },
+        "constraints": [
+          {
+            "type": "tangent",
+            "curves": [
+              "l2",
+              "a1"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "a1",
+              "l3"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "rolled",
+      "op": "sheet",
+      "inputs": [
+        "path"
+      ],
+      "thickness": 2,
+      "radius": 2,
+      "side": "left",
+      "z0": 0,
+      "z1": 200
+    }
+  ]
+}

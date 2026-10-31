@@ -6511,6 +6511,25 @@ mod tests {
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("sheet", p) if p == flipped)));
     }
 
+    /// An arc on the chain (a rolled section, D200): E on it asks for sheet metal along the
+    /// chain, not for a face that has no closed contour to take.
+    #[test]
+    fn e_on_an_arc_of_an_open_chain_makes_sheet_metal() {
+        let (mut h, inbox) = with_open_chain("l2", Some("Лист"));
+        let p = h.state_mut().sketch.as_mut().unwrap().placed.as_mut().unwrap();
+        for (n, at) in [("q4", [300.0, 100.0]), ("q5", [250.0, 100.0])] {
+            p.solved.points.insert(n.into(), datum_math::Vec2::new(at[0], at[1]));
+        }
+        p.arcs.insert("a1".into(), serde_json::from_value(json!({"center": "q5", "from": "q3", "to": "q4"})).unwrap());
+        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve("a1".into())];
+        h.run();
+        inbox.try_iter().for_each(drop);
+        h.key_press(egui::Key::E);
+        h.run();
+        let sheet = inbox.try_iter().find_map(|r| if let Request::Preview(Some(("sheet", p))) = r { Some(p) } else { None });
+        assert_eq!(sheet.expect("a sheet preview")["path"], "a1");
+    }
+
     /// Without a sheet rule chosen the form refuses: no preview, and Enter makes nothing.
     #[test]
     fn sheet_metal_needs_a_sheet_rule() {
