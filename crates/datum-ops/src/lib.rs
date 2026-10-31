@@ -127,13 +127,14 @@ pub enum Op {
         #[serde(default = "zero")]
         offset: Num,
     },
-    /// Flanges (M8, D205) on end faces `faces` of the input sheet metal: a bend of inner `radius`
-    /// (the part's rule's, put here when the model is built) turning by `angle` degrees toward
-    /// the sheet's front side (`flip`: the other), and a wall beyond it, `height` from the outer
-    /// surface of the sheet (for a right angle; else along the flange from where its outer
-    /// surface meets the sheet's). One input: the sheet.
+    /// Flanges (M8, D205) on edges `edges` of the input sheet metal: an end's long edge, or a
+    /// wall's edge on the sheet's side face (along the wall, outward). A bend of inner `radius`
+    /// (the part's rule's, put here when the model is built) turning by `angle` degrees (an end:
+    /// toward the sheet's front side; a wall: outward; `flip`: the other way), and a wall beyond
+    /// it, `height` from the outer surface of the sheet (for a right angle; else along the flange
+    /// from where its outer surface meets the sheet's). One input: the sheet.
     Flange {
-        faces: Vec<String>,
+        edges: Vec<String>,
         height: Num,
         #[serde(default = "right_angle")]
         angle: Num,
@@ -388,8 +389,8 @@ impl Op {
                 path: path.clone(),
                 start: start.clone(),
             },
-            Self::Flange { faces, height, angle, radius, flip } => Self::Flange {
-                faces: faces.clone(),
+            Self::Flange { edges, height, angle, radius, flip } => Self::Flange {
+                edges: edges.clone(),
                 height: r(height, "height")?,
                 angle: r(angle, "angle")?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
@@ -542,10 +543,10 @@ impl Op {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
-            Self::Flange { faces, height, angle, radius, flip } => {
+            Self::Flange { edges, height, angle, radius, flip } => {
                 let Some(radius) = radius else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let dims = FlangeDims { height: num(height)?, angle: num(angle)?, radius: num(radius)?, flip: *flip };
-                flanges(feature, inputs[0], faces, dims)?
+                flanges(feature, inputs[0], edges, dims)?
             }
             // Made above, before inputs are taken as bodies.
             Self::Plane { .. } => return Err(BrepError::Invalid("a plane is no body".into())),

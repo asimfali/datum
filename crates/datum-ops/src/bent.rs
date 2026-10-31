@@ -165,6 +165,11 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
     vertices.extend(
         new.into_iter().filter(|(id, _)| target.vertices().binary_search_by_key(id, |v| v.id).is_err()).map(|(id, point)| Vertex { id, point }),
     );
+    // A flange on the sheet's side (D205) is laid off the blank: a cut reaching it comes later.
+    let flanges = crate::unfold::branches(target);
+    if rims.iter().any(|r| flanges.contains(&r.beyond)) || gone.iter().any(|t| flanges.contains(t)) {
+        return Err(unsupported("a cut reaching a flange on the sheet's side comes later"));
+    }
     let cuts = Cuts { open: !rims.is_empty() || !gone.is_empty(), pieces, seams, rims, profiles };
     // The curves of curved edges cut in pieces, a piece each.
     let mut split: Vec<CurveSpec> = Vec::new();
@@ -581,12 +586,13 @@ impl Blank {
     fn new(target: &Body, f: Ix, sketch: &Placed) -> Result<Option<Self>, BrepError> {
         let unsupported = |m: &str| BrepError::Unsupported(format!("cut across a bend: {m}"));
         let surface = |x: Ix| target.faces()[x as usize].surface;
-        let mut front = chain_through(target, f)?;
+        let skip = crate::unfold::branches(target);
+        let mut front = chain_through(target, f, &skip)?;
         let Some(bend) = front.iter().position(|s| matches!(surface(s[0]), Surface::Cylinder(_))) else { return Self::plate(target, &front, sketch) };
         let Surface::Cylinder(c0) = surface(front[bend][0]) else { return Ok(None) };
         let (across, _) =
             opposite_cylinder(target, front[bend][0] as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-        let mut back = chain_through(target, across)?;
+        let mut back = chain_through(target, across, &skip)?;
         // The other side strip by strip: a bend across each bend, a wall across each wall.
         let paired = |back: &[Vec<Ix>]| {
             back.len() == front.len()
@@ -707,7 +713,7 @@ impl Blank {
         let Surface::Plane(q) = target.faces()[other as usize].surface else { return Ok(None) };
         let [o, x, y, z] = sketch.frame;
         let n = unit(p.normal);
-        let back = chain_through(target, other)?.concat();
+        let back = chain_through(target, other, &crate::unfold::branches(target))?.concat();
         let strip = Strip { faces: [home.clone(), back], lo: f64::NEG_INFINITY, hi: f64::INFINITY, lay: Lay::Plane { n: z, e: x, base: o, at: 0.0 } };
         Ok(Some(Self { o, a: y, e: x, thickness: (p.origin - q.origin).dot(n), strips: vec![strip], home: 0 }))
     }

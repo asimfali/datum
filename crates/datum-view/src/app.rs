@@ -712,7 +712,7 @@ struct Viewer {
     /// The points a work plane through three is picked by so far (D204), as the model's spots.
     plane_points: Vec<(Json, datum_math::Vec3)>,
     /// The ends of sheet metal picked for a flange (D205): the body's feature and the face.
-    flange_faces: Vec<(String, datum_brep::TopoId)>,
+    flange_edges: Vec<(String, datum_brep::TopoId)>,
     /// A flange being asked for: its form.
     flange: Option<FlangeForm>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
@@ -741,8 +741,8 @@ struct FlangeForm {
 }
 
 /// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
-fn flange_params(name: &str, body: &str, faces: &[String], height: &str, angle: &str, flip: bool) -> Json {
-    json!({"name": name, "op": "flange", "inputs": [body], "faces": faces, "height": value_of(height), "angle": value_of(angle), "flip": flip})
+fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool) -> Json {
+    json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip})
 }
 
 /// What the form of E makes, decided when it opens.
@@ -1031,7 +1031,7 @@ impl Viewer {
             under: None,
             plane_draft: None,
             plane_points: Vec::new(),
-            flange_faces: Vec::new(),
+            flange_edges: Vec::new(),
             flange: None,
             extrusion: None,
             contour_hint: None,
@@ -2904,7 +2904,7 @@ impl Viewer {
             }
         };
         if self.sketch.is_none() {
-            for (feature, face) in &self.flange_faces {
+            for (feature, face) in &self.flange_edges {
                 if let Some(body) = m.bodies.iter().position(|b| b == feature) {
                     tint(*face, body, 150);
                 }
@@ -3056,8 +3056,8 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.picking = None;
                 self.plane_points.clear();
-                self.flange_faces.clear();
-            } else if self.picking == Some(Purpose::Flange) && !self.flange_faces.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.flange_edges.clear();
+            } else if self.picking == Some(Purpose::Flange) && !self.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.open_flange();
             }
         }
@@ -3108,17 +3108,17 @@ impl Viewer {
                 let Some(feature) = body(self, f) else { return };
                 if self.extrusion.is_some() {
                     self.extrusion = None;
-                    self.flange_faces.clear();
+                    self.flange_edges.clear();
                 }
                 self.picking = Some(Purpose::Flange);
                 let pick = (feature, f.face);
-                let same_body = self.flange_faces.first().is_none_or(|(b, _)| *b == pick.0);
+                let same_body = self.flange_edges.first().is_none_or(|(b, _)| *b == pick.0);
                 if !crate::select::adding(&ui.input(|i| i.modifiers)) || !same_body {
-                    self.flange_faces = vec![pick];
-                } else if let Some(k) = self.flange_faces.iter().position(|p| *p == pick) {
-                    self.flange_faces.remove(k);
+                    self.flange_edges = vec![pick];
+                } else if let Some(k) = self.flange_edges.iter().position(|p| *p == pick) {
+                    self.flange_edges.remove(k);
                 } else {
-                    self.flange_faces.push(pick);
+                    self.flange_edges.push(pick);
                 }
             }
             Some((Purpose::Flange, _)) => {}
@@ -3270,7 +3270,7 @@ impl Viewer {
     /// used yet, else the one clicked in the tree.
     fn extrude(&mut self, at: egui::Pos2) {
         // Ends of sheet metal picked: a flange on them, not an extrusion.
-        if self.sketch.is_none() && !self.flange_faces.is_empty() {
+        if self.sketch.is_none() && !self.flange_edges.is_empty() {
             self.open_flange();
             return;
         }
@@ -3381,12 +3381,12 @@ impl Viewer {
     /// Esc or Cancel drops it.
     fn flange_window(&mut self, ctx: &egui::Context) {
         let Some(f) = &mut self.flange else { return };
-        let Some((body, _)) = self.flange_faces.first().cloned() else {
+        let Some((body, _)) = self.flange_edges.first().cloned() else {
             self.flange = None;
             return;
         };
-        let faces: Vec<String> = self.flange_faces.iter().map(|(_, id)| format!("{id:?}")).collect();
-        let params = flange_params(&f.name, &body, &faces, &f.height, &f.angle, f.flip);
+        let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
+        let params = flange_params(&f.name, &body, &edges, &f.height, &f.angle, f.flip);
         // The preview of what the form says now; until it comes, none.
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
@@ -3430,15 +3430,15 @@ impl Viewer {
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if cancel || esc {
             self.flange = None;
-            self.flange_faces.clear();
+            self.flange_edges.clear();
             self.send(Request::Preview(None));
         } else if (add || enter) && ok {
             self.flange = None;
-            self.flange_faces.clear();
+            self.flange_edges.clear();
             self.send(Request::Preview(None));
             self.send(Request::Command("add", params));
         } else if f.sent.as_ref() != Some(&params) {
-            let params = flange_params(&f.name, &body, &faces, &f.height, &f.angle, f.flip);
+            let params = flange_params(&f.name, &body, &edges, &f.height, &f.angle, f.flip);
             f.sent = Some(params.clone());
             self.send(Request::Preview(Some(("add", params))));
         }
@@ -5279,7 +5279,7 @@ mod tests {
             under: None,
             plane_draft: None,
             plane_points: Vec::new(),
-            flange_faces: Vec::new(),
+            flange_edges: Vec::new(),
             flange: None,
             extrusion: None,
             contour_hint: None,
@@ -6848,7 +6848,7 @@ mod tests {
         let faces = ["ab".to_string(), "cd".to_string()];
         assert_eq!(
             flange_params("flange1", "sheet1", &faces, "20", "h + 5", true),
-            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "faces": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true})
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true})
         );
     }
 
@@ -6858,7 +6858,7 @@ mod tests {
         let (v, inbox) = viewer("symmetric_plate.json");
         let face = datum_brep::TopoId(0xab);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.flange_window(ui.ctx()), v);
-        h.state_mut().flange_faces = vec![("sheet1".into(), face)];
+        h.state_mut().flange_edges = vec![("sheet1".into(), face)];
         h.state_mut().open_flange();
         h.run();
         h.get_by_label("Height");
@@ -6870,8 +6870,8 @@ mod tests {
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
         let made = sent.iter().find_map(|r| if let Request::Command("add", p) = r { Some(p) } else { None }).expect("the flange");
-        assert_eq!((&made["op"], &made["faces"]), (&json!("flange"), &json!([format!("{face:?}")])));
-        assert!(h.state().flange.is_none() && h.state().flange_faces.is_empty());
+        assert_eq!((&made["op"], &made["edges"]), (&json!("flange"), &json!([format!("{face:?}")])));
+        assert!(h.state().flange.is_none() && h.state().flange_edges.is_empty());
     }
 
     /// Esc while ends are picked for a flange drops them and stops picking.
@@ -6879,7 +6879,7 @@ mod tests {
     fn escape_drops_the_ends_picked() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
         v.pick(Purpose::Flange);
-        v.flange_faces = vec![("sheet1".into(), datum_brep::TopoId(0xab))];
+        v.flange_edges = vec![("sheet1".into(), datum_brep::TopoId(0xab))];
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -6890,7 +6890,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::Escape);
         h.run();
-        assert!(h.state().picking.is_none() && h.state().flange_faces.is_empty());
+        assert!(h.state().picking.is_none() && h.state().flange_edges.is_empty());
     }
 
     /// An arc on the chain (a rolled section, D200): E on it asks for sheet metal along the

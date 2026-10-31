@@ -188,7 +188,7 @@ pub const ACTIONS: [Action; 44] = [
         plain(Key::CloseBracket),
         Model,
     ),
-    action(Act::Flange, "sheet.flange", "Flange", "A bend and a wall on ends of sheet metal: click its ends (Shift adds), Enter", None, Model),
+    action(Act::Flange, "sheet.flange", "Flange", "A bend and a wall on edges of sheet metal: its ends or its walls along its sides; click the edges (Shift adds), Enter", None, Model),
     action(Act::SideBar, "view.side_bar", "Side bar", "The sections of the icon chosen on the activity bar", ctrl(Key::B), Anywhere),
     action(Act::SideBarRight, "view.side_bar_right", "Side bar on the right", "The activity bar and side bar at the right edge", None, Anywhere),
     action(

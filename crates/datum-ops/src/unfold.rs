@@ -67,6 +67,27 @@ struct Laid {
     face: Ix,
     u0: f64,
     lay: Lay,
+    /// A flange on the sheet's side (D205): laid across X from its wall, whose `lay` it has.
+    branch: Option<Branch>,
+}
+
+/// A face of a flange on the sheet's side: its Y from the line it stands on (`y0`), away from the
+/// sheet (`sign`), along its bend's neutral layer and then its wall.
+#[derive(Clone, Copy)]
+struct Branch {
+    y0: f64,
+    sign: f64,
+    part: Part,
+}
+
+#[derive(Clone, Copy)]
+enum Part {
+    /// The bend: a point of its axis, the unit axis it turns about away from the wall, the unit
+    /// direction across the axis where it starts, the radius of its neutral layer.
+    Bend { origin: Vec3, axis: Vec3, start: Vec3, neutral: f64 },
+    /// The wall: a point of its line on the bend, its unit direction away from it, and the bend's
+    /// length before it.
+    Wall { start: Vec3, dir: Vec3, offset: f64 },
 }
 
 #[derive(Clone, Copy)]
@@ -79,6 +100,20 @@ enum Lay {
 }
 
 impl Laid {
+    /// Where `p`, a point of the face, lies on the blank, Y of the sheet's own faces being `y`.
+    fn at(&self, p: Vec3, y: impl Fn(Vec3) -> f64) -> Vec2 {
+        let Some(b) = self.branch else { return Vec2::new(self.x(p), y(p)) };
+        let away = match b.part {
+            Part::Bend { origin, axis, start, neutral } => {
+                let w = p - origin;
+                let across = w - axis * w.dot(axis);
+                neutral * libm::atan2(axis.dot(start.cross(across)), start.dot(across))
+            }
+            Part::Wall { start, dir, offset } => offset + (p - start).dot(dir),
+        };
+        Vec2::new(self.x(p), b.y0 + b.sign * away)
+    }
+
     /// X of `p`, a point of the face (or of its neutral layer).
     fn x(&self, p: Vec3) -> f64 {
         match &self.lay {
@@ -133,11 +168,11 @@ fn strip(body: &Body, x: Ix) -> Vec<Ix> {
 }
 
 /// The strips of the sheet that go on smoothly from strip `s`, each once, its own faces left out.
-fn beside(body: &Body, s: &[Ix]) -> Vec<Vec<Ix>> {
+fn beside(body: &Body, s: &[Ix], skip: &BTreeSet<Ix>) -> Vec<Vec<Ix>> {
     let mut out: Vec<Vec<Ix>> = Vec::new();
     for &x in s {
         for (y, _) in smooth(body, x) {
-            if !s.contains(&y) && !out.iter().any(|t| t.contains(&y)) {
+            if !s.contains(&y) && !skip.contains(&y) && !out.iter().any(|t| t.contains(&y)) {
                 out.push(strip(body, y));
             }
         }
@@ -145,12 +180,58 @@ fn beside(body: &Body, s: &[Ix]) -> Vec<Vec<Ix>> {
     out
 }
 
+/// The faces of flanges on the sheet's sides (D205): bends across the sheet's own bends, each with
+/// the wall beyond it, which goes on to nothing. The sheet's own bends are those all others are
+/// such flanges of; of two ways to see it, the one with more bends, then the one met first. None
+/// for a sheet with bends one way only (or none).
+pub(crate) fn branches(body: &Body) -> BTreeSet<Ix> {
+    let none = BTreeSet::new();
+    let cylinders: Vec<(Ix, Vec3)> = (0..body.faces().len() as Ix)
+        .filter_map(|x| match body.faces()[x as usize].surface {
+            // A bend goes on into a wall; a cut's round wall only into its other half.
+            Surface::Cylinder(c) if smooth(body, x).iter().any(|(y, _)| matches!(body.faces()[*y as usize].surface, Surface::Plane(_))) => {
+                Some((x, c.axis))
+            }
+            _ => None,
+        })
+        .collect();
+    let mut classes: Vec<Vec<Ix>> = Vec::new();
+    for &(x, axis) in &cylinders {
+        match classes.iter_mut().find(|c| crate::sketch::parallel(cylinders.iter().find(|y| y.0 == c[0]).map_or(axis, |y| y.1), axis)) {
+            Some(c) => c.push(x),
+            None => classes.push(vec![x]),
+        }
+    }
+    if classes.len() < 2 {
+        return none;
+    }
+    // A flange: its bend's strip meets two strips, one of them a wall meeting nothing else.
+    let leaf = |x: Ix| -> Option<Vec<Ix>> {
+        let bend = strip(body, x);
+        let ways = beside(body, &bend, &none);
+        let [a, b] = &ways[..] else { return None };
+        let end = |t: &Vec<Ix>| matches!(body.faces()[t[0] as usize].surface, Surface::Plane(_)) && beside(body, t, &none) == [bend.clone()];
+        let wall = if end(a) { a } else if end(b) { b } else { return None };
+        Some(bend.iter().chain(wall).copied().collect())
+    };
+    let mut best: Option<(usize, BTreeSet<Ix>)> = None;
+    for (k, main) in classes.iter().enumerate() {
+        let others: Option<Vec<Vec<Ix>>> = classes.iter().enumerate().filter(|(j, _)| *j != k).flat_map(|(_, c)| c.iter().map(|&x| leaf(x))).collect();
+        let Some(others) = others else { continue };
+        if best.as_ref().is_none_or(|(n, _)| main.len() > *n) {
+            best = Some((main.len(), others.into_iter().flatten().collect()));
+        }
+    }
+    best.map_or(none, |(_, b)| b)
+}
+
 /// The chain of strips through face `f`: on from its strip each way while one strip goes on, in
-/// order along the sheet (not yet turned the way it is laid).
-pub(crate) fn chain_through(body: &Body, f: Ix) -> Result<Vec<Vec<Ix>>, BrepError> {
+/// order along the sheet (not yet turned the way it is laid); the flanges on its sides
+/// (`skip`, see [`branches`]) left out.
+pub(crate) fn chain_through(body: &Body, f: Ix, skip: &BTreeSet<Ix>) -> Result<Vec<Vec<Ix>>, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
     let home = strip(body, f);
-    let ways = beside(body, &home);
+    let ways = beside(body, &home, skip);
     if ways.len() > 2 {
         return Err(unsupported("the face meets more than two faces smoothly: not a sheet"));
     }
@@ -158,7 +239,7 @@ pub(crate) fn chain_through(body: &Body, f: Ix) -> Result<Vec<Vec<Ix>>, BrepErro
     for first in ways {
         let (mut prev, mut cur, mut half) = (home.clone(), first.clone(), vec![first]);
         loop {
-            let on: Vec<Vec<Ix>> = beside(body, &cur).into_iter().filter(|t| *t != prev).collect();
+            let on: Vec<Vec<Ix>> = beside(body, &cur, skip).into_iter().filter(|t| *t != prev).collect();
             match &on[..] {
                 [] => break,
                 [t] if *t == home || half.contains(t) => return Err(unsupported("the sheet closes on itself: a closed path comes later")),
@@ -184,14 +265,16 @@ pub(crate) fn chain_through(body: &Body, f: Ix) -> Result<Vec<Vec<Ix>>, BrepErro
 pub fn sheet_sides(body: &Body) -> Result<[Ix; 2], BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
     let plain = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_) | Surface::Cylinder(_));
-    let mut seen: BTreeSet<Ix> = BTreeSet::new();
+    // Flanges on the sheet's sides are no side of it.
+    let skip = branches(body);
+    let mut seen: BTreeSet<Ix> = skip.clone();
     // Each chain: its area, its area vector, the face of it with the largest area.
     let mut chains: Vec<(f64, Vec3, Ix)> = Vec::new();
     for f in 0..body.faces().len() as Ix {
         if seen.contains(&f) || !plain(f) {
             continue;
         }
-        let Ok(chain) = chain_through(body, f) else { continue };
+        let Ok(chain) = chain_through(body, f, &skip) else { continue };
         let chain: Vec<Ix> = chain.into_iter().flatten().collect();
         seen.extend(chain.iter().copied());
         if !chain.iter().all(|&x| plain(x)) {
@@ -235,7 +318,8 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
     let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
     let smooth = |x: Ix| smooth(body, x);
-    let mut chain = chain_through(body, f)?;
+    let skip = branches(body);
+    let mut chain = chain_through(body, f, &skip)?;
 
     // Y runs along the bends' axis; a flat sheet takes the first edge of its face.
     let axis = chain.iter().flatten().find_map(|&x| match body.faces()[x as usize].surface {
@@ -314,32 +398,71 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             }
             Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
         };
-        let faces: Vec<Laid> = st.iter().map(|&x| Laid { face: x, u0, lay }).collect();
+        let faces: Vec<Laid> = st.iter().map(|&x| Laid { face: x, u0, lay, branch: None }).collect();
         u0 += faces.iter().map(|l| l.length(body)).fold(f64::NEG_INFINITY, f64::max);
         laid.extend(faces);
     }
     let y = |p: Vec3| (p - corner).dot(a);
+    // Flanges on the sheet's sides (D205): each from the wall it stands on, across X; the pairs of
+    // faces their bend lines lie between.
+    let mut seams: Vec<(Ix, Ix)> = Vec::new();
+    let walls: Vec<Laid> = laid.iter().filter(|l| matches!(l.lay, Lay::Plane { .. })).copied().collect();
+    for w in walls {
+        for (b, h0) in smooth(w.face).into_iter().filter(|(b, _)| skip.contains(b)) {
+            let Surface::Cylinder(c) = body.faces()[b as usize].surface else { continue };
+            let Some((f, h1)) = smooth(b).into_iter().find(|(x, _)| *x != w.face && skip.contains(x)) else { continue };
+            let (p0, q0) = (body.point(he(h0).origin), body.point(he(h1).origin));
+            let c_axis = unit(c.axis);
+            let radial = |q: Vec3| {
+                let v = q - c.origin;
+                unit(v - c_axis * v.dot(c_axis))
+            };
+            let (start, end) = (radial(p0), radial(q0));
+            let turn = start.cross(end);
+            if turn == Vec3::ZERO {
+                return Err(unsupported("a flange bent back on itself"));
+            }
+            let axis = unit(turn);
+            let span = libm::atan2(axis.dot(start.cross(end)), start.dot(end));
+            let (_, other) = opposite_cylinder(body, b as usize).ok_or_else(|| unsupported("a flange's bend without the face across the sheet"))?;
+            let neutral = neutral(c.radius, other.radius, k);
+            let far = centroid(body, f) - q0;
+            let along = match w.lay {
+                Lay::Plane { along, .. } => along,
+                Lay::Bend { .. } => continue,
+            };
+            let dir = unit(far - along * far.dot(along));
+            let y0 = y(p0);
+            let sign = if y(centroid(body, f)) > y0 { 1.0 } else { -1.0 };
+            laid.push(Laid { face: b, branch: Some(Branch { y0, sign, part: Part::Bend { origin: c.origin, axis, start, neutral } }), ..w });
+            laid.push(Laid { face: f, branch: Some(Branch { y0, sign, part: Part::Wall { start: q0, dir, offset: neutral * span } }), ..w });
+            seams.extend([(w.face, b), (b, f)]);
+        }
+    }
     // Every vertex where the first face of the chain that has it lays it.
     let mut at: BTreeMap<Ix, Vec2> = BTreeMap::new();
     for l in &laid {
         for lp in body.face_loops(l.face) {
             for h in body.loop_half_edges(lp) {
                 let v = he(h).origin;
-                at.entry(v).or_insert_with(|| Vec2::new(l.x(body.point(v)), y(body.point(v))));
+                at.entry(v).or_insert_with(|| l.at(body.point(v), y));
             }
         }
     }
-    let in_chain: BTreeSet<Ix> = chain.iter().flatten().copied().collect();
+    let in_chain: BTreeSet<Ix> = laid.iter().map(|l| l.face).collect();
     // The piece of edge `h` of face `l`, as its loop runs.
     let piece = |l: &Laid, h: Ix| -> Result<FlatPiece, BrepError> {
         let (from, to) = (at[&he(h).origin], at[&he(body.next(h)).origin]);
         let e = &body.edges()[he(h).edge as usize];
         let curve = body.edge_curve(e).map(|c| if e.half == h { c } else { c.reversed() });
+        let bend = matches!(l.branch, Some(Branch { part: Part::Bend { .. }, .. }));
         Ok(match (curve, &l.lay) {
             (None, _) | (Some(Curve::Arc(_)), Lay::Bend { .. }) => FlatPiece::Line(from, to),
+            (Some(Curve::Arc(_)), _) if bend => FlatPiece::Line(from, to),
+            (Some(Curve::Rolled { .. }), _) if l.branch.is_some() => return Err(unsupported("a cut across a flange's bend on the side comes later")),
             (Some(Curve::Arc(arc)), Lay::Plane { .. }) => {
                 let n = normal(l.face, body.point(he(h).origin));
-                arc_piece(Vec2::new(l.x(arc.center), y(arc.center)), from, to, arc.axis.dot(n) > 0.0)
+                arc_piece(l.at(arc.center, y), from, to, arc.axis.dot(n) > 0.0)
             }
             (Some(Curve::Rolled { piece, .. }), Lay::Bend { neutral, .. }) => {
                 if piece.dev.neutral != *neutral {
@@ -412,6 +535,16 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 .collect();
             Some([shift(*seam.iter().min_by(by_y)?), shift(*seam.iter().max_by(by_y)?)])
         })
+        .chain(seams.iter().filter_map(|&(x, z)| {
+            // A flange's bend line on the side runs along X.
+            let by_x = |p: &&Vec2, q: &&Vec2| p.x.total_cmp(&q.x);
+            let seam: Vec<Vec2> = body
+                .loop_half_edges(body.faces()[z as usize].first_loop)
+                .filter(|&h| face_of(he(h).twin) == x)
+                .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
+                .collect();
+            Some([shift(*seam.iter().min_by(by_x)?), shift(*seam.iter().max_by(by_x)?)])
+        }))
         .collect();
     let pieces: Vec<FlatPiece> = outline
         .into_iter()
