@@ -157,6 +157,14 @@
     "punched": "e2cd1ca24a0a9143bc68e125c24e9f8cc6ba9045ee5758fb4538ac8bf84b45c0",
     "w": "4903dddd4ba41272bcebb96767982dfcbaf92614c875f6fa31324bd8ef1931b4"
   },
+  "sheet_cut_over_cut.json": {
+    "hole_sketch": "04526431bd991d4b2bbffb1e6a384fa990f24f8c8c0df1c273286c6497030b49",
+    "holed": "0951ec93809c7489c05c6130dd2fa6bcc98b6a28dde66f7bd922e63225a50686",
+    "joined": "09ea07a092b0d922e13591271bf9860e8053398ab6fe051fc6ba25e14952b951",
+    "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
+    "notch_sketch": "c6621f6a13709e9df1b1727251c0c1dbc6bc3eacc6d686ee284a760face57b63",
+    "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42"
+  },
   "sheet_panel.json": {
     "blank": "2fb51a00cb5d288c07badcdea6b7d33308655329a66ff3e190d914895ddd5463",
     "fixing": "740f28f1fa5859b41ad5f1c69ed81de68ea0ccd59b1555275163db1e5b82b086",
