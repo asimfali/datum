@@ -113,6 +113,9 @@ pub struct Placed {
     pub arcs: BTreeMap<String, Arc>,
     /// Circles, each diameter a number.
     pub circles: BTreeMap<String, Circle>,
+    /// The pairs of curves the sketch makes tangent, each in name order: a sheet's path goes
+    /// smoothly from one to the other, a fact the sketch states rather than one measured.
+    pub tangent: BTreeSet<[String; 2]>,
     /// The face the sketch lies on, if it was placed on one.
     pub face: Option<TopoId>,
     /// Where each projection's points stand now, in the order of [`Projection::at`].
@@ -456,6 +459,14 @@ pub fn place(
         lines: sketch.lines.clone(),
         arcs: sketch.arcs.clone(),
         circles: sketch.circles.clone(),
+        tangent: sketch
+            .constraints
+            .iter()
+            .filter_map(|c| match c {
+                Constraint::Tangent { curves: [a, b] } => Some(if a <= b { [a.clone(), b.clone()] } else { [b.clone(), a.clone()] }),
+                _ => None,
+            })
+            .collect(),
         patterns: Vec::new(),
         hash: [0; 32],
     };
@@ -518,6 +529,12 @@ pub fn place(
                 bytes(&[d.turn.x.to_bits().to_le_bytes(), d.turn.y.to_bits().to_le_bytes()].concat());
             }
         }
+    }
+    // Only a sketch with tangents hashes them: the rest keep their hashes.
+    for [a, b] in &placed.tangent {
+        bytes(b"tangent");
+        bytes(a.as_bytes());
+        bytes(b.as_bytes());
     }
     if let Some(k) = placed.k_factor {
         bytes(b"k_factor");

@@ -407,19 +407,24 @@ fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<Flat
     {
         cycle.rotate_left((first + n - 1) % n);
     }
+    // Whether piece `b` goes on the run piece `a` is in, the run begun beside face `run`.
+    let goes_on = |run: Ix, a: Ix, (p, q): (FlatPiece, FlatPiece), b: Ix| {
+        let line = matches!((p, q), (FlatPiece::Line(..), FlatPiece::Line(..)));
+        let arc = matches!((p, q), (FlatPiece::Arc { .. }, FlatPiece::Arc { .. }));
+        (line && b == run) || ((line || arc) && linked(a, b))
+    };
+    // Nor does the run the cycle happens to start in the middle of.
+    if goes_on(cycle[n - 1].2, cycle[n - 1].2, (cycle[n - 1].0, cycle[0].0), cycle[0].2)
+        && let Some(first) = (1..n).find(|&i| !goes_on(cycle[i - 1].2, cycle[i - 1].2, (cycle[i - 1].0, cycle[i].0), cycle[i].2))
+    {
+        cycle.rotate_left(first);
+    }
     let mut k = 0;
     while k < n {
         let (p, from, beside) = cycle[k];
         let mut last = k;
-        while last + 1 < n {
-            let (q, _, next) = cycle[last + 1];
-            let line = matches!((p, q), (FlatPiece::Line(..), FlatPiece::Line(..)));
-            let arc = matches!((p, q), (FlatPiece::Arc { .. }, FlatPiece::Arc { .. }));
-            if (line && next == beside) || ((line || arc) && linked(cycle[last].2, next)) {
-                last += 1;
-            } else {
-                break;
-            }
+        while last + 1 < n && goes_on(beside, cycle[last].2, (p, cycle[last + 1].0), cycle[last + 1].2) {
+            last += 1;
         }
         let to = cycle.get(last + 1).map_or(cycle[0].1, |e| e.1);
         out.push(match p {

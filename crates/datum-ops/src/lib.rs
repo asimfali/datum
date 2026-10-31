@@ -121,10 +121,11 @@ pub enum Op {
         #[serde(default = "zero")]
         offset: Num,
     },
-    /// Sheet metal from the input sketch's path: its lines (an open chain, from point `start` or
-    /// else from its end named first) given `thickness` on `side` of the path (looking along it),
-    /// bent at every corner with inner `radius`, and extruded from `z0` to `z1` along the sketch's
-    /// normal. One input: a sketch. The thickness and the radius are the part's sheet rule's
+    /// Sheet metal from the input sketch's path: its lines and arcs (an open chain, from point
+    /// `start` or else from its end named first) given `thickness` on `side` of the path (looking
+    /// along it), bent at every corner of two lines with inner `radius`, rolled along every arc
+    /// (tangent to its neighbours by the sketch's constraints, D200), and extruded from `z0` to `z1`
+    /// along the sketch's normal. One input: a sketch. The thickness and the radius are the part's sheet rule's
     /// (D193), put here when the model is built; a file has its own only from before rules.
     Sheet {
         #[serde(default, skip_serializing_if = "Option::is_none")]
