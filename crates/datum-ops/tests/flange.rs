@@ -521,6 +521,48 @@ fn a_hole_in_a_side_flange() {
     assert_eq!(counts[2], 1);
 }
 
+/// A cut over the free edge of a side flange: a notch in the flange (D205), its wall laid as a
+/// plate's. A square centred on that edge, whichever way it lies, takes half of itself.
+#[test]
+fn a_notch_in_a_side_flange() {
+    let u = u_of(MID);
+    let b = side_of(&u, &[wall_edge(&u, 1, 62.0, 0.0)], serde_json::json!({}));
+    let target = Value::Body(b.clone());
+    let old: Vec<_> = u.faces().iter().map(|f| f.id).collect();
+    let new = |x: usize| !old.contains(&b.faces()[x].id) && matches!(b.faces()[x].surface, Surface::Plane(_));
+    let (x, wall) = (0..b.faces().len())
+        .filter(|&x| new(x))
+        .map(|x| (x, b.faces()[x].id))
+        .max_by(|p, q| b.face_area(p.0 as u32).total_cmp(&b.face_area(q.0 as u32)))
+        .unwrap();
+    // The wall's free edge: on the flange's end, the new flat face `width × t`.
+    let he = |h: u32| b.half_edges()[h as usize];
+    let edge = b
+        .loop_half_edges(b.faces()[x].first_loop)
+        .find(|&h| {
+            let y = b.loops()[he(he(h).twin).loop_ix as usize].face as usize;
+            new(y) && close(b.face_area(y as u32), SIDE * T)
+        })
+        .unwrap();
+    let m = (b.point(he(edge).origin) + b.point(he(b.next(edge)).origin)) * 0.5;
+    let on_face = |at: [f64; 2]| {
+        let (cx, cy) = (at[0], at[1]);
+        let square = serde_json::json!({"points": {"a": [cx - 3.0, cy - 3.0], "b": [cx + 3.0, cy - 3.0], "c": [cx + 3.0, cy + 3.0], "d": [cx - 3.0, cy + 3.0]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+        op(serde_json::json!({"op": "sketch", "face": format!("{wall:?}"), "k_factor": K, "sketch": square})).eval(id("notch"), &[&target]).unwrap()
+    };
+    let [o, ax, ay, _] = on_face([0.0, 0.0]).sketch().unwrap().frame;
+    let placed = on_face([(m - o).dot(ax), (m - o).dot(ay)]);
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id("cut"), &[&target, &placed]).unwrap().body().unwrap().clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    assert!(close(b.volume() - r.volume(), 18.0 * T), "{}", b.volume() - r.volume());
+    // The blank's outline goes round the notch: three more lines and one split.
+    let (_, counts, _) = blank(&r);
+    assert_eq!(counts, [12, 0, 0]);
+}
+
 /// A hole on a leg across the edge where its side flange stands reaches the flange: refused.
 #[test]
 fn a_hole_reaching_a_side_flange_is_refused() {
