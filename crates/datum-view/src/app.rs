@@ -53,6 +53,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
                 viewer.dock = crate::dock::from_text(&layout);
             }
             viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
+            viewer.touchpad = kept(TOUCHPAD) == "true";
             // What the menu chose last wins over the settings file's.
             viewer.set_language(&kept(LANGUAGE));
             match crate::settings::theme(&kept(THEME)) {
@@ -80,6 +81,8 @@ const LANGUAGE: &str = "datum_language";
 const THEME: &str = "datum_theme";
 /// The side bar's side, set and sections (D162).
 const SIDE_BAR: &str = "datum_side_bar";
+/// Touchpad navigation on.
+const TOUCHPAD: &str = "datum_touchpad";
 
 /// The models opened or saved last, the latest first: state beside the window's, not a setting.
 const RECENT: &str = "datum_recent";
@@ -365,6 +368,32 @@ fn warning_text(i18n: &crate::i18n::I18n, w: &Json) -> String {
     }
 }
 
+/// How the view moves this frame: a pan in pixels, a zoom factor (under 1 nearer), and whether
+/// Space holds the left button to moving the view (then it neither orbits, draws nor selects).
+struct Nav {
+    pan: egui::Vec2,
+    zoom: f64,
+    space: bool,
+}
+
+/// A right or middle drag pans, so does a left one with Space held; a pinch zooms (Ctrl+wheel
+/// too, as egui gives it). The wheel zooms, or with `touchpad` two fingers pan: the two cannot be
+/// told apart, Windows sends both as a wheel.
+fn navigation(ui: &egui::Ui, r: &egui::Response, touchpad: bool) -> Nav {
+    use egui::PointerButton::{Middle, Primary, Secondary};
+    let space = !ui.ctx().text_edit_focused() && ui.input(|i| i.key_down(egui::Key::Space));
+    let dragged = r.dragged_by(Secondary) || r.dragged_by(Middle) || (space && r.dragged_by(Primary));
+    let mut pan = if dragged { r.drag_delta() } else { egui::Vec2::ZERO };
+    let (scroll, pinch) = if r.hovered() { ui.input(|i| (i.smooth_scroll_delta, i.zoom_delta())) } else { (egui::Vec2::ZERO, 1.0) };
+    let mut zoom = 1.0 / f64::from(pinch);
+    if touchpad {
+        pan += scroll;
+    } else {
+        zoom *= libm::exp(-f64::from(scroll.y) * 0.002);
+    }
+    Nav { pan, zoom, space }
+}
+
 fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
     match reply["failed"].as_array().into_iter().flatten().find(|f| f["feature"] == *name) {
         Some(f) => Err(f["error"].as_str().unwrap_or_default().to_string()),
@@ -519,6 +548,8 @@ struct Viewer {
     /// Multisampling of the view when the camera is still: smooth edges, at about twice the GPU
     /// time on a weak card.
     smooth: bool,
+    /// Two fingers pan instead of zooming: a laptop without a mouse.
+    touchpad: bool,
     /// Made on the first frame.
     renderer: Option<Renderer>,
     /// The picture as an egui texture, and the size it was registered with.
@@ -864,6 +895,7 @@ impl Viewer {
             geometry,
             version: 0,
             smooth: true,
+            touchpad: false,
             renderer: None,
             texture: None,
             drawn: None,
@@ -3309,18 +3341,17 @@ impl Viewer {
                 ui.ctx().request_repaint();
             }
         }
-        let d = r.drag_delta();
-        if r.dragged_by(egui::PointerButton::Primary) {
+        let nav = navigation(ui, r, self.touchpad);
+        if r.dragged_by(egui::PointerButton::Primary) && !nav.space {
+            let d = r.drag_delta();
             self.turn = None;
             self.camera.orbit(f64::from(d.x), f64::from(d.y));
-        } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
-            self.camera.pan(f64::from(d.x), f64::from(d.y), f64::from(rect.height()));
         }
-        if r.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.camera.zoom(libm::exp(-f64::from(scroll) * 0.002));
-            }
+        if nav.pan != egui::Vec2::ZERO {
+            self.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), f64::from(rect.height()));
+        }
+        if nav.zoom != 1.0 {
+            self.camera.zoom(nav.zoom);
         }
     }
 
@@ -3543,6 +3574,18 @@ impl Viewer {
     fn sketch_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
         let Some(sk) = &mut self.sketch else { return };
         let h = f64::from(rect.height());
+        let nav = navigation(ui, r, self.touchpad);
+        if nav.pan != egui::Vec2::ZERO {
+            sk.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), h);
+        }
+        if nav.zoom != 1.0 {
+            let (x, y) = offset.unwrap_or((0.0, 0.0));
+            sk.camera.zoom_at(nav.zoom, x, y, h);
+        }
+        // Space held: the left button moves the view, and draws, selects or drags nothing.
+        if nav.space {
+            return;
+        }
         let mut sent = Vec::new();
         let mut leave = false;
         // An element dragged from the palette and let go here: it hangs at the cursor there, its
@@ -3949,20 +3992,11 @@ impl Viewer {
                 draft.axis = None;
                 draft.asked = None;
             }
-            if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
-                let d = r.drag_delta();
-                sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
-            }
             // Esc, or a right click (a right drag pans): the mouse alone ends the command too.
             if (!typing && !typing_field && ui.input(|i| i.key_pressed(egui::Key::Escape))) || picker_esc || r.secondary_clicked() {
                 draft.escape();
             }
             sk.draft = draft;
-            let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
-            if scroll != 0.0 {
-                let (x, y) = offset.unwrap_or((0.0, 0.0));
-                sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
-            }
             for r in sent {
                 self.send(r);
             }
@@ -3995,9 +4029,6 @@ impl Viewer {
             {
                 sent.push(Request::Command("edit_sketch", p));
             }
-        } else if r.dragged_by(egui::PointerButton::Secondary) || r.dragged_by(egui::PointerButton::Middle) {
-            let d = r.drag_delta();
-            sk.camera.pan(f64::from(d.x), f64::from(d.y), h);
         }
         // A dimension changes on a double click.
         if r.double_clicked()
@@ -4036,11 +4067,6 @@ impl Viewer {
                 p => p.into_iter().collect(),
             };
             crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
-        }
-        let scroll = if r.hovered() { ui.input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
-        if scroll != 0.0 {
-            let (x, y) = offset.unwrap_or((0.0, 0.0));
-            sk.camera.zoom_at(libm::exp(-f64::from(scroll) * 0.002), x, y, h);
         }
         // A right click held still for half a second: the menu of what is selected (D155); a
         // short one (a right drag pans): the last command again, as Enter, by the mouse alone.
@@ -4344,6 +4370,7 @@ impl Viewer {
         let draft = self.sketch.as_ref().map(|sk| &sk.draft);
         match act {
             Act::SmoothEdges => self.smooth,
+            Act::Touchpad => self.touchpad,
             Act::NewSketch => self.picking == Some(Purpose::Sketch),
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::Extrude => self.extrusion.is_some(),
@@ -4384,6 +4411,7 @@ impl Viewer {
             Act::Undo => self.send(Request::Command("undo", json!({}))),
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
+            Act::Touchpad => self.touchpad = !self.touchpad,
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
@@ -4544,6 +4572,7 @@ impl Viewer {
             self.item(ui, Act::MaterialTable, true);
             self.item(ui, Act::RuleTable, true);
             self.item(ui, Act::SmoothEdges, true);
+            self.item(ui, Act::Touchpad, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
                 self.item(ui, act, true);
@@ -4803,6 +4832,7 @@ impl eframe::App for Viewer {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
+        storage.set_string(TOUCHPAD, self.touchpad.to_string());
         if self.language_chosen {
             storage.set_string(LANGUAGE, self.language.clone());
         }
@@ -4860,6 +4890,7 @@ mod tests {
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
             version: 0,
             smooth: true,
+            touchpad: false,
             renderer: None,
             texture: None,
             drawn: None,
@@ -5138,6 +5169,78 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         assert_eq!(tool(&h), Tool::Line, "Enter: the last command again");
+    }
+
+    /// Without a mouse (D199): in touchpad mode two fingers move the sketch and a pinch zooms; in
+    /// mouse mode the wheel zooms. Space with a left drag moves the view in either, and selects
+    /// nothing.
+    #[test]
+    fn a_touchpad_moves_the_view() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        let camera = |h: &egui_kittest::Harness<Viewer>| {
+            let c = &h.state().sketch.as_ref().unwrap().camera;
+            (c.center, c.half_height)
+        };
+        let wheel = |h: &mut egui_kittest::Harness<Viewer>, modifiers| {
+            h.hover_at(egui::pos2(300.0, 200.0));
+            let unit = egui::MouseWheelUnit::Point;
+            h.event(egui::Event::MouseWheel { unit, delta: egui::vec2(40.0, 0.0), phase: egui::TouchPhase::Move, modifiers });
+            h.run();
+        };
+        h.run();
+        let (center, half) = camera(&h);
+        h.state_mut().touchpad = true;
+        wheel(&mut h, egui::Modifiers::NONE);
+        let (moved, same) = camera(&h);
+        assert!(moved[0] != center[0] && same == half, "two fingers pan: {center:?} → {moved:?}, {half} → {same}");
+        wheel(&mut h, egui::Modifiers::COMMAND);
+        assert!(camera(&h).1 != half, "a pinch zooms");
+        h.state_mut().touchpad = false;
+        let before = camera(&h);
+        h.hover_at(egui::pos2(300.0, 200.0));
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 40.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run();
+        assert!(camera(&h).1 != before.1, "the wheel zooms");
+        // Space and a left drag: the view moves, nothing is framed or selected.
+        let before = camera(&h);
+        let key = |pressed| egui::Event::Key { key: egui::Key::Space, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE };
+        h.event(key(true));
+        let button = |h: &mut egui_kittest::Harness<Viewer>, pressed, at: egui::Pos2| {
+            h.hover_at(at);
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.step();
+        };
+        button(&mut h, true, egui::pos2(100.0, 100.0));
+        h.hover_at(egui::pos2(250.0, 180.0));
+        h.step();
+        h.hover_at(egui::pos2(400.0, 260.0));
+        h.step();
+        button(&mut h, false, egui::pos2(400.0, 260.0));
+        h.event(key(false));
+        h.run();
+        let sk = h.state().sketch.as_ref().unwrap();
+        assert!(sk.camera.center != before.0 && sk.frame.is_none() && sk.selected.is_empty(), "{:?} → {:?}", before.0, sk.camera.center);
     }
 
     /// A right click held still opens the menu (D155) and repeats nothing: the point selected
