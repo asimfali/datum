@@ -3308,7 +3308,11 @@ impl Viewer {
         let used = |name: &str| {
             features.iter().any(|f| f["op"] != "sketch" && f["inputs"].as_array().is_some_and(|i| i.iter().any(|n| n.as_str() == Some(name))))
         };
-        let mut unused = features.iter().filter(|f| f["op"] == "sketch").filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
+        // A sketch of points alone (where a work plane goes through) has nothing to extrude.
+        let drawn = |f: &Json| {
+            ["lines", "arcs", "circles"].iter().any(|k| f["sketch"][k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)))
+        };
+        let mut unused = features.iter().filter(|f| f["op"] == "sketch" && drawn(f)).filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
         let lone = unused.next().filter(|_| unused.next().is_none());
         let sketch = open.or_else(|| lone.map(String::from));
         let kind = match chain {
@@ -6712,9 +6716,10 @@ mod tests {
     fn extruding(second: bool) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
         let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
-        features.push(json!({"name": "extra", "op": "sketch", "inputs": []}));
+        let drawn = json!({"lines": {"l": {"from": "a", "to": "b"}}});
+        features.push(json!({"name": "extra", "op": "sketch", "inputs": [], "sketch": drawn}));
         if second {
-            features.push(json!({"name": "other", "op": "sketch", "inputs": []}));
+            features.push(json!({"name": "other", "op": "sketch", "inputs": [], "sketch": drawn}));
         }
         let h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -7043,6 +7048,27 @@ mod tests {
         assert!(matches!(sent.last(), Some(Request::Preview(None))));
         assert!(!sent.iter().any(|r| matches!(r, Request::Command(..))));
         assert!(h.state().extrusion.is_none());
+    }
+
+    /// A sketch of points alone (for a work plane) is no sketch to extrude: E does not take it, it
+    /// waits for a click in the tree or on an edge of the sheet.
+    #[test]
+    fn e_leaves_a_sketch_of_points_alone() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        features.push(json!({"name": "marks", "op": "sketch", "inputs": [], "sketch": {"points": {"p1": [1, 2]}}}));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+                v.extrusion_form(ui.ctx());
+            },
+            v,
+        );
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()), "waits");
     }
 
     /// With two sketches unused, E waits for a click in the tree.
