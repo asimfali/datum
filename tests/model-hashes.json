@@ -170,6 +170,12 @@
     "path": "1e6a99a0f7af1c468116455f9e34802b60581707f14a03f38c0bcc9e150f1f9c",
     "rolled": "a740bd237fe6fc3236a1f1b571e7d0d5df1c9ce61fb9d9af3f485e4ecb5cada6"
   },
+  "sheet_side_notch.json": {
+    "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
+    "notch_sketch": "2514fb3fc57774570c10e4cb5432f3b9756bb9c03e22c7b44275d5c551a8655f",
+    "notched": "61b2a2fd6e3a7719aea7e6044a98ec3326aa5d9b10237471f8f2884eea9c85ec",
+    "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42"
+  },
   "sheet_slot_through.json": {
     "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
     "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42",

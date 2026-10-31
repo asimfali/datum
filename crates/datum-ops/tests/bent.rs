@@ -248,3 +248,145 @@ proptest! {
         prop_assert!((size.0 - 141.0477868423386).abs() < 1e-9 * 141.0 && (size.1 - 40.0).abs() < 1e-9);
     }
 }
+
+/// The volume `cut` removed from `b`, against `want`.
+fn assert_removed(b: &Body, cut: &Body, want: f64) {
+    cut.validate().unwrap();
+    let got = b.volume() - cut.volume();
+    assert!((got - want).abs() < 1e-9 * want, "removed {got} against {want}");
+}
+
+/// A slot reaching over both bends from the sheet's edge: a notch in the side.
+#[test]
+fn a_side_slot_over_both_bends() {
+    let b = u_sheet(20.0);
+    let cut = slot_cut(&b, 50.0, 85.0, 5.0, -10.0).unwrap();
+    assert_removed(&b, &cut, 707.5398223686134);
+    let (size, counts) = blank(&cut);
+    assert_size(size, (141.0477868423386, 40.0));
+    assert_eq!(counts, [8, 0, 0]);
+}
+
+/// Half a circle centred on the edge, on the flat wall.
+#[test]
+fn a_half_circle_on_the_edge_of_a_wall() {
+    let b = u_sheet(20.0);
+    let cut = circle_cut(&b, 30.0, 0.0, 10.0).unwrap();
+    assert_removed(&b, &cut, std::f64::consts::PI * 25.0);
+    assert_eq!(blank(&cut).1, [5, 1, 0]);
+}
+
+/// Half a circle centred on the edge, over a bend.
+#[test]
+fn a_half_circle_on_the_edge_over_a_bend() {
+    let b = u_sheet(20.0);
+    let cut = circle_cut(&b, 60.0, 0.0, 10.0).unwrap();
+    assert_removed(&b, &cut, 80.35543932165456);
+    assert_eq!(blank(&cut).1, [5, 1, 0]);
+}
+
+/// A notch in the corner at the sheet's end.
+#[test]
+fn a_corner_notch_at_the_end() {
+    let b = u_sheet(20.0);
+    let cut = slot_cut(&b, -5.0, 10.0, 5.0, -10.0).unwrap();
+    assert_removed(&b, &cut, 200.0);
+    assert_eq!(blank(&cut).1, [6, 0, 0]);
+}
+
+/// A notch on the flat wall only.
+#[test]
+fn a_side_slot_on_the_wall_only() {
+    let b = u_sheet(20.0);
+    let cut = slot_cut(&b, 20.0, 30.0, 5.0, -10.0).unwrap();
+    assert_removed(&b, &cut, 200.0);
+    assert_eq!(blank(&cut).1, [8, 0, 0]);
+}
+
+/// Notches in both sides of the sheet.
+#[test]
+fn notches_in_both_sides() {
+    let b = u_sheet(20.0);
+    let one = slot_cut(&b, 50.0, 85.0, 5.0, -10.0).unwrap();
+    let two = slot_cut(&one, 50.0, 85.0, -30.0, -45.0).unwrap();
+    assert!(two.volume() < one.volume());
+    assert_eq!(blank(&two).1, [12, 0, 0]);
+}
+
+/// A cut across the whole width divides the sheet in two.
+#[test]
+fn a_cut_across_the_width_is_refused() {
+    let e = slot_cut(&u_sheet(20.0), 50.0, 85.0, 5.0, -45.0).unwrap_err();
+    assert!(matches!(&e, BrepError::Unsupported(m) if m.contains("two parts")), "{e:?}");
+}
+
+/// A notch meeting an earlier hole is refused.
+#[test]
+fn a_notch_meeting_a_hole_is_refused() {
+    let holed = circle_cut(&u_sheet(20.0), 30.0, -8.0, 6.0).unwrap();
+    let e = slot_cut(&holed, 25.0, 40.0, 5.0, -8.0).unwrap_err();
+    assert!(matches!(&e, BrepError::Unsupported(m) if m.contains("another cut")), "{e:?}");
+}
+
+/// A plain slab 100 by 60 by 2, with a notch cut from its top face (sketch X, Y as the world's).
+fn plate_cut(sketch: serde_json::Value) -> (Body, Body) {
+    let rect = serde_json::json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 60], "d": [0, 60]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let s = op(serde_json::json!({"op": "sketch", "sketch": rect})).eval(id("plate_sketch"), &[]).unwrap();
+    let b = op(serde_json::json!({"op": "extrude", "z0": 0, "z1": T})).eval(id("plate"), &[&s]).unwrap().body().unwrap().clone();
+    let top = b.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.z > 0.5)).unwrap();
+    let target = Value::Body(b.clone());
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": format!("{:?}", top.id), "sketch": sketch})).eval(id("notch_sketch"), &[&target]).unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id("notch"), &[&target, &placed]).unwrap().body().unwrap().clone();
+    (b, r)
+}
+
+fn plate_blank(b: &Body) -> [usize; 3] {
+    unfold_side(b, false, K).unwrap().counts()
+}
+
+fn rect_sketch(x0: f64, x1: f64, y0: f64, y1: f64) -> serde_json::Value {
+    serde_json::json!({"points": {"p": [x0, y0], "q": [x1, y0], "r": [x1, y1], "s": [x0, y1]},
+        "lines": {"pq": {"from": "p", "to": "q"}, "qr": {"from": "q", "to": "r"}, "rs": {"from": "r", "to": "s"}, "sp": {"from": "s", "to": "p"}}})
+}
+
+#[test]
+fn a_plate_has_a_corner_notch() {
+    let (b, cut) = plate_cut(rect_sketch(-5.0, 10.0, -5.0, 10.0));
+    assert_removed(&b, &cut, 200.0);
+    assert_eq!(plate_blank(&cut), [6, 0, 0]);
+}
+
+#[test]
+fn a_plate_has_a_side_slot() {
+    let (b, cut) = plate_cut(rect_sketch(40.0, 50.0, -5.0, 20.0));
+    assert_removed(&b, &cut, 400.0);
+    assert_eq!(plate_blank(&cut), [8, 0, 0]);
+}
+
+#[test]
+fn a_plate_has_a_half_circle() {
+    let (b, cut) = plate_cut(serde_json::json!({"points": {"h": [50, 60]}, "circles": {"c": {"center": "h", "diameter": 10}}}));
+    assert_removed(&b, &cut, std::f64::consts::PI * 25.0);
+    assert_eq!(plate_blank(&cut), [5, 1, 0]);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// A notch from the edge, on the first wall, removes its own volume and adds two lines
+    /// to the blank's outline and none else.
+    #[test]
+    fn a_notch_from_the_edge_removes_its_volume(
+        (lo, w, d) in (10.0..45.0f64, 3.0..12.0f64, 3.0..15.0f64),
+    ) {
+        prop_assume!(lo + w <= 55.0);
+        let b = u_sheet(20.0);
+        let cut = slot_cut(&b, lo, lo + w, 5.0, -d)
+            .map_err(|e| TestCaseError::fail(format!("{lo} {w} {d}: {e}")))?;
+        prop_assert!(((b.volume() - cut.volume()) - w * d * T).abs() < 1e-9 * w * d * T, "{} {} {}", lo, w, d);
+        prop_assert_eq!(blank(&cut).1, [8, 0, 0], "{} {} {}", lo, w, d);
+    }
+}

@@ -291,9 +291,21 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                     let arc = if e.half == h { arc } else { arc.reversed() };
                     Some((arc, body.point(he(h).origin), body.point(he(body.next(h)).origin)))
                 });
-                let Some((arc, p, q)) = arc else { return Err(unsupported("a bend without an edge across it")) };
-                let span = arc.sweep(p, q);
-                let from = entry.unwrap_or(if arc.axis.dot(turn) > 0.0 { p } else { q });
+                // A bend cut across at both its sides (D202) has no such edge left: its angle is
+                // then the turn between its two bend lines.
+                let (span, from) = match arc {
+                    Some((arc, p, q)) => (arc.sweep(p, q), entry.unwrap_or(if arc.axis.dot(turn) > 0.0 { p } else { q })),
+                    None => {
+                        let exit = chain.get(i + 1).and_then(|next| seam(st, next)).map(|(_, h)| body.point(he(h).origin));
+                        let (Some(from), Some(to)) = (entry, exit) else { return Err(unsupported("a bend without an edge across it")) };
+                        let radial = |q: Vec3| {
+                            let w = q - c.origin;
+                            unit(w - c.axis * w.dot(c.axis))
+                        };
+                        let (u, v, t) = (radial(from), radial(to), unit(turn));
+                        (libm::atan2(t.dot(u.cross(v)), u.dot(v)).abs(), from)
+                    }
+                };
                 let w = from - c.origin;
                 let start = unit(w - c.axis * w.dot(c.axis));
                 let (_, other) = opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
