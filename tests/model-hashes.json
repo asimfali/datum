@@ -172,6 +172,11 @@
     "notch_sketch": "c6621f6a13709e9df1b1727251c0c1dbc6bc3eacc6d686ee284a760face57b63",
     "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42"
   },
+  "sheet_flange.json": {
+    "flanged": "b32bfc8fe8baec20c16ec5af3edee4330fe75b385442eef84328c7b87692b789",
+    "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
+    "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42"
+  },
   "sheet_panel.json": {
     "blank": "2fb51a00cb5d288c07badcdea6b7d33308655329a66ff3e190d914895ddd5463",
     "fixing": "740f28f1fa5859b41ad5f1c69ed81de68ea0ccd59b1555275163db1e5b82b086",

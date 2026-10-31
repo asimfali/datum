@@ -19,11 +19,11 @@ use std::ops::RangeInclusive;
 pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
 pub use copies::{Copies, Place};
-pub use flange::{FlangeDims, flange_ends, flanges};
 use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
+pub use flange::{FlangeDims, flange_ends, flanges};
 pub use pattern::pattern_grid;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -330,7 +330,12 @@ impl Op {
             Self::Sketch { .. } => 0..=1,
             Self::Plane { .. } => 0..=3,
             Self::Extrude { .. } => 1..=3,
-            Self::Transform { .. } | Self::PatternGrid { .. } | Self::Unfold { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } => 1..=1,
+            Self::Transform { .. }
+            | Self::PatternGrid { .. }
+            | Self::Unfold { .. }
+            | Self::Sheet { .. }
+            | Self::Plate { .. }
+            | Self::Flange { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
         }
     }

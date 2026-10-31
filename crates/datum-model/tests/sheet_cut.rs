@@ -349,3 +349,20 @@ fn a_cut_across_a_bend_needs_a_k_factor() {
     let r = punch_circle(&mut s, "l", "hole", flat - 2.0, 20.0, 10.0);
     assert!(failure(&r).contains("k_factor"), "{r}");
 }
+
+/// A flange on an end of a sheet of the rule `Лист` takes the rule's radius (D205): nothing
+/// fails, and it adds what a bend of radius 2 and a wall of 20 high add.
+#[test]
+fn a_flange_takes_the_rules_radius() {
+    let mut s = l_sheet("sheet_flange_rule");
+    let whole = volume(&mut s, "l");
+    // The sheet's end at the origin faces −y: the face of 40 × 2.
+    let faces = run(&mut s, "query_faces", json!({"name": "l", "normal": [0, -1, 0]}));
+    let end = faces["faces"].as_array().unwrap().iter().find(|f| f["area"] == 80.0).unwrap()["id"].as_str().unwrap().to_string();
+    let r = run(&mut s, "add", json!({"name": "f", "op": "flange", "inputs": ["l"], "faces": [end], "height": 20}));
+    assert_cut(&r);
+    let (t, big) = (2.0_f64, 4.0_f64);
+    let added = 40.0 * (std::f64::consts::FRAC_PI_4 * (big * big - t * t) + (20.0 - big) * t);
+    let v = volume(&mut s, "f");
+    assert!((v - whole - added).abs() < 1e-9 * added, "{v} − {whole} against {added}");
+}

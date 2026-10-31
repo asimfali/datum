@@ -139,7 +139,9 @@ fn flange(feature: TopoId, target: &Body, id: TopoId, dims: FlangeDims) -> Resul
     // Turning `n` toward `up`: about `w` or `-w`.
     let axis = if w.cross(n).dot(up) > 0.0 { w } else { w * -1.0 };
     let along = turned(n, axis, turn);
-    let set_back = (r + t) * libm::tan(0.5 * a);
+    // At a right angle exactly `r + t`: tan 45° in floating point is not quite 1, and a flange as
+    // high as its bend would come out a sliver instead of refused.
+    let set_back = (r + t) * if dims.angle == 90.0 { 1.0 } else { libm::tan(0.5 * a) };
     let wall = dims.height - set_back;
     if wall.is_nan() || wall <= 0.0 {
         return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({set_back:.3})", dims.height)));
@@ -230,7 +232,8 @@ fn flange(feature: TopoId, target: &Body, id: TopoId, dims: FlangeDims) -> Resul
         // the flange's outline goes in between, the same way.
         let mut spec = target.face_spec(x);
         let (a, b) = (target.vertices()[he(he(*h).twin).origin as usize].id, target.vertices()[he(target.next(he(*h).twin)).origin as usize].id);
-        let run: Vec<TopoId> = if chain[0] == a { chain[1..chain.len() - 1].to_vec() } else { chain[1..chain.len() - 1].iter().rev().copied().collect() };
+        let run: Vec<TopoId> =
+            if chain[0] == a { chain[1..chain.len() - 1].to_vec() } else { chain[1..chain.len() - 1].iter().rev().copied().collect() };
         for l in &mut spec.loops {
             if let Some(k) = (0..l.len()).find(|&k| l[k] == a && l[(k + 1) % l.len()] == b) {
                 for (j, v) in run.iter().enumerate() {
