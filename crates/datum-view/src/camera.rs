@@ -300,6 +300,21 @@ impl SketchCamera {
         self.center = [self.center[0] - dx * k, self.center[1] + dy * k];
     }
 
+    /// Brings sketch point `p` into a picture `width` × `height` when it lies at its edge or
+    /// beyond: zoomed out to what was in the picture and the point both, with a margin, so
+    /// nothing seen is lost.
+    pub fn follow(&mut self, p: [f64; 2], width: f64, height: f64) {
+        let (dx, dy) = self.offset(p, height);
+        if dx.abs() < 0.45 * width && dy.abs() < 0.45 * height {
+            return;
+        }
+        let half = [self.half_height * width / height.max(1.0), self.half_height];
+        let lo = [(self.center[0] - half[0]).min(p[0]), (self.center[1] - half[1]).min(p[1])];
+        let hi = [(self.center[0] + half[0]).max(p[0]), (self.center[1] + half[1]).max(p[1])];
+        self.center = [0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])];
+        self.half_height = 0.55 * (hi[1] - lo[1]).max((hi[0] - lo[0]) * height / width.max(1.0));
+    }
+
     /// Zooms by `factor` (< 1: closer), keeping the sketch point under pixel offset `(dx, dy)`
     /// where it is.
     pub fn zoom_at(&mut self, factor: f64, dx: f64, dy: f64, height: f64) {
@@ -337,6 +352,21 @@ impl SketchCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A point put beyond the picture's edge: the view zooms out to it and to all it showed, with
+    /// a margin; one well inside changes nothing.
+    #[test]
+    fn the_sketch_view_follows_a_point_out_of_sight() {
+        let mut c = SketchCamera { frame: [Vec3::ZERO; 4], center: [0.0, 0.0], half_height: 50.0 };
+        c.follow([30.0, 10.0], 800.0, 400.0);
+        assert_eq!((c.center, c.half_height), ([0.0, 0.0], 50.0));
+        // The picture showed x −100…100, y −50…50; a point at x 150.
+        c.follow([150.0, 0.0], 800.0, 400.0);
+        for q in [[-100.0, -50.0], [-100.0, 50.0], [150.0, 0.0]] {
+            let (dx, dy) = c.offset(q, 400.0);
+            assert!(dx.abs() < 0.95 * 400.0 && dy.abs() < 0.95 * 200.0, "{q:?} at {dx} {dy}");
+        }
+    }
 
     /// From the front's top edge to the back's, the turn goes over the top, about X, and ends
     /// upside down as the way there leaves it, not spun about the vertical; then on to the top,

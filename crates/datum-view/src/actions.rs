@@ -17,6 +17,7 @@ pub enum Act {
     Undo,
     Redo,
     SmoothEdges,
+    Touchpad,
     NewSketch,
     Extrude,
     Select,
@@ -93,7 +94,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 42] = [
+pub const ACTIONS: [Action; 43] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -107,6 +108,14 @@ pub const ACTIONS: [Action; 42] = [
         "view.smooth_edges",
         "Smooth edges",
         "Multisampling (MSAA ×4) when the view is still; while it turns, frames are drawn without it",
+        None,
+        Anywhere,
+    ),
+    action(
+        Act::Touchpad,
+        "view.touchpad",
+        "Touchpad",
+        "Two fingers move the view, a pinch zooms; off, the wheel zooms. Space with a drag moves the view either way",
         None,
         Anywhere,
     ),
