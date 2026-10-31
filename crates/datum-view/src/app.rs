@@ -2831,6 +2831,19 @@ impl Viewer {
         }
         if self.sketch.is_none() {
             crate::origin::paint_origin(&painter, clip, screen, size);
+            // The points of the sketches shown, as their lines are; while a work plane is picked
+            // through points (D204), every corner of the bodies too.
+            let corners = self.picking == Some(Purpose::Plane);
+            for (spot, p) in &m.spots {
+                let (sketch, vertex) = (spot.get("point").is_some(), spot.get("vertex").is_some());
+                if !(sketch || (corners && vertex)) {
+                    continue;
+                }
+                if let Some(at) = on_screen(&view_projection, *p - anchor, rect) {
+                    let colour = if sketch { egui::Color32::from_rgb(40, 90, 200) } else { egui::Color32::from_rgb(90, 95, 105) };
+                    painter.circle_filled(at, if sketch { 3.0 } else { 2.5 }, colour);
+                }
+            }
         }
         if let Some(purpose) = self.picking {
             if let Some(Under::Face(f)) = self.under {
