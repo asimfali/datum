@@ -35,7 +35,7 @@ fn sheet() -> Body {
 /// The ID of the outer face of the first wall (looking along −X), whose sketch has X along the
 /// wall and Y along −Z.
 fn first_wall(b: &Body) -> String {
-    let f = b.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.x < -0.5)).unwrap();
+    let f = b.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.x < -0.5 && p.origin.x <= 0.0)).unwrap();
     format!("{:?}", f.id)
 }
 
@@ -131,5 +131,120 @@ proptest! {
     #[test]
     fn a_circle_across_a_bend_is_one_circle_on_the_front(c in crossing()) {
         check(false)(c)?;
+    }
+}
+
+/// A U of sheet metal: up 60 from the origin, `mid` along X, down to Y = 0.
+fn u_sheet(mid: f64) -> Body {
+    let path = serde_json::json!({"points": {"a": [0, 0], "b": [0, 60], "c": [mid, 60], "d": [mid, 0]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}}});
+    let p = op(serde_json::json!({"op": "sketch", "sketch": path})).eval(id("path"), &[]).unwrap();
+    let s =
+        op(serde_json::json!({"op": "sheet", "thickness": T, "radius": T, "side": "left", "z0": 0, "z1": WIDTH})).eval(id("sheet"), &[&p]).unwrap();
+    s.body().unwrap().clone()
+}
+
+/// Cuts `sketch` (on the first wall's face) through the wall of `b`.
+/// The cut's ID comes from the body's face count: a second cut has IDs of its own.
+fn cut_with(b: &Body, sketch: serde_json::Value) -> Result<Body, BrepError> {
+    let tag = format!("cut{}", b.faces().len());
+    let target = Value::Body(b.clone());
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch})).eval(id(&format!("{tag}s")), &[&target])?;
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id(&tag), &[&target, &placed])?.body().unwrap().clone();
+    r.validate().unwrap();
+    Ok(r)
+}
+
+/// A rectangle from `x0` to `x1` along the wall and from `y0` to `y1` on the sketch's Y.
+fn slot_cut(b: &Body, x0: f64, x1: f64, y0: f64, y1: f64) -> Result<Body, BrepError> {
+    let sketch = serde_json::json!({"points": {"p": [x0, y0], "q": [x1, y0], "r": [x1, y1], "s": [x0, y1]},
+        "lines": {"pq": {"from": "p", "to": "q"}, "qr": {"from": "q", "to": "r"}, "rs": {"from": "r", "to": "s"}, "sp": {"from": "s", "to": "p"}}});
+    cut_with(b, sketch)
+}
+
+fn circle_cut(b: &Body, x: f64, y: f64, diameter: f64) -> Result<Body, BrepError> {
+    cut_with(b, serde_json::json!({"points": {"h": [x, y]}, "circles": {"c": {"center": "h", "diameter": diameter}}}))
+}
+
+/// The size of the blank seen from the front and the counts of its pieces.
+fn blank(b: &Body) -> ((f64, f64), [usize; 3]) {
+    let flat = unfold_side(b, false, K).unwrap();
+    ((flat.size.x, flat.size.y), flat.counts())
+}
+
+fn assert_size(got: (f64, f64), want: (f64, f64)) {
+    assert!((got.0 - want.0).abs() < 1e-9 * want.0 && (got.1 - want.1).abs() < 1e-9 * want.1, "{got:?} against {want:?}");
+}
+
+/// A slot over a bend, the whole top and the next bend divides all three faces; the blank is
+/// the outline and the slot as four whole lines.
+#[test]
+fn a_slot_over_a_whole_wall_divides_it() {
+    let b = u_sheet(20.0);
+    let cut = slot_cut(&b, 50.0, 85.0, -15.0, -25.0).unwrap();
+    assert!(cut.volume() < b.volume());
+    let ids: Vec<_> = cut.faces().iter().map(|f| f.id).collect();
+    for f in b.faces() {
+        assert!(ids.contains(&f.id), "{:?} is gone", f.id);
+    }
+    let (size, counts) = blank(&cut);
+    assert_size(size, (141.0477868423386, 40.0));
+    assert_eq!(counts, [8, 0, 0]);
+}
+
+/// A hole over a narrow top and both its bends is one circle in the blank.
+#[test]
+fn a_hole_over_a_narrow_wall_is_one_circle() {
+    let cut = circle_cut(&u_sheet(10.0), 62.0, -20.0, 14.0).unwrap();
+    let (size, counts) = blank(&cut);
+    assert_size(size, (131.0477868423386, 40.0));
+    assert_eq!(counts, [4, 0, 1]);
+    let radii = circles(&cut, false);
+    assert!(radii.len() == 1 && (radii[0] - 7.0).abs() < 1e-9, "{radii:?}");
+}
+
+/// A hole wider than a bend, over it and the top, is one circle too.
+#[test]
+fn a_hole_wider_than_a_bend_is_one_circle() {
+    let cut = circle_cut(&u_sheet(80.0), 60.3, -20.0, 8.0).unwrap();
+    let (size, counts) = blank(&cut);
+    assert_size(size, (201.0477868423386, 40.0));
+    assert_eq!(counts, [4, 0, 1]);
+    let radii = circles(&cut, false);
+    assert!(radii.len() == 1 && (radii[0] - 4.0).abs() < 1e-9, "{radii:?}");
+}
+
+/// A sheet with divided faces takes more cuts.
+#[test]
+fn a_divided_sheet_is_cut_again() {
+    let slotted = slot_cut(&u_sheet(20.0), 50.0, 85.0, -15.0, -25.0).unwrap();
+    let holed = circle_cut(&slotted, 68.0, -5.0, 4.0).unwrap();
+    assert!(holed.volume() < slotted.volume());
+    assert_eq!(blank(&holed).1, [8, 0, 1]);
+    let again = slot_cut(&slotted, 50.0, 85.0, -30.0, -35.0).unwrap();
+    assert!(again.volume() < slotted.volume());
+    assert_eq!(blank(&again).1, [12, 0, 0]);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// Any slot across the bends and the top, clear of the sheet's edges, keeps the body valid
+    /// and shows in the blank as four whole lines.
+    #[test]
+    fn a_slot_across_a_wall_is_four_lines(
+        (lo, hi, h) in (40.0..55.0f64, 82.0..95.0f64, 2.0..8.0f64),
+        t in 0.0..1.0f64,
+    ) {
+        let top = -5.0 - t * (30.0 - h);
+        let b = u_sheet(20.0);
+        let cut = slot_cut(&b, lo, hi, top, top - h)
+            .map_err(|e| TestCaseError::fail(format!("{lo} {hi} {top} {h}: {e}")))?;
+        prop_assert!(cut.volume() < b.volume());
+        let (size, counts) = blank(&cut);
+        prop_assert_eq!(counts, [8, 0, 0], "{} {} {} {}", lo, hi, top, h);
+        prop_assert!((size.0 - 141.0477868423386).abs() < 1e-9 * 141.0 && (size.1 - 40.0).abs() < 1e-9);
     }
 }

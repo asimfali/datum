@@ -62,12 +62,14 @@ pub struct Flat {
 }
 
 /// A face of the chain as it lies in the blank, from `u0` along X.
+#[derive(Clone, Copy)]
 struct Laid {
     face: Ix,
     u0: f64,
     lay: Lay,
 }
 
+#[derive(Clone, Copy)]
 enum Lay {
     /// A plane: a point where it starts, and its unit direction along the sheet.
     Plane { start: Vec3, along: Vec3 },
@@ -122,34 +124,56 @@ fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
         .collect()
 }
 
-/// The chain of faces through `f`: on from it each way while one face goes on, in order along the
-/// sheet (not yet turned the way it is laid).
-pub(crate) fn chain_through(body: &Body, f: Ix) -> Result<Vec<Ix>, BrepError> {
+/// The strip of face `x`: the faces of its surface. One face, or the pieces a cut divided it
+/// into (D201): they keep its surface bit for bit, so they are found by it, not by nearness.
+/// In face order.
+fn strip(body: &Body, x: Ix) -> Vec<Ix> {
+    let surface = body.faces()[x as usize].surface;
+    (0..body.faces().len() as Ix).filter(|&y| body.faces()[y as usize].surface == surface).collect()
+}
+
+/// The strips of the sheet that go on smoothly from strip `s`, each once, its own faces left out.
+fn beside(body: &Body, s: &[Ix]) -> Vec<Vec<Ix>> {
+    let mut out: Vec<Vec<Ix>> = Vec::new();
+    for &x in s {
+        for (y, _) in smooth(body, x) {
+            if !s.contains(&y) && !out.iter().any(|t| t.contains(&y)) {
+                out.push(strip(body, y));
+            }
+        }
+    }
+    out
+}
+
+/// The chain of strips through face `f`: on from its strip each way while one strip goes on, in
+/// order along the sheet (not yet turned the way it is laid).
+pub(crate) fn chain_through(body: &Body, f: Ix) -> Result<Vec<Vec<Ix>>, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
-    let ways = smooth(body, f);
+    let home = strip(body, f);
+    let ways = beside(body, &home);
     if ways.len() > 2 {
         return Err(unsupported("the face meets more than two faces smoothly: not a sheet"));
     }
     let mut halves = Vec::new();
-    for &(first, _) in &ways {
-        let (mut prev, mut cur, mut half) = (f, first, vec![first]);
+    for first in ways {
+        let (mut prev, mut cur, mut half) = (home.clone(), first.clone(), vec![first]);
         loop {
-            let on: Vec<Ix> = smooth(body, cur).into_iter().map(|(y, _)| y).filter(|&y| y != prev).collect();
-            match on[..] {
+            let on: Vec<Vec<Ix>> = beside(body, &cur).into_iter().filter(|t| *t != prev).collect();
+            match &on[..] {
                 [] => break,
-                [y] if y == f || half.contains(&y) => return Err(unsupported("the sheet closes on itself: a closed path comes later")),
-                [y] => {
-                    half.push(y);
-                    (prev, cur) = (cur, y);
+                [t] if *t == home || half.contains(t) => return Err(unsupported("the sheet closes on itself: a closed path comes later")),
+                [t] => {
+                    half.push(t.clone());
+                    (prev, cur) = (cur, t.clone());
                 }
                 _ => return Err(unsupported("a face meets more than two faces smoothly: not a sheet")),
             }
         }
         halves.push(half);
     }
-    let mut chain: Vec<Ix> = halves.first().map(|h| h.iter().rev().copied().collect()).unwrap_or_default();
-    chain.push(f);
-    chain.extend(halves.get(1).into_iter().flatten());
+    let mut chain: Vec<Vec<Ix>> = halves.first().map(|h| h.iter().rev().cloned().collect()).unwrap_or_default();
+    chain.push(home);
+    chain.extend(halves.into_iter().nth(1).into_iter().flatten());
     Ok(chain)
 }
 
@@ -168,6 +192,7 @@ pub fn sheet_sides(body: &Body) -> Result<[Ix; 2], BrepError> {
             continue;
         }
         let Ok(chain) = chain_through(body, f) else { continue };
+        let chain: Vec<Ix> = chain.into_iter().flatten().collect();
         seen.extend(chain.iter().copied());
         if !chain.iter().all(|&x| plain(x)) {
             continue;
@@ -213,11 +238,11 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let mut chain = chain_through(body, f)?;
 
     // Y runs along the bends' axis; a flat sheet takes the first edge of its face.
-    let axis = chain.iter().find_map(|&x| match body.faces()[x as usize].surface {
+    let axis = chain.iter().flatten().find_map(|&x| match body.faces()[x as usize].surface {
         Surface::Cylinder(c) => Some(c.axis),
         _ => None,
     });
-    let first = body.faces()[chain[0] as usize].first_loop;
+    let first = body.faces()[chain[0][0] as usize].first_loop;
     let corner = body.point(he(body.loop_half_edges(first).start).origin);
     // A plate has no axis of bends: Y runs up the face as the sketch drawn on it would see it
     // (world +Z projected onto the face; +Y on a face lying flat), so the blank looks as drawn.
@@ -225,30 +250,34 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         let up = if n.cross(Vec3::new(0.0, 0.0, 1.0)) == Vec3::ZERO { Vec3::new(0.0, 1.0, 0.0) } else { Vec3::new(0.0, 0.0, 1.0) };
         unit(up - n * (up.dot(n) / n.dot(n)))
     };
-    let a = unit(axis.unwrap_or_else(|| upright(normal(chain[0], corner))));
+    let a = unit(axis.unwrap_or_else(|| upright(normal(chain[0][0], corner))));
+    // Where strip `s` meets strip `t`: a face of `s` and its half-edge on the bend line.
+    let seam = |s: &[Ix], t: &[Ix]| s.iter().find_map(|&x| smooth(x).into_iter().find(|(y, _)| t.contains(y)).map(|(_, h)| (x, h)));
     // X along `a × n`: the chain runs from the end it points away from.
-    if chain.len() > 1 {
-        let seam = smooth(chain[0]).into_iter().find(|&(y, _)| y == chain[1]).map(|(_, h)| h);
-        if let Some(h) = seam {
-            let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
-            let centre = centroid(body, chain[0]);
-            if (m - centre).dot(a.cross(normal(chain[0], m))) < 0.0 {
-                chain.reverse();
-            }
+    if chain.len() > 1
+        && let Some((x, h)) = seam(&chain[0], &chain[1])
+    {
+        let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
+        let centre = centroid(body, x);
+        if (m - centre).dot(a.cross(normal(x, m))) < 0.0 {
+            chain.reverse();
         }
     }
 
-    // Each face laid from where the previous one ends.
+    // Each strip laid from where the previous one ends, all its faces alike.
     let mut laid: Vec<Laid> = Vec::with_capacity(chain.len());
     let mut u0 = 0.0;
-    for (i, &x) in chain.iter().enumerate() {
-        let outline = body.faces()[x as usize].first_loop;
-        // Where it starts: the bend line with the previous face, or for the first face its back end.
-        let entry = (i > 0).then(|| smooth(x).into_iter().find(|&(y, _)| y == chain[i - 1]).map(|(_, h)| body.point(he(h).origin))).flatten();
+    for (i, st) in chain.iter().enumerate() {
+        let x = st[0];
+        let outline = |x: Ix| body.faces()[x as usize].first_loop;
+        // Where it starts: the bend line with the previous strip, or for the first strip its back end.
+        let entry = (i > 0).then(|| seam(st, &chain[i - 1]).map(|(_, h)| body.point(he(h).origin))).flatten();
         let lay = match body.faces()[x as usize].surface {
             Surface::Plane(p) => {
                 let along = unit(a.cross(unit(p.normal)));
-                let start = entry.unwrap_or_else(|| body.loop_points(outline).min_by(|p, q| p.dot(along).total_cmp(&q.dot(along))).unwrap_or(corner));
+                let start = entry.unwrap_or_else(|| {
+                    st.iter().flat_map(|&x| body.loop_points(outline(x))).min_by(|p, q| p.dot(along).total_cmp(&q.dot(along))).unwrap_or(corner)
+                });
                 Lay::Plane { start, along }
             }
             Surface::Cylinder(c) => {
@@ -256,7 +285,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 let turn = a * sigma;
                 // The face's angle: the turn of an arc of its outline (a cap's edge), from the
                 // end where turning about `turn` starts.
-                let arc = body.loop_half_edges(outline).find_map(|h| {
+                let arc = st.iter().flat_map(|&x| body.loop_half_edges(outline(x))).find_map(|h| {
                     let e = &body.edges()[he(h).edge as usize];
                     let arc = body.edge_arc(e)?;
                     let arc = if e.half == h { arc } else { arc.reversed() };
@@ -273,9 +302,9 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             }
             Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
         };
-        let l = Laid { face: x, u0, lay };
-        u0 += l.length(body);
-        laid.push(l);
+        let faces: Vec<Laid> = st.iter().map(|&x| Laid { face: x, u0, lay }).collect();
+        u0 += faces.iter().map(|l| l.length(body)).fold(f64::NEG_INFINITY, f64::max);
+        laid.extend(faces);
     }
     let y = |p: Vec3| (p - corner).dot(a);
     // Every vertex where the first face of the chain that has it lays it.
@@ -288,7 +317,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             }
         }
     }
-    let in_chain: BTreeSet<Ix> = chain.iter().copied().collect();
+    let in_chain: BTreeSet<Ix> = chain.iter().flatten().copied().collect();
     // The piece of edge `h` of face `l`, as its loop runs.
     let piece = |l: &Laid, h: Ix| -> Result<FlatPiece, BrepError> {
         let (from, to) = (at[&he(h).origin], at[&he(body.next(h)).origin]);
@@ -363,9 +392,10 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let bends: Vec<[Vec2; 2]> = chain
         .windows(2)
         .filter_map(|w| {
-            let seam: Vec<Vec2> = body
-                .loop_half_edges(body.faces()[w[1] as usize].first_loop)
-                .filter(|&h| face_of(he(h).twin) == w[0])
+            let seam: Vec<Vec2> = w[1]
+                .iter()
+                .flat_map(|&x| body.loop_half_edges(body.faces()[x as usize].first_loop))
+                .filter(|&h| w[0].contains(&face_of(he(h).twin)))
                 .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
                 .collect();
             Some([shift(*seam.iter().min_by(by_y)?), shift(*seam.iter().max_by(by_y)?)])
