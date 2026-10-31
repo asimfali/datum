@@ -350,6 +350,21 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
 
 /// A command's reply as a preview: made, but its feature `name` failing when the model is
 /// evaluated (the command itself succeeds), it is refused with that feature's error.
+/// A warning of the model (D198) in the window's language, by its code; one the window does not
+/// know, as the model says it.
+fn warning_text(i18n: &crate::i18n::I18n, w: &Json) -> String {
+    let (n, clearance) = (w["profiles"].to_string(), w["clearance"].as_f64().unwrap_or_default().to_string());
+    match w["code"].as_str() {
+        Some("sheet.cut.near_bend") => i18n.f(
+            "warn-near-bend",
+            "{ $n } cut(s) closer to a bend line than 2t + R = { $clearance } mm (nearest { $distance } mm): a hole there distorts on bending",
+            &[("n", &n), ("clearance", &clearance), ("distance", &format!("{:.2}", w["distance"].as_f64().unwrap_or_default()))],
+        ),
+        Some("sheet.cut.across_bend") => i18n.f("warn-across-bend", "{ $n } cut(s) across a bend: a hole there distorts on bending", &[("n", &n)]),
+        _ => w["message"].as_str().unwrap_or_default().to_string(),
+    }
+}
+
 fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
     match reply["failed"].as_array().into_iter().flatten().find(|f| f["feature"] == *name) {
         Some(f) => Err(f["error"].as_str().unwrap_or_default().to_string()),
@@ -467,9 +482,19 @@ impl TreeRows {
             ui.label(format!("·  {tail}"));
             return;
         }
+        // Built, but with something to know (D198): the mark says so, the hint what.
+        let warnings: Vec<String> = f["warnings"].as_array().into_iter().flatten().map(|w| warning_text(i18n, w)).collect();
+        let mark = if mark == "✔" && !warnings.is_empty() { "⚠" } else { mark };
         let text = egui::RichText::new(format!("{mark} {}  ·  {tail}", title.unwrap_or(key)));
-        let text = if mark == "✖" { text.color(ui.visuals().error_fg_color) } else { text };
+        let text = match mark {
+            "✖" => text.color(ui.visuals().error_fg_color),
+            "⚠" => text.color(ui.visuals().warn_fg_color),
+            _ => text,
+        };
         let mut r = ui.selectable_label(self.selected.as_deref() == Some(key), text);
+        if !warnings.is_empty() {
+            r = r.on_hover_text(warnings.join("\n"));
+        }
         if title.is_some() {
             r = r.on_hover_text(i18n.f("feature-key", "Key: { $key } — commands and the agent use it", &[("key", key)]));
         }
@@ -3200,6 +3225,9 @@ impl Viewer {
                     Some(Ok(reply)) => {
                         let (mode, body) = (reply["mode"].as_str().unwrap_or_default(), reply["body"].as_str().unwrap_or_default());
                         ui.label(self.i18n.f("extrude-preview", "{ $mode } · { $body }", &[("mode", mode_name(&self.i18n, mode)), ("body", body)]));
+                        for w in reply["warnings"].as_array().into_iter().flatten().filter(|w| w["feature"] == params["name"]) {
+                            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {}", warning_text(&self.i18n, w)));
+                        }
                     }
                     Some(Err(why)) => {
                         ui.colored_label(ui.visuals().error_fg_color, why);
@@ -6570,6 +6598,18 @@ mod tests {
         let reply = json!({"failed": [{"feature": "extrude2", "error": "old"}, {"feature": "extrude3", "error": "crosses"}], "mode": "cut"});
         assert_eq!(previewed(reply.clone(), &json!("extrude3")), Err("crosses".into()));
         assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
+    }
+
+    /// A warning is said by its code in the window's language; one the window does not know, as
+    /// the model says it.
+    #[test]
+    fn a_warning_is_said_in_the_language() {
+        let near = json!({"code": "sheet.cut.near_bend", "profiles": 2, "distance": 3.0, "clearance": 6.0, "message": "m"});
+        let ru = crate::i18n::I18n::of("ru");
+        assert_eq!(warning_text(&ru, &near), "Вырезов ближе 2t + R = 6 мм к линии гиба: 2 (ближайший — 3.00 мм): отверстие исказится при гибке");
+        let en = crate::i18n::I18n::of("en");
+        assert!(warning_text(&en, &json!({"code": "sheet.cut.across_bend", "profiles": 1})).starts_with("1 cut(s) across a bend"));
+        assert_eq!(warning_text(&ru, &json!({"code": "other", "message": "as said"})), "as said");
     }
 
     /// A click inside a contour, off its curves, takes the contour; inside a hole, the hole.

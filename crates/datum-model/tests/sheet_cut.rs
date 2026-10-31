@@ -75,6 +75,34 @@ fn a_u_is_cut_through_one_wall() {
     assert!((whole - v - HOLE * 2.0).abs() < 1e-6, "one wall's hole: {whole} − {v}");
 }
 
+/// A hole closer to a bend line than 2t + R (here 2·2 + 2) is cut, and told of (D198): in the
+/// command's reply and in `inspect`; one in the middle of the wall is not. The wall runs along
+/// the sketch's x from the bend line at 2.
+#[test]
+fn a_hole_near_a_bend_is_told() {
+    let u = json!({"points": {"a": [0, 60], "b": [0, 0], "c": [80, 0], "d": [80, 60]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}}});
+    let mut s = project("sheet_cut_near_bend", u);
+    run(&mut s, "sheet", json!({"name": "u", "sketch": "path", "rule": "Лист", "side": "right", "z1": 40}));
+    let wall = run(&mut s, "query_faces", json!({"name": "u", "normal": [-1, 0, 0]}))["faces"][0]["id"].as_str().unwrap().to_string();
+    hole_on(&mut s, "middle", "u", &wall, 30.0, -20.0);
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "middle", "mode": "cut"}));
+    assert_eq!(r["warnings"], json!([]), "{r}");
+    hole_on(&mut s, "near", "cut", &wall, 10.0, -20.0);
+    let r = run(&mut s, "extrude", json!({"name": "cut2", "sketch": "near", "mode": "cut"}));
+    let [w] = &r["warnings"].as_array().unwrap()[..] else { panic!("{r}") };
+    assert_eq!(
+        (&w["feature"], &w["code"], &w["profiles"], &w["clearance"]),
+        (&json!("cut2"), &json!("sheet.cut.near_bend"), &json!(1), &json!(6.0)),
+        "{w}"
+    );
+    let d = w["distance"].as_f64().unwrap();
+    assert!((d - 3.0).abs() < 1e-9, "{d}");
+    let inspect = run(&mut s, "inspect", json!({}));
+    let of = |name: &str| inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap()["warnings"].clone();
+    assert_eq!((of("cut"), of("cut2")[0]["code"].clone()), (Value::Null, json!("sheet.cut.near_bend")));
+}
+
 /// A sheet along two lines, neither along the axes, and the wall of the first: the face of its left
 /// side with its flat length, and a sketch of a hole there at `along` from the wall's start.
 fn inclined(name: &str, along: impl Fn(f64) -> f64) -> (Session, f64) {

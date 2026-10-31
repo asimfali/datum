@@ -15,6 +15,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
+pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
 pub use copies::{Copies, Place};
 use cut::{Reach, from_face, through_walls};
@@ -500,6 +501,14 @@ impl Op {
         }
         Ok(Value::Body(body))
     }
+}
+
+/// The profiles of feature `op`, a cut of sheet metal (`wall`), that lie closer to a bend than
+/// [`NearBend`] allows, its inputs `values`; none for any other feature.
+pub fn near_bends(feature: TopoId, values: &[&Value], op: &Op) -> Result<Vec<NearBend>, BrepError> {
+    let (Op::Extrude { wall: true, profiles, .. }, [target, sketch, ..]) = (op, values) else { return Ok(Vec::new()) };
+    let (Some(t), Some(s)) = (target.body(), sketch.sketch()) else { return Ok(Vec::new()) };
+    bent::near_bends(feature, t, &*chosen(feature, s, profiles)?)
 }
 
 /// An extrusion (see [`Op::Extrude`]), its numbers evaluated.

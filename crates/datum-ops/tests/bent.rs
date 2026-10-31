@@ -3,7 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use datum_brep::{Body, BrepError, Surface, TopoId};
-use datum_ops::{FlatPiece, Op, Value, unfold_side};
+use datum_ops::{FlatPiece, NearBend, Op, Value, near_bends, unfold_side};
 use proptest::prelude::*;
 
 const K: f64 = 0.44;
@@ -48,6 +48,33 @@ fn punched(b: &Body, along: f64, z: f64, diameter: f64) -> Result<Body, BrepErro
     let r = cut.eval(id("cut"), &[&target, &placed])?.body().unwrap().clone();
     r.validate().unwrap();
     Ok(r)
+}
+
+/// How close a circle of `diameter` at `along` the first wall of `b`, height `z`, comes to a bend.
+fn near(b: &Body, along: f64, z: f64, diameter: f64) -> Vec<NearBend> {
+    let target = Value::Body(b.clone());
+    let sketch = serde_json::json!({"points": {"h": [along, -z]}, "circles": {"c": {"center": "h", "diameter": diameter}}});
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch})).eval(id("hole"), &[&target]).unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    near_bends(id("cut"), &[&target, &placed], &cut).unwrap()
+}
+
+/// 2t + R from the bend line a hole distorts on bending: closer, the check gives the distance;
+/// into the bend, none; farther, nothing. A hole on the wall beyond the bend is measured too.
+#[test]
+fn a_hole_near_a_bend_is_told() {
+    let b = sheet();
+    let clearance = 2.0 * T + T;
+    assert_eq!(near(&b, FLAT - 5.0 - clearance - 0.5, 20.0, 10.0), []);
+    let [NearBend { distance: Some(d), clearance: c }] = near(&b, FLAT - 5.0 - 3.0, 20.0, 10.0)[..] else { panic!() };
+    assert!((d - 3.0).abs() < 1e-9 && (c - clearance).abs() < 1e-12, "{d} {c}");
+    assert_eq!(near(&b, FLAT - 2.0, 20.0, 10.0), [NearBend { distance: None, clearance }]);
+    let [NearBend { distance: Some(d), .. }] = near(&b, FLAT + BEND + 5.0 + 2.0, 20.0, 10.0)[..] else { panic!() };
+    assert!((d - 2.0).abs() < 1e-9, "{d}");
+    // Not a cut of sheet metal (through all the body): nothing to tell.
+    let target = Value::Body(b.clone());
+    assert_eq!(near_bends(id("x"), &[&target], &op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}))).unwrap(), []);
 }
 
 /// The circles of the blank of `b` seen from the front or the back, as their radii.
