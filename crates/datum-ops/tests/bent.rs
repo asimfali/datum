@@ -320,12 +320,19 @@ fn a_cut_across_the_width_is_refused() {
     assert!(matches!(&e, BrepError::Unsupported(m) if m.contains("two parts")), "{e:?}");
 }
 
-/// A notch meeting an earlier hole is refused.
+/// A notch reaching into an earlier hole joins it (D203): what it takes is its own area less the
+/// hole's part in it; a side running through the hole's corners is a contact not resolved.
 #[test]
-fn a_notch_meeting_a_hole_is_refused() {
+fn a_notch_into_a_hole_joins_it() {
     let holed = circle_cut(&u_sheet(20.0), 30.0, -8.0, 6.0).unwrap();
+    let joined = slot_cut(&holed, 25.0, 40.0, 5.0, -10.0).unwrap();
+    // The hole below the notch's floor 2 from its centre: a circular segment.
+    let segment = 9.0 * libm::acos(2.0 / 3.0) - 2.0 * 5.0_f64.sqrt();
+    let want = 2.0 * (15.0 * 10.0 - (std::f64::consts::PI * 9.0 - segment));
+    let got = holed.volume() - joined.volume();
+    assert!((got - want).abs() < 1e-9 * want, "{got} against {want}");
     let e = slot_cut(&holed, 25.0, 40.0, 5.0, -8.0).unwrap_err();
-    assert!(matches!(&e, BrepError::Unsupported(m) if m.contains("another cut")), "{e:?}");
+    assert!(matches!(&e, BrepError::Degenerate(_)), "{e:?}");
 }
 
 /// A plain slab 100 by 60 by 2, with a notch cut from its top face (sketch X, Y as the world's).
@@ -388,5 +395,169 @@ proptest! {
             .map_err(|e| TestCaseError::fail(format!("{lo} {w} {d}: {e}")))?;
         prop_assert!(((b.volume() - cut.volume()) - w * d * T).abs() < 1e-9 * w * d * T, "{} {} {}", lo, w, d);
         prop_assert_eq!(blank(&cut).1, [8, 0, 0], "{} {} {}", lo, w, d);
+    }
+}
+
+/// The body is valid and every face meshes (curved walls too).
+fn assert_meshes(b: &Body) {
+    b.validate().unwrap();
+    datum_brep::tessellate(b).unwrap();
+}
+
+/// A cut over an earlier cut on the U sheet: the earlier body, the result, the blank.
+fn over(first: serde_json::Value, second: serde_json::Value) -> (Body, Body) {
+    let holed = cut_with(&u_sheet(20.0), first).unwrap();
+    let r = cut_with(&holed, second).unwrap();
+    assert_meshes(&r);
+    (holed, r)
+}
+
+fn circle_sketch(x: f64, y: f64, diameter: f64) -> serde_json::Value {
+    serde_json::json!({"points": {"h": [x, y]}, "circles": {"c": {"center": "h", "diameter": diameter}}})
+}
+
+const U_BLANK: (f64, f64) = (141.0477868423386, 40.0);
+
+/// The area of a circle segment of radius `r` beyond a chord `a` from the centre.
+fn segment(r: f64, a: f64) -> f64 {
+    r * r * libm::acos(a / r) - a * (r * r - a * a).sqrt()
+}
+
+/// A rectangle over part of a hole takes its own area less the hole's part in it.
+#[test]
+fn a_rect_over_part_of_a_hole() {
+    let (holed, cut) = over(circle_sketch(30.0, -20.0, 10.0), rect_sketch(32.0, 45.0, -15.0, -25.0));
+    assert_removed(&holed, &cut, 2.0 * (130.0 - segment(5.0, 2.0)));
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [9, 3, 0]);
+}
+
+/// A rectangle holding the hole whole: the hole and its walls go away.
+#[test]
+fn a_rect_holding_a_hole() {
+    let (holed, cut) = over(circle_sketch(30.0, -20.0, 10.0), rect_sketch(20.0, 45.0, -10.0, -30.0));
+    assert_removed(&holed, &cut, 2.0 * (500.0 - 25.0 * std::f64::consts::PI));
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [8, 0, 0]);
+}
+
+/// A circle over part of a hole: the lens is taken once.
+#[test]
+fn a_circle_over_part_of_a_hole() {
+    let (holed, cut) = over(circle_sketch(30.0, -20.0, 10.0), circle_sketch(36.0, -20.0, 8.0));
+    // The lens of circles of radii 5 and 4, 6 apart.
+    let lens = 25.0 * libm::acos(45.0 / 60.0) + 16.0 * libm::acos(27.0 / 48.0) - 0.5 * (3.0 * 7.0 * 5.0 * 15.0_f64).sqrt();
+    assert_removed(&holed, &cut, 2.0 * (16.0 * std::f64::consts::PI - lens));
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [4, 7, 0]);
+}
+
+/// A circle centred on a slot's floor, over the slot's end.
+#[test]
+fn a_circle_over_a_slots_end() {
+    let (slot, cut) = over(rect_sketch(20.0, 30.0, 5.0, -10.0), circle_sketch(25.0, -10.0, 8.0));
+    assert_removed(&slot, &cut, 2.0 * 8.0 * std::f64::consts::PI);
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [9, 1, 0]);
+}
+
+/// A rectangle over the arc of a notch on a bend.
+#[test]
+fn a_rect_over_a_notch_on_a_bend() {
+    let (notch, cut) = over(circle_sketch(60.0, 0.0, 30.0), rect_sketch(70.0, 90.0, 5.0, -25.0));
+    assert_removed(&notch, &cut, 931.9877259579771);
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [8, 1, 0]);
+}
+
+/// A small circle centred on a notch's arc, its piece of wall on the bend wholly inside it.
+#[test]
+fn a_circle_on_the_arc_of_a_notch_on_a_bend() {
+    let (notch, cut) = over(circle_sketch(60.0, 0.0, 30.0), circle_sketch(60.0, -15.0, 6.0));
+    assert_removed(&notch, &cut, 30.50332523954785);
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [5, 4, 0]);
+}
+
+/// A circle over a hole across a bend.
+#[test]
+fn a_circle_over_a_hole_across_a_bend() {
+    let (holed, cut) = over(circle_sketch(58.0, -20.0, 8.0), circle_sketch(63.0, -20.0, 8.0));
+    assert_removed(&holed, &cut, 75.12375167939535);
+    let (size, counts) = blank(&cut);
+    assert_size(size, U_BLANK);
+    assert_eq!(counts, [4, 3, 0]);
+}
+
+/// A side running through the points where the hole's circle is split is a contact not resolved.
+#[test]
+fn a_cut_through_the_corners_of_a_hole_is_degenerate() {
+    let holed = circle_cut(&u_sheet(20.0), 30.0, -20.0, 10.0).unwrap();
+    let e = slot_cut(&holed, 28.0, 40.0, -20.0, -30.0).unwrap_err();
+    assert!(matches!(&e, BrepError::Degenerate(_)), "{e:?}");
+}
+
+/// A plain slab with a hole at (50, 30), then a second cut over it: the slab with the hole and
+/// the slab with both.
+fn plate_over(second: serde_json::Value) -> (Body, Body) {
+    let (_, holed) = plate_cut(circle_sketch(50.0, 30.0, 10.0));
+    let top = holed.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.z > 0.5)).unwrap();
+    let target = Value::Body(holed.clone());
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": format!("{:?}", top.id), "sketch": second})).eval(id("second_sketch"), &[&target]).unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id("second"), &[&target, &placed]).unwrap().body().unwrap().clone();
+    assert_meshes(&r);
+    (holed, r)
+}
+
+#[test]
+fn a_plate_rect_over_part_of_a_hole() {
+    let (holed, cut) = plate_over(rect_sketch(52.0, 70.0, 25.0, 35.0));
+    assert_removed(&holed, &cut, 2.0 * (180.0 - segment(5.0, 2.0)));
+    assert_eq!(plate_blank(&cut), [9, 3, 0]);
+}
+
+#[test]
+fn a_plate_rect_holding_a_hole() {
+    let (holed, cut) = plate_over(rect_sketch(40.0, 60.0, 20.0, 40.0));
+    assert_removed(&holed, &cut, 2.0 * (400.0 - 25.0 * std::f64::consts::PI));
+    assert_eq!(plate_blank(&cut), [8, 0, 0]);
+}
+
+#[test]
+fn a_plate_notch_into_a_hole() {
+    let (holed, cut) = plate_over(rect_sketch(48.0, 52.0, -5.0, 30.0));
+    assert_removed(&holed, &cut, 201.09385491680223);
+    assert_eq!(plate_blank(&cut), [7, 4, 0]);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    /// A rectangle crossing a hole's left side, its sides clear of the circle's split points,
+    /// takes its own area less the circle's part in it, and leaves no circle in the blank.
+    #[test]
+    fn a_rect_over_a_hole_takes_the_rest(x0 in 31.0..34.0f64, b in 0.3..2.0f64) {
+        let holed = circle_cut(&u_sheet(20.0), 30.0, -20.0, 10.0).unwrap();
+        let d = 5.0 - b;
+        let cut = slot_cut(&holed, x0, 45.0, -20.0 + d, -20.0 - d)
+            .map_err(|e| TestCaseError::fail(format!("{x0} {b}: {e}")))?;
+        assert_meshes(&cut);
+        // The circle's part right of x0, within the band: twice the area under the chord.
+        let a = x0 - 30.0;
+        let h = d.min((25.0 - a * a).sqrt());
+        let under = 0.5 * (h * (25.0 - h * h).sqrt() + 25.0 * libm::asin(h / 5.0));
+        let overlap = 2.0 * (under - a * h);
+        let want = T * ((45.0 - x0) * 2.0 * d - overlap);
+        let got = holed.volume() - cut.volume();
+        prop_assert!((got - want).abs() < 1e-9 * want, "{} {}: {} against {}", x0, b, got, want);
+        prop_assert_eq!(blank(&cut).1[2], 0, "{} {}", x0, b);
     }
 }

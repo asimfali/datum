@@ -1,0 +1,148 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            0,
+            60
+          ],
+          "c": [
+            20,
+            60
+          ],
+          "d": [
+            20,
+            0
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          }
+        }
+      }
+    },
+    {
+      "name": "l",
+      "op": "sheet",
+      "inputs": [
+        "path"
+      ],
+      "thickness": 2,
+      "radius": 2,
+      "side": "left",
+      "z0": 0,
+      "z1": 40
+    },
+    {
+      "name": "hole_sketch",
+      "op": "sketch",
+      "inputs": [
+        "l"
+      ],
+      "face": "3f1758c21d48acd975af1d9b70e4c657",
+      "k_factor": 0.44,
+      "sketch": {
+        "points": {
+          "h": [
+            30,
+            -20
+          ]
+        },
+        "circles": {
+          "c": {
+            "center": "h",
+            "diameter": 10
+          }
+        }
+      }
+    },
+    {
+      "name": "holed",
+      "op": "extrude",
+      "inputs": [
+        "l",
+        "hole_sketch"
+      ],
+      "mode": "cut",
+      "through": true,
+      "wall": true
+    },
+    {
+      "name": "notch_sketch",
+      "op": "sketch",
+      "inputs": [
+        "holed"
+      ],
+      "face": "3f1758c21d48acd975af1d9b70e4c657",
+      "k_factor": 0.44,
+      "sketch": {
+        "points": {
+          "p": [
+            32,
+            -15
+          ],
+          "q": [
+            45,
+            -15
+          ],
+          "r": [
+            45,
+            -25
+          ],
+          "s": [
+            32,
+            -25
+          ]
+        },
+        "lines": {
+          "pq": {
+            "from": "p",
+            "to": "q"
+          },
+          "qr": {
+            "from": "q",
+            "to": "r"
+          },
+          "rs": {
+            "from": "r",
+            "to": "s"
+          },
+          "sp": {
+            "from": "s",
+            "to": "p"
+          }
+        }
+      }
+    },
+    {
+      "name": "joined",
+      "op": "extrude",
+      "inputs": [
+        "holed",
+        "notch_sketch"
+      ],
+      "mode": "cut",
+      "through": true,
+      "wall": true
+    }
+  ]
+}
