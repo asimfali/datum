@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use datum_brep::{Body, BrepError, Surface, TopoId, tessellate};
 use datum_math::Vec3;
-use datum_ops::{Op, Value, flange_ends, unfold_side};
+use datum_ops::{Op, Value, flange_edges, flange_ends, unfold_side};
 
 const K: f64 = 0.44;
 const T: f64 = 2.0;
@@ -25,13 +25,17 @@ fn close(a: f64, b: f64) -> bool {
     (a - b).abs() <= 1e-9 * b.abs()
 }
 
-/// A U of sheet metal: up 60 from the origin, along X by 20, down again; on the left of its path.
-fn u_sheet() -> Body {
-    let path = serde_json::json!({"points": {"a": [0, 0], "b": [0, 60], "c": [20, 60], "d": [20, 0]},
+/// A U of sheet metal: up 60 from the origin, along X by `mid`, down again; on the left of its path.
+fn u_of(mid: f64) -> Body {
+    let path = serde_json::json!({"points": {"a": [0, 0], "b": [0, 60], "c": [mid, 60], "d": [mid, 0]},
         "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}}});
     let p = op(serde_json::json!({"op": "sketch", "sketch": path})).eval(id("path"), &[]).unwrap();
     let s = op(serde_json::json!({"op": "sheet", "thickness": T, "radius": R, "side": "left", "z0": 0, "z1": WIDTH}));
     s.eval(id("sheet"), &[&p]).unwrap().body().unwrap().clone()
+}
+
+fn u_sheet() -> Body {
+    u_of(20.0)
 }
 
 /// A plate of 100 × 60 and 2 thick.
@@ -58,9 +62,41 @@ fn ends(b: &Body) -> Vec<String> {
     faces_of_area(b, WIDTH * T)
 }
 
-/// Flanges on `faces` of `b`, with `extra` fields of the operation; the result checked.
-fn flange(b: &Body, faces: &[String], extra: serde_json::Value) -> Result<Body, BrepError> {
-    let mut j = serde_json::json!({"op": "flange", "faces": faces, "height": 20, "radius": R});
+/// The IDs of the long edges of the end face `face` of `b` (the first of `ends`, say).
+fn long_edges(b: &Body, face: &str) -> Vec<String> {
+    let f = (0..b.faces().len()).find(|&x| hex(b, x) == face).unwrap();
+    let len = |h: u32| {
+        let d = b.point(b.half_edges()[b.next(h) as usize].origin) - b.point(b.half_edges()[h as usize].origin);
+        d.dot(d)
+    };
+    let halves: Vec<u32> = b.loop_half_edges(b.faces()[f].first_loop).collect();
+    let longest = halves.iter().map(|&h| len(h)).fold(0.0, f64::max);
+    let ids: Vec<String> =
+        halves.iter().filter(|&&h| len(h) == longest).map(|&h| format!("{:?}", b.edges()[b.half_edges()[h as usize].edge as usize].id)).collect();
+    assert_eq!(ids.len(), 2);
+    ids
+}
+
+/// The long edges of all `faces` of `b`.
+fn ends_edges(b: &Body, faces: &[String]) -> Vec<String> {
+    faces.iter().flat_map(|f| long_edges(b, f)).collect()
+}
+
+/// The edge of the flat side face at `z` of `b` that lies on `axis` (0 for x, 1 for y) = `at`.
+fn wall_edge(b: &Body, axis: usize, at: f64, z: f64) -> String {
+    let c = |p: Vec3| [p.x, p.y, p.z];
+    let found: Vec<String> = datum_ops::flange_edges(b)
+        .into_iter()
+        .filter(|(_, e)| e.iter().all(|&p| (c(p)[axis] - at).abs() < 1e-9 && (p.z - z).abs() < 1e-9))
+        .map(|e| format!("{:?}", e.0))
+        .collect();
+    assert_eq!(found.len(), 1, "axis {axis} at {at}, z {z}");
+    found[0].clone()
+}
+
+/// Flanges on `edges` of `b`, with `extra` fields of the operation; the result checked.
+fn flange(b: &Body, edges: &[String], extra: serde_json::Value) -> Result<Body, BrepError> {
+    let mut j = serde_json::json!({"op": "flange", "edges": edges, "height": 20, "radius": R});
     for (k, v) in extra.as_object().unwrap() {
         j[k] = v.clone();
     }
@@ -120,19 +156,35 @@ fn ends_of_a_u_are_its_two_ends() {
     assert_eq!(found.len(), 2);
 }
 
-/// A flange is picked by an end's long edges: two for each end, the width long, at its sides.
+/// A flange is picked by an edge: an end's two long edges (the width long, along Z), or a wall's
+/// edge on a flat side face of the sheet. The U has three walls and two caps (z = 0 and z = 40),
+/// and a wall has two edges (inner and outer) on each: 3 · 2 · 2 = 12; the two ends add 2 · 2 = 4.
 #[test]
-fn an_end_is_picked_by_its_two_long_edges() {
+fn a_flange_is_picked_by_an_edge_of_an_end_or_of_a_wall() {
     let u = u_sheet();
-    let edges = datum_ops::flange_edges(&u);
-    assert_eq!(edges.len(), 4);
-    for id in flange_ends(&u) {
-        let mine: Vec<_> = edges.iter().filter(|e| e.0 == id).collect();
-        assert_eq!(mine.len(), 2);
-        for (_, [a, b]) in mine {
-            let d = *b - *a;
-            assert!((d.dot(d).sqrt() - WIDTH).abs() < 1e-9 * WIDTH, "{d:?}");
+    let edges = flange_edges(&u);
+    assert_eq!(edges.len(), 16);
+    let along_z = |e: &(TopoId, [Vec3; 2])| (e.1[0].x == e.1[1].x && e.1[0].y == e.1[1].y).then(|| (e.1[1].z - e.1[0].z).abs());
+    let ids: BTreeSet<String> = edges.iter().map(|e| format!("{:?}", e.0)).collect();
+    assert_eq!(ids.len(), 16);
+    // The ends' long edges: both of each end face, and no others along Z.
+    let ends = ends(&u);
+    let long: BTreeSet<String> = ends_edges(&u, &ends).into_iter().collect();
+    assert_eq!(long.len(), 4);
+    for e in &edges {
+        assert_eq!(long.contains(&format!("{:?}", e.0)), along_z(e).is_some(), "{e:?}");
+        if let Some(l) = along_z(e) {
+            assert!((l - WIDTH).abs() < 1e-9 * WIDTH, "{l}");
         }
+    }
+    // The walls' edges: 6 on each cap, none on a bend (they run in the walls' planes).
+    for z in [0.0, WIDTH] {
+        let n = edges.iter().filter(|e| e.1.iter().all(|p| p.z == z)).count();
+        assert_eq!(n, 6, "z {z}");
+    }
+    // Each wall: its inner and outer edge on z = 0 are there (wall 1 at x = 0 and −2, the top at y = 60 and 62).
+    for (axis, at) in [(0, 0.0), (0, -2.0), (1, 60.0), (1, 62.0), (0, 20.0), (0, 22.0)] {
+        wall_edge(&u, axis, at, 0.0);
     }
 }
 
@@ -150,7 +202,7 @@ fn ends_of_a_plate_are_its_four_sides() {
 fn one_flange_on_a_u() {
     let u = u_sheet();
     let (base, ..) = blank(&u);
-    let b = flange(&u, &ends(&u)[..1], serde_json::json!({})).unwrap();
+    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({})).unwrap();
     assert!(close(b.volume() - u.volume(), added(1.0, WIDTH, 20.0, 90.0)), "{}", b.volume() - u.volume());
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base.0 + longer(20.0, 90.0)) && close(size.1, WIDTH), "{size:?}");
@@ -161,7 +213,7 @@ fn one_flange_on_a_u() {
 fn a_flange_on_both_ends() {
     let u = u_sheet();
     let (base, ..) = blank(&u);
-    let b = flange(&u, &ends(&u), serde_json::json!({})).unwrap();
+    let b = flange(&u, &ends_edges(&u, &ends(&u)), serde_json::json!({})).unwrap();
     assert!(close(b.volume() - u.volume(), added(2.0, WIDTH, 20.0, 90.0)));
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base.0 + 2.0 * longer(20.0, 90.0)) && close(size.1, WIDTH), "{size:?}");
@@ -171,7 +223,7 @@ fn a_flange_on_both_ends() {
 #[test]
 fn a_flange_turns_to_the_front_or_the_other_side() {
     let u = u_sheet();
-    let e = &ends(&u)[..1];
+    let e = &long_edges(&u, &ends(&u)[0]);
     let (a, b) = (flange(&u, e, serde_json::json!({})).unwrap(), flange(&u, e, serde_json::json!({"flip": true})).unwrap());
     assert!(close(b.volume(), a.volume()));
     assert_eq!(blank(&a), blank(&b));
@@ -185,7 +237,7 @@ fn a_flange_turns_to_the_front_or_the_other_side() {
 fn a_flange_of_45_degrees() {
     let u = u_sheet();
     let (base, ..) = blank(&u);
-    let b = flange(&u, &ends(&u)[..1], serde_json::json!({"angle": 45})).unwrap();
+    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({"angle": 45})).unwrap();
     assert!(close(b.volume() - u.volume(), added(1.0, WIDTH, 20.0, 45.0)), "{}", b.volume() - u.volume());
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base.0 + longer(20.0, 45.0)) && close(size.1, WIDTH), "{size:?}");
@@ -197,12 +249,12 @@ fn a_flange_on_a_plate() {
     let p = plate();
     let long: Vec<String> = faces_of_area(&p, 100.0 * T);
     assert_eq!(long.len(), 2);
-    let one = flange(&p, &long[..1], serde_json::json!({})).unwrap();
+    let one = flange(&p, &long_edges(&p, &long[0]), serde_json::json!({})).unwrap();
     assert!(close(one.volume() - p.volume(), added(1.0, 100.0, 20.0, 90.0)));
     let (size, counts, bends) = blank(&one);
     assert!(close(size.0, 60.0 + longer(20.0, 90.0)) && close(size.1, 100.0), "{size:?}");
     assert_eq!((counts, bends), ([4, 0, 0], 2));
-    let two = flange(&p, &long, serde_json::json!({})).unwrap();
+    let two = flange(&p, &ends_edges(&p, &long), serde_json::json!({})).unwrap();
     assert!(close(two.volume() - p.volume(), added(2.0, 100.0, 20.0, 90.0)));
     let (size, _, bends) = blank(&two);
     assert!(close(size.0, 60.0 + 2.0 * longer(20.0, 90.0)) && close(size.1, 100.0), "{size:?}");
@@ -212,7 +264,7 @@ fn a_flange_on_a_plate() {
 #[test]
 fn refusals() {
     let u = u_sheet();
-    let e = &ends(&u)[..1];
+    let e = &long_edges(&u, &ends(&u)[0]);
     for angle in [0, 180] {
         assert!(flange(&u, e, serde_json::json!({"angle": angle})).is_err(), "angle {angle}");
     }
@@ -221,21 +273,30 @@ fn refusals() {
     // As high as its bend at a right angle: no wall left, refused rather than a sliver.
     assert!(matches!(flange(&u, e, serde_json::json!({"height": 4})), Err(BrepError::Degenerate(_))));
     assert!(flange(&u, e, serde_json::json!({"height": 5})).is_ok());
-    // A cap of the sheet is no end.
-    let cap = (0..u.faces().len()).find(|&x| matches!(u.faces()[x].surface, Surface::Plane(p) if p.normal.z > 0.5)).unwrap();
-    assert!(flange(&u, &[hex(&u, cap)], serde_json::json!({})).is_err());
+    // An edge of a face that is no wall (a short edge of an end) is no pick.
+    let end = (0..u.faces().len()).find(|&x| hex(&u, x) == ends(&u)[0]).unwrap();
+    let short = u
+        .loop_half_edges(u.faces()[end].first_loop)
+        .map(|h| format!("{:?}", u.edges()[u.half_edges()[h as usize].edge as usize].id))
+        .find(|i| !e.contains(i))
+        .unwrap();
+    assert!(flange(&u, &[short], serde_json::json!({})).is_err());
     // Ends meeting at a corner, or one end twice.
     let p = plate();
     let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
-    let err = flange(&p, &[long[0].clone(), short[0].clone()], serde_json::json!({})).unwrap_err();
+    let corner = [long_edges(&p, &long[0]), long_edges(&p, &short[0])].concat();
+    let err = flange(&p, &corner, serde_json::json!({})).unwrap_err();
     assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("corner")), "{err}");
-    assert!(matches!(flange(&p, &[long[0].clone(), long[0].clone()], serde_json::json!({})), Err(BrepError::Unsupported(_))));
+    // One end by its two edges, or by one edge twice, is one flange.
+    let one = flange(&p, &long_edges(&p, &long[0]), serde_json::json!({})).unwrap();
+    let twice = flange(&p, &vec![long_edges(&p, &long[0])[0].clone(); 2], serde_json::json!({})).unwrap();
+    assert!(close(twice.volume(), one.volume()));
 }
 
 #[test]
 fn ids_do_not_depend_on_the_height() {
     let u = u_sheet();
-    let e = ends(&u);
+    let e = ends_edges(&u, &ends(&u));
     let ids = |h: u32| sorted_ids(&flange(&u, &e, serde_json::json!({"height": h})).unwrap());
     assert_eq!(ids(20), ids(30));
     assert!(ids(20).windows(2).all(|w| w[0] < w[1]));
@@ -246,7 +307,7 @@ fn ids_do_not_depend_on_the_height() {
 fn a_hole_across_a_flanges_bend() {
     for inner in [false, true] {
         let u = u_sheet();
-        let f = flange(&u, &ends(&u)[..1], serde_json::json!({})).unwrap();
+        let f = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({})).unwrap();
         let end = new_end(&u, &f);
         // The wall's faces: the new planes of 16 × 40; the inner one is nearer the leg's inner side.
         let walls: Vec<usize> = new_faces(&u, &f)
@@ -285,4 +346,163 @@ fn a_hole_across_a_flanges_bend() {
         let flat = unfold_side(&r, false, K).unwrap();
         assert_eq!(flat.counts()[2], 1, "inner {inner}: {:?}", flat.counts());
     }
+}
+
+/// Side flanges (D205): on a U with a top 40 long; edges on the cap z = 0 (and z = 40).
+const MID: f64 = 40.0;
+const SIDE: f64 = 36.0; // the top's straight part: 40 less the two bends' set-back (2 · 2)
+const LEG: f64 = 58.0; // a leg's straight part: 60 less the bend's set-back (2), to the sheet's end
+
+fn side_of(b: &Body, edges: &[String], extra: serde_json::Value) -> Body {
+    flange(b, edges, extra).unwrap()
+}
+
+/// The side flange's blank: Y grows by the unrolled length of each; X stays.
+fn base_blank(u: &Body) -> (f64, f64) {
+    blank(u).0
+}
+
+#[test]
+fn a_side_flange_on_the_top() {
+    let u = u_of(MID);
+    let b = side_of(&u, &[wall_edge(&u, 1, 62.0, 0.0)], serde_json::json!({}));
+    assert!(close(b.volume() - u.volume(), added(1.0, SIDE, 20.0, 90.0)), "{}", b.volume() - u.volume());
+    let (size, counts, bends) = blank(&b);
+    let base = base_blank(&u);
+    assert!(close(size.0, base.0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
+    assert_eq!((counts, bends), ([8, 0, 0], 6));
+}
+
+#[test]
+fn a_side_flange_on_a_leg_goes_outward() {
+    let u = u_of(MID);
+    let e = wall_edge(&u, 0, -2.0, 0.0);
+    let b = side_of(&u, std::slice::from_ref(&e), serde_json::json!({}));
+    assert!(close(b.volume() - u.volume(), added(1.0, LEG, 20.0, 90.0)), "{}", b.volume() - u.volume());
+    let (size, counts, bends) = blank(&b);
+    assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
+    assert_eq!((counts, bends), ([6, 0, 0], 6));
+    // Outward: the leg's outer face is at x = −2, the flange reaches x = −20 (2 + 16 + 2 out of the wall).
+    let (lo, _) = b.bounds();
+    assert!(close(lo.x.abs(), 20.0), "{lo:?}");
+    // Flipped: inward, the sheet's bounds stay.
+    let f = side_of(&u, &[e], serde_json::json!({"flip": true}));
+    assert!(close(f.volume() - u.volume(), added(1.0, LEG, 20.0, 90.0)));
+    let (lo, _) = f.bounds();
+    assert!(close(lo.x.abs(), 2.0), "{lo:?}");
+    assert_eq!(blank(&f), blank(&b));
+}
+
+/// The inner edge of a wall makes the same flange as its outer one.
+#[test]
+fn both_edges_of_a_walls_side_make_one_flange() {
+    let u = u_of(MID);
+    let one = side_of(&u, &[wall_edge(&u, 1, 62.0, 0.0)], serde_json::json!({}));
+    let inner = side_of(&u, &[wall_edge(&u, 1, 60.0, 0.0)], serde_json::json!({}));
+    let both = side_of(&u, &[wall_edge(&u, 1, 60.0, 0.0), wall_edge(&u, 1, 62.0, 0.0)], serde_json::json!({}));
+    assert!(close(inner.volume(), one.volume()) && close(both.volume(), one.volume()));
+    // Whichever edge is picked, the flange's faces are named alike.
+    assert_eq!(sorted_ids(&both), sorted_ids(&inner));
+    assert_eq!(sorted_ids(&one), sorted_ids(&inner));
+}
+
+#[test]
+fn several_side_flanges_in_one_operation() {
+    let u = u_of(MID);
+    let edges = [wall_edge(&u, 0, -2.0, 0.0), wall_edge(&u, 1, 62.0, 0.0), wall_edge(&u, 0, 42.0, 0.0)];
+    let b = side_of(&u, &edges, serde_json::json!({}));
+    assert!(close(b.volume() - u.volume(), added(2.0, LEG, 20.0, 90.0) + added(1.0, SIDE, 20.0, 90.0)), "{}", b.volume() - u.volume());
+    let (size, counts, bends) = blank(&b);
+    assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
+    assert_eq!((counts, bends), ([12, 0, 0], 10));
+    let (lo, hi) = b.bounds();
+    assert!(close(lo.x.abs(), 20.0) && close(hi.x, MID + 20.0) && close(hi.y, 80.0), "{lo:?} {hi:?}");
+}
+
+/// A wall flanged on both sides of the sheet's width (z = 0 and z = 40): the blank grows twice.
+#[test]
+fn a_wall_with_a_side_flange_on_each_side() {
+    let u = u_of(MID);
+    let edges = [wall_edge(&u, 0, -2.0, 0.0), wall_edge(&u, 0, -2.0, WIDTH)];
+    let b = side_of(&u, &edges, serde_json::json!({}));
+    assert!(close(b.volume() - u.volume(), added(2.0, LEG, 20.0, 90.0)), "{}", b.volume() - u.volume());
+    let (size, counts, bends) = blank(&b);
+    assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + 2.0 * longer(20.0, 90.0)), "{size:?}");
+    assert_eq!((counts, bends), ([8, 0, 0], 8));
+}
+
+/// A flange on an end of the U with mid 40 for comparison with the side flanges.
+#[test]
+fn an_end_flange_on_a_long_u() {
+    let u = u_of(MID);
+    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({})).unwrap();
+    assert!(close(b.volume() - u.volume(), added(1.0, WIDTH, 20.0, 90.0)));
+    let (size, counts, bends) = blank(&b);
+    assert!(close(size.0, base_blank(&u).0 + longer(20.0, 90.0)) && close(size.1, WIDTH), "{size:?}");
+    assert_eq!((counts, bends), ([4, 0, 0], 6));
+}
+
+/// A side flange along a leg and an end flange at the leg's end meet at a corner.
+#[test]
+fn a_side_flange_and_an_end_flange_at_a_corner_are_refused() {
+    let u = u_of(MID);
+    // The end at the origin: the one whose face lies at y = 0 and x from −2 to 0.
+    let end = ends(&u)
+        .into_iter()
+        .find(|f| {
+            let x = (0..u.faces().len()).find(|&x| hex(&u, x) == *f).unwrap();
+            centroid(&u, x).x < 1.0
+        })
+        .unwrap();
+    let mut edges = long_edges(&u, &end);
+    edges.push(wall_edge(&u, 0, -2.0, 0.0));
+    let err = flange(&u, &edges, serde_json::json!({})).unwrap_err();
+    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("corner")), "{err}");
+}
+
+#[test]
+fn side_flange_ids_do_not_depend_on_the_height() {
+    let u = u_of(MID);
+    let e = [wall_edge(&u, 1, 62.0, 0.0)];
+    let ids = |h: u32| sorted_ids(&flange(&u, &e, serde_json::json!({"height": h})).unwrap());
+    assert_eq!(ids(20), ids(30));
+    assert!(ids(20).windows(2).all(|w| w[0] < w[1]));
+}
+
+/// A hole well inside the top wall, beside a side flange on it, cuts as without the flange: one
+/// circle in the blank. (The hole is on the leg, which has no flange: the cut reaches none.)
+#[test]
+fn a_hole_beside_a_side_flange_still_cuts() {
+    let u = u_of(MID);
+    let b = side_of(&u, &[wall_edge(&u, 1, 62.0, 0.0)], serde_json::json!({}));
+    let target = Value::Body(b.clone());
+    let first = b.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.x < -0.5 && p.origin.x <= 0.0)).unwrap();
+    let sketch = serde_json::json!({"points": {"h": [30, -20]}, "circles": {"c": {"center": "h", "diameter": 6}}});
+    let placed = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", first.id), "k_factor": K, "sketch": sketch}))
+        .eval(id("hole"), &[&target])
+        .unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id("cut"), &[&target, &placed]).unwrap().body().unwrap().clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    assert!(r.volume() < b.volume());
+    let (_, counts, bends) = blank(&r);
+    assert_eq!((counts[2], bends), (1, 6));
+}
+
+/// A hole on a leg across the edge where its side flange stands reaches the flange: refused.
+#[test]
+fn a_hole_reaching_a_side_flange_is_refused() {
+    let u = u_of(MID);
+    let b = side_of(&u, &[wall_edge(&u, 0, -2.0, 0.0)], serde_json::json!({}));
+    let target = Value::Body(b.clone());
+    let first = b.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.x < -0.5 && p.origin.x <= 0.0)).unwrap();
+    // The sketch's Y is −z: the circle spans z from −1 to 5.
+    let sketch = serde_json::json!({"points": {"h": [30, -2]}, "circles": {"c": {"center": "h", "diameter": 6}}});
+    let placed = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", first.id), "k_factor": K, "sketch": sketch}))
+        .eval(id("hole"), &[&target])
+        .unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    let r = cut.eval(id("cut"), &[&target, &placed]);
+    assert!(matches!(r, Err(BrepError::Unsupported(ref m)) if m.contains("flange")), "{:?}", r.map(|_| ()));
 }

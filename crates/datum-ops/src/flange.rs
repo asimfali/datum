@@ -121,14 +121,15 @@ fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
     if !side_face(body, cap, &sides) {
         return Err(unsupported("it stands on a wall's edge on the sheet's side face (one along its bends too, no hole)"));
     }
-    // The wall's other side: the face along the side face parallel to it, nearest.
+    // The wall's other side: of the sheet's sides along the side face, parallel to it, nearest
+    // (a flange's own side, square to its wall, may be parallel too).
     let across = body
         .loop_half_edges(body.faces()[cap as usize].first_loop)
         .filter(|&g| g != cap_h)
         .filter_map(|g| {
             let x = face_of(he(g).twin);
             let p = plane(x)?;
-            (x != wall && parallel(p.normal, pw.normal)).then(|| (g, (p.origin - pw.origin).dot(unit(pw.normal)).abs()))
+            (x != wall && sides.contains(&x) && parallel(p.normal, pw.normal)).then(|| (g, (p.origin - pw.origin).dot(unit(pw.normal)).abs()))
         })
         .filter(|(_, d)| *d > 0.0)
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -149,6 +150,9 @@ fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
     };
     let toward_wall = wall_out != flip;
     let (inner, outer) = if toward_wall { ([a1, a0], [b1, b0]) } else { ([b1, b0], [a1, a0]) };
+    // The same whichever edge of the wall is picked: its ends in the order of their IDs.
+    let id_of = |v: Ix| body.vertices()[v as usize].id;
+    let (inner, outer) = if id_of(inner[0]) > id_of(inner[1]) { ([inner[1], inner[0]], [outer[1], outer[0]]) } else { (inner, outer) };
     let up_face = if toward_wall { wall } else { face_of(he(across).twin) };
     let up = unit(plane(up_face).map_or(pw.normal, |p| p.normal));
     // The side face without the strip: its loop cut at the wall's two edges, each piece closed
@@ -192,7 +196,9 @@ fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
         };
         kept.push(FaceSpec { id: face, surface: spec.surface, loops: vec![piece] });
     }
-    let key = TopoId::derive("flange.side").id(id(a0).min(id(b0))).id(id(a1).max(id(b1))).finish();
+    let mut corners = strip;
+    corners.sort();
+    let key = TopoId::derive("flange.side").id(corners[0]).id(corners[3]).finish();
     Ok(Base { key, inner, outer, out: unit(pc.normal), up, gone: vec![cap], kept, joins })
 }
 
@@ -214,7 +220,11 @@ fn smooth_convex(body: &Body, x: Ix) -> bool {
     body.loop_half_edges(body.faces()[x as usize].first_loop).any(|h| {
         let y = body.loops()[he(he(h).twin).loop_ix as usize].face;
         matches!(body.faces()[y as usize].surface, Surface::Cylinder(c) if c.convex)
-            && body.faces()[x as usize].surface.normal_at(body.point(he(h).origin)).dot(body.faces()[y as usize].surface.normal_at(body.point(he(h).origin))) > 0.5
+            && body.faces()[x as usize]
+                .surface
+                .normal_at(body.point(he(h).origin))
+                .dot(body.faces()[y as usize].surface.normal_at(body.point(he(h).origin)))
+                > 0.5
     })
 }
 
@@ -341,20 +351,23 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<
     // From each corner of the end, about the bend's axis `up · radius` away: where the bend ends,
     // and the wall's end beyond it.
     let mut vertices: Vec<Vertex> = target.vertices().to_vec();
-    let mut corner = |base: Ix, radius: f64, k: u64| -> [TopoId; 3] {
+    // One axis for the bend's both sides, through the inner edge's start `r` up: both sides
+    // turn about it, so the two cylinders are coaxial exactly (made apart, they part in the last
+    // bits, and the bend has no face across it).
+    let c_in = target.point(i0) + up * r;
+    let mut corner = |base: Ix, k: u64| -> [TopoId; 3] {
         let p = target.point(base);
-        let c = p + up * radius;
-        let q = c + turned(p - c, axis, turn);
+        let q = c_in + turned(p - c_in, axis, turn);
         let (vq, ve) = (id("flange.v", k), id("flange.v", k + 1));
         vertices.push(Vertex { id: vq, point: q });
         vertices.push(Vertex { id: ve, point: q + along * wall });
         [target.vertices()[base as usize].id, vq, ve]
     };
     // Inner and outer, at the start and end of the width.
-    let [ii0, ji0, ki0] = corner(i0, r, 0);
-    let [ii1, ji1, ki1] = corner(i1, r, 2);
-    let [oo0, po0, qo0] = corner(o0, r + t, 4);
-    let [oo1, po1, qo1] = corner(o1, r + t, 6);
+    let [ii0, ji0, ki0] = corner(i0, 0);
+    let [ii1, ji1, ki1] = corner(i1, 2);
+    let [oo0, po0, qo0] = corner(o0, 4);
+    let [oo1, po1, qo1] = corner(o1, 6);
     let point = |v: TopoId| vertices.iter().find(|x| x.id == v).map_or(Vec3::ZERO, |x| x.point);
     // A loop of `ids` turning about `outward` by the right hand.
     let oriented = |mut ids: Vec<TopoId>, outward: Vec3| -> Vec<TopoId> {
@@ -365,8 +378,7 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<
         }
         ids
     };
-    let c_in = target.point(i0) + up * r;
-    let c_out = target.point(o0) + up * (r + t);
+    let c_out = c_in;
     let in_mid = c_in + turned(target.point(i0) - c_in, axis, libm::sincos(0.5 * a)) - c_in;
     let inner_normal = turned(up, axis, turn);
     let mut faces: Vec<FaceSpec> = Vec::new();
@@ -398,9 +410,14 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<
         CurveSpec { from, to, curve: Curve::Arc(Arc { center: c, axis, radius: r }) }
     };
     let mut curves = target.curve_specs();
-    let c_in1 = c_in + w * (target.point(i1) - target.point(i0)).dot(w);
-    let c_out1 = c_out + w * (target.point(o1) - target.point(o0)).dot(w);
-    curves.extend([arc(c_in, r, ii0, ji0), arc(c_in1, r, ii1, ji1), arc(c_out, r + t, oo0, po0), arc(c_out1, r + t, oo1, po1)]);
+    // Each arc's centre on the axis, in its plane.
+    let on_axis = |v: Ix| c_in + w * (target.point(v) - c_in).dot(w);
+    curves.extend([
+        arc(on_axis(i0), r, ii0, ji0),
+        arc(on_axis(i1), r, ii1, ji1),
+        arc(on_axis(o0), r + t, oo0, po0),
+        arc(on_axis(o1), r + t, oo1, po1),
+    ]);
     // The sides: into the face at that end of the width where it is square to the width, else
     // faces of their own.
     let mut gone: BTreeSet<Ix> = gone.into_iter().collect();

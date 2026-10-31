@@ -211,12 +211,19 @@ pub(crate) fn branches(body: &Body) -> BTreeSet<Ix> {
         let ways = beside(body, &bend, &none);
         let [a, b] = &ways[..] else { return None };
         let end = |t: &Vec<Ix>| matches!(body.faces()[t[0] as usize].surface, Surface::Plane(_)) && beside(body, t, &none) == [bend.clone()];
-        let wall = if end(a) { a } else if end(b) { b } else { return None };
+        let wall = if end(a) {
+            a
+        } else if end(b) {
+            b
+        } else {
+            return None;
+        };
         Some(bend.iter().chain(wall).copied().collect())
     };
     let mut best: Option<(usize, BTreeSet<Ix>)> = None;
     for (k, main) in classes.iter().enumerate() {
-        let others: Option<Vec<Vec<Ix>>> = classes.iter().enumerate().filter(|(j, _)| *j != k).flat_map(|(_, c)| c.iter().map(|&x| leaf(x))).collect();
+        let others: Option<Vec<Vec<Ix>>> =
+            classes.iter().enumerate().filter(|(j, _)| *j != k).flat_map(|(_, c)| c.iter().map(|&x| leaf(x))).collect();
         let Some(others) = others else { continue };
         if best.as_ref().is_none_or(|(n, _)| main.len() > *n) {
             best = Some((main.len(), others.into_iter().flatten().collect()));

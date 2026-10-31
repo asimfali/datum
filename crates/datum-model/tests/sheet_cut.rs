@@ -359,7 +359,16 @@ fn a_flange_takes_the_rules_radius() {
     // The sheet's end at the origin faces −y: the face of 40 × 2.
     let faces = run(&mut s, "query_faces", json!({"name": "l", "normal": [0, -1, 0]}));
     let end = faces["faces"].as_array().unwrap().iter().find(|f| f["area"] == 80.0).unwrap()["id"].as_str().unwrap().to_string();
-    let r = run(&mut s, "add", json!({"name": "f", "op": "flange", "inputs": ["l"], "faces": [end], "height": 20}));
+    // Its long edge: the one 40 long, along z.
+    let edges = run(&mut s, "query_edges", json!({"name": "l", "face": end}));
+    let long = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["to"]["point"][2].as_f64().unwrap() - e["from"]["point"][2].as_f64().unwrap()).abs() == 40.0)
+        .unwrap();
+    let edge = long["id"].as_str().unwrap().to_string();
+    let r = run(&mut s, "add", json!({"name": "f", "op": "flange", "inputs": ["l"], "edges": [edge], "height": 20}));
     assert_cut(&r);
     let (t, big) = (2.0_f64, 4.0_f64);
     let added = 40.0 * (std::f64::consts::FRAC_PI_4 * (big * big - t * t) + (20.0 - big) * t);

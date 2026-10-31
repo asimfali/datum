@@ -173,7 +173,7 @@
     "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42"
   },
   "sheet_flange.json": {
-    "flanged": "b32bfc8fe8baec20c16ec5af3edee4330fe75b385442eef84328c7b87692b789",
+    "flanged": "585f9dd8a94480894d7de51c0e25aaaa8ca147502beda861f3a54cd9e445fab6",
     "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
     "path": "aaa143ce7f45a3cfd4206cb03140b2fca52f6812a50fbf69653a55c33350ba42"
   },
@@ -189,6 +189,11 @@
   "sheet_rolled_path.json": {
     "path": "1e6a99a0f7af1c468116455f9e34802b60581707f14a03f38c0bcc9e150f1f9c",
     "rolled": "a740bd237fe6fc3236a1f1b571e7d0d5df1c9ce61fb9d9af3f485e4ecb5cada6"
+  },
+  "sheet_side_flange.json": {
+    "l": "02d2731d3a28bfcc87e28cb5f58ec1dfe79fc85482e51e36af1f44b33199f746",
+    "path": "8d24424d4be5a498ff5c3b563765196e1a9bdf8fe60e39e184340d6e05013fe3",
+    "side_flanged": "1ac66f5d07df8643ec86228e61d94a5215673183825d9d35259bd98a634df376"
   },
   "sheet_side_notch.json": {
     "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",

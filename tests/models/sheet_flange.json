@@ -58,12 +58,14 @@
       "inputs": [
         "l"
       ],
-      "faces": [
-        "43f1609749189bd3830dd0a663739f2b",
-        "503bd73f956174fbb036cdbb24ad1824"
-      ],
       "height": 20,
-      "radius": 2
+      "radius": 2,
+      "edges": [
+        "a304f7b49ba0b7a052f8822b21966e7f",
+        "f3f37f85c3b2f0de86159dad048c2c65",
+        "50aa8b1c1e7b3bc280f9f1c19683e1c3",
+        "57d1637d92516c79f5c92461395c34d2"
+      ]
     }
   ]
 }
