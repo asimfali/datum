@@ -67,7 +67,7 @@ pub fn close(dock: &mut DockState<Pane>, pane: Pane) {
 }
 
 /// The layout as kept between runs, and back; a layout that does not read (or lacks the 3D
-/// view) gives the default.
+/// view) gives the default. The flat pattern is left out: it opens when asked, not with every run.
 pub fn to_text(dock: &DockState<Pane>) -> String {
     serde_json::to_string(dock).unwrap_or_default()
 }
@@ -75,7 +75,9 @@ pub fn to_text(dock: &DockState<Pane>) -> String {
 pub fn from_text(text: &str) -> DockState<Pane> {
     let Ok(mut v) = serde_json::from_str::<serde_json::Value>(text) else { return default_layout() };
     unbounded(&mut v);
-    serde_json::from_value::<DockState<Pane>>(v).ok().filter(|d| is_open(d, Pane::Model)).unwrap_or_else(default_layout)
+    let mut dock = serde_json::from_value::<DockState<Pane>>(v).ok().filter(|d| is_open(d, Pane::Model)).unwrap_or_else(default_layout);
+    close(&mut dock, Pane::Flat);
+    dock
 }
 
 /// A pane's rectangle not laid out yet is infinite, which JSON writes as null: read as 0, it is
@@ -105,8 +107,9 @@ mod tests {
         assert!(is_open(&dock, Pane::Model) && !is_open(&dock, Pane::Flat));
         open(&mut dock, Pane::Flat);
         assert!(is_open(&dock, Pane::Flat));
+        open(&mut dock, Pane::Library);
         let back = from_text(&to_text(&dock));
-        assert!(is_open(&back, Pane::Flat) && is_open(&back, Pane::Model));
+        assert!(is_open(&back, Pane::Library) && is_open(&back, Pane::Model) && !is_open(&back, Pane::Flat), "the flat pattern opens when asked");
         close(&mut dock, Pane::Flat);
         assert!(!is_open(&dock, Pane::Flat));
         assert!(!is_open(&from_text("not a layout"), Pane::Flat), "the default");

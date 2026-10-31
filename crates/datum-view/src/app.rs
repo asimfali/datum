@@ -1190,6 +1190,7 @@ impl Viewer {
         self.leave();
         self.set_path(None);
         self.send(Request::Close);
+        crate::dock::close(&mut self.dock, crate::dock::Pane::Flat);
     }
 
     /// The library palette (D117): every sketch element with its outline, name and where it comes
@@ -1654,6 +1655,7 @@ impl Viewer {
             for (act, icon) in [
                 (Act::NewSketch, Icon::NewSketch),
                 (Act::Extrude, Icon::Extrude),
+                (Act::FlatPane, Icon::Flat),
                 (Act::WorkPlane, Icon::WorkPlane),
                 (Act::LookAt, Icon::LookAt),
                 (Act::Measure, Icon::Measure),
@@ -4325,6 +4327,8 @@ impl Viewer {
             | Act::RuleTable => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Extrude => self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch")),
+            // Something to lay flat, or the pane open to close.
+            Act::FlatPane => self.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::Rename => self.tree.selected.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.sketch.is_some(),

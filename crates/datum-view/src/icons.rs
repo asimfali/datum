@@ -32,6 +32,8 @@ pub enum Icon {
     Measure,
     /// A profile with an arrow up: extrude.
     Extrude,
+    /// A blank with its bend lines dashed: the flat pattern.
+    Flat,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -172,6 +174,12 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             painter.add(egui::Shape::closed_line(vec![at(-6.0, 3.0), at(6.0, 3.0), at(6.0, 7.0), at(-6.0, 7.0)], stroke));
             painter.line_segment([at(0.0, 1.0), at(0.0, -7.0)], stroke);
             painter.add(egui::Shape::line(vec![at(-2.5, -4.5), at(0.0, -7.0), at(2.5, -4.5)], stroke));
+        }
+        Icon::Flat => {
+            painter.add(egui::Shape::closed_line(vec![at(-7.0, -5.0), at(7.0, -5.0), at(7.0, 5.0), at(-7.0, 5.0)], stroke));
+            for x in [-2.0, 2.0] {
+                painter.add(egui::Shape::dashed_line(&[at(x, -5.0), at(x, 5.0)], stroke, 1.5, 1.5));
+            }
         }
         Icon::Measure => {
             // A ruler laid aslant, its ticks.
