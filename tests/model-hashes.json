@@ -125,6 +125,12 @@
     "bushing": "a31ebaa14cce81fc56a529a5454c10ea01ab1ec72c5afa4f3395be102f508b1a",
     "profile": "fb06260e4a036138e19068561887eb7546dbc79bb849105fa50c7f67a8fa42b2"
   },
+  "rolled.json": {
+    "cone": "4fbefb83353726cee199c1a5e5e4ec8f8ea7fc157e6e204d8c4e78b0598f850c",
+    "cone_profile": "9be3b20c63769e9ea77bfbb1a96c45dbea9fd78a6ffe8e289616edd4a9d8abd9",
+    "shell": "50d7346add40184ec3c972772ecdbcd1b02314d711946eb682ba97be31aab908",
+    "shell_profile": "78fbafbd1ca597047c3b304f9cb0688c0a08b13031e289d8b8ba43d3361be7c5"
+  },
   "rolled_holes.json": {
     "holes": "0d31287537f8c17b9cc1cd4a6d7f027b895f88aeeaae628862839c010aee7f2f",
     "perforated": "7a6556e087fd0bbdc3bd4a7404a81c61fcb929dba84cc37b31dea7e1964adac2",

@@ -1,0 +1,42 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "shell_profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {"o": [0, 0], "x": [100, 0], "a": [0, 50], "b": [100, 50]},
+        "lines": {"axis": {"from": "o", "to": "x", "construction": true}, "wall": {"from": "a", "to": "b"}}
+      }
+    },
+    {
+      "name": "shell",
+      "op": "rolled",
+      "inputs": ["shell_profile"],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2,
+      "thickness": 2,
+      "k_factor": 0.44
+    },
+    {
+      "name": "cone_profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {"o": [0, 0], "x": [100, 0], "a": [0, 50], "b": [100, 80]},
+        "lines": {"axis": {"from": "o", "to": "x", "construction": true}, "wall": {"from": "a", "to": "b"}}
+      }
+    },
+    {
+      "name": "cone",
+      "op": "rolled",
+      "inputs": ["cone_profile"],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2,
+      "thickness": 2,
+      "k_factor": 0.44
+    }
+  ]
+}
