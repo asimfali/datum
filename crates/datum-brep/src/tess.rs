@@ -134,10 +134,17 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
     }
     let (mut points, mut vertices, mut next, mut angles) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let frame = face.surface.revolution().map(|c| crate::curve::frame(&c));
+    // The middle of the angles the outer loop spans: a hole's are taken a whole turn round if
+    // need be to lie among them (a rolled shell spans nearly a turn, and a hole past the frame's
+    // ±π cut would land outside its face).
+    let mut outer: Option<f64> = None;
     for l in body.face_loops(f) {
         let first = points.len() as Vx;
         let start = body.point(body.half_edges()[body.loop_half_edges(l).start as usize].origin);
         let mut theta = frame.as_ref().map_or(0.0, |fr| fr.angle(start));
+        if let Some(mid) = outer {
+            theta += std::f64::consts::TAU * libm::round((mid - theta) / std::f64::consts::TAU);
+        }
         for h in body.loop_half_edges(l) {
             let he = &body.half_edges()[h as usize];
             let (u, v) = (body.point(he.origin), body.point(body.half_edges()[body.next(h) as usize].origin));
@@ -166,6 +173,10 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
         }
         let last = points.len() as Vx - 1;
         next.extend((first..last).map(|k| k + 1).chain([first]));
+        if frame.is_some() && outer.is_none() {
+            let (lo, hi) = angles.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &a| (lo.min(a), hi.max(a)));
+            outer = Some(0.5 * (lo + hi));
+        }
     }
     let project = Projection::of(&face.surface);
     let mut flat: Vec<Vec2> = points.iter().zip(&angles).map(|(&p, &t)| project.at(p, t)).collect();

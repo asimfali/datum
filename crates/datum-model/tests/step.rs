@@ -33,6 +33,7 @@ fn reference_models_export_or_say_why_not() {
                 "rolled_perforation" => &["perforated", "slotted"],
                 "rolled_holes" => &["perforated"],
                 "sheet_bend_cut" => &["punched"],
+                "rolled_trim" => &["trimmed", "trimmed_other"],
                 _ => &[],
             };
             assert_eq!(datum_model::inexact_features(&g, &e), inexact, "{name}");

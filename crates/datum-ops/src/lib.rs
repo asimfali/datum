@@ -750,6 +750,8 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),
         };
         return match local {
+            // A sketch in a development has no tool to stretch through all: the cut's own reason.
+            Err(BrepError::Unsupported(why)) if s.developed.is_some() => Err(BrepError::Unsupported(why)),
             Err(BrepError::Unsupported(why)) => {
                 let tool = extrude_sketch(feature, s, 0.0, 1.0)?;
                 boolean(feature, BooleanKind::Difference, Some(s.frame[3]), &[t, &tool]).map_err(|e| match e {
