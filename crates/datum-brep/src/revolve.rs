@@ -89,8 +89,8 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
     let on_axis = |k: usize| at.origin + at.axis * p[k].x;
     let mut vertices = Vec::new();
     let mut curves = Vec::new();
-    for k in 0..n {
-        if p[k].y == 0.0 {
+    for (k, &q) in p.iter().enumerate() {
+        if q.y == 0.0 {
             // A full turn leaves no vertex on the axis: its edges turn into nothing or a disc.
             if !full {
                 vertices.push(Vertex { id: vid(k, 0), point: on_axis(k) });
@@ -98,9 +98,9 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
             continue;
         }
         for (i, &t) in angles.iter().enumerate() {
-            vertices.push(Vertex { id: vid(k, i), point: at.point(p[k], t) });
+            vertices.push(Vertex { id: vid(k, i), point: at.point(q, t) });
         }
-        let arc = Curve::Arc(Arc { center: on_axis(k), axis: at.axis, radius: p[k].y });
+        let arc = Curve::Arc(Arc { center: on_axis(k), axis: at.axis, radius: q.y });
         for i in 0..if full { m } else { 1 } {
             curves.push(CurveSpec { from: vid(k, i), to: vid(k, (i + 1) % m), curve: arc });
         }
