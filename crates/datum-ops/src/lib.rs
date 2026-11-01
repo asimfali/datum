@@ -11,6 +11,7 @@ mod pattern;
 mod revolve;
 mod sheet;
 mod sketch;
+mod trim;
 mod unfold;
 
 use std::borrow::Cow;
@@ -33,7 +34,7 @@ pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
     Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, contour_at, depth_to, extrude_sketch, face_plane, place, profile_regions,
 };
-pub use unfold::{Flat, FlatPiece, sheet_sides, unfold, unfold_side};
+pub use unfold::{Flat, FlatPiece, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -211,6 +212,16 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         k_factor: Option<Num>,
     },
+    /// Rolled sheet metal (a shell) trimmed by a work plane (D211): what lies on the side the
+    /// plane's normal points to goes (`flip`: the other side). The cut follows where the plane
+    /// meets the neutral layer at `k_factor` (the part's rule's, put here when the model is
+    /// built), its wall square to the sheet. Inputs: the body, then the work plane.
+    Trim {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        flip: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -359,6 +370,7 @@ impl Op {
             Self::Extrude { .. } => "extrude",
             Self::Revolve { .. } => "revolve",
             Self::Rolled { .. } => "rolled",
+            Self::Trim { .. } => "trim",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
@@ -383,6 +395,7 @@ impl Op {
             | Self::Revolve { .. }
             | Self::Rolled { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
+            Self::Trim { .. } => 2..=2,
         }
     }
 
@@ -419,6 +432,7 @@ impl Op {
                 Self::Plane { base: *base, face: face.clone(), points: points.clone(), offset: r(offset, "offset")? }
             }
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
+            Self::Trim { flip, k_factor } => Self::Trim { flip: *flip, k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
             Self::Revolve { axis, angle, profiles } => Self::Revolve { axis: axis.clone(), angle: r(angle, "angle")?, profiles: profiles.clone() },
             Self::Rolled { axis, path, side, gap, thickness, k_factor } => Self::Rolled {
                 axis: axis.clone(),
@@ -497,7 +511,7 @@ impl Op {
                 h.update(face.as_bytes());
             }
             // `Debug` spells every field exactly, as for a sketch.
-            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } | Self::Revolve { .. } | Self::Rolled { .. } => {
+            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } | Self::Revolve { .. } | Self::Rolled { .. } | Self::Trim { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -541,9 +555,13 @@ impl Op {
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
-            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Plane { .. } | Self::Revolve { .. } | Self::Rolled { .. } => {
-                Vec::new()
-            }
+            Self::Extrude { .. }
+            | Self::Sheet { .. }
+            | Self::Plate { .. }
+            | Self::Plane { .. }
+            | Self::Revolve { .. }
+            | Self::Rolled { .. }
+            | Self::Trim { .. } => Vec::new(),
             _ => values
                 .iter()
                 .enumerate()
@@ -582,6 +600,12 @@ impl Op {
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
+            Self::Trim { flip, k_factor } => {
+                let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
+                let body = values[0].body().ok_or_else(|| BrepError::Sketch("trim takes a body, then a work plane".into()))?;
+                let plane = values[1].plane().ok_or_else(|| BrepError::Sketch("trim takes a body, then a work plane".into()))?;
+                trim::trim(feature, body, plane, *flip, num(k)?)?
+            }
             Self::Rolled { axis, path, side, gap, thickness, k_factor } => {
                 let (Some(thickness), Some(k)) = (thickness, k_factor) else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
                 let dims = RollDims { thickness: num(thickness)?, k_factor: num(k)?, side: *side, gap: num(gap)? };

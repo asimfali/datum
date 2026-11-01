@@ -152,15 +152,52 @@ impl Development {
     }
 }
 
-/// A segment or an arc of a development, from `from` to `to`, the arc as in a profile. At a fixed
-/// distance from the axis it is an edge on a cylinder (see [`Curve`]); swept along the radius,
-/// the wall of a cut (see [`Surface::Wall`]).
+/// A segment, an arc or a wave of a development, from `from` to `to`, the arc as in a profile.
+/// At a fixed distance from the axis it is an edge on a cylinder (see [`Curve`]); swept along the
+/// radius, the wall of a cut (see [`Surface::Wall`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rolled {
     pub dev: Development,
     pub from: Vec2,
     pub to: Vec2,
     pub arc: Option<ProfileArc>,
+    /// The piece follows this wave, not a straight line (D211); never with `arc`.
+    pub wave: Option<Wave>,
+}
+
+/// Where a plane meets the neutral layer of a rolled sheet, in its development (D211):
+/// `v = a + b·cos(u/N) + c·sin(u/N)`, `N` the development's neutral radius. A plane meets the
+/// cylinder in an ellipse, and an ellipse rolled out is this wave, exactly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wave {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+}
+
+impl Wave {
+    /// `v` at `u`, and its first and second derivatives in `u`, for neutral radius `n`.
+    pub fn at(&self, u: f64, n: f64) -> [f64; 3] {
+        let (s, c) = libm::sincos(u / n);
+        [self.a + self.b * c + self.c * s, (self.c * c - self.b * s) / n, -(self.b * c + self.c * s) / (n * n)]
+    }
+
+    /// The least and greatest `v` over `u` from `u0` to `u1`: at the ends, or where the wave
+    /// turns between them.
+    pub fn range(&self, u0: f64, u1: f64, n: f64) -> [f64; 2] {
+        let (lo, hi) = (u0.min(u1), u0.max(u1));
+        let ends = [self.at(lo, n)[0], self.at(hi, n)[0]];
+        let mut out = [ends[0].min(ends[1]), ends[0].max(ends[1])];
+        // Turning points where tan(u/N) = c/b, every half turn from the first.
+        let (first, half) = (libm::atan2(self.c, self.b) * n, std::f64::consts::PI * n);
+        let mut k = libm::ceil((lo - first) / half);
+        while first + k * half <= hi {
+            let v = self.at(first + k * half, n)[0];
+            out = [out[0].min(v), out[1].max(v)];
+            k += 1.0;
+        }
+        out
+    }
 }
 
 impl Rolled {
@@ -171,6 +208,12 @@ impl Rolled {
     /// The point at `t` from 0 at `from` to 1 at `to`, and its derivative in `t`.
     pub fn at(&self, t: f64) -> (Vec2, Vec2) {
         let (f, g) = (self.from, self.to);
+        if let Some(w) = self.wave {
+            let du = g.x - f.x;
+            let u = f.x + du * t;
+            let [v, dv, _] = w.at(u, self.dev.neutral);
+            return (Vec2::new(u, v), Vec2::new(du, dv * du));
+        }
         match self.arc {
             None => {
                 let d = Vec2::new(g.x - f.x, g.y - f.y);
@@ -188,6 +231,10 @@ impl Rolled {
     /// The second derivative in `t` of [`Rolled::at`] at `t`: none on a segment, towards the
     /// centre on an arc.
     pub fn second(&self, t: f64) -> Vec2 {
+        if let Some(w) = self.wave {
+            let du = self.to.x - self.from.x;
+            return Vec2::new(0.0, w.at(self.from.x + du * t, self.dev.neutral)[2] * du * du);
+        }
         match self.arc {
             None => Vec2::new(0.0, 0.0),
             Some(a) => {
@@ -201,6 +248,10 @@ impl Rolled {
     /// direction of the piece.
     pub fn normal(&self, p: Vec2, r: f64) -> Vec3 {
         let d = match self.arc {
+            None if self.wave.is_some() => {
+                let du = self.to.x - self.from.x;
+                Vec2::new(du, self.wave.map_or(0.0, |w| w.at(p.x, self.dev.neutral)[1]) * du)
+            }
             None => Vec2::new(self.to.x - self.from.x, self.to.y - self.from.y),
             Some(a) if a.ccw => Vec2::new(a.center.y - p.y, p.x - a.center.x),
             Some(a) => Vec2::new(p.y - a.center.y, a.center.x - p.x),
@@ -211,6 +262,16 @@ impl Rolled {
     /// The radius of the arc (0 for a segment), the angle it turns (0 for a segment) and its length.
     pub(crate) fn measure(&self) -> (f64, f64, f64) {
         let (f, g) = (self.from, self.to);
+        if self.wave.is_some() {
+            // A wave as chords: its length, and how far its direction turns (a curvature that
+            // chords and quadrature follow as they follow an arc's turn, of no radius of its own).
+            const STEPS: usize = 32;
+            let pts: Vec<(Vec2, Vec2)> = (0..=STEPS).map(|k| self.at(k as f64 / STEPS as f64)).collect();
+            let length = pts.windows(2).map(|w| libm::hypot(w[1].0.x - w[0].0.x, w[1].0.y - w[0].0.y)).sum();
+            let turn =
+                pts.windows(2).map(|w| libm::atan2(w[0].1.x * w[1].1.y - w[0].1.y * w[1].1.x, w[0].1.x * w[1].1.x + w[0].1.y * w[1].1.y).abs()).sum();
+            return (0.0, turn, length);
+        }
         match self.arc {
             None => (0.0, 0.0, libm::hypot(g.x - f.x, g.y - f.y)),
             Some(a) => {
@@ -232,7 +293,8 @@ impl Rolled {
     /// the arc in the development needs, or the turn about the axis, whichever is more.
     pub fn chords(&self, r: f64, chord: f64) -> usize {
         let (rho, turn, length) = self.measure();
-        let own = turn / TAU * per_turn(rho, chord);
+        // A wave has no radius of its own: its turn at the finest the screen takes.
+        let own = turn / TAU * if self.wave.is_some() { SEGMENTS[1] } else { per_turn(rho, chord) };
         let bend = length / self.dev.neutral / TAU * per_turn(r, chord);
         own.max(bend).ceil().max(1.0) as usize
     }
@@ -244,6 +306,9 @@ impl Rolled {
         let (f, g) = (self.from, self.to);
         let rho = self.arc.map_or(0.0, |a| libm::hypot(f.x - a.center.x, f.y - a.center.y));
         let (mut u, mut v) = ([f.x.min(g.x), f.x.max(g.x)], [f.y.min(g.y), f.y.max(g.y)]);
+        if let Some(w) = self.wave {
+            v = w.range(f.x, g.x, self.dev.neutral);
+        }
         if let Some(a) = self.arc {
             u = [u[0].min(a.center.x - rho), u[1].max(a.center.x + rho)];
             v = [v[0].min(a.center.y - rho), v[1].max(a.center.y + rho)];

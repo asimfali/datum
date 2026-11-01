@@ -1210,6 +1210,34 @@ impl Viewer {
         }
     }
 
+    /// Whether the blank `name` may go to DXF, and as what: `Some(true)` with its polylines
+    /// (curves DXF has no exact entity for, D211), once the engineer says yes (D147);
+    /// `Some(false)` with none; `None` when the engineer says no.
+    fn dxf_approved(&self, name: &str) -> Option<bool> {
+        let polylines =
+            self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| n == name)).and_then(|(_, f)| f.as_ref().ok()).map_or(0, |f| f.polylines());
+        if polylines == 0 {
+            return Some(false);
+        }
+        let deviation = datum_ops::POLYLINE_DEVIATION.to_string();
+        let question = [
+            self.i18n.f(
+                "dxf-inexact",
+                "{ $n } curve(s) of the blank (a plane's cut through a rolled sheet) have no exact DXF entity.",
+                &[("n", &polylines.to_string())],
+            ),
+            self.i18n.f(
+                "dxf-inexact-ask",
+                "Write them as polylines within { $deviation } mm? A note beside the file (.dxf.txt) says what was approximated.",
+                &[("deviation", &deviation)],
+            ),
+            self.i18n.t("step-inexact-no", "No: nothing is written.").to_string(),
+        ]
+        .join("\n\n");
+        let answer = rfd::MessageDialog::new().set_title("Datum").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show();
+        (answer == rfd::MessageDialogResult::Yes).then_some(true)
+    }
+
     /// Where a model is opened, or saved again elsewhere, by dialog: where the engineer works —
     /// the folder of the model open, or of the last one opened or saved; else `part` (D121).
     fn where_working(&self) -> rfd::FileDialog {
@@ -2778,8 +2806,10 @@ impl Viewer {
             fields["name"] = json!(name);
             self.send(Request::Command("edit", fields));
         }
-        if let Some((name, path)) = export {
-            self.send(Request::Command("export_dxf", json!({"name": name, "path": path.display().to_string()})));
+        if let Some((name, path)) = export
+            && let Some(approximate) = self.dxf_approved(&name)
+        {
+            self.send(Request::Command("export_dxf", json!({"name": name, "path": path.display().to_string(), "approximate": approximate})));
         }
         if let Some(name) = enter {
             self.enter(name);
@@ -5290,12 +5320,15 @@ impl Viewer {
                 }
             }
             if matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_)))) {
-                let hint = self.i18n.t("flat-dxf-hint", "The blank for the turret press: R12, lines, arcs and circles, no bend lines");
+                let hint = self.i18n.t("flat-dxf-hint", "The blank for the turret press: DXF R2000, lines, arcs and circles, no bend lines");
                 export = ui.button("DXF…").on_hover_text(hint).clicked();
             }
         });
-        if export && let Some(p) = self.exported("dxf", &chosen).save_file() {
-            self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string()})));
+        if export
+            && let Some(approximate) = self.dxf_approved(&chosen)
+            && let Some(p) = self.exported("dxf", &chosen).save_file()
+        {
+            self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string(), "approximate": approximate})));
         }
         let Some(m) = &self.model else { return };
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {

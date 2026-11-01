@@ -41,12 +41,32 @@ pub(crate) fn next_piece(w: TopoId) -> TopoId {
     TopoId::derive("cut.piece").id(w).finish()
 }
 /// A piece of a flat blank's outline or of a cut: arcs run counterclockwise from `start` to
-/// `end` (radians); a hole cut by a circle is one.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// `end` (radians); a hole cut by a circle is one. A polyline stands for a curve with no exact
+/// DXF entity (a plane's cut through a rolled sheet, D211), within [`POLYLINE_DEVIATION`]: the
+/// DXF holds it only when the engineer agrees (D147).
+#[derive(Clone, Debug, PartialEq)]
 pub enum FlatPiece {
     Line(Vec2, Vec2),
     Arc { center: Vec2, radius: f64, start: f64, end: f64 },
     Circle { center: Vec2, radius: f64 },
+    Polyline(Vec<Vec2>),
+}
+
+/// How far, in millimetres, a polyline of a blank strays from the curve it stands for: a
+/// hundredth of what a laser cuts to.
+pub const POLYLINE_DEVIATION: f64 = 1e-3;
+
+impl FlatPiece {
+    /// The same piece moved by `-lo`.
+    fn shifted(&self, lo: Vec2) -> Self {
+        let s = |p: Vec2| Vec2::new(p.x - lo.x, p.y - lo.y);
+        match self {
+            Self::Line(a, b) => Self::Line(s(*a), s(*b)),
+            Self::Arc { center, radius, start, end } => Self::Arc { center: s(*center), radius: *radius, start: *start, end: *end },
+            Self::Circle { center, radius } => Self::Circle { center: s(*center), radius: *radius },
+            Self::Polyline(pts) => Self::Polyline(pts.iter().map(|&p| s(p)).collect()),
+        }
+    }
 }
 
 /// A flat blank: the value of an unfold feature.
@@ -483,6 +503,20 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                     return Err(unsupported("a cut was made with another K-factor"));
                 }
                 match piece.arc {
+                    None if piece.wave.is_some() => {
+                        // Chords within the deviation: a wave in the development bends at most
+                        // its amplitude over the neutral radius squared.
+                        let w = piece.wave.unwrap_or(datum_brep::Wave { a: 0.0, b: 0.0, c: 0.0 });
+                        let (du, amp) = ((piece.to.x - piece.from.x).abs(), libm::hypot(w.b, w.c));
+                        let length = du * libm::sqrt(1.0 + (amp / neutral) * (amp / neutral));
+                        let bend = amp / (neutral * neutral);
+                        let n = (length * libm::sqrt(bend / (8.0 * POLYLINE_DEVIATION))).ceil().max(2.0) as usize;
+                        let inner = (1..n).map(|k| {
+                            let q = piece.dev.point(piece.at(k as f64 / n as f64).0, *neutral);
+                            Vec2::new(l.x(q), y(q))
+                        });
+                        FlatPiece::Polyline(std::iter::once(from).chain(inner).chain([to]).collect())
+                    }
                     None => FlatPiece::Line(from, to),
                     Some(pa) => {
                         let Lay::Bend { axis, .. } = &l.lay else { unreachable!("matched a bend") };
@@ -528,9 +562,10 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         joined(body, cycle, &mut outline);
     }
     // The corner of the outline at the origin.
-    let corners = outline.iter().flat_map(|p| match *p {
-        FlatPiece::Line(a, b) => [a, b],
-        FlatPiece::Arc { center, .. } | FlatPiece::Circle { center, .. } => [center, center],
+    let corners = outline.iter().flat_map(|p| match p {
+        FlatPiece::Line(a, b) => vec![*a, *b],
+        FlatPiece::Arc { center, .. } | FlatPiece::Circle { center, .. } => vec![*center],
+        FlatPiece::Polyline(pts) => pts.clone(),
     });
     let (lo, hi) = corners.fold((Vec2::new(f64::INFINITY, f64::INFINITY), Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY)), |(lo, hi), p| {
         (Vec2::new(lo.x.min(p.x), lo.y.min(p.y)), Vec2::new(hi.x.max(p.x), hi.y.max(p.y)))
@@ -560,15 +595,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             Some([shift(*seam.iter().min_by(by_x)?), shift(*seam.iter().max_by(by_x)?)])
         }))
         .collect();
-    let pieces: Vec<FlatPiece> = outline
-        .into_iter()
-        .chain(holes)
-        .map(|p| match p {
-            FlatPiece::Line(a, b) => FlatPiece::Line(shift(a), shift(b)),
-            FlatPiece::Arc { center, radius, start, end } => FlatPiece::Arc { center: shift(center), radius, start, end },
-            FlatPiece::Circle { center, radius } => FlatPiece::Circle { center: shift(center), radius },
-        })
-        .collect();
+    let pieces: Vec<FlatPiece> = outline.iter().chain(&holes).map(|p| p.shifted(lo)).collect();
     Ok(Flat::new(pieces, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends))
 }
 
@@ -660,6 +687,7 @@ fn cone_blank(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     for p in &pieces {
         match *p {
             FlatPiece::Line(a, b) => [a, b].into_iter().for_each(&mut grow),
+            FlatPiece::Polyline(ref pts) => pts.iter().copied().for_each(&mut grow),
             FlatPiece::Arc { center, radius, start, end } => {
                 let span = (end - start).rem_euclid(TAU);
                 let extremes = (0..4).map(|q| f64::from(q) * std::f64::consts::FRAC_PI_2).filter(|&a| (a - start).rem_euclid(TAU) <= span);
@@ -671,15 +699,7 @@ fn cone_blank(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             FlatPiece::Circle { .. } => {}
         }
     }
-    let shift = |p: Vec2| Vec2::new(p.x - lo.x, p.y - lo.y);
-    let pieces = pieces
-        .into_iter()
-        .map(|p| match p {
-            FlatPiece::Line(a, b) => FlatPiece::Line(shift(a), shift(b)),
-            FlatPiece::Arc { center, radius, start, end } => FlatPiece::Arc { center: shift(center), radius, start, end },
-            circle => circle,
-        })
-        .collect();
+    let pieces = pieces.iter().map(|p| p.shifted(lo)).collect();
     Ok(Flat::new(pieces, Vec2::new(hi.x - lo.x, hi.y - lo.y), Vec::new()))
 }
 
@@ -692,6 +712,12 @@ impl Flat {
                 FlatPiece::Line(a, b) => (0, [a.x, a.y, b.x, b.y, 0.0]),
                 FlatPiece::Arc { center, radius, start, end } => (1, [center.x, center.y, radius, start, end]),
                 FlatPiece::Circle { center, radius } => (2, [center.x, center.y, radius, 0.0, 0.0]),
+                FlatPiece::Polyline(ref pts) => {
+                    bytes.push(3);
+                    bytes.extend((pts.len() as u64).to_le_bytes());
+                    bytes.extend(pts.iter().flat_map(|q| [q.x, q.y]).flat_map(|x| x.to_bits().to_le_bytes()));
+                    continue;
+                }
             };
             bytes.push(tag);
             bytes.extend(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
@@ -715,22 +741,22 @@ fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<Flat
         cycle.rotate_left((first + n - 1) % n);
     }
     // Whether piece `b` goes on the run piece `a` is in, the run begun beside face `run`.
-    let goes_on = |run: Ix, a: Ix, (p, q): (FlatPiece, FlatPiece), b: Ix| {
+    let goes_on = |run: Ix, a: Ix, (p, q): (&FlatPiece, &FlatPiece), b: Ix| {
         let line = matches!((p, q), (FlatPiece::Line(..), FlatPiece::Line(..)));
         let arc = matches!((p, q), (FlatPiece::Arc { .. }, FlatPiece::Arc { .. }));
         (line && b == run) || ((line || arc) && linked(a, b))
     };
     // Nor does the run the cycle happens to start in the middle of.
-    if goes_on(cycle[n - 1].2, cycle[n - 1].2, (cycle[n - 1].0, cycle[0].0), cycle[0].2)
-        && let Some(first) = (1..n).find(|&i| !goes_on(cycle[i - 1].2, cycle[i - 1].2, (cycle[i - 1].0, cycle[i].0), cycle[i].2))
+    if goes_on(cycle[n - 1].2, cycle[n - 1].2, (&cycle[n - 1].0, &cycle[0].0), cycle[0].2)
+        && let Some(first) = (1..n).find(|&i| !goes_on(cycle[i - 1].2, cycle[i - 1].2, (&cycle[i - 1].0, &cycle[i].0), cycle[i].2))
     {
         cycle.rotate_left(first);
     }
     let mut k = 0;
     while k < n {
-        let (p, from, beside) = cycle[k];
+        let (p, from, beside) = cycle[k].clone();
         let mut last = k;
-        while last + 1 < n && goes_on(beside, cycle[last].2, (p, cycle[last + 1].0), cycle[last + 1].2) {
+        while last + 1 < n && goes_on(beside, cycle[last].2, (&p, &cycle[last + 1].0), cycle[last + 1].2) {
             last += 1;
         }
         let to = cycle.get(last + 1).map_or(cycle[0].1, |e| e.1);
@@ -739,7 +765,7 @@ fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<Flat
             FlatPiece::Line(..) => FlatPiece::Line(from, to),
             FlatPiece::Arc { center, radius, .. } if k == 0 && last == n - 1 => FlatPiece::Circle { center, radius },
             FlatPiece::Arc { center, start, .. } => arc_piece(center, from, to, libm::atan2(from.y - center.y, from.x - center.x) == start),
-            FlatPiece::Circle { .. } => p,
+            FlatPiece::Circle { .. } | FlatPiece::Polyline(_) => p,
         });
         k = last + 1;
     }
@@ -774,46 +800,82 @@ impl Flat {
     pub fn counts(&self) -> [usize; 3] {
         let mut n = [0; 3];
         for p in &self.pieces {
-            n[match p {
-                FlatPiece::Line(..) => 0,
-                FlatPiece::Arc { .. } => 1,
-                FlatPiece::Circle { .. } => 2,
-            }] += 1;
+            match p {
+                FlatPiece::Line(..) => n[0] += 1,
+                FlatPiece::Arc { .. } => n[1] += 1,
+                FlatPiece::Circle { .. } => n[2] += 1,
+                FlatPiece::Polyline(_) => {}
+            }
         }
         n
     }
 
-    /// The blank as DXF R12 (AC1009): lines, arcs and circles on layer 0, millimetres.
+    /// How many of its pieces are polylines: curves with no exact DXF entity, written only when
+    /// the engineer agrees (D147, D211).
+    pub fn polylines(&self) -> usize {
+        self.pieces.iter().filter(|p| matches!(p, FlatPiece::Polyline(_))).count()
+    }
+
+    /// The blank as DXF R2000 (AC1015, D211): lines, arcs, circles and lightweight polylines on
+    /// layer 0, millimetres. The sections a DXF R2000 needs besides its entities (tables, blocks,
+    /// objects) are a fixed file made by ezdxf (`dxf2000.dxf`); the entities go into its model
+    /// space with handles after the file's own, and its handle seed follows them.
     pub fn dxf(&self) -> String {
+        const TEMPLATE: &str = include_str!("dxf2000.dxf");
+        const SEED: &str = "$HANDSEED\n  5\n32\n";
+        const ENTITIES: &str = "ENTITIES\n  0\nENDSEC\n";
+        // The template's handle seed, and its model space's block record.
+        const FIRST: u32 = 0x32;
+        const MODEL_SPACE: &str = "17";
         // Writing to a `String` cannot fail.
         fn put(s: &mut String, code: u32, value: impl std::fmt::Display) {
-            let _ = writeln!(s, "{code}\n{value}");
+            let _ = writeln!(s, "{code:>3}\n{value}");
         }
         // Coordinates as shortest round-trip decimals, always with a point.
         fn num(s: &mut String, code: u32, x: f64) {
-            let _ = writeln!(s, "{code}\n{x:?}");
+            let _ = writeln!(s, "{code:>3}\n{x:?}");
         }
-        let mut s = String::with_capacity(self.pieces.len() * 120 + 200);
-        for (c, v) in [(0, "SECTION"), (2, "HEADER"), (9, "$ACADVER"), (1, "AC1009"), (0, "ENDSEC"), (0, "SECTION"), (2, "ENTITIES")] {
-            put(&mut s, c, v);
-        }
+        let mut s = String::with_capacity(self.pieces.len() * 160 + 200);
+        let mut handle = FIRST;
         for p in &self.pieces {
-            let (kind, values): (&str, &[(u32, f64)]) = match *p {
-                FlatPiece::Line(a, b) => ("LINE", &[(10, a.x), (20, a.y), (30, 0.0), (11, b.x), (21, b.y), (31, 0.0)]),
-                FlatPiece::Arc { center, radius, start, end } => {
-                    ("ARC", &[(10, center.x), (20, center.y), (30, 0.0), (40, radius), (50, start.to_degrees()), (51, end.to_degrees())])
-                }
-                FlatPiece::Circle { center, radius } => ("CIRCLE", &[(10, center.x), (20, center.y), (30, 0.0), (40, radius)]),
+            let (kind, class) = match p {
+                FlatPiece::Line(..) => ("LINE", "AcDbLine"),
+                FlatPiece::Arc { .. } | FlatPiece::Circle { .. } => (if matches!(p, FlatPiece::Arc { .. }) { "ARC" } else { "CIRCLE" }, "AcDbCircle"),
+                FlatPiece::Polyline(_) => ("LWPOLYLINE", "AcDbPolyline"),
             };
             put(&mut s, 0, kind);
+            put(&mut s, 5, format_args!("{handle:X}"));
+            put(&mut s, 330, MODEL_SPACE);
+            put(&mut s, 100, "AcDbEntity");
             put(&mut s, 8, "0");
-            for &(c, v) in values {
-                num(&mut s, c, v);
+            put(&mut s, 100, class);
+            handle += 1;
+            match p {
+                FlatPiece::Line(a, b) => {
+                    for (c, v) in [(10, a.x), (20, a.y), (30, 0.0), (11, b.x), (21, b.y), (31, 0.0)] {
+                        num(&mut s, c, v);
+                    }
+                }
+                FlatPiece::Circle { center, radius } | FlatPiece::Arc { center, radius, .. } => {
+                    for (c, v) in [(10, center.x), (20, center.y), (30, 0.0), (40, *radius)] {
+                        num(&mut s, c, v);
+                    }
+                    if let FlatPiece::Arc { start, end, .. } = p {
+                        put(&mut s, 100, "AcDbArc");
+                        num(&mut s, 50, start.to_degrees());
+                        num(&mut s, 51, end.to_degrees());
+                    }
+                }
+                FlatPiece::Polyline(pts) => {
+                    put(&mut s, 90, pts.len());
+                    put(&mut s, 70, 0);
+                    for q in pts {
+                        num(&mut s, 10, q.x);
+                        num(&mut s, 20, q.y);
+                    }
+                }
             }
         }
-        for (c, v) in [(0, "ENDSEC"), (0, "EOF")] {
-            put(&mut s, c, v);
-        }
-        s
+        TEMPLATE.replacen(SEED, &format!("$HANDSEED\n  5\n{handle:X}\n"), 1).replacen(ENTITIES, &format!("ENTITIES\n{s}  0\nENDSEC\n"), 1)
     }
 }

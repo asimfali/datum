@@ -91,15 +91,21 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "export_dxf",
-        description: "Write the flat blank of feature `name` as DXF (R12: lines, arcs, circles on layer 0, mm; no bend lines) to `path`: \
-                      an `unfold` feature's, or a sheet or plate body's, seen from the side `set_flat` chose (front by default).",
-        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name", "path"]}),
+        description: "Write the flat blank of feature `name` as DXF (R2000: lines, arcs, circles on layer 0, mm; no bend lines) to `path`: \
+                      an `unfold` feature's, or a sheet or plate body's, seen from the side `set_flat` chose (front by default). \
+                      Curves DXF has no exact entity for (a trim's cut through a rolled sheet) are refused; with `approximate: true` \
+                      they are written as polylines within 0.001 mm and told of in `<path>.txt`. That is the engineer's decision: \
+                      ask before passing it.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}, "approximate": {"type": "boolean"}}, "required": ["name", "path"]}),
         run: |s, p| {
             let name = text(p, "name")?;
             let flat = s.flat_of(name)?;
             let path = PathBuf::from(text(p, "path")?);
-            std::fs::write(&path, flat.dxf()).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(json!({"written": path.display().to_string(), "width": flat.size.x, "height": flat.size.y, "pieces": flat.pieces.len()}))
+            let approximate = p.get("approximate").and_then(Value::as_bool).unwrap_or(false);
+            let polylines = crate::write_dxf(&flat, &path, approximate)?;
+            Ok(
+                json!({"written": path.display().to_string(), "width": flat.size.x, "height": flat.size.y, "pieces": flat.pieces.len(), "polylines": polylines}),
+            )
         },
     },
     Command {

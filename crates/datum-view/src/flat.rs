@@ -85,6 +85,9 @@ impl FlatView {
                 FlatPiece::Circle { center, radius } => {
                     painter.circle_stroke(screen([center.x, center.y]), (radius * self.scale) as f32, stroke);
                 }
+                FlatPiece::Polyline(ref pts) => {
+                    painter.add(egui::Shape::line(pts.iter().map(|q| screen([q.x, q.y])).collect(), stroke));
+                }
             }
         }
         painter.text(

@@ -315,6 +315,46 @@ pub fn write_step(g: &Graph, e: &datum_graph::Evaluation, path: &std::path::Path
     Ok(step.approximated)
 }
 
+/// What begins a note Datum writes beside a DXF, and only such a note is removed.
+const DXF_NOTE: &str = "Datum DXF note";
+
+/// Writes the blank `flat` as DXF to `path` (D211). Curves the DXF has no exact entity for (a
+/// plane's cut through a rolled sheet) are written as polylines within
+/// [`datum_ops::POLYLINE_DEVIATION`] only if `approximate`, and told of in `<path>.txt`; else
+/// refused. Returns how many were.
+pub fn write_dxf(flat: &datum_ops::Flat, path: &std::path::Path, approximate: bool) -> Result<usize, String> {
+    let n = flat.polylines();
+    let bound = datum_ops::POLYLINE_DEVIATION;
+    if n > 0 && !approximate {
+        return Err(format!(
+            "{n} curve(s) of the blank (a plane's cut through a rolled sheet) have no exact DXF entity; agreed to, they are written as polylines within {bound} mm"
+        ));
+    }
+    let mut note = path.as_os_str().to_owned();
+    note.push(".txt");
+    let note = std::path::PathBuf::from(note);
+    let write = |p: &std::path::Path, text: &str| std::fs::write(p, text).map_err(|err| format!("{}: {err}", p.display()));
+    write(path, &flat.dxf())?;
+    let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    if n > 0 {
+        write(
+            &note,
+            &format!(
+                "{DXF_NOTE}: {file}\n\
+                 Curves DXF has no exact entity for are written as polylines (LWPOLYLINE), within {bound} mm of the model.\n\
+                 Polylines: {n}.\n\
+                 \n\
+                 Заметка Datum к DXF: {file}\n\
+                 Кривые, у которых в DXF нет точной сущности, записаны ломаными (LWPOLYLINE), не дальше {bound} мм от модели.\n\
+                 Ломаных: {n}.\n"
+            ),
+        )?;
+    } else if std::fs::read_to_string(&note).is_ok_and(|t| t.starts_with(DXF_NOTE)) {
+        std::fs::remove_file(&note).map_err(|err| format!("{}: {err}", note.display()))?;
+    }
+    Ok(n)
+}
+
 /// Canonical JSON: sorted keys, two-space indent, trailing newline.
 pub fn to_json(g: &Graph) -> String {
     to_json_doc(&levels::Doc { root: g.clone(), ..levels::Doc::default() })
