@@ -102,8 +102,15 @@ pub struct Drag {
     grab: [f64; 2],
     /// The own points as drawn before the drag: what it changes is written when it ends.
     drawn: BTreeMap<String, [f64; 2]>,
-    /// The point a single dragged point is held on now: they are made one when the drag ends.
-    onto: Option<String>,
+    /// What a single dragged point is held on now: tied to it when the drag ends.
+    onto: Option<Join>,
+}
+
+/// What a dragged point is dropped onto (D209): another point, or the middle of a line.
+#[derive(Clone, Debug, PartialEq)]
+enum Join {
+    Point(String),
+    Middle(String),
 }
 
 /// A selection frame: where it began and where the cursor is, pixels from the middle of the
@@ -672,7 +679,7 @@ impl SketchEdit {
     pub fn drag_to(&mut self, p: [f64; 2], within: f64) {
         let onto = self.onto(p, within);
         let Some(drag) = &mut self.drag else { return };
-        drag.onto = onto.as_ref().map(|(n, _)| n.clone());
+        drag.onto = onto.as_ref().map(|(j, _)| j.clone());
         let p = onto.map_or(p, |(_, q)| q);
         let (dx, dy) = (p[0] - drag.grab[0], p[1] - drag.grab[1]);
         let pins: Vec<(String, [f64; 2])> = drag.points.iter().map(|(n, q)| (n.clone(), [q[0] + dx, q[1] + dy])).collect();
@@ -693,9 +700,10 @@ impl SketchEdit {
         self.set(placed);
     }
 
-    /// The point a single point dragged to `p` would go onto: the nearest within `within`, but
-    /// not itself, a point it shares a curve with, or one standing there.
-    fn onto(&self, p: [f64; 2], within: f64) -> Option<(String, [f64; 2])> {
+    /// What a single point dragged to `p` would go onto: the nearest point or middle of a line
+    /// within `within`, but not itself, a point it shares a curve with, one standing there, or
+    /// the middle of its own line.
+    fn onto(&self, p: [f64; 2], within: f64) -> Option<(Join, [f64; 2])> {
         let drag = self.drag.as_ref()?;
         let [(dragged, _)] = &drag.points[..] else { return None };
         let placed = self.placed.as_ref().ok()?;
@@ -715,15 +723,25 @@ impl SketchEdit {
                 .filter_map(|m| placed.solved.points.get(*m))
                 .any(|m| *m != placed.solved.points[dragged] && libm::hypot(q.x - m.x, q.y - m.y) <= within)
         };
-        placed
+        let points = placed
             .solved
             .points
             .iter()
             .filter(|(n, q)| !mates.contains(n.as_str()) && *n != dragged && !at_mate(q))
-            .map(|(n, q)| (libm::hypot(q.x - p[0], q.y - p[1]), n, [q.x, q.y]))
+            .map(|(n, q)| (Join::Point(n.clone()), [q.x, q.y]));
+        let own = |l: &Json| l["from"].as_str() == Some(dragged.as_str()) || l["to"].as_str() == Some(dragged.as_str());
+        let middles = placed
+            .lines
+            .keys()
+            .filter(|n| !sketch["lines"].get(n.as_str()).is_some_and(own))
+            .filter_map(|n| Self::middle(placed, n).map(|m| (Join::Middle(n.clone()), m)));
+        // Points first: of a tie, the point.
+        points
+            .chain(middles)
+            .map(|(j, q)| (libm::hypot(q[0] - p[0], q[1] - p[1]), j, q))
             .filter(|(d, ..)| *d <= within)
             .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|(_, n, q)| (n.clone(), q))
+            .map(|(_, j, q)| (j, q))
     }
 
     /// Ends the drag: `edit_sketch` parameters writing every own point where it now stands, and
@@ -740,7 +758,10 @@ impl SketchEdit {
                 patch.insert(n.clone(), json!([s.x, s.y]));
             }
         }
-        let join = drag.onto.zip(drag.points.first().map(|(n, _)| n.clone())).map(|(onto, n)| json!({"type": "coincident", "points": [onto, n]}));
+        let join = drag.onto.zip(drag.points.first().map(|(n, _)| n.clone())).map(|(onto, n)| match onto {
+            Join::Point(q) => json!({"type": "coincident", "points": [q, n]}),
+            Join::Middle(l) => json!({"type": "midpoint", "point": n, "line": l}),
+        });
         if patch.is_empty() && join.is_none() {
             return None;
         }
@@ -1702,6 +1723,18 @@ mod tests {
         let patch = e.end_drag().unwrap();
         assert!(patch.get("add_constraints").is_none(), "{patch}");
         assert_eq!(patch["points"]["p2"], json!([1.0, 1.0]), "{patch}");
+    }
+
+    /// A lone point dragged near the middle of a line goes onto it and is held there.
+    #[test]
+    fn a_dragged_point_joins_the_middle_of_a_line() {
+        let mut e = open_outline();
+        e.hover = Some(Pick::Point("q".into()));
+        assert!(e.start_drag([20.0, 5.0]));
+        e.drag_to([5.2, 0.1], 0.5);
+        let patch = e.end_drag().unwrap();
+        assert_eq!(patch["add_constraints"], json!([{"type": "midpoint", "point": "q", "line": "l1"}]), "{patch}");
+        assert_eq!(patch["points"]["q"], json!([5.0, 0.0]), "{patch}");
     }
 
     /// A line from the origin: its free end is not joined to the origin, which stands under its

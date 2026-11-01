@@ -485,25 +485,40 @@ impl Draft {
     }
 
     /// The free spot `at` moved in line with the nearest points of the sketch within [`TRACK`]
-    /// pixels: onto one's X (if `axes[0]`) and another's Y (if `axes[1]`); the chain's own end is
-    /// left to the lean. None if no point is that near in line.
-    fn tracking(&self, edit: &SketchEdit, at: [f64; 2], height: f64, axes: [bool; 2]) -> Option<Spot> {
+    /// pixels: onto one's X and another's Y; or, on a line leaning from `along` (its start and
+    /// the spot on its lean), to where that line meets the nearest point's X or Y. The chain's own
+    /// end is left to the lean. None if no point is that near in line.
+    fn tracking(&self, edit: &SketchEdit, at: [f64; 2], height: f64, along: Option<[f64; 2]>) -> Option<Spot> {
         let p = edit.placed.as_ref().ok()?;
         let within = TRACK * edit.camera.per_pixel(height);
         let skip = self.chain.as_ref().map(|c| c.point.as_str());
+        let points = || p.solved.points.iter().filter(move |(n, _)| Some(n.as_str()) != skip).map(|(n, v)| (n, [v.x, v.y]));
+        if let Some(from) = along {
+            // Where the line from `from` through `at` reaches coordinate `k` of `q`, if it does.
+            let d = [at[0] - from[0], at[1] - from[1]];
+            let meet = |k: usize, q: [f64; 2]| {
+                (d[k] != 0.0).then(|| {
+                    let t = (q[k] - from[k]) / d[k];
+                    [from[0] + d[0] * t, from[1] + d[1] * t]
+                })
+            };
+            let (n, k, q) = points()
+                .flat_map(|(n, q)| [0, 1].into_iter().filter_map(move |k| meet(k, q).map(|m| (n, k, m))))
+                .map(|(n, k, m)| (libm::hypot(m[0] - at[0], m[1] - at[1]), n, k, m))
+                .filter(|(dist, ..)| *dist <= within)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, n, k, m)| (n.clone(), k, m))?;
+            let (x, y) = if k == 0 { (Some(n), None) } else { (None, Some(n)) };
+            return Some(Spot { at: q, snap: Snap::Track { x, y } });
+        }
         let nearest = |k: usize| {
-            let coord = |v: &datum_math::Vec2| if k == 0 { v.x } else { v.y };
-            p.solved
-                .points
-                .iter()
-                .filter(|(n, _)| Some(n.as_str()) != skip)
-                .map(|(n, v)| ((coord(v) - at[k]).abs(), n, coord(v)))
+            points()
+                .map(|(n, q)| ((q[k] - at[k]).abs(), n, q[k]))
                 .filter(|(d, ..)| *d <= within)
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, n, c)| (n.clone(), c))
         };
-        let x = axes[0].then(|| nearest(0)).flatten();
-        let y = axes[1].then(|| nearest(1)).flatten();
+        let (x, y) = (nearest(0), nearest(1));
         if x.is_none() && y.is_none() {
             return None;
         }
@@ -536,13 +551,10 @@ impl Draft {
         // In line with a point of the sketch, along what the lean leaves free.
         let starts = matches!((self.tool, &self.clicks[..]), (Tool::Line | Tool::Point, _) | (Tool::Circle | Tool::Arc, []));
         if leaning && starts && !self.tangent {
-            let free_axes = match &self.lean {
-                None => [true, true],
-                Some(Lean::Horizontal) => [true, false],
-                Some(Lean::Vertical) => [false, true],
-                Some(_) => [false, false],
-            };
-            if let Some(tracked) = self.tracking(edit, spot.at, height, free_axes) {
+            // A lean fixes the line's direction: the spot slides along it (a horizontal line meets
+            // only an X, a vertical one only a Y, a tangent or parallel one either).
+            let along = self.lean.as_ref().and(self.chain.as_ref()).map(|c| c.at);
+            if let Some(tracked) = self.tracking(edit, spot.at, height, along) {
                 spot = tracked;
             }
         }
@@ -1102,6 +1114,23 @@ mod tests {
         let p = click_at(&mut e, [15.4, 5.0], false).unwrap();
         assert_eq!(p["points"]["p2"][0].as_f64(), Some(15.0), "{p}");
         assert_eq!(p["add_constraints"], json!([{"type": "vertical", "points": ["r", "p2"]}]), "{p}");
+    }
+
+    /// A line leaning parallel to another slides along that direction to where it meets a
+    /// point's Y: the lean stays, the tie is added (as a tangent line leaving an arc, D209).
+    #[test]
+    fn a_leaning_line_tracks_along_its_direction() {
+        let mut e = editor(json!({"points": {"g0": [0, 0], "g1": [10, 5], "r": [0, 20]}, "lines": {"g": {"from": "g0", "to": "g1"}}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [50.0, 0.0], false);
+        let spot = hover_at(&mut e, [90.2, 20.15], false);
+        assert_eq!(spot.snap, Snap::Track { x: None, y: Some("r".into()) });
+        assert!((spot.at[0] - 90.0).abs() < 1e-9 && (spot.at[1] - 20.0).abs() < 1e-9, "{:?}", spot.at);
+        assert_eq!(e.draft.lean, Some(Lean::Parallel("g".into())));
+        let p = click_at(&mut e, [90.2, 20.15], false).unwrap();
+        let ties = p["add_constraints"].as_array().unwrap();
+        assert!(ties.contains(&json!({"type": "horizontal", "points": ["r", "p2"]})), "{p}");
+        assert!(ties.iter().any(|c| c["type"] == "parallel"), "{p}");
     }
 
     /// In line with the X of one point and the Y of another: both ties.
