@@ -757,18 +757,28 @@ struct TrimForm {
     body: String,
     plane: String,
     flip: bool,
+    /// Changing feature `name`, opened from the tree, not adding it.
+    editing: bool,
     sent: Option<Json>,
 }
 
 impl TrimForm {
-    /// The command's fields as the model takes them.
-    fn params(&self) -> Json {
+    /// The command and its fields as the model takes them: the feature added, or changed.
+    fn params(&self) -> (&'static str, Json) {
+        if self.editing {
+            return ("edit", json!({"name": self.name, "flip": self.flip}));
+        }
         let mut p = json!({"name": self.name, "op": "trim", "inputs": [self.body, self.plane]});
         if self.flip {
             p["flip"] = json!(true);
         }
-        p
+        ("add", p)
     }
+}
+
+/// The "other side" tile of a form: two arrows opposite, highlighted when flipped.
+fn flip_tile(ui: &mut egui::Ui, name: &str, on: bool) -> egui::Response {
+    crate::icons::tile(ui, name, name, on, true, |p, c, colour| crate::icons::paint(p, c, crate::icons::Icon::Flip, colour))
 }
 
 /// Whether `inspect` has a work plane feature `name`.
@@ -796,6 +806,8 @@ struct RevolveForm {
     angle: String,
     gap: String,
     side: datum_ops::Side,
+    /// Changing feature `name`, opened from the tree: its rule stays the part's.
+    editing: bool,
     /// The first field is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -804,6 +816,12 @@ struct RevolveForm {
 impl RevolveForm {
     /// The command and its fields as the model takes them; none while a rolled sheet lacks a rule.
     fn params(&self, rule: Option<&str>) -> Option<(&'static str, Json)> {
+        if self.editing {
+            return Some(match self.turned {
+                Turned::Revolve => ("edit", json!({"name": self.name, "axis": self.axis, "angle": value_of(&self.angle)})),
+                Turned::Rolled => ("edit", json!({"name": self.name, "axis": self.axis, "side": self.side, "gap": value_of(&self.gap)})),
+            });
+        }
         match self.turned {
             Turned::Revolve => {
                 Some(("add", json!({"name": self.name, "op": "revolve", "inputs": [self.sketch], "axis": self.axis, "angle": value_of(&self.angle)})))
@@ -2654,6 +2672,7 @@ impl Viewer {
         let mut revert: Option<Json> = None;
         let _ = (&set, &own_parameters);
         let (mut export, mut edit, mut enter) = (None, None, None);
+        let mut reedit: Option<String> = None;
         let mut toggle: Option<(String, Json)> = None;
         let mut show_flat: Option<String> = None;
         // A sketch row clicked while an extrusion waits for one, and where.
@@ -2723,6 +2742,16 @@ impl Viewer {
                             // Applied when the field is left changed, as a parameter's value is.
                             if r.lost_focus() && *text != definition(&f["offset"]) {
                                 edit = Some((bare.to_string(), json!({"offset": value_of(text)})));
+                            }
+                        });
+                    }
+                    // Changed in the form it was made in, its values in it.
+                    None if matches!(op, "revolve" | "rolled" | "trim") => {
+                        ui.horizontal(|ui| {
+                            tree.label(ui, &self.i18n, f, "✔", op);
+                            let hint = self.i18n.t("edit-feature", "Change it");
+                            if crate::icons::button(ui, crate::icons::Icon::Edit, hint, hint, true).clicked() {
+                                reedit = Some(bare.to_string());
                             }
                         });
                     }
@@ -2844,6 +2873,9 @@ impl Viewer {
         }
         if let Some(name) = enter {
             self.enter(name);
+        }
+        if let Some(name) = reedit {
+            self.reedit(&name);
         }
     }
 
@@ -3502,9 +3534,49 @@ impl Viewer {
             angle: "360".into(),
             gap: "2".into(),
             side: datum_ops::Side::Left,
+            editing: false,
             fresh: true,
             sent: None,
         });
+    }
+
+    /// The lines of sketch feature `sketch`, with whether each is a construction line.
+    fn sketch_lines(&self, sketch: &str) -> Vec<(String, bool)> {
+        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
+        let f = features.iter().find(|f| f["name"] == sketch);
+        f.and_then(|f| f["sketch"]["lines"].as_object())
+            .map_or_else(Vec::new, |m| m.iter().map(|(n, l)| (n.clone(), l["construction"] == true)).collect())
+    }
+
+    /// The form of feature `name` (a revolution, rolled sheet or trim), opened from the tree with
+    /// its values: OK changes it.
+    fn reedit(&mut self, name: &str) {
+        let Some(f) = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == name).cloned()) else { return };
+        self.leave();
+        let input = |k: usize| f["inputs"][k].as_str().unwrap_or_default().to_string();
+        match f["op"].as_str() {
+            Some(op @ ("revolve" | "rolled")) => {
+                let sketch = input(0);
+                self.revolve = Some(RevolveForm {
+                    name: name.to_string(),
+                    lines: self.sketch_lines(&sketch),
+                    sketch,
+                    axis: f["axis"].as_str().unwrap_or_default().to_string(),
+                    turned: if op == "rolled" { Turned::Rolled } else { Turned::Revolve },
+                    angle: if f["angle"].is_null() { "360".into() } else { definition(&f["angle"]) },
+                    gap: definition(&f["gap"]),
+                    side: serde_json::from_value(f["side"].clone()).unwrap_or(datum_ops::Side::Left),
+                    editing: true,
+                    fresh: true,
+                    sent: None,
+                });
+            }
+            Some("trim") => {
+                self.trim =
+                    Some(TrimForm { name: name.to_string(), body: input(0), plane: input(1), flip: f["flip"] == true, editing: true, sent: None });
+            }
+            _ => {}
+        }
     }
 
     /// Drops the revolution form, and the preview it made.
@@ -3556,8 +3628,10 @@ impl Viewer {
                     }
                 });
                 if f.turned == Turned::Rolled {
-                    // The rule is the engineer's choice, on the toolbar, never guessed here.
+                    // The rule is the engineer's choice, on the toolbar, never guessed here; a
+                    // rolled sheet changed keeps its part's.
                     match &rule {
+                        _ if f.editing => {}
                         Some(name) => {
                             ui.horizontal(|ui| {
                                 ui.label(self.i18n.t("revolve-rule", "Rule"));
@@ -3652,7 +3726,7 @@ impl Viewer {
         self.flange_edges.clear();
         self.picking = None;
         self.under = None;
-        self.trim = Some(TrimForm { name: self.feature_name("trim"), body, plane, flip: false, sent: None });
+        self.trim = Some(TrimForm { name: self.feature_name("trim"), body, plane, flip: false, editing: false, sent: None });
     }
 
     /// Drops the trim form, and the preview it made.
@@ -3669,7 +3743,7 @@ impl Viewer {
     /// drops it.
     fn trim_window(&mut self, ctx: &egui::Context) {
         let Some(f) = &mut self.trim else { return };
-        let params = f.params();
+        let (command, params) = f.params();
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
@@ -3680,7 +3754,7 @@ impl Viewer {
             .show(ctx, |ui| {
                 ui.label(format!("{}: {}", self.i18n.t("trim-plane", "Plane"), f.plane));
                 ui.label(format!("{}: {}", self.i18n.t("trim-sheet", "Sheet"), f.body));
-                if ui.button(self.i18n.t("trim-flip", "⇄ Other side")).clicked() {
+                if flip_tile(ui, self.i18n.t("trim-flip", "Other side"), f.flip).clicked() {
                     f.flip = !f.flip;
                 }
                 if let Some(Err(why)) = preview {
@@ -3698,12 +3772,12 @@ impl Viewer {
         } else if (add || enter) && ok {
             self.trim = None;
             self.send(Request::Preview(None));
-            self.send(Request::Command("add", params));
+            self.send(Request::Command(command, params));
         } else {
-            let params = f.params();
+            let (command, params) = f.params();
             if f.sent.as_ref() != Some(&params) {
                 f.sent = Some(params.clone());
-                self.send(Request::Preview(Some(("add", params))));
+                self.send(Request::Preview(Some((command, params))));
             }
         }
     }
@@ -3757,7 +3831,7 @@ impl Viewer {
                             .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
                     );
                 });
-                if ui.button(self.i18n.t("flange-flip", "⇄ Other side")).clicked() {
+                if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
                     f.flip = !f.flip;
                 }
                 if let Some(Err(why)) = preview {
@@ -3878,7 +3952,7 @@ impl Viewer {
                         }
                         ui.separator();
                         if face {
-                            if ui.add_enabled(!x.symmetric, egui::Button::new(self.i18n.t("plate-flip", "⇄ Other side"))).clicked() {
+                            if ui.add_enabled_ui(!x.symmetric, |ui| flip_tile(ui, self.i18n.t("plate-flip", "Other side"), x.flip)).inner.clicked() {
                                 x.flip = !x.flip;
                             }
                             return;
@@ -7326,7 +7400,7 @@ mod tests {
         assert_eq!((&first["profiles"], &first["rule"], &first["name"]), (&json!(["bottom"]), &json!("Лист"), &json!("plate1")));
         assert!(first.get("z1").is_none() && first.get("flip").is_none());
         h.get_by_label("Thickness from the rule: Лист");
-        h.get_by_label("⇄ Other side").click();
+        h.get_by_label("Other side").click();
         h.run();
         let flipped = previews(&inbox).pop().expect("a preview of the other side");
         assert_eq!(flipped["flip"], true);
@@ -7677,7 +7751,7 @@ mod tests {
             inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect()
         };
         assert_eq!(previews(&inbox).last(), Some(&want));
-        h.get_by_label("⇄ Other side").click();
+        h.get_by_label("Other side").click();
         h.run();
         let flipped = json!({"name": "trim1", "op": "trim", "inputs": ["shell", "cut"], "flip": true});
         assert_eq!(previews(&inbox).last(), Some(&flipped));
@@ -7691,6 +7765,26 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add", p) if *p == flipped)), "{sent:?}");
         assert!(h.state().trim.is_none());
+    }
+
+    /// A trim opened from the tree keeps its name and values; the other side is an edit of it.
+    #[test]
+    fn a_trim_is_changed_from_the_tree() {
+        let (mut h, inbox) = trimming();
+        let trim = json!({"name": "trim1", "op": "trim", "inputs": ["shell", "cut"]});
+        h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(trim);
+        h.state_mut().reedit("trim1");
+        h.run();
+        assert!(h.state().trim.as_ref().is_some_and(|t| t.editing && t.body == "shell" && t.plane == "cut" && !t.flip));
+        h.get_by_label("Other side").click();
+        h.run();
+        let want = json!({"name": "trim1", "flip": true});
+        let previews: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(previews.last(), Some(Request::Preview(Some(("edit", p)))) if *p == want), "{previews:?}");
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)));
     }
 
     /// Esc drops the trim form and its preview.

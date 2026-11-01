@@ -212,7 +212,7 @@ pub const ACTIONS: [Action; 47] = [
         Act::Trim,
         "sheet.trim",
         "Trim by plane",
-        "Rolled sheet metal cut by a work plane: click the plane; the part on the side of its arrow goes, ⇄ keeps it instead",
+        "Rolled sheet metal cut by a work plane: click the plane; the part on the side of its arrow goes, Other side keeps it instead",
         None,
         Model,
     ),
