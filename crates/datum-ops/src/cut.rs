@@ -297,7 +297,7 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
                     }
                 },
                 Frame::Rolled { d, radius, side } => {
-                    let piece = Rolled { dev: d.dev, from: d.uv(a), to: d.uv(b), arc: l.arc(k).map(|arc| d.arc(arc)) };
+                    let piece = Rolled { dev: d.dev, from: d.uv(a), to: d.uv(b), arc: l.arc(k).map(|arc| d.arc(arc)), wave: None };
                     for (layer, depth) in [(0, 0.0), (1, end)] {
                         curves.push(CurveSpec { from: v[layer], to: w[layer], curve: Curve::Rolled { piece, radius: radius + side * depth } });
                     }
@@ -435,7 +435,8 @@ fn rolled_neighbours(
     // Exact faces by outline (`Some(along)`), the others by their boxes (`None`).
     let kinds: Vec<Option<(Ix, Option<bool>)>> = in_order(other.par_iter().map(|&h| {
         Ok::<_, BrepError>(match target.faces()[h as usize].surface {
-            Surface::Wall(w) if w.dev == d.dev => {
+            // A trim's wave is known by its box (D211): the cut keeps clear of the whole band.
+            Surface::Wall(w) if w.dev == d.dev && w.wave.is_none() => {
                 let (lo, hi) = radii(h);
                 (hi > r[0] && lo < r[1]).then_some((h, Some(true)))
             }

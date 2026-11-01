@@ -221,7 +221,7 @@ fn a_sheets_sides_and_bend_lines() {
         assert!(xs.windows(2).all(|w| w[0] < w[1]) && xs[0] > 0.0 && xs[5] < flat.size.x, "{xs:?}");
         // Seen from either side the blank is as long; DXF has no bend lines.
         assert!(close(flat.size.x, 577.2266941436376), "{:?}", flat.size);
-        assert_eq!(flat.dxf().matches("LINE").count(), 4);
+        assert_eq!(flat.dxf().matches("\nLINE\n").count(), 4);
     }
     // A cube has no two sides standing out.
     let cube =

@@ -41,7 +41,7 @@ impl Session {
 
     /// Adds the rolled sheet metal the `rolled` command's parameters `p` describe, as `sheet`.
     pub(super) fn rolled(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
-        let mut fields: Map<String, Value> = ["axis", "path", "gap"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();
+        let mut fields: Map<String, Value> = ["axis", "path", "angle", "gap"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();
         fields.insert("op".into(), "rolled".into());
         fields.insert("side".into(), p.get("side").cloned().unwrap_or(json!("left")));
         self.sheet_part(p, fields)

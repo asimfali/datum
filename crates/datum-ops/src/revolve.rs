@@ -97,30 +97,46 @@ pub(crate) fn revolve_sketch(feature: TopoId, s: &Placed, axis: &str, angle: f64
 }
 
 /// Rolled sheet metal (D207): its thickness and K-factor (the part's rule's), the side of the
-/// line it lies on, and the gap left at its seam.
+/// line it lies on, and how far round it goes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RollDims {
     pub thickness: f64,
     pub k_factor: f64,
     pub side: Side,
-    pub gap: f64,
+    pub span: Span,
+}
+
+/// How far round rolled sheet goes (D213): a whole turn but a gap at its seam (millimetres), or
+/// a piece of `degrees` from the sketch's plane.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Span {
+    Full { gap: f64 },
+    Part { degrees: f64 },
 }
 
 /// Line `path` of `s` (none: its only line other than the axis and construction lines) turned
 /// about line `axis` into rolled sheet metal (D207): a line parallel to the axis rolls into a
 /// shell, an oblique one into a cone. The sheet lies on `side` of the line looking along it, its
-/// ends square to it (the blank is cut square); `gap` millimetres are left open at the seam,
-/// measured along the neutral layer at the larger end, half each side of the sketch's plane.
+/// ends square to it (the blank is cut square). A whole turn leaves `gap` millimetres open at
+/// the seam, measured along the neutral layer at the larger end, half each side of the sketch's
+/// plane; a piece starts at the sketch's plane, the line on its edge, and turns as a revolution
+/// does (D213).
 pub(crate) fn rolled(feature: TopoId, s: &Placed, axis: &str, path: Option<&str>, dims: RollDims) -> Result<Body, BrepError> {
-    let RollDims { thickness: t, k_factor: k, side, gap } = dims;
+    let RollDims { thickness: t, k_factor: k, side, span } = dims;
     if !(t > 0.0 && t.is_finite()) {
         return Err(BrepError::Degenerate(format!("rolled sheet needs a positive thickness, got {t}")));
     }
     if !(0.0..=1.0).contains(&k) {
         return Err(BrepError::Degenerate(format!("a K-factor lies between 0 and 1, got {k}")));
     }
-    if !(gap > 0.0 && gap.is_finite()) {
-        return Err(BrepError::Degenerate(format!("rolled sheet needs a gap at its seam, or it closes and cannot be unrolled: got {gap}")));
+    match span {
+        Span::Full { gap } if !(gap > 0.0 && gap.is_finite()) => {
+            return Err(BrepError::Degenerate(format!("rolled sheet needs a gap at its seam, or it closes and cannot be unrolled: got {gap}")));
+        }
+        Span::Part { degrees } if !(degrees > 0.0 && degrees < 360.0) => {
+            return Err(BrepError::Degenerate(format!("a piece of rolled sheet turns by more than 0° and less than 360°, got {degrees}°")));
+        }
+        _ => {}
     }
     if !s.arcs.is_empty() || !s.circles.is_empty() {
         return Err(BrepError::Unsupported("rolled sheet from arcs: a torus is not made yet".into()));
@@ -166,10 +182,6 @@ pub(crate) fn rolled(feature: TopoId, s: &Placed, axis: &str, path: Option<&str>
     let inner = if n.y > 0.0 { near } else { far };
     let neutral = inner + (far - near) * k * if n.y > 0.0 { 1.0 } else { -1.0 };
     let larger = off(a, neutral).y.max(off(b, neutral).y);
-    let open = gap / larger;
-    if open >= TAU {
-        return Err(BrepError::Degenerate(format!("a gap of {gap} leaves nothing of a sheet {} round", TAU * larger)));
-    }
     let id = |tag: &str, k: u64| TopoId::derive(tag).id(feature).tag(&name).index(k).finish();
     let ring = ProfileLoop {
         points,
@@ -178,8 +190,17 @@ pub(crate) fn rolled(feature: TopoId, s: &Placed, axis: &str, path: Option<&str>
         arcs: Vec::new(),
     };
     let caps = ["rolled.seam_start", "rolled.seam_end"].map(|t| TopoId::derive(t).id(feature).finish());
-    // The seam half the gap past the sketch's plane each way.
     let base = Axis { start: if on_right { right } else { left }, ..turn.at };
-    let at = Axis { start: base.radial(0.5 * open), ..base };
-    revolve(&Region { outer: ring, holes: Vec::new(), caps }, &at, TAU - open)
+    let region = Region { outer: ring, holes: Vec::new(), caps };
+    match span {
+        // The seam half the gap past the sketch's plane each way.
+        Span::Full { gap } => {
+            let open = gap / larger;
+            if open >= TAU {
+                return Err(BrepError::Degenerate(format!("a gap of {gap} leaves nothing of a sheet {} round", TAU * larger)));
+            }
+            revolve(&region, &Axis { start: base.radial(0.5 * open), ..base }, TAU - open)
+        }
+        Span::Part { degrees } => revolve(&region, &base, degrees.to_radians()),
+    }
 }

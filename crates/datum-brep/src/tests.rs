@@ -416,3 +416,71 @@ fn cone_tessellation_and_step() {
     assert_eq!(s.text.matches("CONICAL_SURFACE").count(), 6);
     assert_eq!(s.approximated, 0);
 }
+
+/// `Wave::range` against dense sampling: ends, ranges over one turning point and several,
+/// reversed ends, a pure cosine or sine, a constant.
+#[test]
+fn wave_range_matches_dense_sampling() {
+    let cases = [
+        (Wave { a: 70.0, b: -18.5, c: 0.3 }, 50.88, 0.0, 317.7),
+        (Wave { a: 70.0, b: -18.5, c: 0.3 }, 50.88, 317.7, 0.0),
+        (Wave { a: -3.0, b: 5.0, c: -7.0 }, 10.0, 1.0, 5.0),
+        (Wave { a: -3.0, b: 5.0, c: -7.0 }, 10.0, 0.0, 400.0),
+        (Wave { a: 1.0, b: 0.0, c: 2.0 }, 3.0, -20.0, 20.0),
+        (Wave { a: 1.0, b: 2.0, c: 0.0 }, 3.0, 20.0, -20.0),
+        (Wave { a: 0.0, b: 0.0, c: 0.0 }, 3.0, 0.0, 10.0),
+        (Wave { a: 5.0, b: 1.0, c: 1.0 }, 7.0, 2.0, 2.0),
+        // The range starts and ends exactly at turning points.
+        (Wave { a: 0.0, b: 1.0, c: 0.0 }, 1.0, 0.0, 3.0 * std::f64::consts::PI),
+    ];
+    for (w, n, u0, u1) in cases {
+        let [lo, hi] = w.range(u0, u1, n);
+        let steps = 200_000;
+        let (mut slo, mut shi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for i in 0..=steps {
+            let v = w.at(u0 + (u1 - u0) * f64::from(i) / f64::from(steps), n)[0];
+            slo = slo.min(v);
+            shi = shi.max(v);
+        }
+        // Sampling never beats the exact range, and comes close to it.
+        let slack = 1e-6 * (1.0 + (w.b * w.b + w.c * w.c).sqrt());
+        assert!(lo <= slo + 1e-12 && hi >= shi - 1e-12, "{w:?} {u0}..{u1}: [{lo}, {hi}] inside [{slo}, {shi}]");
+        assert!(lo >= slo - slack && hi <= shi + slack, "{w:?} {u0}..{u1}: [{lo}, {hi}] vs [{slo}, {shi}]");
+    }
+}
+
+/// A piece following a wave: points, tangents and second derivatives against finite
+/// differences, whichever way it runs.
+#[test]
+fn rolled_wave_derivatives_match_finite_differences() {
+    let dev = Development { origin: Vec3::ZERO, axis: Vec3::new(1.0, 0.0, 0.0), start: Vec3::new(0.0, 1.0, 0.0), neutral: 50.88 };
+    let wave = Wave { a: 70.0, b: -18.5, c: 0.7 };
+    for (u0, u1) in [(0.0, 317.7), (317.7, 0.0), (40.0, 90.0)] {
+        let r = Rolled {
+            dev,
+            from: Vec2::new(u0, wave.at(u0, dev.neutral)[0]),
+            to: Vec2::new(u1, wave.at(u1, dev.neutral)[0]),
+            arc: None,
+            wave: Some(wave),
+        };
+        assert_eq!(r.at(0.0).0, r.from);
+        assert!((r.at(1.0).0.x - u1).abs() < 1e-12 && (r.at(1.0).0.y - wave.at(u1, dev.neutral)[0]).abs() < 1e-9);
+        let h = 1e-5;
+        for t in [0.1, 0.35, 0.5, 0.8] {
+            let (p, d) = r.at(t);
+            let (a, b) = (r.at(t - h), r.at(t + h));
+            let fd = Vec2::new((b.0.x - a.0.x) / (2.0 * h), (b.0.y - a.0.y) / (2.0 * h));
+            let fd2 = Vec2::new((b.1.x - a.1.x) / (2.0 * h), (b.1.y - a.1.y) / (2.0 * h));
+            let s = r.second(t);
+            let scale = (u1 - u0).abs();
+            assert!((fd.x - d.x).abs() <= 1e-6 * scale && (fd.y - d.y).abs() <= 1e-6 * scale, "{u0}..{u1} t {t}: {fd:?} vs {d:?}");
+            assert!((fd2.x - s.x).abs() <= 1e-6 * scale && (fd2.y - s.y).abs() <= 1e-4 * scale, "{u0}..{u1} t {t}: {fd2:?} vs {s:?}");
+            assert!(s.x == 0.0 && (p.y - wave.at(p.x, dev.neutral)[0]).abs() < 1e-9);
+        }
+        // Reversed: the same curve the other way, derivatives of opposite sign.
+        let back = r.reversed();
+        let ((p, d), (q, e)) = (r.at(0.3), back.at(0.7));
+        assert!((p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9);
+        assert!((d.x + e.x).abs() < 1e-9 && (d.y + e.y).abs() < 1e-9);
+    }
+}

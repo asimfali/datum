@@ -2,7 +2,7 @@
 //! the gap at the seam along the neutral layer, the blank unfolded flat, refusals.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 
 use datum_brep::{Body, BrepError, Surface, TopoId, tessellate};
 use datum_ops::{Flat, FlatPiece, Op, Value, unfold_side};
@@ -263,4 +263,20 @@ fn the_same_roll_hashes_the_same() {
         assert_eq!(flat(&a).hash, flat(&b).hash);
         assert_ne!(a.hash(), rolled(along_x(p, q), "right", GAP).hash());
     }
+}
+
+/// A piece of a shell (D213): half a turn from the sketch's plane, no gap; the blank half the
+/// neutral layer's round. A whole turn with no gap, or more than 360°, is refused.
+#[test]
+fn half_a_shell() {
+    let (r, l) = (50.0, 100.0);
+    let b = eval(along_x([0.0, r], [l, r]), json!({"angle": 180, "gap": null})).unwrap();
+    let want = 0.5 * PI * ((r + T) * (r + T) - r * r) * l;
+    assert!(close(b.volume(), want), "{} vs {want}", b.volume());
+    let f = flat(&b);
+    assert!(close(f.size.x, PI * (r + K * T)) && close(f.size.y, l), "{:?}", f.size);
+    // The line drawn lies on its edge: a vertex of the body is where the line starts.
+    assert!(b.vertices().iter().any(|v| (v.point - datum_math::Vec3::new(0.0, r, 0.0)).dot(v.point - datum_math::Vec3::new(0.0, r, 0.0)) < 1e-20));
+    assert!(matches!(eval(along_x([0.0, r], [l, r]), json!({"gap": null})), Err(BrepError::Degenerate(m)) if m.contains("gap")));
+    assert!(matches!(eval(along_x([0.0, r], [l, r]), json!({"angle": 400})), Err(BrepError::Degenerate(_))));
 }

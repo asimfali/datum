@@ -91,15 +91,21 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "export_dxf",
-        description: "Write the flat blank of feature `name` as DXF (R12: lines, arcs, circles on layer 0, mm; no bend lines) to `path`: \
-                      an `unfold` feature's, or a sheet or plate body's, seen from the side `set_flat` chose (front by default).",
-        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}, "required": ["name", "path"]}),
+        description: "Write the flat blank of feature `name` as DXF (R2000: lines, arcs, circles on layer 0, mm; no bend lines) to `path`: \
+                      an `unfold` feature's, or a sheet or plate body's, seen from the side `set_flat` chose (front by default). \
+                      Curves DXF has no exact entity for (a trim's cut through a rolled sheet) are refused; with `approximate: true` \
+                      they are written as polylines within 0.001 mm and told of in `<path>.txt`. That is the engineer's decision: \
+                      ask before passing it.",
+        params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}, "approximate": {"type": "boolean"}}, "required": ["name", "path"]}),
         run: |s, p| {
             let name = text(p, "name")?;
             let flat = s.flat_of(name)?;
             let path = PathBuf::from(text(p, "path")?);
-            std::fs::write(&path, flat.dxf()).map_err(|e| format!("{}: {e}", path.display()))?;
-            Ok(json!({"written": path.display().to_string(), "width": flat.size.x, "height": flat.size.y, "pieces": flat.pieces.len()}))
+            let approximate = p.get("approximate").and_then(Value::as_bool).unwrap_or(false);
+            let polylines = crate::write_dxf(&flat, &path, approximate)?;
+            Ok(
+                json!({"written": path.display().to_string(), "width": flat.size.x, "height": flat.size.y, "pieces": flat.pieces.len(), "polylines": polylines}),
+            )
         },
     },
     Command {
@@ -222,9 +228,10 @@ const COMMANDS: &[Command] = &[
                       line besides the axis and construction lines) turned about the sketch's line `axis`. Parallel to the axis it \
                       rolls into a shell, oblique into a cone; a line square to the axis is refused (a flat ring is a `plate`). \
                       `rule` is required, a sheet rule of the library giving thickness and K-factor. `side`: where the material \
-                      lies looking along the line, `left` (default), `right` or `middle`. `gap` (required, mm, above 0): left \
-                      open at the seam so the sheet unrolls, along the neutral layer at the larger end, half each side of the \
-                      sketch's plane. The reply names the part and its rule.",
+                      lies looking along the line, `left` (default), `right` or `middle`. `angle` (degrees, default 360): how far \
+                      round; a whole turn needs `gap` (mm, above 0) left open at the seam so the sheet unrolls, along the neutral \
+                      layer at the larger end, half each side of the sketch's plane; a piece (half a shell…) starts at the sketch's \
+                      plane, no gap. The reply names the part and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -233,8 +240,9 @@ const COMMANDS: &[Command] = &[
                 "axis": {"type": "string"},
                 "path": {"type": "string"},
                 "side": {"type": "string", "enum": ["left", "right", "middle"]},
+                "angle": {"type": ["number", "string"]},
                 "gap": {"type": ["number", "string"]}
-            }, "required": ["name", "sketch", "rule", "axis", "gap"], "additionalProperties": false})
+            }, "required": ["name", "sketch", "rule", "axis"], "additionalProperties": false})
         },
         run: |s, p| s.rolled(p),
     },

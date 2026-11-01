@@ -262,7 +262,7 @@ fn the_flat_blank() {
     assert!(matches!(unfold(&both, &side(&both, true), 0.5), Err(BrepError::Unsupported(_))));
 
     let dxf = flat.dxf();
-    assert!(dxf.starts_with("0\nSECTION\n2\nHEADER\n9\n$ACADVER\n1\nAC1009\n") && dxf.ends_with("0\nENDSEC\n0\nEOF\n"));
+    assert!(dxf.starts_with("  0\nSECTION\n  2\nHEADER\n  9\n$ACADVER\n  1\nAC1015\n") && dxf.ends_with("  0\nENDSEC\n  0\nEOF\n"));
     assert_eq!((dxf.matches("\nCIRCLE\n").count(), dxf.matches("\nARC\n").count(), dxf.matches("\nLINE\n").count()), (13, 2, 6));
 }
 

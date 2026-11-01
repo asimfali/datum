@@ -140,6 +140,8 @@ enum Purpose {
     Plane,
     /// Ends of sheet metal a flange stands on (D205).
     Flange,
+    /// A work plane a rolled sheet is trimmed by.
+    Trim,
 }
 
 /// What is under the cursor while picking.
@@ -717,6 +719,8 @@ struct Viewer {
     flange: Option<FlangeForm>,
     /// A revolution being asked for: its form.
     revolve: Option<RevolveForm>,
+    /// A trim of rolled sheet metal being asked for: its form.
+    trim: Option<TrimForm>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
     /// "Select a contour or a chain, then E": where it shows, and since when (until a click or a few seconds).
@@ -747,6 +751,41 @@ fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: 
     json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip})
 }
 
+/// The form of a trim: the sheet body, the work plane and the side as it is now, the preview sent last.
+struct TrimForm {
+    name: String,
+    body: String,
+    plane: String,
+    flip: bool,
+    /// Changing feature `name`, opened from the tree, not adding it.
+    editing: bool,
+    sent: Option<Json>,
+}
+
+impl TrimForm {
+    /// The command and its fields as the model takes them: the feature added, or changed.
+    fn params(&self) -> (&'static str, Json) {
+        if self.editing {
+            return ("edit", json!({"name": self.name, "flip": self.flip}));
+        }
+        let mut p = json!({"name": self.name, "op": "trim", "inputs": [self.body, self.plane]});
+        if self.flip {
+            p["flip"] = json!(true);
+        }
+        ("add", p)
+    }
+}
+
+/// The "other side" tile of a form: two arrows opposite, highlighted when flipped.
+fn flip_tile(ui: &mut egui::Ui, name: &str, on: bool) -> egui::Response {
+    crate::icons::tile(ui, name, name, on, true, |p, c, colour| crate::icons::paint(p, c, crate::icons::Icon::Flip, colour))
+}
+
+/// Whether `inspect` has a work plane feature `name`.
+fn is_work_plane(inspect: &Json, name: &str) -> bool {
+    inspect["features"].as_array().is_some_and(|fs| fs.iter().any(|f| f["name"] == name && f["op"] == "plane"))
+}
+
 /// What the form of R makes, decided when it opens: a body turned from a profile (D206), or rolled
 /// sheet metal from a line beside the axis (D207).
 #[derive(Clone, Copy, PartialEq)]
@@ -767,6 +806,8 @@ struct RevolveForm {
     angle: String,
     gap: String,
     side: datum_ops::Side,
+    /// Changing feature `name`, opened from the tree: its rule stays the part's.
+    editing: bool,
     /// The first field is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -775,15 +816,37 @@ struct RevolveForm {
 impl RevolveForm {
     /// The command and its fields as the model takes them; none while a rolled sheet lacks a rule.
     fn params(&self, rule: Option<&str>) -> Option<(&'static str, Json)> {
+        if self.editing {
+            return Some(match self.turned {
+                Turned::Revolve => ("edit", json!({"name": self.name, "axis": self.axis, "angle": value_of(&self.angle)})),
+                Turned::Rolled => {
+                    let mut p = json!({"name": self.name, "axis": self.axis, "side": self.side, "angle": value_of(&self.angle)});
+                    if self.whole() {
+                        p["gap"] = value_of(&self.gap);
+                    }
+                    ("edit", p)
+                }
+            });
+        }
         match self.turned {
             Turned::Revolve => {
                 Some(("add", json!({"name": self.name, "op": "revolve", "inputs": [self.sketch], "axis": self.axis, "angle": value_of(&self.angle)})))
             }
-            Turned::Rolled => Some((
-                "rolled",
-                json!({"name": self.name, "sketch": self.sketch, "rule": rule?, "axis": self.axis, "side": self.side, "gap": value_of(&self.gap)}),
-            )),
+            Turned::Rolled => {
+                let mut p = json!({"name": self.name, "sketch": self.sketch, "rule": rule?, "axis": self.axis, "side": self.side});
+                if self.whole() {
+                    p["gap"] = value_of(&self.gap);
+                } else {
+                    p["angle"] = value_of(&self.angle);
+                }
+                Some(("rolled", p))
+            }
         }
+    }
+
+    /// Whether the sheet goes a whole turn round (the angle is 360): then it has a gap.
+    fn whole(&self) -> bool {
+        value_of(&self.angle).as_f64().is_some_and(|a| a >= 360.0)
     }
 }
 
@@ -1077,6 +1140,7 @@ impl Viewer {
             flange_edges: Vec::new(),
             flange: None,
             revolve: None,
+            trim: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -1208,6 +1272,34 @@ impl Viewer {
         if let Some(p) = self.exported("step", "part").save_file() {
             self.send(Request::Command("export_step", json!({"path": p.display().to_string(), "approximate": approximate})));
         }
+    }
+
+    /// Whether the blank `name` may go to DXF, and as what: `Some(true)` with its polylines
+    /// (curves DXF has no exact entity for, D211), once the engineer says yes (D147);
+    /// `Some(false)` with none; `None` when the engineer says no.
+    fn dxf_approved(&self, name: &str) -> Option<bool> {
+        let polylines =
+            self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| n == name)).and_then(|(_, f)| f.as_ref().ok()).map_or(0, |f| f.polylines());
+        if polylines == 0 {
+            return Some(false);
+        }
+        let deviation = datum_ops::POLYLINE_DEVIATION.to_string();
+        let question = [
+            self.i18n.f(
+                "dxf-inexact",
+                "{ $n } curve(s) of the blank (a plane's cut through a rolled sheet) have no exact DXF entity.",
+                &[("n", &polylines.to_string())],
+            ),
+            self.i18n.f(
+                "dxf-inexact-ask",
+                "Write them as polylines within { $deviation } mm? A note beside the file (.dxf.txt) says what was approximated.",
+                &[("deviation", &deviation)],
+            ),
+            self.i18n.t("step-inexact-no", "No: nothing is written.").to_string(),
+        ]
+        .join("\n\n");
+        let answer = rfd::MessageDialog::new().set_title("Datum").set_description(question).set_buttons(rfd::MessageButtons::YesNo).show();
+        (answer == rfd::MessageDialogResult::Yes).then_some(true)
     }
 
     /// Where a model is opened, or saved again elsewhere, by dialog: where the engineer works —
@@ -1707,6 +1799,7 @@ impl Viewer {
     fn leave(&mut self) {
         self.close_extrusion();
         self.close_revolve();
+        self.close_trim();
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
         if let Some(sk) = &self.sketch {
@@ -2595,6 +2688,7 @@ impl Viewer {
         let mut revert: Option<Json> = None;
         let _ = (&set, &own_parameters);
         let (mut export, mut edit, mut enter) = (None, None, None);
+        let mut reedit: Option<String> = None;
         let mut toggle: Option<(String, Json)> = None;
         let mut show_flat: Option<String> = None;
         // A sketch row clicked while an extrusion waits for one, and where.
@@ -2664,6 +2758,16 @@ impl Viewer {
                             // Applied when the field is left changed, as a parameter's value is.
                             if r.lost_focus() && *text != definition(&f["offset"]) {
                                 edit = Some((bare.to_string(), json!({"offset": value_of(text)})));
+                            }
+                        });
+                    }
+                    // Changed in the form it was made in, its values in it.
+                    None if matches!(op, "revolve" | "rolled" | "trim") => {
+                        ui.horizontal(|ui| {
+                            tree.label(ui, &self.i18n, f, "✔", op);
+                            let hint = self.i18n.t("edit-feature", "Change it");
+                            if crate::icons::button(ui, crate::icons::Icon::Edit, hint, hint, true).clicked() {
+                                reedit = Some(bare.to_string());
                             }
                         });
                     }
@@ -2778,11 +2882,16 @@ impl Viewer {
             fields["name"] = json!(name);
             self.send(Request::Command("edit", fields));
         }
-        if let Some((name, path)) = export {
-            self.send(Request::Command("export_dxf", json!({"name": name, "path": path.display().to_string()})));
+        if let Some((name, path)) = export
+            && let Some(approximate) = self.dxf_approved(&name)
+        {
+            self.send(Request::Command("export_dxf", json!({"name": name, "path": path.display().to_string(), "approximate": approximate})));
         }
         if let Some(name) = enter {
             self.enter(name);
+        }
+        if let Some(name) = reedit {
+            self.reedit(&name);
         }
     }
 
@@ -2988,6 +3097,7 @@ impl Viewer {
                 Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
                 Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
                 Purpose::Flange => "Click edges of the sheet for flanges · Shift or Ctrl adds · Enter: the flange · Esc: cancel",
+                Purpose::Trim => "Click the work plane to trim the sheet by · Esc: cancel",
                 Purpose::Plane => {
                     "Click an origin plane, a work plane or a plane face to offset the new plane from, or three points (corners, sketch points, the origin) for a plane through them · Esc: cancel"
                 }
@@ -3084,6 +3194,12 @@ impl Viewer {
                     }
                     return m.scene.pick(origin, dir).filter(|f| m.ends.iter().any(|e| e.1 == f.face)).map(Under::Face);
                 }
+                // Trimming takes a work plane only: the nearest along the ray.
+                if purpose == Purpose::Trim {
+                    let keep: Vec<usize> = (0..work.len()).filter(|&k| is_work_plane(&m.inspect, &work[k].0)).collect();
+                    let own: Vec<crate::origin::Square> = keep.iter().map(|&k| squares[k].clone()).collect();
+                    return crate::origin::hit(&own, origin, dir, size).map(|(_, j)| Under::Work(keep[j]));
+                }
                 // A face of a body; off the bodies, the nearest origin or work plane along the ray.
                 // The planes are larger than the model: the nearest would be a plane in front of
                 // the face aimed at, and there is room to take a plane beside the bodies.
@@ -3169,6 +3285,8 @@ impl Viewer {
                 }
             }
             Some((Purpose::Flange, _)) => {}
+            Some((Purpose::Trim, Under::Work(k))) => self.open_trim(work[k].0.clone()),
+            Some((Purpose::Trim, _)) => {}
             Some((Purpose::Plane, under)) => {
                 let from = match under {
                     Under::Origin(k) => json!({"base": datum_ops::OriginPlane::ALL[k]}),
@@ -3432,9 +3550,49 @@ impl Viewer {
             angle: "360".into(),
             gap: "2".into(),
             side: datum_ops::Side::Left,
+            editing: false,
             fresh: true,
             sent: None,
         });
+    }
+
+    /// The lines of sketch feature `sketch`, with whether each is a construction line.
+    fn sketch_lines(&self, sketch: &str) -> Vec<(String, bool)> {
+        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
+        let f = features.iter().find(|f| f["name"] == sketch);
+        f.and_then(|f| f["sketch"]["lines"].as_object())
+            .map_or_else(Vec::new, |m| m.iter().map(|(n, l)| (n.clone(), l["construction"] == true)).collect())
+    }
+
+    /// The form of feature `name` (a revolution, rolled sheet or trim), opened from the tree with
+    /// its values: OK changes it.
+    fn reedit(&mut self, name: &str) {
+        let Some(f) = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == name).cloned()) else { return };
+        self.leave();
+        let input = |k: usize| f["inputs"][k].as_str().unwrap_or_default().to_string();
+        match f["op"].as_str() {
+            Some(op @ ("revolve" | "rolled")) => {
+                let sketch = input(0);
+                self.revolve = Some(RevolveForm {
+                    name: name.to_string(),
+                    lines: self.sketch_lines(&sketch),
+                    sketch,
+                    axis: f["axis"].as_str().unwrap_or_default().to_string(),
+                    turned: if op == "rolled" { Turned::Rolled } else { Turned::Revolve },
+                    angle: if f["angle"].is_null() { "360".into() } else { definition(&f["angle"]) },
+                    gap: if f["gap"].is_null() { "2".into() } else { definition(&f["gap"]) },
+                    side: serde_json::from_value(f["side"].clone()).unwrap_or(datum_ops::Side::Left),
+                    editing: true,
+                    fresh: true,
+                    sent: None,
+                });
+            }
+            Some("trim") => {
+                self.trim =
+                    Some(TrimForm { name: name.to_string(), body: input(0), plane: input(1), flip: f["flip"] == true, editing: true, sent: None });
+            }
+            _ => {}
+        }
     }
 
     /// Drops the revolution form, and the preview it made.
@@ -3472,22 +3630,31 @@ impl Viewer {
                         }
                     });
                 });
-                let (label, field) = match f.turned {
-                    Turned::Revolve => (self.i18n.t("revolve-angle", "Angle"), &mut f.angle),
-                    Turned::Rolled => (self.i18n.t("revolve-gap", "Gap, mm"), &mut f.gap),
-                };
+                let hint = self.i18n.t("plane-offset-hint", "number or formula");
+                // The angle; rolled sheet a whole turn round also its gap, typed first.
+                let rolled_whole = f.turned == Turned::Rolled && f.whole();
                 ui.horizontal(|ui| {
-                    ui.label(label);
-                    let r = ui
-                        .add(egui::TextEdit::singleline(field).desired_width(120.0).hint_text(self.i18n.t("plane-offset-hint", "number or formula")));
-                    // Typed at once, as a sketch's dimension is.
-                    if std::mem::take(&mut f.fresh) {
+                    ui.label(self.i18n.t("revolve-angle", "Angle"));
+                    let r = ui.add(egui::TextEdit::singleline(&mut f.angle).desired_width(120.0).hint_text(hint));
+                    if !rolled_whole && std::mem::take(&mut f.fresh) {
                         r.request_focus();
                     }
                 });
+                if rolled_whole {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("revolve-gap", "Gap, mm"));
+                        let r = ui.add(egui::TextEdit::singleline(&mut f.gap).desired_width(120.0).hint_text(hint));
+                        // Typed at once, as a sketch's dimension is.
+                        if std::mem::take(&mut f.fresh) {
+                            r.request_focus();
+                        }
+                    });
+                }
                 if f.turned == Turned::Rolled {
-                    // The rule is the engineer's choice, on the toolbar, never guessed here.
+                    // The rule is the engineer's choice, on the toolbar, never guessed here; a
+                    // rolled sheet changed keeps its part's.
                     match &rule {
+                        _ if f.editing => {}
                         Some(name) => {
                             ui.horizontal(|ui| {
                                 ui.label(self.i18n.t("revolve-rule", "Rule"));
@@ -3561,6 +3728,83 @@ impl Viewer {
         (1..).map(|k| format!("{command}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
     }
 
+    /// The feature of the rolled sheet a trim goes to: the only one, else the part clicked last.
+    fn trim_body(&self) -> Option<String> {
+        let m = self.model.as_ref()?;
+        let rolled =
+            |b: &String| m.inspect["features"].as_array().is_some_and(|fs| fs.iter().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"));
+        let mut sheets = m.bodies.iter().zip(&m.begun).filter(|(_, b)| rolled(b));
+        let first = sheets.next()?;
+        match sheets.next() {
+            None => Some(first.0.clone()),
+            Some(second) => [first, second].into_iter().chain(sheets).find(|(_, b)| self.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
+        }
+    }
+
+    /// Opens the form of a trim of the sheet by the work plane `plane`, and stops picking.
+    fn open_trim(&mut self, plane: String) {
+        let Some(body) = self.trim_body() else { return };
+        self.close_revolve();
+        self.flange = None;
+        self.flange_edges.clear();
+        self.picking = None;
+        self.under = None;
+        self.trim = Some(TrimForm { name: self.feature_name("trim"), body, plane, flip: false, editing: false, sent: None });
+    }
+
+    /// Drops the trim form, and the preview it made.
+    fn close_trim(&mut self) {
+        if let Some(t) = self.trim.take()
+            && t.sent.is_some()
+        {
+            self.send(Request::Preview(None));
+        }
+    }
+
+    /// The trim form: the plane, the sheet and the side; the command previewed at every change,
+    /// Enter or OK makes it once the preview of what it says now is not refused, Esc or Cancel
+    /// drops it.
+    fn trim_window(&mut self, ctx: &egui::Context) {
+        let Some(f) = &mut self.trim else { return };
+        let (command, params) = f.params();
+        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let ok = preview.is_some_and(Result::is_ok);
+        let (mut add, mut cancel) = (false, false);
+        egui::Window::new(self.i18n.label(Act::Trim))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .show(ctx, |ui| {
+                ui.label(format!("{}: {}", self.i18n.t("trim-plane", "Plane"), f.plane));
+                ui.label(format!("{}: {}", self.i18n.t("trim-sheet", "Sheet"), f.body));
+                if flip_tile(ui, self.i18n.t("trim-flip", "Other side"), f.flip).clicked() {
+                    f.flip = !f.flip;
+                }
+                if let Some(Err(why)) = preview {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
+                }
+                ui.horizontal(|ui| {
+                    add = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK"))).clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
+                });
+            });
+        let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if cancel || esc {
+            self.trim = None;
+            self.send(Request::Preview(None));
+        } else if (add || enter) && ok {
+            self.trim = None;
+            self.send(Request::Preview(None));
+            self.send(Request::Command(command, params));
+        } else {
+            let (command, params) = f.params();
+            if f.sent.as_ref() != Some(&params) {
+                f.sent = Some(params.clone());
+                self.send(Request::Preview(Some((command, params))));
+            }
+        }
+    }
+
     /// Opens the form of a flange on the ends picked, and stops picking.
     fn open_flange(&mut self) {
         self.close_revolve();
@@ -3610,7 +3854,7 @@ impl Viewer {
                             .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
                     );
                 });
-                if ui.button(self.i18n.t("flange-flip", "⇄ Other side")).clicked() {
+                if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
                     f.flip = !f.flip;
                 }
                 if let Some(Err(why)) = preview {
@@ -3659,10 +3903,10 @@ impl Viewer {
                 let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(at) + egui::vec2(14.0, 14.0);
                 egui::Area::new(egui::Id::new("datum_contour_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(if act == Act::Revolve {
-                            self.i18n.t("revolve-pick", "Open a sketch with a profile and an axis line, then R")
-                        } else {
-                            self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E")
+                        ui.label(match act {
+                            Act::Revolve => self.i18n.t("revolve-pick", "Open a sketch with a profile and an axis line, then R"),
+                            Act::Trim => self.i18n.t("trim-pick", "Click the sheet first"),
+                            _ => self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E"),
                         })
                     });
                 });
@@ -3731,7 +3975,7 @@ impl Viewer {
                         }
                         ui.separator();
                         if face {
-                            if ui.add_enabled(!x.symmetric, egui::Button::new(self.i18n.t("plate-flip", "⇄ Other side"))).clicked() {
+                            if ui.add_enabled_ui(!x.symmetric, |ui| flip_tile(ui, self.i18n.t("plate-flip", "Other side"), x.flip)).inner.clicked() {
                                 x.flip = !x.flip;
                             }
                             return;
@@ -4878,6 +5122,12 @@ impl Viewer {
                 self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
             }
             // Something to lay flat, or the pane open to close.
+            Act::Trim => self.model.as_ref().is_some_and(|m| {
+                m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "plane")
+                    && m.begun
+                        .iter()
+                        .any(|b| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"))
+            }),
             Act::FlatPane => self.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::Rename => self.tree.selected.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
@@ -4901,6 +5151,7 @@ impl Viewer {
             Act::Revolve => self.revolve.is_some(),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Flange => self.picking == Some(Purpose::Flange),
+            Act::Trim => self.picking == Some(Purpose::Trim) || self.trim.is_some(),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             Act::Construction => draft.is_some_and(|d| d.construction),
             Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
@@ -4964,6 +5215,15 @@ impl Viewer {
             Act::Flange => {
                 self.leave();
                 self.pick(Purpose::Flange);
+            }
+            Act::Trim => {
+                self.leave();
+                if self.trim_body().is_some() {
+                    self.pick(Purpose::Trim);
+                } else {
+                    let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                    self.contour_hint = Some((at, std::time::Instant::now(), Act::Trim));
+                }
             }
             Act::Rectangle => {
                 if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
@@ -5149,6 +5409,7 @@ impl Viewer {
             self.item(ui, Act::Extrude, true);
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
+            self.item(ui, Act::Trim, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Construction]) {
                 self.item(ui, act, true);
@@ -5290,12 +5551,15 @@ impl Viewer {
                 }
             }
             if matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_)))) {
-                let hint = self.i18n.t("flat-dxf-hint", "The blank for the turret press: R12, lines, arcs and circles, no bend lines");
+                let hint = self.i18n.t("flat-dxf-hint", "The blank for the turret press: DXF R2000, lines, arcs and circles, no bend lines");
                 export = ui.button("DXF…").on_hover_text(hint).clicked();
             }
         });
-        if export && let Some(p) = self.exported("dxf", &chosen).save_file() {
-            self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string()})));
+        if export
+            && let Some(approximate) = self.dxf_approved(&chosen)
+            && let Some(p) = self.exported("dxf", &chosen).save_file()
+        {
+            self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string(), "approximate": approximate})));
         }
         let Some(m) = &self.model else { return };
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
@@ -5360,6 +5624,7 @@ impl eframe::App for Viewer {
         self.plane_window(ui.ctx());
         self.flange_window(ui.ctx());
         self.revolve_window(ui.ctx());
+        self.trim_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
         self.settings_said(ui.ctx());
@@ -5500,6 +5765,7 @@ mod tests {
             flange_edges: Vec::new(),
             flange: None,
             revolve: None,
+            trim: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -7157,7 +7423,7 @@ mod tests {
         assert_eq!((&first["profiles"], &first["rule"], &first["name"]), (&json!(["bottom"]), &json!("Лист"), &json!("plate1")));
         assert!(first.get("z1").is_none() && first.get("flip").is_none());
         h.get_by_label("Thickness from the rule: Лист");
-        h.get_by_label("⇄ Other side").click();
+        h.get_by_label("Other side").click();
         h.run();
         let flipped = previews(&inbox).pop().expect("a preview of the other side");
         assert_eq!(flipped["flip"], true);
@@ -7483,6 +7749,90 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(&sent[..], [Request::Command("set_part", p)] if *p == json!({"body": "plate", "rule": "body"})), "{sent:?}");
         assert_eq!(h.state().next_rule, None);
+    }
+
+    /// A harness for the trim form over the rolled sheet `shell` (its body and part) and a work plane `cut`.
+    fn trimming() -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer("rolled.json");
+        let m = v.model.as_mut().unwrap();
+        m.inspect["features"].as_array_mut().unwrap().push(json!({"name": "cut", "op": "plane"}));
+        m.bodies = vec!["shell".into()];
+        m.begun = vec!["shell".into()];
+        let h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.trim_window(ui.ctx()), v);
+        (h, inbox)
+    }
+
+    /// The trim form previews the cut, flips the side, makes it on Enter once the preview is Ok.
+    #[test]
+    fn the_trim_form_previews_flips_and_makes_the_cut() {
+        let (mut h, inbox) = trimming();
+        assert!(h.state().available(Act::Trim.action()));
+        h.state_mut().open_trim("cut".into());
+        h.run();
+        let want = json!({"name": "trim1", "op": "trim", "inputs": ["shell", "cut"]});
+        let previews = |inbox: &std::sync::mpsc::Receiver<Request>| -> Vec<Json> {
+            inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect()
+        };
+        assert_eq!(previews(&inbox).last(), Some(&want));
+        h.get_by_label("Other side").click();
+        h.run();
+        let flipped = json!({"name": "trim1", "op": "trim", "inputs": ["shell", "cut"], "flip": true});
+        assert_eq!(previews(&inbox).last(), Some(&flipped));
+        // No Enter while the preview of these fields has not come.
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(h.state().trim.is_some() && !inbox.try_iter().any(|r| matches!(r, Request::Command(..))));
+        h.state_mut().model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "trim1"}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("add", p) if *p == flipped)), "{sent:?}");
+        assert!(h.state().trim.is_none());
+    }
+
+    /// A trim opened from the tree keeps its name and values; the other side is an edit of it.
+    #[test]
+    fn a_trim_is_changed_from_the_tree() {
+        let (mut h, inbox) = trimming();
+        let trim = json!({"name": "trim1", "op": "trim", "inputs": ["shell", "cut"]});
+        h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(trim);
+        h.state_mut().reedit("trim1");
+        h.run();
+        assert!(h.state().trim.as_ref().is_some_and(|t| t.editing && t.body == "shell" && t.plane == "cut" && !t.flip));
+        h.get_by_label("Other side").click();
+        h.run();
+        let want = json!({"name": "trim1", "flip": true});
+        let previews: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(previews.last(), Some(Request::Preview(Some(("edit", p)))) if *p == want), "{previews:?}");
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)));
+    }
+
+    /// Esc drops the trim form and its preview.
+    #[test]
+    fn esc_drops_the_trim_form() {
+        let (mut h, inbox) = trimming();
+        h.state_mut().open_trim("cut".into());
+        h.run();
+        inbox.try_iter().for_each(drop);
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.state().trim.is_none());
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Preview(None))));
+    }
+
+    /// Two rolled sheets: the one clicked last is trimmed; none clicked, no body.
+    #[test]
+    fn the_trim_goes_to_the_sheet_clicked() {
+        let (mut v, _inbox) = viewer("rolled.json");
+        let m = v.model.as_mut().unwrap();
+        m.bodies = vec!["shell".into(), "cone".into()];
+        m.begun = vec!["shell".into(), "cone".into()];
+        assert_eq!(v.trim_body(), None);
+        v.part = Some("cone".into());
+        assert_eq!(v.trim_body().as_deref(), Some("cone"));
     }
 
     /// A harness for R on `model`, whose first feature is the sketch and the rest dropped, so the

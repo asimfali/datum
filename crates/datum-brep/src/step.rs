@@ -322,6 +322,7 @@ enum Exact {
 fn exact(piece: &Rolled) -> Option<Exact> {
     let (f, t, d) = (piece.from, piece.to, piece.dev);
     match piece.arc {
+        _ if piece.wave.is_some() => None,
         Some(_) => None,
         None if f.x == t.x => Some(Exact::Along),
         None if f.y == t.y => Some(Exact::Around { center: d.origin + d.axis * f.y, axis: if t.x > f.x { d.axis } else { -d.axis } }),
@@ -591,7 +592,8 @@ mod tests {
         use datum_math::Vec2;
         let dev = Development { origin: Vec3::ZERO, axis: Vec3::new(0.0, 0.0, 1.0), start: Vec3::new(1.0, 0.0, 0.0), neutral: 501.32 };
         let center = Vec2::new(15.0, 15.0);
-        let piece = Rolled { dev, from: Vec2::new(17.5, 15.0), to: Vec2::new(13.75, 17.165_063_5), arc: Some(ProfileArc { center, ccw: true }) };
+        let piece =
+            Rolled { dev, from: Vec2::new(17.5, 15.0), to: Vec2::new(13.75, 17.165_063_5), arc: Some(ProfileArc { center, ccw: true }), wave: None };
         let radii = [500.0, 503.0];
         let (n, found) = fit(&piece, radii).unwrap();
         assert!(found <= DEVIATION / 2.0);

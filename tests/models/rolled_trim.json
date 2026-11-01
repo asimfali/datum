@@ -1,0 +1,77 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "k": 0.44
+  },
+  "features": [
+    {
+      "name": "shell_profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {"o": [0, 0], "x": [10, 0], "a": [0, 50], "b": [100, 50]},
+        "lines": {"axis": {"from": "o", "to": "x", "construction": true}, "wall": {"from": "a", "to": "b"}}
+      }
+    },
+    {
+      "name": "shell",
+      "op": "rolled",
+      "inputs": ["shell_profile"],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2,
+      "thickness": 2,
+      "k_factor": "k"
+    },
+    {
+      "name": "on_floor",
+      "op": "sketch",
+      "sketch": {
+        "points": {"a": [70, 0], "b": [67, 8]}
+      }
+    },
+    {
+      "name": "lifted",
+      "op": "plane",
+      "base": "xy",
+      "offset": 1
+    },
+    {
+      "name": "on_lifted",
+      "op": "sketch",
+      "inputs": ["lifted"],
+      "sketch": {
+        "points": {"c": [70, 0]}
+      }
+    },
+    {
+      "name": "slanted",
+      "op": "plane",
+      "inputs": ["on_floor", "on_floor", "on_lifted"],
+      "points": [
+        {"input": 0, "point": "a"},
+        {"input": 1, "point": "b"},
+        {"input": 2, "point": "c"}
+      ]
+    },
+    {
+      "name": "trimmed",
+      "op": "trim",
+      "inputs": ["shell", "slanted"],
+      "k_factor": "k"
+    },
+    {
+      "name": "trimmed_other",
+      "op": "trim",
+      "inputs": ["shell", "slanted"],
+      "flip": true,
+      "k_factor": "k"
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "inputs": ["trimmed"],
+      "face": "3c04ac0becc731e82b5b2159e258fcfb",
+      "k_factor": "k"
+    }
+  ]
+}

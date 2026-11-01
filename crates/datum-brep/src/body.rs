@@ -460,6 +460,10 @@ impl Body {
                 floats(b, &[a.center.x, a.center.y]);
                 b.push(u8::from(a.ccw));
             }
+            if let Some(v) = w.wave {
+                b.extend_from_slice(b"wave");
+                floats(b, &[v.a, v.b, v.c]);
+            }
         }
         match &face.surface {
             // A plane hashes as before cylinders existed: pinned hashes of plane bodies stay.

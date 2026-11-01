@@ -1,0 +1,195 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "sketch1",
+      "op": "sketch",
+      "plane": {
+        "normal": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "sketch": {
+        "constraints": [
+          {
+            "line": "l1",
+            "type": "length",
+            "value": 10.0
+          },
+          {
+            "line": "l1",
+            "type": "vertical"
+          },
+          {
+            "points": [
+              "origin",
+              "p2"
+            ],
+            "type": "horizontal"
+          },
+          {
+            "line": "l2",
+            "type": "vertical"
+          }
+        ],
+        "lines": {
+          "l1": {
+            "construction": true,
+            "from": "origin",
+            "to": "p1"
+          },
+          "l2": {
+            "from": "p2",
+            "to": "p3"
+          }
+        },
+        "points": {
+          "p1": [
+            0.0,
+            10.000000000000002
+          ],
+          "p2": [
+            -44.38453147623013,
+            0.0
+          ],
+          "p3": [
+            -44.38453147623013,
+            37.21622799242488
+          ]
+        }
+      }
+    },
+    {
+      "axis": "l1",
+      "gap": 2.0,
+      "inputs": [
+        "sketch1"
+      ],
+      "name": "rolled1",
+      "op": "rolled",
+      "side": "left"
+    },
+    {
+      "name": "sketch3",
+      "op": "sketch",
+      "plane": {
+        "normal": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "sketch": {
+        "constraints": [
+          {
+            "points": [
+              "p1",
+              "p2"
+            ],
+            "type": "horizontal"
+          }
+        ],
+        "lines": {},
+        "points": {
+          "p1": [
+            -46.495414679750766,
+            18.0
+          ],
+          "p2": [
+            46.80348232456818,
+            18.0
+          ]
+        }
+      }
+    },
+    {
+      "name": "sketch4",
+      "op": "sketch",
+      "plane": {
+        "normal": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          0.0,
+          1.0,
+          0.0
+        ]
+      },
+      "sketch": {
+        "constraints": [],
+        "lines": {},
+        "points": {
+          "p1": [
+            45.91548278249467,
+            4.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "sketch3",
+        "sketch4"
+      ],
+      "name": "plane1",
+      "offset": 0.0,
+      "op": "plane",
+      "points": [
+        {
+          "input": 0,
+          "point": "p1"
+        },
+        {
+          "input": 1,
+          "point": "p1"
+        },
+        {
+          "input": 0,
+          "point": "p2"
+        }
+      ]
+    },
+    {
+      "name": "trim1",
+      "op": "trim",
+      "inputs": [
+        "rolled1",
+        "plane1"
+      ]
+    }
+  ],
+  "parts": {
+    "rolled1": {
+      "rule": "Лист 2 мм"
+    }
+  }
+}
