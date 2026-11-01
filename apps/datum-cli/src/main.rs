@@ -20,8 +20,10 @@ const USAGE: &str = "usage:
                                                         evaluate a model, export its final bodies;
                                                         --approximate: STEP writes what it has no
                                                         exact type for as B-splines (D147)
-  datum dxf <model.json> --out <file.dxf> [--feature <name>]
-                                                        flat blank of an unfold feature as DXF (R12)
+  datum dxf <model.json> --out <file.dxf> [--feature <name>] [--approximate]
+                                                        flat blank of an unfold feature as DXF (R2000);
+                                                        --approximate: curves with no exact entity
+                                                        (a trim's cut) as polylines (D147, D211)
   datum determinism-check <model.json|dir>...           same result on 1, 4 and 16 threads (C4)
   datum view <model.json>                               window: the model in 3D, parameters to edit
   datum <model.json>                                    the same (a model dropped on datum.exe)
@@ -162,6 +164,8 @@ fn cmd_build(args: &[String], level: Option<&str>) -> Result<(), String> {
 
 /// The flat blank of an unfold feature as DXF: the one named, or the model's only one.
 fn cmd_dxf(args: &[String], level: Option<&str>) -> Result<(), String> {
+    let approximate = args.last().is_some_and(|a| a == "--approximate");
+    let args = if approximate { &args[..args.len() - 1] } else { args };
     let (model, out, feature) = match args {
         [m, o, out] if o == "--out" => (m, out, None),
         [m, o, out, f, name] if o == "--out" && f == "--feature" => (m, out, Some(name.as_str())),
@@ -185,9 +189,9 @@ fn cmd_dxf(args: &[String], level: Option<&str>) -> Result<(), String> {
         }
         _ => return Err(format!("unfold features: {}; choose one with --feature", flats.iter().map(|f| f.0).collect::<Vec<_>>().join(", "))),
     };
-    std::fs::write(out, flat.dxf()).map_err(|e| format!("{out}: {e}"))?;
+    let polylines = datum_model::write_dxf(flat, Path::new(out), approximate)?;
     let [lines, arcs, circles] = flat.counts();
-    println!("{name}: {:.3} × {:.3} mm, {lines} lines, {arcs} arcs, {circles} circles → {out}", flat.size.x, flat.size.y);
+    println!("{name}: {:.3} × {:.3} mm, {lines} lines, {arcs} arcs, {circles} circles, {polylines} polylines → {out}", flat.size.x, flat.size.y);
     Ok(())
 }
 
