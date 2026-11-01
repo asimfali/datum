@@ -291,7 +291,7 @@ impl Doc {
             .iter()
             .enumerate()
             .filter_map(|(ix, n)| match n.op {
-                Op::Sheet { .. } | Op::Plate { .. } => Some((ix, self.rule(&n.name, level)?)),
+                Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
                 Op::Flange { .. } => {
                     let begun = body_chain(g, ix as NodeIx).last()?;
                     Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
@@ -317,6 +317,10 @@ impl Doc {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
                 Op::Flange { radius, .. } => *radius = Some(Num::Value(r)),
+                // The gap is along the neutral layer: no K, no rolled sheet.
+                Op::Rolled { thickness, k_factor, .. } => {
+                    (*thickness, *k_factor) = (Some(Num::Value(t)), ks.get(&(ix as NodeIx)).map(|&k| Num::Value(k)))
+                }
                 _ => {}
             }
             // The same operation with other numbers: its arity holds.
@@ -336,11 +340,11 @@ impl Doc {
         Cow::Owned(out)
     }
 
-    /// The kind of part `part` (D179): `sheet` if its body began as sheet metal (from a path, or a
-    /// face of it, D195), else `part`. Set by its first feature, it never changes.
+    /// The kind of part `part` (D179): `sheet` if its body began as sheet metal (from a path, a
+    /// face of it, D195, or rolled about an axis, D207), else `part`. Set by its first feature, it never changes.
     pub fn kind(&self, part: &str) -> &'static str {
         match self.root.find(part).map(|i| &self.root.nodes()[i as usize].op) {
-            Some(Op::Sheet { .. } | Op::Plate { .. }) => "sheet",
+            Some(Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. }) => "sheet",
             _ => "part",
         }
     }

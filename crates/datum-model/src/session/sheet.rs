@@ -1,5 +1,6 @@
-//! The `sheet` and `plate` commands (D185, D194, D195): sheet metal from an open chain of a
-//! sketch, or a face of it from its closed profiles, a part of its own made by a sheet rule,
+//! The `sheet`, `plate` and `rolled` commands (D185, D194, D195, D207): sheet metal from an open
+//! chain of a sketch, a face of it from its closed profiles, or a line of it rolled about an
+//! axis, a part of its own made by a sheet rule,
 //! whose thickness (and bend radius) it takes (D193).
 
 use datum_graph::Op;
@@ -35,6 +36,14 @@ impl Session {
     pub(super) fn plate(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
         let mut fields: Map<String, Value> = ["profiles", "flip", "symmetric"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();
         fields.insert("op".into(), "plate".into());
+        self.sheet_part(p, fields)
+    }
+
+    /// Adds the rolled sheet metal the `rolled` command's parameters `p` describe, as `sheet`.
+    pub(super) fn rolled(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
+        let mut fields: Map<String, Value> = ["axis", "path", "gap"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();
+        fields.insert("op".into(), "rolled".into());
+        fields.insert("side".into(), p.get("side").cloned().unwrap_or(json!("left")));
         self.sheet_part(p, fields)
     }
 
