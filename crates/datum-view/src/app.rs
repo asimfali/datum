@@ -767,9 +767,6 @@ struct RevolveForm {
     angle: String,
     gap: String,
     side: datum_ops::Side,
-    /// Rolled sheet's rule: the toolbar's, else the only sheet rule of the library; chosen in
-    /// the form.
-    rule: Option<String>,
     /// The first field is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -777,8 +774,7 @@ struct RevolveForm {
 
 impl RevolveForm {
     /// The command and its fields as the model takes them; none while a rolled sheet lacks a rule.
-    fn params(&self) -> Option<(&'static str, Json)> {
-        let rule = self.rule.as_deref();
+    fn params(&self, rule: Option<&str>) -> Option<(&'static str, Json)> {
         match self.turned {
             Turned::Revolve => {
                 Some(("add", json!({"name": self.name, "op": "revolve", "inputs": [self.sketch], "axis": self.axis, "angle": value_of(&self.angle)})))
@@ -3426,10 +3422,6 @@ impl Viewer {
         self.picking = None;
         // One line has no closed profile to turn into a body: it can only be rolled, by a rule.
         let turned = if single { Turned::Rolled } else { Turned::Revolve };
-        let rule = self.sheet_rule().or_else(|| {
-            let mut sheets = self.rules.iter().filter(|r| r["kind"] == "sheet").filter_map(|r| r["name"].as_str());
-            sheets.next().filter(|_| sheets.next().is_none()).map(String::from)
-        });
         let name = self.feature_name(if turned == Turned::Rolled { "rolled" } else { "revolve" });
         self.revolve = Some(RevolveForm {
             name,
@@ -3440,7 +3432,6 @@ impl Viewer {
             angle: "360".into(),
             gap: "2".into(),
             side: datum_ops::Side::Left,
-            rule,
             fresh: true,
             sent: None,
         });
@@ -3459,9 +3450,9 @@ impl Viewer {
     /// numbers or formulas; previewed at every change like the flange's, Enter or OK makes it once
     /// the preview of what it says now is not refused, Esc or Cancel drops it.
     fn revolve_window(&mut self, ctx: &egui::Context) {
-        let sheets: Vec<String> = self.rules.iter().filter(|r| r["kind"] == "sheet").filter_map(|r| r["name"].as_str().map(String::from)).collect();
+        let rule = self.sheet_rule();
         let Some(f) = &mut self.revolve else { return };
-        let shown = f.params();
+        let shown = f.params(rule.as_deref());
         let preview = shown.as_ref().and_then(|(_, params)| self.model.as_ref()?.preview.as_ref().filter(|(p, _)| p == params).map(|(_, r)| r));
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
@@ -3495,15 +3486,24 @@ impl Viewer {
                     }
                 });
                 if f.turned == Turned::Rolled {
-                    ui.horizontal(|ui| {
-                        ui.label(self.i18n.t("revolve-rule", "Rule"));
-                        let none = self.i18n.t("revolve-no-rule", "choose a sheet rule");
-                        egui::ComboBox::from_id_salt("datum_revolve_rule").selected_text(f.rule.as_deref().unwrap_or(none)).show_ui(ui, |ui| {
-                            for name in &sheets {
-                                ui.selectable_value(&mut f.rule, Some(name.clone()), name);
-                            }
-                        });
-                    });
+                    // The rule is the engineer's choice, on the toolbar, never guessed here.
+                    match &rule {
+                        Some(name) => {
+                            ui.horizontal(|ui| {
+                                ui.label(self.i18n.t("revolve-rule", "Rule"));
+                                ui.label(name);
+                            });
+                        }
+                        None => {
+                            ui.colored_label(
+                                ui.visuals().warn_fg_color,
+                                self.i18n.t(
+                                    "revolve-no-rule",
+                                    "First choose the material and the sheet rule on the toolbar: the thickness and K-factor come from the rule",
+                                ),
+                            );
+                        }
+                    }
                     let side = format!("{}: {}", self.i18n.t("revolve-side", "Side"), side_name(&self.i18n, f.side));
                     if ui.button(side).clicked() {
                         f.side = f.side.next();
@@ -3518,7 +3518,7 @@ impl Viewer {
                 });
             });
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
-        let Some((command, params)) = f.params() else { return };
+        let Some((command, params)) = f.params(rule.as_deref()) else { return };
         if cancel || esc {
             self.close_revolve();
         } else if (add || enter) && ok && shown.as_ref().is_some_and(|(_, p)| *p == params) {
@@ -7532,17 +7532,12 @@ mod tests {
         let want = json!({"name": "rolled1", "sketch": "shell_profile", "rule": "Лист", "axis": "axis", "side": "left", "gap": 2.0});
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(sent.last(), Some(Request::Preview(Some(("rolled", p)))) if *p == want), "{sent:?}");
-        // No rule on the toolbar: the library's only sheet rule is taken.
-        let (mut h, _) = revolving("rolled.json", None);
-        h.key_press(egui::Key::R);
-        h.run();
-        assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled && f.rule.as_deref() == Some("Лист")));
-        // Of several, none: the form asks for one and previews nothing.
+        // Without a rule the form asks for one and previews nothing.
         let (mut h, inbox) = revolving("rolled.json", None);
-        h.state_mut().rules.push(json!({"name": "Лист 3", "kind": "sheet", "material": "Сталь"}));
         h.key_press(egui::Key::R);
         h.run();
-        assert!(h.state().revolve.as_ref().is_some_and(|f| f.rule.is_none()));
+        assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled));
+        h.get_by_label("First choose the material and the sheet rule on the toolbar: the thickness and K-factor come from the rule");
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)))));
     }
 
