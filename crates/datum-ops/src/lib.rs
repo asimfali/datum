@@ -26,6 +26,7 @@ use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
 pub use flange::{FlangeDims, flange_edges, flange_ends, flanges};
 pub use pattern::pattern_grid;
+use revolve::RollDims;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
@@ -192,6 +193,24 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         profiles: Vec<String>,
     },
+    /// Rolled sheet metal (D207): line `path` of the input sketch (none: its only line other than
+    /// the axis and construction lines) turned about the sketch's line `axis`: parallel to it, a
+    /// shell; oblique, a cone. The sheet lies on `side` of the line looking along it, its ends
+    /// square to it; `gap` millimetres stay open at the seam, along the neutral layer at the
+    /// larger end, half each side of the sketch's plane (0 is refused: the sheet would close and
+    /// not unroll). The thickness and K-factor are the part's sheet rule's, put here when the
+    /// model is built. One input: a sketch.
+    Rolled {
+        axis: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
+        side: Side,
+        gap: Num,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -201,6 +220,10 @@ pub enum Op {
 
 /// Said when sheet metal is built with no rule giving its thickness.
 const NO_SHEET_RULE: &str = "sheet metal takes its thickness and bend radius from the part's sheet rule: give the part one";
+
+/// Said when rolled sheet metal is built with no rule giving its thickness and K-factor.
+const NO_ROLL_RULE: &str =
+    "rolled sheet metal takes its thickness and K-factor (for the gap at its seam) from the part's sheet rule: give the part one with both";
 
 /// What an extrusion does with its target body (D185).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -335,6 +358,7 @@ impl Op {
             Self::Sketch { .. } => "sketch",
             Self::Extrude { .. } => "extrude",
             Self::Revolve { .. } => "revolve",
+            Self::Rolled { .. } => "rolled",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
@@ -356,7 +380,8 @@ impl Op {
             | Self::Sheet { .. }
             | Self::Plate { .. }
             | Self::Flange { .. }
-            | Self::Revolve { .. } => 1..=1,
+            | Self::Revolve { .. }
+            | Self::Rolled { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
         }
     }
@@ -395,6 +420,14 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Revolve { axis, angle, profiles } => Self::Revolve { axis: axis.clone(), angle: r(angle, "angle")?, profiles: profiles.clone() },
+            Self::Rolled { axis, path, side, gap, thickness, k_factor } => Self::Rolled {
+                axis: axis.clone(),
+                path: path.clone(),
+                side: *side,
+                gap: r(gap, "gap")?,
+                thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
+                k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
+            },
             Self::Plate { thickness, flip, symmetric, profiles } => Self::Plate {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 flip: *flip,
@@ -464,7 +497,7 @@ impl Op {
                 h.update(face.as_bytes());
             }
             // `Debug` spells every field exactly, as for a sketch.
-            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } | Self::Revolve { .. } => {
+            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } | Self::Revolve { .. } | Self::Rolled { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -508,7 +541,9 @@ impl Op {
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
-            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Plane { .. } | Self::Revolve { .. } => Vec::new(),
+            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Plane { .. } | Self::Revolve { .. } | Self::Rolled { .. } => {
+                Vec::new()
+            }
             _ => values
                 .iter()
                 .enumerate()
@@ -547,6 +582,11 @@ impl Op {
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
+            Self::Rolled { axis, path, side, gap, thickness, k_factor } => {
+                let (Some(thickness), Some(k)) = (thickness, k_factor) else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
+                let dims = RollDims { thickness: num(thickness)?, k_factor: num(k)?, side: *side, gap: num(gap)? };
+                revolve::rolled(feature, sketch(0)?, axis, path.as_deref(), dims)?
+            }
             Self::Plate { thickness, flip, symmetric, profiles } => {
                 let Some(t) = thickness else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let t = num(t)?;

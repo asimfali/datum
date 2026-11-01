@@ -217,6 +217,28 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.plate(p),
     },
     Command {
+        name: "rolled",
+        description: "Rolled sheet metal (D207) as feature `name`, a part of its own: line `path` of sketch `sketch` (none: its only \
+                      line besides the axis and construction lines) turned about the sketch's line `axis`. Parallel to the axis it \
+                      rolls into a shell, oblique into a cone; a line square to the axis is refused (a flat ring is a `plate`). \
+                      `rule` is required, a sheet rule of the library giving thickness and K-factor. `side`: where the material \
+                      lies looking along the line, `left` (default), `right` or `middle`. `gap` (required, mm, above 0): left \
+                      open at the seam so the sheet unrolls, along the neutral layer at the larger end, half each side of the \
+                      sketch's plane. The reply names the part and its rule.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "sketch": {"type": "string"},
+                "rule": {"type": "string"},
+                "axis": {"type": "string"},
+                "path": {"type": "string"},
+                "side": {"type": "string", "enum": ["left", "right", "middle"]},
+                "gap": {"type": ["number", "string"]}
+            }, "required": ["name", "sketch", "rule", "axis", "gap"], "additionalProperties": false})
+        },
+        run: |s, p| s.rolled(p),
+    },
+    Command {
         name: "set_parameter",
         description: "Set a model parameter to a number or an expression of other parameters (e.g. {name: \"t\", value: \"w / 5\"}). \
                       Numbers of features and sketch dimensions may be expressions of parameters: `+ - * /`, parentheses, `pi`, \
@@ -1333,6 +1355,7 @@ impl Session {
                 Op::Sheet { start, path, .. } => start.iter_mut().chain(path.iter_mut()).for_each(&mut follow),
                 Op::Extrude { profiles, .. } | Op::Plate { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
                 Op::Revolve { axis, profiles, .. } => std::iter::once(axis).chain(profiles.iter_mut()).for_each(&mut follow),
+                Op::Rolled { axis, path, .. } => std::iter::once(axis).chain(path.iter_mut()).for_each(&mut follow),
                 // A plane through points of this sketch (D204).
                 Op::Plane { points, .. } => {
                     let k = n.inputs.iter().position(|&i| i == ix);

@@ -271,7 +271,7 @@ pub(crate) fn chain_through(body: &Body, f: Ix, skip: &BTreeSet<Ix>) -> Result<V
 /// the orientation of a sketch on XY. A solid with no two sides standing out is no sheet.
 pub fn sheet_sides(body: &Body) -> Result<[Ix; 2], BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
-    let plain = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_) | Surface::Cylinder(_));
+    let plain = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_));
     // Flanges on the sheet's sides are no side of it.
     let skip = branches(body);
     let mut seen: BTreeSet<Ix> = skip.clone();
@@ -327,6 +327,12 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let smooth = |x: Ix| smooth(body, x);
     let skip = branches(body);
     let mut chain = chain_through(body, f, &skip)?;
+    if chain.iter().flatten().any(|&x| matches!(body.faces()[x as usize].surface, Surface::Cone(_))) {
+        return match &chain[..] {
+            [one] if one.len() == 1 => cone_blank(body, one[0], k),
+            _ => Err(unsupported("a cone joined to other faces of a sheet")),
+        };
+    }
 
     // Y runs along the bends' axis; a flat sheet takes the first edge of its face.
     let axis = chain.iter().flatten().find_map(|&x| match body.faces()[x as usize].surface {
@@ -563,17 +569,135 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             FlatPiece::Circle { center, radius } => FlatPiece::Circle { center: shift(center), radius },
         })
         .collect();
-    let mut bytes = Vec::with_capacity(pieces.len() * 41);
-    for p in &pieces {
-        let (tag, v): (u8, [f64; 5]) = match *p {
-            FlatPiece::Line(a, b) => (0, [a.x, a.y, b.x, b.y, 0.0]),
-            FlatPiece::Arc { center, radius, start, end } => (1, [center.x, center.y, radius, start, end]),
-            FlatPiece::Circle { center, radius } => (2, [center.x, center.y, radius, 0.0, 0.0]),
-        };
-        bytes.push(tag);
-        bytes.extend(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
+    Ok(Flat::new(pieces, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends))
+}
+
+/// The flat blank of a rolled cone (D207), face `f` its inner or outer face: an annular sector,
+/// arcs about where the apex of its neutral layer lies, at `k` of the thickness from the inside.
+/// A point of the cone lies on the blank by its distance from that apex along the cone (its ends
+/// are square to the cone, so a whole end lies at one distance) and by its angle about the axis,
+/// shrunk by the cone's sine. The sector hangs below its apex, seen from the face's side.
+fn cone_blank(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
+    let he = |h: Ix| body.half_edges()[h as usize];
+    let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
+    let face = &body.faces()[f as usize];
+    if face.loop_count > 1 {
+        return Err(unsupported("a cut on a cone comes later"));
     }
-    Ok(Flat { pieces, size: Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, hash: *blake3::hash(&bytes).as_bytes() })
+    let Surface::Cone(c) = face.surface else { return Err(BrepError::Invalid("unfold: not a cone".into())) };
+    // Across the sheet: the other cone face sharing no edge with this one (the ends share arcs).
+    let near: BTreeSet<Ix> = body.loop_half_edges(face.first_loop).map(|h| face_of(he(h).twin)).collect();
+    let other = (0..body.faces().len() as Ix).find_map(|y| match body.faces()[y as usize].surface {
+        Surface::Cone(o) if y != f && !near.contains(&y) && o.convex != c.convex => Some(o),
+        _ => None,
+    });
+    let other = other.ok_or_else(|| unsupported("a cone without the face across the sheet"))?;
+    let (inner, outer) = if c.convex { (other, c) } else { (c, other) };
+    let axis = unit(inner.axis);
+    let slope = inner.slope;
+    let stretch = libm::sqrt(1.0 + slope * slope);
+    // In a half plane through the axis, `z` along it from the inner cone's origin and `r` out.
+    let meridian = |p: Vec3| {
+        let w = p - inner.origin;
+        let z = w.dot(axis);
+        let across = w - axis * z;
+        (z, across.dot(across).sqrt())
+    };
+    let t = (outer.radius + outer.slope * (inner.origin - outer.origin).dot(axis) - inner.radius).abs() / stretch;
+    // The neutral layer's radius at `z = 0`, and where it reaches the axis.
+    let r0 = inner.radius + k * t * stretch;
+    let apex = -r0 / slope;
+    let rho = |p: Vec3| {
+        let (z, r) = meridian(p);
+        ((z - apex) + slope * r).abs() / stretch
+    };
+    let sine = slope.abs() / stretch;
+    // Angles about the axis along the outline: arcs turn, lines (along the cone, across its ends'
+    // thickness at a seam) do not.
+    let loop_edges: Vec<Ix> = body.loop_half_edges(face.first_loop).collect();
+    let mut theta = Vec::with_capacity(loop_edges.len() + 1);
+    let mut at = 0.0;
+    for &h in &loop_edges {
+        theta.push(at);
+        let e = &body.edges()[he(h).edge as usize];
+        if let Some(Curve::Arc(arc)) = body.edge_curve(e).map(|cv| if e.half == h { cv } else { cv.reversed() }) {
+            let (u, v) = (body.point(he(h).origin), body.point(he(body.next(h)).origin));
+            at += arc.sweep(u, v) * if arc.axis.dot(axis) > 0.0 { 1.0 } else { -1.0 };
+        }
+    }
+    let (lo, hi) = theta.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &a| (lo.min(a), hi.max(a)));
+    // Seen from the face's side the blank is not mirrored: X and Y turn as the face's angle and
+    // its distance from the apex do, seen from where its normal points.
+    let p0 = body.point(he(loop_edges[0]).origin);
+    let radial = {
+        let w = p0 - inner.origin;
+        unit(w - axis * w.dot(axis))
+    };
+    let (z0, r0p) = meridian(p0);
+    let out = (axis + radial * slope) * if (z0 - apex) + slope * r0p > 0.0 { 1.0 } else { -1.0 };
+    let sigma = if axis.cross(radial).cross(out).dot(face.surface.normal_at(p0)) > 0.0 { -1.0 } else { 1.0 };
+    let psi0 = -std::f64::consts::FRAC_PI_2 - sigma * 0.5 * (lo + hi) * sine;
+    let place = |p: Vec3, th: f64| {
+        let (s, cs) = libm::sincos(psi0 + sigma * th * sine);
+        let d = rho(p);
+        Vec2::new(d * cs, d * s)
+    };
+    let o = Vec2::new(0.0, 0.0);
+    let n = loop_edges.len();
+    let mut pieces = Vec::with_capacity(n);
+    for (i, &h) in loop_edges.iter().enumerate() {
+        let (a, b) =
+            (place(body.point(he(h).origin), theta[i]), place(body.point(he(body.next(h)).origin), theta.get(i + 1).copied().unwrap_or(0.0)));
+        let turn = theta.get(i + 1).copied().unwrap_or(0.0) - theta[i];
+        pieces.push(if turn == 0.0 { FlatPiece::Line(a, b) } else { arc_piece(o, a, b, sigma * turn > 0.0) });
+    }
+    // The box: the corners, and the arcs' points farthest along X and Y.
+    let (mut lo, mut hi) = (Vec2::new(f64::INFINITY, f64::INFINITY), Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY));
+    let mut grow = |p: Vec2| {
+        (lo, hi) = (Vec2::new(lo.x.min(p.x), lo.y.min(p.y)), Vec2::new(hi.x.max(p.x), hi.y.max(p.y)));
+    };
+    for p in &pieces {
+        match *p {
+            FlatPiece::Line(a, b) => [a, b].into_iter().for_each(&mut grow),
+            FlatPiece::Arc { center, radius, start, end } => {
+                let span = (end - start).rem_euclid(TAU);
+                let extremes = (0..4).map(|q| f64::from(q) * std::f64::consts::FRAC_PI_2).filter(|&a| (a - start).rem_euclid(TAU) <= span);
+                for a in [start, end].into_iter().chain(extremes) {
+                    let (sn, cs) = libm::sincos(a);
+                    grow(Vec2::new(center.x + radius * cs, center.y + radius * sn));
+                }
+            }
+            FlatPiece::Circle { .. } => {}
+        }
+    }
+    let shift = |p: Vec2| Vec2::new(p.x - lo.x, p.y - lo.y);
+    let pieces = pieces
+        .into_iter()
+        .map(|p| match p {
+            FlatPiece::Line(a, b) => FlatPiece::Line(shift(a), shift(b)),
+            FlatPiece::Arc { center, radius, start, end } => FlatPiece::Arc { center: shift(center), radius, start, end },
+            circle => circle,
+        })
+        .collect();
+    Ok(Flat::new(pieces, Vec2::new(hi.x - lo.x, hi.y - lo.y), Vec::new()))
+}
+
+impl Flat {
+    /// A blank of `pieces`, its `size` and bend lines; hashed by what the DXF holds.
+    fn new(pieces: Vec<FlatPiece>, size: Vec2, bends: Vec<[Vec2; 2]>) -> Self {
+        let mut bytes = Vec::with_capacity(pieces.len() * 41);
+        for p in &pieces {
+            let (tag, v): (u8, [f64; 5]) = match *p {
+                FlatPiece::Line(a, b) => (0, [a.x, a.y, b.x, b.y, 0.0]),
+                FlatPiece::Arc { center, radius, start, end } => (1, [center.x, center.y, radius, start, end]),
+                FlatPiece::Circle { center, radius } => (2, [center.x, center.y, radius, 0.0, 0.0]),
+            };
+            bytes.push(tag);
+            bytes.extend(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
+        }
+        Self { pieces, size, bends, hash: *blake3::hash(&bytes).as_bytes() }
+    }
 }
 
 /// The pieces of a closed run of the outline, each with where it starts and the face beside it,
