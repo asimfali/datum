@@ -254,7 +254,7 @@ fn a_hole_across_a_bend_is_one_circle() {
     assert_eq!(text.matches("CIRCLE").count(), 1, "{text}");
     // The radius as drawn, to its last digit (as a hole within a wall has it).
     let radius: f64 =
-        text.split("CIRCLE").nth(1).and_then(|c| c.split("\n40\n").nth(1)).and_then(|r| r.lines().next()).unwrap().trim().parse().unwrap();
+        text.split("CIRCLE").nth(1).and_then(|c| c.split("\n 40\n").nth(1)).and_then(|r| r.lines().next()).unwrap().trim().parse().unwrap();
     assert!((radius - 5.0).abs() <= 4.0 * f64::EPSILON * 5.0, "{radius}");
 }
 
