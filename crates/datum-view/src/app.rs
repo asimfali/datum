@@ -4530,7 +4530,7 @@ impl Viewer {
         }
         if sk.drag.is_some() {
             if let Some((x, y)) = offset {
-                sk.drag_to(sk.camera.at(x, y, h));
+                sk.drag_to(sk.camera.at(x, y, h), crate::draw::SNAP_POINT * sk.camera.per_pixel(h));
             }
             if r.drag_stopped()
                 && let Some(p) = sk.end_drag()

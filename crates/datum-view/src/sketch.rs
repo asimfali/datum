@@ -102,6 +102,8 @@ pub struct Drag {
     grab: [f64; 2],
     /// The own points as drawn before the drag: what it changes is written when it ends.
     drawn: BTreeMap<String, [f64; 2]>,
+    /// The point a single dragged point is held on now: they are made one when the drag ends.
+    onto: Option<String>,
 }
 
 /// A selection frame: where it began and where the cursor is, pixels from the middle of the
@@ -658,16 +660,20 @@ impl SketchEdit {
             (Pick::Point(_), [(_, q)]) => *q,
             _ => at,
         };
-        self.drag = Some(Drag { points, grab, drawn: self.drawn() });
+        self.drag = Some(Drag { points, grab, drawn: self.drawn(), onto: None });
         true
     }
 
     /// Moves what is dragged by the cursor's way to sketch point `p`: its points keep their
     /// places among themselves, the rest follow. One point goes under the cursor if the
     /// constraints let it; if not, as far along the direction it is free in (D89). Failing that,
-    /// the solver places them as drawn there (what holds them does not move).
-    pub fn drag_to(&mut self, p: [f64; 2]) {
-        let Some(drag) = &self.drag else { return };
+    /// the solver places them as drawn there (what holds them does not move). A single point
+    /// within `within` of another point (not one at the other end of its own curve) goes onto it.
+    pub fn drag_to(&mut self, p: [f64; 2], within: f64) {
+        let onto = self.onto(p, within);
+        let Some(drag) = &mut self.drag else { return };
+        drag.onto = onto.as_ref().map(|(n, _)| n.clone());
+        let p = onto.map_or(p, |(_, q)| q);
         let (dx, dy) = (p[0] - drag.grab[0], p[1] - drag.grab[1]);
         let pins: Vec<(String, [f64; 2])> = drag.points.iter().map(|(n, q)| (n.clone(), [q[0] + dx, q[1] + dy])).collect();
         for (n, q) in &pins {
@@ -687,8 +693,42 @@ impl SketchEdit {
         self.set(placed);
     }
 
-    /// Ends the drag: `edit_sketch` parameters writing every own point where it now stands, or
-    /// None if nothing moved. The window keeps showing the same until the model comes back.
+    /// The point a single point dragged to `p` would go onto: the nearest within `within`, but
+    /// not itself, a point it shares a curve with, or one standing there.
+    fn onto(&self, p: [f64; 2], within: f64) -> Option<(String, [f64; 2])> {
+        let drag = self.drag.as_ref()?;
+        let [(dragged, _)] = &drag.points[..] else { return None };
+        let placed = self.placed.as_ref().ok()?;
+        let sketch = &self.json["sketch"];
+        let mates: BTreeSet<&str> = ["lines", "arcs"]
+            .iter()
+            .flat_map(|k| sketch[*k].as_object().into_iter().flat_map(|m| m.values()))
+            .map(|c| [c["from"].as_str(), c["to"].as_str(), c["center"].as_str()])
+            .filter(|ends| ends.contains(&Some(dragged.as_str())))
+            .flat_map(|ends| ends.into_iter().flatten())
+            .collect();
+        // Nor a point standing where a mate does (the origin under a line's other end): joining
+        // it would shrink the curve to nothing.
+        let at_mate = |q: &datum_math::Vec2| {
+            mates
+                .iter()
+                .filter_map(|m| placed.solved.points.get(*m))
+                .any(|m| *m != placed.solved.points[dragged] && libm::hypot(q.x - m.x, q.y - m.y) <= within)
+        };
+        placed
+            .solved
+            .points
+            .iter()
+            .filter(|(n, q)| !mates.contains(n.as_str()) && *n != dragged && !at_mate(q))
+            .map(|(n, q)| (libm::hypot(q.x - p[0], q.y - p[1]), n, [q.x, q.y]))
+            .filter(|(d, ..)| *d <= within)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, n, q)| (n.clone(), q))
+    }
+
+    /// Ends the drag: `edit_sketch` parameters writing every own point where it now stands, and
+    /// joining a single point to the one it was dropped on; None if nothing changed. The window
+    /// keeps showing the same until the model comes back.
     pub fn end_drag(&mut self) -> Option<Json> {
         let drag = self.drag.take()?;
         let Ok(placed) = &self.placed else { return None };
@@ -700,15 +740,18 @@ impl SketchEdit {
                 patch.insert(n.clone(), json!([s.x, s.y]));
             }
         }
-        if patch.is_empty() {
+        let join = drag.onto.zip(drag.points.first().map(|(n, _)| n.clone())).map(|(onto, n)| json!({"type": "coincident", "points": [onto, n]}));
+        if patch.is_empty() && join.is_none() {
             return None;
         }
-        for (n, v) in &patch {
-            self.json["sketch"]["points"][n] = v.clone();
+        let mut params = serde_json::Map::new();
+        if !patch.is_empty() {
+            params.insert("points".into(), Json::Object(patch));
         }
-        // Without the cursor's pin: what is still free shows blue again.
-        self.solve();
-        Some(json!({"name": self.feature, "points": patch}))
+        if let Some(c) = join {
+            params.insert("add_constraints".into(), json!([c]));
+        }
+        Some(self.apply(params))
     }
 
     /// `edit_sketch` parameters removing what is selected, or None if nothing is.
@@ -1612,7 +1655,7 @@ mod tests {
         e.hover = e.hit(dx, dy, 600.0, |_| (0.0, 0.0));
         assert_eq!(e.hover, Some(Pick::Point("c".into())));
         assert!(e.start_drag([12.0, 4.0]));
-        e.drag_to([13.0, 7.0]);
+        e.drag_to([13.0, 7.0], 0.0);
         let patch = e.end_drag().unwrap();
         // The corner keeps the width and the right angles: it rises to 7, its neighbour with it.
         let near = |v: &Json, want: f64| (v.as_f64().unwrap() - want).abs() < 1e-9;
@@ -1628,6 +1671,66 @@ mod tests {
         assert!(!e.start_drag([6.0, 0.0]), "nor a line of defined points");
     }
 
+    /// Two corners of the open outline: dragged onto a point that is not its mate, a free corner
+    /// joins it; its own line's other end, or a drag with no tolerance, does not join.
+    fn open_outline() -> SketchEdit {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [],
+            "plane": {"origin": [-1000, -1000, 0], "x_axis": [1, 0, 0], "normal": [0, 0, 1]}, "sketch": {
+            "points": {"p1": [0, 0], "p2": [10, 0], "q": [20, 5]},
+            "lines": {"l1": {"from": "p1", "to": "p2"}}}});
+        let id = TopoId::derive("feature").tag("s").finish();
+        SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None)
+    }
+
+    #[test]
+    fn a_dragged_point_joins_one_near_it() {
+        let mut e = open_outline();
+        e.hover = Some(Pick::Point("p2".into()));
+        assert!(e.start_drag([10.0, 0.0]));
+        e.drag_to([19.8, 5.1], 0.5);
+        let patch = e.end_drag().unwrap();
+        assert_eq!(patch["points"]["p2"], json!([20.0, 5.0]), "{patch}");
+        assert_eq!(patch["add_constraints"], json!([{"type": "coincident", "points": ["q", "p2"]}]), "{patch}");
+    }
+
+    #[test]
+    fn a_dragged_point_does_not_join_its_own_line() {
+        let mut e = open_outline();
+        e.hover = Some(Pick::Point("p2".into()));
+        assert!(e.start_drag([10.0, 0.0]));
+        e.drag_to([1.0, 1.0], 2.0);
+        let patch = e.end_drag().unwrap();
+        assert!(patch.get("add_constraints").is_none(), "{patch}");
+        assert_eq!(patch["points"]["p2"], json!([1.0, 1.0]), "{patch}");
+    }
+
+    /// A line from the origin: its free end is not joined to the origin, which stands under its
+    /// other end (the line would shrink to nothing).
+    #[test]
+    fn a_dragged_point_does_not_join_the_origin_under_its_line() {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
+            "points": {"p1": [0, 0], "p2": [10, 0]}, "lines": {"l1": {"from": "p1", "to": "p2"}}}});
+        let id = TopoId::derive("feature").tag("s").finish();
+        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        assert!(e.placed.as_ref().unwrap().solved.points.contains_key(datum_ops::ORIGIN));
+        e.hover = Some(Pick::Point("p2".into()));
+        assert!(e.start_drag([10.0, 0.0]));
+        e.drag_to([1.0, 1.0], 2.0);
+        let patch = e.end_drag().unwrap();
+        assert!(patch.get("add_constraints").is_none(), "{patch}");
+    }
+
+    #[test]
+    fn no_tolerance_no_join() {
+        let mut e = open_outline();
+        e.hover = Some(Pick::Point("p2".into()));
+        assert!(e.start_drag([10.0, 0.0]));
+        e.drag_to([19.8, 5.1], 0.0);
+        let patch = e.end_drag().unwrap();
+        assert!(patch.get("add_constraints").is_none(), "{patch}");
+        assert_eq!(patch["points"]["p2"], json!([19.8, 5.1]), "{patch}");
+    }
+
     /// A line dragged by its middle moves with the cursor, its ends together; the width given
     /// and the corner fixed keep the rest where it is (issue #57).
     #[test]
@@ -1635,7 +1738,7 @@ mod tests {
         let mut e = edit();
         e.hover = Some(Pick::Curve("top".into()));
         assert!(e.start_drag([6.0, 4.0]));
-        e.drag_to([6.5, 6.0]);
+        e.drag_to([6.5, 6.0], 0.0);
         let patch = e.end_drag().unwrap();
         let near = |v: &Json, want: f64| (v.as_f64().unwrap() - want).abs() < 1e-9;
         assert!(near(&patch["points"]["c"][1], 6.0) && near(&patch["points"]["d"][1], 6.0), "{patch}");
@@ -1655,7 +1758,7 @@ mod tests {
         e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into())];
         e.hover = Some(Pick::Curve("l2".into()));
         assert!(e.start_drag([3.5, 5.0]));
-        e.drag_to([5.5, 2.0]);
+        e.drag_to([5.5, 2.0], 0.0);
         let patch = e.end_drag().unwrap();
         assert_eq!(patch["points"], json!({"p1": [2.0, -3.0], "p2": [3.0, 1.0], "p3": [8.0, 3.0]}));
     }
@@ -1692,7 +1795,7 @@ mod tests {
         }
         e.hover = Some(Pick::Group("g1".into()));
         assert!(e.start_drag([0.0, 0.0]));
-        e.drag_to([1.0, 1.0]);
+        e.drag_to([1.0, 1.0], 0.0);
         let moved = e.end_drag().unwrap();
         assert_eq!(moved["points"], json!({"p1": [1.0, 1.0], "p2": [2.0, 5.0], "p3": [7.0, 7.0]}), "the circle stays");
         let sent = e.ungroup("g1");
@@ -1708,10 +1811,10 @@ mod tests {
         e.hover = Some(Pick::Point("c".into()));
         assert!(e.start_drag([12.0, 4.0]));
         let at = |e: &SketchEdit| e.placed.as_ref().map(|p| p.solved.points["c"]).unwrap();
-        e.drag_to([15.0, 7.0]);
+        e.drag_to([15.0, 7.0], 0.0);
         let first = at(&e);
         for _ in 0..4 {
-            e.drag_to([15.0, 7.0]);
+            e.drag_to([15.0, 7.0], 0.0);
             assert_eq!(at(&e), first);
         }
         // The width is given: the corner slides up its side to the cursor's height.
