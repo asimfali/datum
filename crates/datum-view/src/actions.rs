@@ -20,6 +20,7 @@ pub enum Act {
     Touchpad,
     NewSketch,
     Extrude,
+    Revolve,
     Select,
     Line,
     Arc,
@@ -52,6 +53,7 @@ pub enum Act {
     MaterialTable,
     RuleTable,
     Rename,
+    Construction,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -95,7 +97,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 44] = [
+pub const ACTIONS: [Action; 46] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -136,6 +138,15 @@ pub const ACTIONS: [Action; 44] = [
         plain(Key::E),
         Anywhere,
     ),
+    action(
+        Act::Revolve,
+        "model.revolve",
+        "Revolve",
+        "A closed profile of a sketch turns about a line of it into a body; one line beside the axis with a sheet rule chosen: \
+         rolled sheet metal, a shell or a cone, with a gap at the seam",
+        plain(Key::R),
+        Anywhere,
+    ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
     action(Act::Arc, "sketch.arc", "Arc", "Centre, start, end", None, Sketch),
@@ -157,7 +168,7 @@ pub const ACTIONS: [Action; 44] = [
         plain(Key::F3),
         Anywhere,
     ),
-    action(Act::Rectangle, "sketch.library_first", "Rectangle", "The first element of the library", plain(Key::R), Sketch),
+    action(Act::Rectangle, "sketch.library_first", "Rectangle", "The first element of the library", None, Sketch),
     action(Act::Tangent, "sketch.tangent_arc", "Tangent arc", "The next segment of the line: an arc tangent to the last one", plain(Key::T), Sketch),
     action(Act::NewProject, "file.new_project", "New project…", "A folder made a project: new models and exports go into it", None, Anywhere),
     action(Act::OpenProject, "file.open_project", "Open project…", "New models, dialogs and the library work in it", None, Anywhere),
@@ -290,6 +301,14 @@ pub const ACTIONS: [Action; 44] = [
         "A feature's title in the tree: any text; the key stays (F2 or a second click on the row)",
         plain(Key::F2),
         Model,
+    ),
+    action(
+        Act::Construction,
+        "sketch.construction",
+        "Construction",
+        "The selected lines, arcs and circles between profile and construction geometry; nothing selected: draw construction geometry or not",
+        plain(Key::Q),
+        Sketch,
     ),
 ];
 

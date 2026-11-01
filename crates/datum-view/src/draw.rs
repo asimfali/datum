@@ -43,7 +43,7 @@ pub enum Stage {
 pub enum Snap {
     /// A point of the sketch, its own or a projection's.
     Point(String),
-    /// The middle of a line.
+    /// The middle of a line, or halfway round an arc (D210).
     Middle(String),
     /// A curve of the sketch.
     On(String),
@@ -51,6 +51,12 @@ pub enum Snap {
     Vertex(String),
     /// An edge of that face, by ID: projected when used.
     Edge(String),
+    /// Free, but in line with points of the sketch, as AutoCAD's tracking: plumb under point `x`
+    /// (its X), level with point `y` (its Y), or both. The new point is tied to them so.
+    Track {
+        x: Option<String>,
+        y: Option<String>,
+    },
     Free,
 }
 
@@ -176,8 +182,11 @@ impl Default for Draft {
     }
 }
 
-/// Pixels within which a click lands on a point (or a middle), and on a curve.
-const SNAP_POINT: f64 = 10.0;
+/// Pixels within which a click lands on a point (or a middle), and on a curve; a point dragged
+/// onto another joins it.
+pub(crate) const SNAP_POINT: f64 = 10.0;
+/// Pixels within which the cursor is in line with a point of the sketch (tracking).
+const TRACK: f64 = 6.0;
 const SNAP_CURVE: f64 = 8.0;
 /// Degrees within which a line is taken as horizontal, vertical, parallel or perpendicular.
 const LEAN_DEG: f64 = 3.0;
@@ -383,7 +392,11 @@ impl Draft {
             .iter()
             .filter(|(n, _)| Some(n.as_str()) != skip)
             .map(|(n, v)| (px([v.x, v.y]), Spot { at: [v.x, v.y], snap: Snap::Point(n.clone()) }));
-        let middles = p.lines.keys().filter_map(|n| SketchEdit::middle(p, n).map(|m| (px(m), Spot { at: m, snap: Snap::Middle(n.clone()) })));
+        let middles = p
+            .lines
+            .keys()
+            .chain(p.arcs.keys())
+            .filter_map(|n| SketchEdit::middle(p, n).map(|m| (px(m), Spot { at: m, snap: Snap::Middle(n.clone()) })));
         let projected: Vec<&str> =
             edit.json["project"].as_object().map(|m| m.values().filter_map(|v| v["id"].as_str()).collect()).unwrap_or_default();
         let vertices = self
@@ -475,6 +488,48 @@ impl Draft {
         best.map(|(_, lean, at)| (lean, at))
     }
 
+    /// The free spot `at` moved in line with the nearest points of the sketch within [`TRACK`]
+    /// pixels: onto one's X and another's Y; or, on a line leaning from `along` (its start and
+    /// the spot on its lean), to where that line meets the nearest point's X or Y. The chain's own
+    /// end is left to the lean. None if no point is that near in line.
+    fn tracking(&self, edit: &SketchEdit, at: [f64; 2], height: f64, along: Option<[f64; 2]>) -> Option<Spot> {
+        let p = edit.placed.as_ref().ok()?;
+        let within = TRACK * edit.camera.per_pixel(height);
+        let skip = self.chain.as_ref().map(|c| c.point.as_str());
+        let points = || p.solved.points.iter().filter(move |(n, _)| Some(n.as_str()) != skip).map(|(n, v)| (n, [v.x, v.y]));
+        if let Some(from) = along {
+            // Where the line from `from` through `at` reaches coordinate `k` of `q`, if it does.
+            let d = [at[0] - from[0], at[1] - from[1]];
+            let meet = |k: usize, q: [f64; 2]| {
+                (d[k] != 0.0).then(|| {
+                    let t = (q[k] - from[k]) / d[k];
+                    [from[0] + d[0] * t, from[1] + d[1] * t]
+                })
+            };
+            let (n, k, q) = points()
+                .flat_map(|(n, q)| [0, 1].into_iter().filter_map(move |k| meet(k, q).map(|m| (n, k, m))))
+                .map(|(n, k, m)| (libm::hypot(m[0] - at[0], m[1] - at[1]), n, k, m))
+                .filter(|(dist, ..)| *dist <= within)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, n, k, m)| (n.clone(), k, m))?;
+            let (x, y) = if k == 0 { (Some(n), None) } else { (None, Some(n)) };
+            return Some(Spot { at: q, snap: Snap::Track { x, y } });
+        }
+        let nearest = |k: usize| {
+            points()
+                .map(|(n, q)| ((q[k] - at[k]).abs(), n, q[k]))
+                .filter(|(d, ..)| *d <= within)
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, n, c)| (n.clone(), c))
+        };
+        let (x, y) = (nearest(0), nearest(1));
+        if x.is_none() && y.is_none() {
+            return None;
+        }
+        let spot_at = [x.as_ref().map_or(at[0], |t| t.1), y.as_ref().map_or(at[1], |t| t.1)];
+        Some(Spot { at: spot_at, snap: Snap::Track { x: x.map(|t| t.0), y: y.map(|t| t.0) } })
+    }
+
     /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
         let mut spot = self.spot(edit, dx, dy, height, free);
@@ -496,6 +551,16 @@ impl Draft {
         if let Some((lean, at)) = found {
             spot.at = at;
             self.lean = Some(lean);
+        }
+        // In line with a point of the sketch, along what the lean leaves free.
+        let starts = matches!((self.tool, &self.clicks[..]), (Tool::Line | Tool::Point, _) | (Tool::Circle | Tool::Arc, []));
+        if leaning && starts && !self.tangent {
+            // A lean fixes the line's direction: the spot slides along it (a horizontal line meets
+            // only an X, a vertical one only a Y, a tangent or parallel one either).
+            let along = self.lean.as_ref().and(self.chain.as_ref()).map(|c| c.at);
+            if let Some(tracked) = self.tracking(edit, spot.at, height, along) {
+                spot = tracked;
+            }
         }
         // A typed size: as far from where the line, circle or arc starts, toward the cursor.
         let from = match (self.tool, &self.chain, &self.clicks[..]) {
@@ -732,6 +797,13 @@ impl Draft {
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }
+        // Tracking: dashed from the points the spot is in line with.
+        if let (Snap::Track { x, y }, Ok(p)) = (&spot.snap, &edit.placed) {
+            let thin = egui::Stroke::new(1.0, DRAFT);
+            for q in [x, y].into_iter().flatten().filter_map(|n| p.solved.points.get(n)) {
+                dashed(painter, &[screen([q.x, q.y]), screen(spot.at)], thin, 4.0, 4.0);
+            }
+        }
         // Where the click lands, and what it ties to.
         let at = screen(spot.at);
         painter.circle_stroke(at, 5.0, egui::Stroke::new(1.5, DRAFT));
@@ -741,12 +813,12 @@ impl Draft {
             (Snap::On(_), _) => i18n.t("snap-on", "on"),
             (Snap::Vertex(_), _) => i18n.t("snap-vertex", "vertex"),
             (Snap::Edge(_), _) => i18n.t("snap-edge", "edge"),
-            (Snap::Free, Some(Lean::Horizontal)) => "H",
-            (Snap::Free, Some(Lean::Vertical)) => "V",
-            (Snap::Free, Some(Lean::Parallel(_))) => i18n.t("snap-parallel", "parallel"),
-            (Snap::Free, Some(Lean::Perpendicular(_))) => i18n.t("snap-perpendicular", "perpendicular"),
-            (Snap::Free, Some(Lean::Tangent(_))) => i18n.t("snap-tangent", "tangent"),
-            (Snap::Free, None) => "",
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Horizontal)) => "H",
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Vertical)) => "V",
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Parallel(_))) => i18n.t("snap-parallel", "parallel"),
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Perpendicular(_))) => i18n.t("snap-perpendicular", "perpendicular"),
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Tangent(_))) => i18n.t("snap-tangent", "tangent"),
+            (Snap::Free | Snap::Track { .. }, None) => "",
         };
         if !mark.is_empty() {
             painter.text(at + egui::vec2(9.0, -9.0), egui::Align2::LEFT_BOTTOM, mark, egui::FontId::proportional(12.0), DRAFT);
@@ -945,9 +1017,18 @@ impl Patch {
         p
     }
 
-    /// New point `p` held on what `spot` snapped to: a middle, a curve, an edge of the face.
+    /// New point `p` held on what `spot` snapped to: a middle, a curve, an edge of the face, the
+    /// points it is in line with.
     pub(crate) fn tie(&mut self, p: &str, spot: &Spot) {
         match &spot.snap {
+            Snap::Track { x, y } => {
+                if let Some(x) = x {
+                    self.constrain(json!({"type": "vertical", "points": [x, p]}));
+                }
+                if let Some(y) = y {
+                    self.constrain(json!({"type": "horizontal", "points": [y, p]}));
+                }
+            }
             Snap::Middle(l) => self.constrain(json!({"type": "midpoint", "point": p, "line": l})),
             Snap::On(c) => self.constrain(json!({"type": "on", "point": p, "curve": c})),
             Snap::Edge(id) => {
@@ -1011,6 +1092,104 @@ mod tests {
     fn rectangle() -> Json {
         json!({"points": {"a": [0, 0], "b": [20, 0], "c": [20, 10], "d": [0, 10]},
                "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}}})
+    }
+
+    /// Moves the cursor to sketch point `q` without clicking: where it would click.
+    fn hover_at(e: &mut SketchEdit, q: [f64; 2], free: bool) -> Spot {
+        let (x, y) = e.camera.offset(q, H);
+        let mut d = std::mem::take(&mut e.draft);
+        d.track(e, x, y, H, free);
+        e.draft = d;
+        e.draft.cursor.clone().unwrap()
+    }
+
+    /// A line drawn obliquely, its end a few pixels off the X of a remote point, goes onto that X
+    /// and is tied plumb under the point.
+    #[test]
+    fn a_line_end_tracks_the_x_of_a_point() {
+        let mut e = editor(json!({"points": {"r": [15, 25]}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        let spot = hover_at(&mut e, [15.4, 5.0], false);
+        assert_eq!(spot.snap, Snap::Track { x: Some("r".into()), y: None });
+        assert_eq!(spot.at[0], 15.0);
+        // Farther than TRACK pixels (6 px = 0.6 units): free.
+        assert_eq!(hover_at(&mut e, [14.0, 5.0], false).snap, Snap::Free);
+        let p = click_at(&mut e, [15.4, 5.0], false).unwrap();
+        assert_eq!(p["points"]["p2"][0].as_f64(), Some(15.0), "{p}");
+        assert_eq!(p["add_constraints"], json!([{"type": "vertical", "points": ["r", "p2"]}]), "{p}");
+    }
+
+    /// A line leaning parallel to another slides along that direction to where it meets a
+    /// point's Y: the lean stays, the tie is added (as a tangent line leaving an arc, D209).
+    #[test]
+    fn a_leaning_line_tracks_along_its_direction() {
+        let mut e = editor(json!({"points": {"g0": [0, 0], "g1": [10, 5], "r": [0, 20]}, "lines": {"g": {"from": "g0", "to": "g1"}}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [50.0, 0.0], false);
+        let spot = hover_at(&mut e, [90.2, 20.15], false);
+        assert_eq!(spot.snap, Snap::Track { x: None, y: Some("r".into()) });
+        assert!((spot.at[0] - 90.0).abs() < 1e-9 && (spot.at[1] - 20.0).abs() < 1e-9, "{:?}", spot.at);
+        assert_eq!(e.draft.lean, Some(Lean::Parallel("g".into())));
+        let p = click_at(&mut e, [90.2, 20.15], false).unwrap();
+        let ties = p["add_constraints"].as_array().unwrap();
+        assert!(ties.contains(&json!({"type": "horizontal", "points": ["r", "p2"]})), "{p}");
+        assert!(ties.iter().any(|c| c["type"] == "parallel"), "{p}");
+    }
+
+    /// In line with the X of one point and the Y of another: both ties.
+    #[test]
+    fn a_line_end_tracks_x_and_y_of_two_points() {
+        let mut e = editor(json!({"points": {"r1": [15, 25], "r2": [30, 6]}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        let spot = hover_at(&mut e, [15.3, 6.2], false);
+        assert_eq!(spot.snap, Snap::Track { x: Some("r1".into()), y: Some("r2".into()) });
+        assert_eq!(spot.at, [15.0, 6.0]);
+        let p = click_at(&mut e, [15.3, 6.2], false).unwrap();
+        assert_eq!(
+            p["add_constraints"],
+            json!([{"type": "vertical", "points": ["r1", "p2"]}, {"type": "horizontal", "points": ["r2", "p2"]}]),
+            "{p}"
+        );
+    }
+
+    /// A line leaning horizontal tracks the X of a point only, and stays horizontal.
+    #[test]
+    fn a_horizontal_line_tracks_only_x() {
+        let mut e = editor(json!({"points": {"r": [15, 3]}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        let spot = hover_at(&mut e, [15.3, 0.2], false);
+        assert!(matches!(e.draft.lean, Some(Lean::Horizontal)));
+        // Y stays with the lean.
+        assert_eq!(spot.snap, Snap::Track { x: Some("r".into()), y: None });
+        assert_eq!(spot.at, [15.0, 0.0]);
+    }
+
+    /// Shift: no tracking.
+    #[test]
+    fn shift_does_not_track() {
+        let mut e = editor(json!({"points": {"r": [15, 25]}}), false);
+        e.draft.tool = Tool::Line;
+        click_at(&mut e, [0.0, 0.0], false);
+        let spot = hover_at(&mut e, [15.4, 5.0], true);
+        assert_eq!(spot.snap, Snap::Free);
+        assert_eq!(spot.at, [15.4, 5.0]);
+    }
+
+    /// The point tool tracks the origin's X.
+    #[test]
+    fn a_point_tracks_the_origin() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.json.as_object_mut().unwrap().remove("plane");
+        e.solve();
+        e.draft.tool = Tool::Point;
+        let spot = hover_at(&mut e, [0.3, 5.0], false);
+        assert_eq!(spot.snap, Snap::Track { x: Some("origin".into()), y: None });
+        assert_eq!(spot.at[0], 0.0);
+        let p = click_at(&mut e, [0.3, 5.0], false).unwrap();
+        assert_eq!(p["add_constraints"], json!([{"type": "vertical", "points": ["origin", "p1"]}]), "{p}");
     }
 
     /// Inferring off (F7): a line goes where it is clicked and takes no constraint.

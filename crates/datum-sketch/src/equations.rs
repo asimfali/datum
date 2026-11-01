@@ -54,6 +54,9 @@ enum Eq {
     ArcArcAt(usize, usize, usize),
     /// A point halfway along a line.
     Midpoint(usize, usize),
+    /// A point halfway round an arc: the point, the arc's centre, start and end. On its circle,
+    /// at one distance from both ends (of the two such points, the one it was drawn near).
+    ArcMidpoint(usize, usize, usize, usize),
     /// Two points mirrored in a line: their middle on it, the segment between them across it.
     Symmetric(usize, usize, usize),
     /// Two arcs by centre and start: one radius.
@@ -350,7 +353,11 @@ impl Equations {
                     (p, Curve::Circle(centre, Rad::Point(f), _)) => Eq::ArcEnds(centre, f, p),
                     (p, Curve::Circle(centre, Rad::Value(r), _)) => Eq::Radius(centre, p, r),
                 },
-                Constraint::Midpoint { point: p, line: l } => Eq::Midpoint(point(p)?, line(l)?),
+                Constraint::Midpoint { point: p, line: l } => match (line(l), find(&arc_names, l)) {
+                    (Ok(l), _) => Eq::Midpoint(point(p)?, l),
+                    (Err(_), Some(a)) => Eq::ArcMidpoint(point(p)?, arcs[a].0, arcs[a].1, arcs[a].2),
+                    (Err(_), None) => return invalid(format!("{}: unknown line or arc `{l}`", c.describe(k))),
+                },
                 Constraint::Symmetric { points, line: l } => Eq::Symmetric(point(&points[0])?, point(&points[1])?, line(l)?),
                 Constraint::EqualRadius { curves } => match (curve(&c.describe(k), &curves[0])?, curve(&c.describe(k), &curves[1])?) {
                     (Curve::Circle(c1, Rad::Point(f1), _), Curve::Circle(c2, Rad::Point(f2), _)) => Eq::EqualRadius(c1, f1, c2, f2),
@@ -462,6 +469,7 @@ impl Equations {
             Eq::LineArcAt(i, c, p) => l(i).into_iter().chain([c, p]).collect(),
             Eq::ArcArcAt(c1, c2, p) => vec![c1, c2, p],
             Eq::Midpoint(p, i) => [p].into_iter().chain(l(i)).collect(),
+            Eq::ArcMidpoint(p, c, f, t) => vec![p, c, f, t],
             Eq::Symmetric(a, b, i) => [a, b].into_iter().chain(l(i)).collect(),
             Eq::EqualRadius(c1, f1, c2, f2) => vec![c1, f1, c2, f2],
             Eq::Held => Vec::new(),
@@ -756,6 +764,16 @@ impl Equations {
                         let half = [-0.5 * d[0], -0.5 * d[1]];
                         emit(pp[i] - 0.5 * (pa[i] + pb[i]), &[(p, d), (a, half), (b, half)]);
                     }
+                }
+                Eq::ArcMidpoint(p, c, f, t) => {
+                    // On the circle: as far from the centre as the start…
+                    let (uf, df) = unit_from(at(c), at(f));
+                    let (up, dp) = unit_from(at(c), at(p));
+                    emit(df - dp, &[(f, uf), (c, sub(up, uf)), (p, neg(up))]);
+                    // …and as far from the start as from the end.
+                    let (a, da) = unit_from(at(f), at(p));
+                    let (b, db) = unit_from(at(t), at(p));
+                    emit(da - db, &[(p, sub(a, b)), (f, neg(a)), (t, b)]);
                 }
                 Eq::Symmetric(p, q, l) => {
                     let (a, _) = self.lines[l];

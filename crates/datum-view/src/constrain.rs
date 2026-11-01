@@ -64,7 +64,9 @@ pub fn text(i18n: &I18n, kind: Kind) -> (&str, &str) {
         Kind::Concentric => {
             (i18n.t("constrain-concentric", "Concentric"), i18n.t("constrain-concentric-what", "two arcs or circles around one centre"))
         }
-        Kind::Midpoint => (i18n.t("constrain-midpoint", "Midpoint"), i18n.t("constrain-midpoint-what", "a point and the line it is halfway along")),
+        Kind::Midpoint => {
+            (i18n.t("constrain-midpoint", "Midpoint"), i18n.t("constrain-midpoint-what", "a point and the line or arc it is halfway along"))
+        }
         Kind::Symmetric => {
             (i18n.t("constrain-symmetric", "Symmetric"), i18n.t("constrain-symmetric-what", "two points, then the line they mirror in"))
         }
@@ -137,7 +139,9 @@ pub fn step(kind: Kind, picks: &[Pick2], placed: &Placed) -> Step {
         (Kind::Tangent, [C(a), C(b)]) if (round(a) || round(b)) && a != b => Step::Done(json!({"type": "tangent", "curves": [a, b]})),
         (Kind::Concentric, [C(a), C(b)]) if round(a) && round(b) && a != b => Step::Done(json!({"type": "concentric", "curves": [a, b]})),
         (Kind::Midpoint, [_]) => Step::More,
-        (Kind::Midpoint, [P(p), C(l)] | [C(l), P(p)]) if line(l) => Step::Done(json!({"type": "midpoint", "point": p, "line": l})),
+        (Kind::Midpoint, [P(p), C(l)] | [C(l), P(p)]) if line(l) || placed.arcs.contains_key(l.as_str()) => {
+            Step::Done(json!({"type": "midpoint", "point": p, "line": l}))
+        }
         (Kind::Symmetric, [P(_)] | [P(_), P(_)]) => Step::More,
         (Kind::Symmetric, [P(a), P(b), C(l)]) if line(l) && a != b => Step::Done(json!({"type": "symmetric", "points": [a, b], "line": l})),
         _ => Step::Wrong(kind),
