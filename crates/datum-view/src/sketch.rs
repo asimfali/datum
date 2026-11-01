@@ -106,7 +106,8 @@ pub struct Drag {
     onto: Option<Join>,
 }
 
-/// What a dragged point is dropped onto (D209): another point, or the middle of a line.
+/// What a dragged point is dropped onto (D209): another point, or the middle of a line or an
+/// arc (D210).
 #[derive(Clone, Debug, PartialEq)]
 enum Join {
     Point(String),
@@ -700,9 +701,9 @@ impl SketchEdit {
         self.set(placed);
     }
 
-    /// What a single point dragged to `p` would go onto: the nearest point or middle of a line
-    /// within `within`, but not itself, a point it shares a curve with, one standing there, or
-    /// the middle of its own line.
+    /// What a single point dragged to `p` would go onto: the nearest point or middle of a line or
+    /// an arc within `within`, but not itself, a point it shares a curve with, one standing there,
+    /// or the middle of its own curve.
     fn onto(&self, p: [f64; 2], within: f64) -> Option<(Join, [f64; 2])> {
         let drag = self.drag.as_ref()?;
         let [(dragged, _)] = &drag.points[..] else { return None };
@@ -729,11 +730,12 @@ impl SketchEdit {
             .iter()
             .filter(|(n, q)| !mates.contains(n.as_str()) && *n != dragged && !at_mate(q))
             .map(|(n, q)| (Join::Point(n.clone()), [q.x, q.y]));
-        let own = |l: &Json| l["from"].as_str() == Some(dragged.as_str()) || l["to"].as_str() == Some(dragged.as_str());
+        let own = |c: &Json| ["from", "to", "center"].iter().any(|e| c[*e].as_str() == Some(dragged.as_str()));
         let middles = placed
             .lines
             .keys()
-            .filter(|n| !sketch["lines"].get(n.as_str()).is_some_and(own))
+            .chain(placed.arcs.keys())
+            .filter(|n| !["lines", "arcs"].iter().any(|k| sketch[*k].get(n.as_str()).is_some_and(own)))
             .filter_map(|n| Self::middle(placed, n).map(|m| (Join::Middle(n.clone()), m)));
         // Points first: of a tie, the point.
         points
@@ -965,8 +967,18 @@ impl SketchEdit {
         )
     }
 
-    /// The middle of a curve: of a line between its ends, of an arc or circle on it.
+    /// The middle of a curve: of a line between its ends, of an arc halfway round it (on its
+    /// bisector, D210), of a circle on it.
     pub(crate) fn middle(p: &Placed, name: &str) -> Option<[f64; 2]> {
+        if let Some(a) = p.arcs.get(name) {
+            let at = |n: &str| p.solved.points.get(n).map(|v| [v.x, v.y]);
+            let (c, f, t) = (at(&a.center)?, at(&a.from)?, at(&a.to)?);
+            let start = libm::atan2(f[1] - c[1], f[0] - c[0]);
+            let sweep = (libm::atan2(t[1] - c[1], t[0] - c[0]) - start).rem_euclid(TAU);
+            let (sn, cs) = libm::sincos(start + 0.5 * sweep);
+            let r = libm::hypot(f[0] - c[0], f[1] - c[1]);
+            return Some([c[0] + r * cs, c[1] + r * sn]);
+        }
         let v = Self::curve_points(p, name)?;
         Some(match v[..] {
             [a, b] => [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5],
@@ -1735,6 +1747,24 @@ mod tests {
         let patch = e.end_drag().unwrap();
         assert_eq!(patch["add_constraints"], json!([{"type": "midpoint", "point": "q", "line": "l1"}]), "{patch}");
         assert_eq!(patch["points"]["q"], json!([5.0, 0.0]), "{patch}");
+    }
+
+    /// A point dragged near the top of a half circle goes halfway round it (D210).
+    #[test]
+    fn a_dragged_point_joins_the_middle_of_an_arc() {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [],
+            "plane": {"origin": [-1000, -1000, 0], "x_axis": [1, 0, 0], "normal": [0, 0, 1]}, "sketch": {
+            "points": {"c": [0, 0], "f": [5, 0], "t": [-5, 0], "q": [3, 9]},
+            "arcs": {"a": {"center": "c", "from": "f", "to": "t"}}}});
+        let id = TopoId::derive("feature").tag("s").finish();
+        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        e.hover = Some(Pick::Point("q".into()));
+        assert!(e.start_drag([3.0, 9.0]));
+        e.drag_to([0.2, 5.1], 0.5);
+        let patch = e.end_drag().unwrap();
+        assert_eq!(patch["add_constraints"], json!([{"type": "midpoint", "point": "q", "line": "a"}]), "{patch}");
+        let q = patch["points"]["q"].as_array().unwrap();
+        assert!(q[0].as_f64().unwrap().abs() < 1e-12 && (q[1].as_f64().unwrap() - 5.0).abs() < 1e-12, "{patch}");
     }
 
     /// A line from the origin: its free end is not joined to the origin, which stands under its

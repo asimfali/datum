@@ -481,3 +481,60 @@ fn arc_angle() {
     );
     assert!(matches!(solve(&s), Err(SketchError::Invalid(m)) if m.contains("up to 360")));
 }
+
+/// A point halfway round an arc (D210): on its bisector, whatever the arc turns; it follows the
+/// arc when the arc changes.
+#[test]
+fn a_point_halfway_round_an_arc() {
+    // A quarter arc of radius 5, and a 120° one; the points drawn roughly in their middles.
+    let s = sketch(
+        r#"{
+        "points": {"c": [0, 0], "f": [5, 0], "t": [0, 5], "m": [3.4, 3.7],
+                   "c2": [20, 0], "f2": [25, 0], "t2": [17.5, 4.33], "m2": [22.6, 4.1]},
+        "arcs": {"a": {"center": "c", "from": "f", "to": "t"}, "b": {"center": "c2", "from": "f2", "to": "t2"}},
+        "constraints": [
+            {"type": "fix", "point": "c"}, {"type": "fix", "point": "f"}, {"type": "fix", "point": "t"},
+            {"type": "fix", "point": "c2"}, {"type": "fix", "point": "f2"}, {"type": "arc_angle", "arc": "b", "degrees": 120},
+            {"type": "midpoint", "point": "m", "line": "a"}, {"type": "midpoint", "point": "m2", "line": "b"}
+        ]
+    }"#,
+    );
+    let r = solve(&s).unwrap();
+    let h = 5.0 * std::f64::consts::FRAC_1_SQRT_2;
+    close(r.points["m"], [h, h], 1e-12);
+    let (sn, cs) = (libm::sin(60f64.to_radians()), libm::cos(60f64.to_radians()));
+    close(r.points["m2"], [20.0 + 5.0 * cs, 5.0 * sn], 1e-12);
+    assert!(!r.free.contains_key("m") && !r.free.contains_key("m2"), "{:?}", r.free);
+}
+
+/// An oval (two half circles and two tangent lines) sized overall: a construction line through
+/// the arcs' middles takes the overall length; changing it rebuilds the oval.
+#[test]
+fn an_oval_sized_between_the_arcs_middles() {
+    let oval = |length: f64| {
+        sketch(&format!(
+            r#"{{
+            "points": {{"c1": [0, 0], "a": [-5, 0], "b": [5, 0], "c2": [0.2, 20.3], "d": [5.1, 20], "e": [-4.9, 20.2],
+                       "m1": [0.3, -5.2], "m2": [0.1, 25.4]}},
+            "arcs": {{"bottom": {{"center": "c1", "from": "a", "to": "b"}}, "top": {{"center": "c2", "from": "d", "to": "e"}}}},
+            "lines": {{"right": {{"from": "b", "to": "d"}}, "left": {{"from": "e", "to": "a"}},
+                      "axis": {{"from": "m1", "to": "m2", "construction": true}}}},
+            "constraints": [
+                {{"type": "fix", "point": "c1"}}, {{"type": "vertical", "line": "right"}}, {{"type": "vertical", "line": "left"}},
+                {{"type": "tangent", "curves": ["right", "bottom"]}}, {{"type": "tangent", "curves": ["right", "top"]}},
+                {{"type": "tangent", "curves": ["left", "bottom"]}}, {{"type": "tangent", "curves": ["left", "top"]}},
+                {{"type": "radius", "arc": "bottom", "value": 5}},
+                {{"type": "midpoint", "point": "m1", "line": "bottom"}}, {{"type": "midpoint", "point": "m2", "line": "top"}},
+                {{"type": "length", "line": "axis", "value": {length}}}
+            ]
+        }}"#
+        ))
+    };
+    for length in [30.0, 42.0] {
+        let r = solve(&oval(length)).unwrap();
+        close(r.points["m1"], [0.0, -5.0], 1e-9);
+        close(r.points["m2"], [0.0, length - 5.0], 1e-9);
+        close(r.points["c2"], [0.0, length - 10.0], 1e-9);
+        assert_eq!(r.dof, 0, "{:?}", r.free);
+    }
+}

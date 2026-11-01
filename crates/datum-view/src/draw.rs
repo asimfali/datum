@@ -43,7 +43,7 @@ pub enum Stage {
 pub enum Snap {
     /// A point of the sketch, its own or a projection's.
     Point(String),
-    /// The middle of a line.
+    /// The middle of a line, or halfway round an arc (D210).
     Middle(String),
     /// A curve of the sketch.
     On(String),
@@ -392,7 +392,11 @@ impl Draft {
             .iter()
             .filter(|(n, _)| Some(n.as_str()) != skip)
             .map(|(n, v)| (px([v.x, v.y]), Spot { at: [v.x, v.y], snap: Snap::Point(n.clone()) }));
-        let middles = p.lines.keys().filter_map(|n| SketchEdit::middle(p, n).map(|m| (px(m), Spot { at: m, snap: Snap::Middle(n.clone()) })));
+        let middles = p
+            .lines
+            .keys()
+            .chain(p.arcs.keys())
+            .filter_map(|n| SketchEdit::middle(p, n).map(|m| (px(m), Spot { at: m, snap: Snap::Middle(n.clone()) })));
         let projected: Vec<&str> =
             edit.json["project"].as_object().map(|m| m.values().filter_map(|v| v["id"].as_str()).collect()).unwrap_or_default();
         let vertices = self

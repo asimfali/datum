@@ -277,7 +277,8 @@ pub enum Constraint {
         point: String,
         curve: String,
     },
-    /// The point halfway along a segment.
+    /// The point halfway along a segment; `line` may name an arc: the point halfway round it, on
+    /// its bisector (D210).
     Midpoint {
         point: String,
         line: String,
