@@ -228,9 +228,10 @@ const COMMANDS: &[Command] = &[
                       line besides the axis and construction lines) turned about the sketch's line `axis`. Parallel to the axis it \
                       rolls into a shell, oblique into a cone; a line square to the axis is refused (a flat ring is a `plate`). \
                       `rule` is required, a sheet rule of the library giving thickness and K-factor. `side`: where the material \
-                      lies looking along the line, `left` (default), `right` or `middle`. `gap` (required, mm, above 0): left \
-                      open at the seam so the sheet unrolls, along the neutral layer at the larger end, half each side of the \
-                      sketch's plane. The reply names the part and its rule.",
+                      lies looking along the line, `left` (default), `right` or `middle`. `angle` (degrees, default 360): how far \
+                      round; a whole turn needs `gap` (mm, above 0) left open at the seam so the sheet unrolls, along the neutral \
+                      layer at the larger end, half each side of the sketch's plane; a piece (half a shell…) starts at the sketch's \
+                      plane, no gap. The reply names the part and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -239,8 +240,9 @@ const COMMANDS: &[Command] = &[
                 "axis": {"type": "string"},
                 "path": {"type": "string"},
                 "side": {"type": "string", "enum": ["left", "right", "middle"]},
+                "angle": {"type": ["number", "string"]},
                 "gap": {"type": ["number", "string"]}
-            }, "required": ["name", "sketch", "rule", "axis", "gap"], "additionalProperties": false})
+            }, "required": ["name", "sketch", "rule", "axis"], "additionalProperties": false})
         },
         run: |s, p| s.rolled(p),
     },

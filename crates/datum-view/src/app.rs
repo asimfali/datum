@@ -819,18 +819,34 @@ impl RevolveForm {
         if self.editing {
             return Some(match self.turned {
                 Turned::Revolve => ("edit", json!({"name": self.name, "axis": self.axis, "angle": value_of(&self.angle)})),
-                Turned::Rolled => ("edit", json!({"name": self.name, "axis": self.axis, "side": self.side, "gap": value_of(&self.gap)})),
+                Turned::Rolled => {
+                    let mut p = json!({"name": self.name, "axis": self.axis, "side": self.side, "angle": value_of(&self.angle)});
+                    if self.whole() {
+                        p["gap"] = value_of(&self.gap);
+                    }
+                    ("edit", p)
+                }
             });
         }
         match self.turned {
             Turned::Revolve => {
                 Some(("add", json!({"name": self.name, "op": "revolve", "inputs": [self.sketch], "axis": self.axis, "angle": value_of(&self.angle)})))
             }
-            Turned::Rolled => Some((
-                "rolled",
-                json!({"name": self.name, "sketch": self.sketch, "rule": rule?, "axis": self.axis, "side": self.side, "gap": value_of(&self.gap)}),
-            )),
+            Turned::Rolled => {
+                let mut p = json!({"name": self.name, "sketch": self.sketch, "rule": rule?, "axis": self.axis, "side": self.side});
+                if self.whole() {
+                    p["gap"] = value_of(&self.gap);
+                } else {
+                    p["angle"] = value_of(&self.angle);
+                }
+                Some(("rolled", p))
+            }
         }
+    }
+
+    /// Whether the sheet goes a whole turn round (the angle is 360): then it has a gap.
+    fn whole(&self) -> bool {
+        value_of(&self.angle).as_f64().is_some_and(|a| a >= 360.0)
     }
 }
 
@@ -3564,7 +3580,7 @@ impl Viewer {
                     axis: f["axis"].as_str().unwrap_or_default().to_string(),
                     turned: if op == "rolled" { Turned::Rolled } else { Turned::Revolve },
                     angle: if f["angle"].is_null() { "360".into() } else { definition(&f["angle"]) },
-                    gap: definition(&f["gap"]),
+                    gap: if f["gap"].is_null() { "2".into() } else { definition(&f["gap"]) },
                     side: serde_json::from_value(f["side"].clone()).unwrap_or(datum_ops::Side::Left),
                     editing: true,
                     fresh: true,
@@ -3614,19 +3630,26 @@ impl Viewer {
                         }
                     });
                 });
-                let (label, field) = match f.turned {
-                    Turned::Revolve => (self.i18n.t("revolve-angle", "Angle"), &mut f.angle),
-                    Turned::Rolled => (self.i18n.t("revolve-gap", "Gap, mm"), &mut f.gap),
-                };
+                let hint = self.i18n.t("plane-offset-hint", "number or formula");
+                // The angle; rolled sheet a whole turn round also its gap, typed first.
+                let rolled_whole = f.turned == Turned::Rolled && f.whole();
                 ui.horizontal(|ui| {
-                    ui.label(label);
-                    let r = ui
-                        .add(egui::TextEdit::singleline(field).desired_width(120.0).hint_text(self.i18n.t("plane-offset-hint", "number or formula")));
-                    // Typed at once, as a sketch's dimension is.
-                    if std::mem::take(&mut f.fresh) {
+                    ui.label(self.i18n.t("revolve-angle", "Angle"));
+                    let r = ui.add(egui::TextEdit::singleline(&mut f.angle).desired_width(120.0).hint_text(hint));
+                    if !rolled_whole && std::mem::take(&mut f.fresh) {
                         r.request_focus();
                     }
                 });
+                if rolled_whole {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("revolve-gap", "Gap, mm"));
+                        let r = ui.add(egui::TextEdit::singleline(&mut f.gap).desired_width(120.0).hint_text(hint));
+                        // Typed at once, as a sketch's dimension is.
+                        if std::mem::take(&mut f.fresh) {
+                            r.request_focus();
+                        }
+                    });
+                }
                 if f.turned == Turned::Rolled {
                     // The rule is the engineer's choice, on the toolbar, never guessed here; a
                     // rolled sheet changed keeps its part's.
