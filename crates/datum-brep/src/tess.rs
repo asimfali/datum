@@ -133,10 +133,7 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
         return wall_mesh(body, f, &w, chord);
     }
     let (mut points, mut vertices, mut next, mut angles) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
-    let frame = match face.surface {
-        Surface::Cylinder(c) => Some(crate::curve::frame(&c)),
-        _ => None,
-    };
+    let frame = face.surface.revolution().map(|c| crate::curve::frame(&c));
     for l in body.face_loops(f) {
         let first = points.len() as Vx;
         let start = body.point(body.half_edges()[body.loop_half_edges(l).start as usize].origin);
@@ -152,7 +149,7 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
             let curve = if edge.half == h { curve } else { curve.reversed() };
             let inner = curve.inner_points(u, v, chord);
             let n = inner.len() + 1;
-            // On a cylinder a curve runs around the axis: θ turns with it, by `at(t)` at `t`.
+            // On a cylinder or a cone a curve runs around the axis: θ turns with it, by `at(t)` at `t`.
             let at = |t: f64| match (&frame, &curve) {
                 (None, _) => 0.0,
                 (Some(fr), Curve::Arc(arc)) => arc.sweep(u, v) * fr.axis.dot(arc.axis).signum() * t,
@@ -179,12 +176,14 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
         .and_then(|poly| poly.triangulate(delaunay))
         .map_err(|()| BrepError::Degenerate(format!("face {:?} cannot be triangulated", face.id)))?;
     // Between holes and far edges even Delaunay triangles span wide angles: no wider than a chord.
-    if let (Surface::Cylinder(c), Some(fr)) = (face.surface, &frame) {
+    if let (Some(c), Some(fr)) = (face.surface.revolution(), &frame) {
         let side = if c.convex { 1.0 } else { -1.0 };
+        let stretch = libm::sqrt(1.0 + c.slope * c.slope);
         let known = flat.len();
         refine(&mut flat, &mut triangles, c.radius * std::f64::consts::TAU / crate::curve::per_turn(c.radius, chord));
         for q in &flat[known..] {
-            points.push(fr.point(q.x * side / c.radius, q.y, c.radius));
+            let z = q.y / stretch;
+            points.push(fr.point(q.x * side / c.radius, z, c.radius + c.slope * z));
             vertices.push(Ix::MAX);
         }
     }
@@ -247,10 +246,11 @@ fn wall_mesh(body: &Body, f: Ix, w: &crate::Rolled, chord: f64) -> Result<FaceMe
 /// A face's own 2D coordinates, in which its loops have the interior on their left. A plane drops
 /// its dominant axis: that keeps the loops' turning sense when the other two axes stay in cyclic
 /// order; a negative dominant component flips it, and swapping the two flips it back. A cylinder
-/// unrolls to `(R·θ, z)`, mirrored when the body is outside it.
+/// unrolls to `(R·θ, z)`, mirrored when the body is outside it; a cone likewise, `R` its radius
+/// at its origin and `z` measured along its slope.
 enum Projection {
     Plane(usize, usize),
-    Cylinder(crate::Cylinder),
+    Revolution(crate::Cone),
 }
 
 impl Projection {
@@ -261,12 +261,13 @@ impl Projection {
                 let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
                 if plane.normal.to_array()[axis] < 0.0 { Self::Plane(v, u) } else { Self::Plane(u, v) }
             }
-            Surface::Cylinder(c) => Self::Cylinder(c),
+            Surface::Cylinder(c) => Self::Revolution(c.into()),
+            Surface::Cone(c) => Self::Revolution(c),
             Surface::Wall(_) => unreachable!("walls are laid out by `wall_mesh`"),
         }
     }
 
-    /// Point `p` at angle `theta` about a cylinder's axis (ignored on a plane). `+ 0.0` turns −0
+    /// Point `p` at angle `theta` about a cylinder's or cone's axis (ignored on a plane). `+ 0.0` turns −0
     /// into +0, so the sweep order agrees with the predicates.
     fn at(&self, p: Vec3, theta: f64) -> Vec2 {
         match self {
@@ -274,9 +275,9 @@ impl Projection {
                 let p = p.to_array();
                 Vec2::new(p[*u] + 0.0, p[*v] + 0.0)
             }
-            Self::Cylinder(c) => {
+            Self::Revolution(c) => {
                 let side = if c.convex { 1.0 } else { -1.0 };
-                Vec2::new(side * c.radius * theta + 0.0, (p - c.origin).dot(c.axis) + 0.0)
+                Vec2::new(side * c.radius * theta + 0.0, (p - c.origin).dot(c.axis) * libm::sqrt(1.0 + c.slope * c.slope) + 0.0)
             }
         }
     }

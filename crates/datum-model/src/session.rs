@@ -863,6 +863,10 @@ const COMMANDS: &[Command] = &[
                         Surface::Cylinder(c) => {
                             json!({"id": id, "cylinder": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "convex": c.convex}, "area": area})
                         }
+                        // `radius` at `origin`, growing by `slope` per unit along `axis`.
+                        Surface::Cone(c) => {
+                            json!({"id": id, "cone": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "slope": c.slope, "convex": c.convex}, "area": area})
+                        }
                         // A wall of a cut through a rolled sheet: its piece in the sheet's development.
                         Surface::Wall(w) => {
                             let arc = w.arc.map(|a| json!({"center": a.center, "ccw": a.ccw}));

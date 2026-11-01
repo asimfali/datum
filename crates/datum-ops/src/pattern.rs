@@ -34,6 +34,7 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
                 match &mut s.surface {
                     Surface::Plane(p) => p.origin = p.origin + o,
                     Surface::Cylinder(c) => c.origin = c.origin + o,
+                    Surface::Cone(c) => c.origin = c.origin + o,
                     Surface::Wall(w) => w.dev.origin = w.dev.origin + o,
                 }
                 s.loops.iter_mut().flatten().for_each(|v| *v = id(*v));
