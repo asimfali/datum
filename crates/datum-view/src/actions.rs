@@ -53,6 +53,7 @@ pub enum Act {
     MaterialTable,
     RuleTable,
     Rename,
+    Construction,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -96,7 +97,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 45] = [
+pub const ACTIONS: [Action; 46] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -300,6 +301,14 @@ pub const ACTIONS: [Action; 45] = [
         "A feature's title in the tree: any text; the key stays (F2 or a second click on the row)",
         plain(Key::F2),
         Model,
+    ),
+    action(
+        Act::Construction,
+        "sketch.construction",
+        "Construction",
+        "The selected lines, arcs and circles between profile and construction geometry; nothing selected: draw construction geometry or not",
+        plain(Key::Q),
+        Sketch,
     ),
 ];
 

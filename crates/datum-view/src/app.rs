@@ -2354,7 +2354,8 @@ impl Viewer {
                 ui.checkbox(on, self.keys.labelled(ui.ctx(), &self.i18n, act)).on_hover_text(self.keys.hint(ui.ctx(), &self.i18n, act));
             };
             ui.horizontal_wrapped(|ui| {
-                ui.checkbox(&mut sk.draft.construction, self.i18n.t("construction", "Construction"));
+                // Checked: drawing construction geometry; with curves selected, the key changes theirs.
+                check(ui, &mut sk.draft.construction, Act::Construction);
                 check(ui, &mut sk.modes.infer, Act::Infer);
                 check(ui, &mut sk.modes.presets, Act::Presets);
                 if sk.draft.tool == Tool::Line && sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some()) {
@@ -4887,6 +4888,7 @@ impl Viewer {
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Flange => self.picking == Some(Purpose::Flange),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
+            Act::Construction => draft.is_some_and(|d| d.construction),
             Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
                 let mut m = self.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
@@ -4980,6 +4982,15 @@ impl Viewer {
             Act::Group => {
                 if let Some(p) = self.sketch.as_mut().and_then(SketchEdit::group_selection) {
                     self.send(Request::Command("edit_sketch", p));
+                }
+            }
+            // The curves selected change kind; with none, the next ones drawn do.
+            Act::Construction => {
+                if let Some(sk) = &mut self.sketch {
+                    match sk.toggle_construction() {
+                        Some(p) => self.send(Request::Command("edit_sketch", p)),
+                        None => sk.draft.construction = !sk.draft.construction,
+                    }
                 }
             }
             // The menu a held right click opens, at once, by the cursor.
@@ -5125,7 +5136,7 @@ impl Viewer {
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
             ui.separator();
-            for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group]) {
+            for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Construction]) {
                 self.item(ui, act, true);
             }
             ui.separator();

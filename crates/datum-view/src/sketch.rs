@@ -573,6 +573,36 @@ impl SketchEdit {
         Some(self.apply(patch.done()?))
     }
 
+    /// `edit_sketch` parameters turning the selected curves into construction geometry, or back
+    /// into profile geometry when all of them are construction already; none if no curve is
+    /// selected.
+    pub fn toggle_construction(&mut self) -> Option<Json> {
+        let sketch = &self.json["sketch"];
+        let curves: Vec<(&str, &String)> = self
+            .selected
+            .iter()
+            .filter_map(|p| if let Pick::Curve(n) = p { Some(n) } else { None })
+            .filter_map(|n| ["lines", "arcs", "circles"].into_iter().find(|k| sketch[*k].get(n).is_some()).map(|k| (k, n)))
+            .collect();
+        if curves.is_empty() {
+            return None;
+        }
+        let make = !curves.iter().all(|(k, n)| sketch[*k][n.as_str()]["construction"] == true);
+        let mut patch = serde_json::Map::new();
+        for (k, n) in curves {
+            let mut curve = sketch[k][n.as_str()].clone();
+            if let Some(fields) = curve.as_object_mut() {
+                if make {
+                    fields.insert("construction".into(), json!(true));
+                } else {
+                    fields.remove("construction");
+                }
+            }
+            patch.entry(k).or_insert_with(|| json!({}))[n.as_str()] = curve;
+        }
+        Some(self.apply(patch))
+    }
+
     /// `edit_sketch` parameters taking group `g` apart: its elements stay.
     pub fn ungroup(&mut self, g: &str) -> Json {
         let mut patch = serde_json::Map::new();
@@ -1555,6 +1585,23 @@ mod tests {
         assert_eq!(p.solved.free.keys().collect::<Vec<_>>(), ["c", "d"]);
         let texts: Vec<String> = e.labels().into_iter().map(|l| l.text).collect();
         assert_eq!(texts, ["w = 12", "(4)"]);
+    }
+
+    /// The selected curves turn into construction geometry, and back when all of them are; nothing
+    /// selected, nothing to send.
+    #[test]
+    fn construction_toggles_the_selected_curves() {
+        let mut e = edit();
+        assert!(e.toggle_construction().is_none());
+        e.selected = vec![Pick::Curve("left".into()), Pick::Point("a".into())];
+        let p = e.toggle_construction().unwrap();
+        assert_eq!(p["lines"]["left"], json!({"from": "d", "to": "a", "construction": true}));
+        assert_eq!(e.json["sketch"]["lines"]["left"]["construction"], json!(true));
+        // With one plain curve among them, all become construction; all construction, all plain.
+        e.selected.push(Pick::Curve("top".into()));
+        assert_eq!(e.toggle_construction().unwrap()["lines"]["top"]["construction"], json!(true));
+        let p = e.toggle_construction().unwrap();
+        assert_eq!((p["lines"]["left"].get("construction"), p["lines"]["top"].get("construction")), (None, None));
     }
 
     /// Dragging the free top corner writes the corners where they stand, nothing else.
