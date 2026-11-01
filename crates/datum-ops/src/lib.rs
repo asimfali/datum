@@ -8,6 +8,7 @@ mod copies;
 mod cut;
 mod flange;
 mod pattern;
+mod revolve;
 mod sheet;
 mod sketch;
 mod unfold;
@@ -178,6 +179,19 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         profiles: Vec<String>,
     },
+    /// The closed profile of the input sketch (curves `profiles` choose it, D191) turned about
+    /// the sketch's line `axis` by `angle` degrees (360, the default: a full turn), a new body
+    /// (D206). Seen from the axis line's end `to`, the turn is counterclockwise. An edge parallel
+    /// to the axis turns into a cylinder, an oblique one into a cone, one square to it into a
+    /// plane; arcs (a torus, a sphere) and an oblique edge reaching the axis (a cone to a point)
+    /// are refused. One input: a sketch.
+    Revolve {
+        axis: String,
+        #[serde(default = "full_turn")]
+        angle: Num,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        profiles: Vec<String>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -302,6 +316,10 @@ impl Value {
     }
 }
 
+fn full_turn() -> Num {
+    Num::Value(360.0)
+}
+
 fn z_axis() -> Vec3 {
     Vec3::new(0.0, 0.0, 1.0)
 }
@@ -316,6 +334,7 @@ impl Op {
             Self::Terrain { .. } => "terrain",
             Self::Sketch { .. } => "sketch",
             Self::Extrude { .. } => "extrude",
+            Self::Revolve { .. } => "revolve",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
@@ -336,7 +355,8 @@ impl Op {
             | Self::Unfold { .. }
             | Self::Sheet { .. }
             | Self::Plate { .. }
-            | Self::Flange { .. } => 1..=1,
+            | Self::Flange { .. }
+            | Self::Revolve { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
         }
     }
@@ -374,6 +394,7 @@ impl Op {
                 Self::Plane { base: *base, face: face.clone(), points: points.clone(), offset: r(offset, "offset")? }
             }
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
+            Self::Revolve { axis, angle, profiles } => Self::Revolve { axis: axis.clone(), angle: r(angle, "angle")?, profiles: profiles.clone() },
             Self::Plate { thickness, flip, symmetric, profiles } => Self::Plate {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 flip: *flip,
@@ -443,7 +464,7 @@ impl Op {
                 h.update(face.as_bytes());
             }
             // `Debug` spells every field exactly, as for a sketch.
-            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } => {
+            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } | Self::Revolve { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -483,11 +504,11 @@ impl Op {
             }
             return Ok(Value::Sketch(Box::new(place(sketch, Some(on), None, None, None, project)?)));
         }
-        // Every operation but `extrude` and `sheet` takes bodies.
+        // Every operation but those of sketches takes bodies.
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
-            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Plane { .. } => Vec::new(),
+            Self::Extrude { .. } | Self::Sheet { .. } | Self::Plate { .. } | Self::Plane { .. } | Self::Revolve { .. } => Vec::new(),
             _ => values
                 .iter()
                 .enumerate()
@@ -525,6 +546,7 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,
+            Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
             Self::Plate { thickness, flip, symmetric, profiles } => {
                 let Some(t) = thickness else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let t = num(t)?;
