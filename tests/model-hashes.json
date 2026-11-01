@@ -121,6 +121,10 @@
     "outline": "3d42ee5e3823835548e75d21541600167199ea1dc4ac809fe4d18582d4b8d862",
     "plate": "363e6d76fc8b9e3edf44e922ffbbd4852fb697c0a400ef33e89f8483bbb8c2fa"
   },
+  "revolve.json": {
+    "bushing": "a31ebaa14cce81fc56a529a5454c10ea01ab1ec72c5afa4f3395be102f508b1a",
+    "profile": "fb06260e4a036138e19068561887eb7546dbc79bb849105fa50c7f67a8fa42b2"
+  },
   "rolled_holes.json": {
     "holes": "0d31287537f8c17b9cc1cd4a6d7f027b895f88aeeaae628862839c010aee7f2f",
     "perforated": "7a6556e087fd0bbdc3bd4a7404a81c61fcb929dba84cc37b31dea7e1964adac2",
