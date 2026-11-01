@@ -715,10 +715,12 @@ struct Viewer {
     flange_edges: Vec<(String, datum_brep::TopoId)>,
     /// A flange being asked for: its form.
     flange: Option<FlangeForm>,
+    /// A revolution being asked for: its form.
+    revolve: Option<RevolveForm>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
     /// "Select a contour or a chain, then E": where it shows, and since when (until a click or a few seconds).
-    contour_hint: Option<(egui::Pos2, std::time::Instant)>,
+    contour_hint: Option<(egui::Pos2, std::time::Instant, Act)>,
     /// The part whose body was last clicked in 3D: what the toolbar's material and rule refer to.
     part: Option<String>,
     /// The rule for the next new part (E), while no part is active; and the material shown when the
@@ -743,6 +745,46 @@ struct FlangeForm {
 /// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
 fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool) -> Json {
     json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip})
+}
+
+/// What the form of R makes, decided when it opens: a body turned from a profile (D206), or rolled
+/// sheet metal from a line beside the axis (D207).
+#[derive(Clone, Copy, PartialEq)]
+enum Turned {
+    Revolve,
+    Rolled,
+}
+
+/// The form of a revolution: the sketch, the axis among its lines, the angle or (rolled) the gap
+/// and side as typed, the preview sent last.
+struct RevolveForm {
+    name: String,
+    sketch: String,
+    /// The lines of the sketch with whether each is a construction line.
+    lines: Vec<(String, bool)>,
+    axis: String,
+    turned: Turned,
+    angle: String,
+    gap: String,
+    side: datum_ops::Side,
+    /// The first field is typed over at once, the first frame only.
+    fresh: bool,
+    sent: Option<Json>,
+}
+
+impl RevolveForm {
+    /// The command and its fields as the model takes them; none while a rolled sheet lacks a rule.
+    fn params(&self, rule: Option<&str>) -> Option<(&'static str, Json)> {
+        match self.turned {
+            Turned::Revolve => {
+                Some(("add", json!({"name": self.name, "op": "revolve", "inputs": [self.sketch], "axis": self.axis, "angle": value_of(&self.angle)})))
+            }
+            Turned::Rolled => Some((
+                "rolled",
+                json!({"name": self.name, "sketch": self.sketch, "rule": rule?, "axis": self.axis, "side": self.side, "gap": value_of(&self.gap)}),
+            )),
+        }
+    }
 }
 
 /// What the form of E makes, decided when it opens.
@@ -1034,6 +1076,7 @@ impl Viewer {
             plane_points: Vec::new(),
             flange_edges: Vec::new(),
             flange: None,
+            revolve: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -1663,6 +1706,7 @@ impl Viewer {
 
     fn leave(&mut self) {
         self.close_extrusion();
+        self.close_revolve();
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
         if let Some(sk) = &self.sketch {
@@ -3275,7 +3319,6 @@ impl Viewer {
             self.open_flange();
             return;
         }
-        let open = self.sketch.as_ref().map(|s| s.feature.clone());
         // The contours selected in the open sketch; with none selected and several regions, they
         // are to be selected first.
         let profiles: Vec<String> = self.sketch.as_ref().map_or_else(Vec::new, |sk| {
@@ -3300,22 +3343,10 @@ impl Viewer {
             && let (regions, chains) = candidates(sk, p)
             && regions + chains.len() > 1
         {
-            self.contour_hint = Some((at, std::time::Instant::now()));
+            self.contour_hint = Some((at, std::time::Instant::now(), Act::Extrude));
             return;
         }
-        self.leave();
-        let Some(m) = &self.model else { return };
-        let features = m.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
-        let used = |name: &str| {
-            features.iter().any(|f| f["op"] != "sketch" && f["inputs"].as_array().is_some_and(|i| i.iter().any(|n| n.as_str() == Some(name))))
-        };
-        // A sketch of points alone (where a work plane goes through) has nothing to extrude.
-        let drawn = |f: &Json| {
-            ["lines", "arcs", "circles"].iter().any(|k| f["sketch"][k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)))
-        };
-        let mut unused = features.iter().filter(|f| f["op"] == "sketch" && drawn(f)).filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
-        let lone = unused.next().filter(|_| unused.next().is_none());
-        let sketch = open.or_else(|| lone.map(String::from));
+        let sketch = self.sketch_to_use();
         let kind = match chain {
             Some((path, start)) => Kind::Sheet(path, start),
             None => self.plain_kind(sketch.as_deref()),
@@ -3336,6 +3367,140 @@ impl Viewer {
             sent: None,
             selected: false,
         });
+    }
+
+    /// The sketch E and R work on: the one open (left, as the form comes), else the only one drawn
+    /// and not used yet.
+    fn sketch_to_use(&mut self) -> Option<String> {
+        let open = self.sketch.as_ref().map(|s| s.feature.clone());
+        self.leave();
+        let features = self.model.as_ref()?.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
+        let used = |name: &str| {
+            features.iter().any(|f| f["op"] != "sketch" && f["inputs"].as_array().is_some_and(|i| i.iter().any(|n| n.as_str() == Some(name))))
+        };
+        // A sketch of points alone (where a work plane goes through) has nothing to extrude.
+        let drawn = |f: &Json| {
+            ["lines", "arcs", "circles"].iter().any(|k| f["sketch"][k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)))
+        };
+        let mut unused = features.iter().filter(|f| f["op"] == "sketch" && drawn(f)).filter_map(|f| f["name"].as_str()).filter(|n| !used(n));
+        let lone = unused.next().filter(|_| unused.next().is_none());
+        open.or_else(|| lone.map(String::from))
+    }
+
+    /// R at `at`: the form of a revolution of the sketch chosen as for E, about a line of it; with
+    /// one line beside the axis, rolled sheet metal by the toolbar's sheet rule.
+    fn revolve(&mut self, at: egui::Pos2) {
+        let found = self.sketch_to_use().and_then(|name| {
+            let f = self.model.as_ref()?.inspect["features"].as_array()?.iter().find(|f| f["name"] == name.as_str())?;
+            let sketch = &f["sketch"];
+            let lines: BTreeMap<String, bool> = sketch["lines"].as_object()?.iter().map(|(n, l)| (n.clone(), l["construction"] == true)).collect();
+            let curved = ["arcs", "circles"].iter().any(|k| sketch[k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)));
+            let mut construction = lines.iter().filter(|(_, c)| **c).map(|(n, _)| n);
+            let axis = construction.next().filter(|_| construction.next().is_none()).or_else(|| lines.keys().next())?.clone();
+            let beside = lines.iter().filter(|(n, c)| !**c && **n != axis).count();
+            Some((name, lines.into_iter().collect::<Vec<_>>(), axis, beside == 1 && !curved))
+        });
+        let Some((sketch, lines, axis, single)) = found else {
+            self.contour_hint = Some((at, std::time::Instant::now(), Act::Revolve));
+            return;
+        };
+        self.flange = None;
+        self.flange_edges.clear();
+        self.picking = None;
+        // One line has no closed profile to turn into a body: it can only be rolled, by a rule.
+        let turned = if single { Turned::Rolled } else { Turned::Revolve };
+        let name = self.feature_name(if turned == Turned::Rolled { "rolled" } else { "revolve" });
+        self.revolve = Some(RevolveForm {
+            name,
+            sketch,
+            lines,
+            axis,
+            turned,
+            angle: "360".into(),
+            gap: "2".into(),
+            side: datum_ops::Side::Left,
+            fresh: true,
+            sent: None,
+        });
+    }
+
+    /// Drops the revolution form, and the preview it made.
+    fn close_revolve(&mut self) {
+        if let Some(r) = self.revolve.take()
+            && r.sent.is_some()
+        {
+            self.send(Request::Preview(None));
+        }
+    }
+
+    /// The revolution form: the axis, the angle (a body) or the gap and side (rolled sheet), as
+    /// numbers or formulas; previewed at every change like the flange's, Enter or OK makes it once
+    /// the preview of what it says now is not refused, Esc or Cancel drops it.
+    fn revolve_window(&mut self, ctx: &egui::Context) {
+        let rule = self.sheet_rule();
+        let Some(f) = &mut self.revolve else { return };
+        let shown = f.params(rule.as_deref());
+        let preview = shown.as_ref().and_then(|(_, params)| self.model.as_ref()?.preview.as_ref().filter(|(p, _)| p == params).map(|(_, r)| r));
+        let ok = preview.is_some_and(Result::is_ok);
+        let (mut add, mut cancel) = (false, false);
+        egui::Window::new(self.i18n.label(Act::Revolve))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .show(ctx, |ui| {
+                let construction = self.i18n.t("revolve-construction", "construction");
+                let show = |n: &str, c: bool| if c { format!("{n} ({construction})") } else { n.to_string() };
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("revolve-axis", "Axis"));
+                    let current = f.lines.iter().find(|(n, _)| *n == f.axis).map_or_else(String::new, |(n, c)| show(n, *c));
+                    egui::ComboBox::from_id_salt("datum_revolve_axis").selected_text(current).show_ui(ui, |ui| {
+                        for (n, c) in &f.lines {
+                            ui.selectable_value(&mut f.axis, n.clone(), show(n, *c));
+                        }
+                    });
+                });
+                let (label, field) = match f.turned {
+                    Turned::Revolve => (self.i18n.t("revolve-angle", "Angle"), &mut f.angle),
+                    Turned::Rolled => (self.i18n.t("revolve-gap", "Gap, mm"), &mut f.gap),
+                };
+                ui.horizontal(|ui| {
+                    ui.label(label);
+                    let r = ui
+                        .add(egui::TextEdit::singleline(field).desired_width(120.0).hint_text(self.i18n.t("plane-offset-hint", "number or formula")));
+                    // Typed at once, as a sketch's dimension is.
+                    if std::mem::take(&mut f.fresh) {
+                        r.request_focus();
+                    }
+                });
+                if f.turned == Turned::Rolled {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("revolve-rule", "Rule"));
+                        ui.label(rule.as_deref().unwrap_or(self.i18n.t("revolve-no-rule", "choose a sheet rule on the toolbar")));
+                    });
+                    let side = format!("{}: {}", self.i18n.t("revolve-side", "Side"), side_name(&self.i18n, f.side));
+                    if ui.button(side).clicked() {
+                        f.side = f.side.next();
+                    }
+                }
+                if let Some(Err(why)) = preview {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
+                }
+                ui.horizontal(|ui| {
+                    add = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK"))).clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
+                });
+            });
+        let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        let Some((command, params)) = f.params(rule.as_deref()) else { return };
+        if cancel || esc {
+            self.close_revolve();
+        } else if (add || enter) && ok && shown.as_ref().is_some_and(|(_, p)| *p == params) {
+            self.close_revolve();
+            self.send(Request::Command(command, params));
+        } else if f.sent.as_ref() != Some(&params) {
+            f.sent = Some(params.clone());
+            self.send(Request::Preview(Some((command, params))));
+        }
     }
 
     /// What E makes of closed contours of `sketch` (none yet: as if off a face): on a face of a
@@ -3371,6 +3536,7 @@ impl Viewer {
 
     /// Opens the form of a flange on the ends picked, and stops picking.
     fn open_flange(&mut self) {
+        self.close_revolve();
         self.picking = None;
         self.under = None;
         self.flange =
@@ -3458,15 +3624,20 @@ impl Viewer {
     /// every change; Enter makes it once the preview of what it says now is not refused, Esc drops
     /// it. Without a sketch yet it only says to click one.
     fn extrusion_form(&mut self, ctx: &egui::Context) {
-        if let Some((at, since)) = self.contour_hint {
+        if let Some((at, since, act)) = self.contour_hint {
             const SECONDS: u64 = 4;
             if since.elapsed().as_secs() >= SECONDS || ctx.input(|i| i.pointer.any_pressed()) {
                 self.contour_hint = None;
             } else {
                 let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(at) + egui::vec2(14.0, 14.0);
                 egui::Area::new(egui::Id::new("datum_contour_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
-                    egui::Frame::popup(ui.style())
-                        .show(ui, |ui| ui.label(self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E")));
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(if act == Act::Revolve {
+                            self.i18n.t("revolve-pick", "Open a sketch with a profile and an axis line, then R")
+                        } else {
+                            self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E")
+                        })
+                    });
                 });
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
@@ -4676,7 +4847,9 @@ impl Viewer {
             | Act::MaterialTable
             | Act::RuleTable => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
-            Act::Extrude => self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch")),
+            Act::Extrude | Act::Revolve => {
+                self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
+            }
             // Something to lay flat, or the pane open to close.
             Act::FlatPane => self.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::Rename => self.tree.selected.is_some(),
@@ -4698,6 +4871,7 @@ impl Viewer {
             Act::NewSketch => self.picking == Some(Purpose::Sketch),
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::Extrude => self.extrusion.is_some(),
+            Act::Revolve => self.revolve.is_some(),
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Flange => self.picking == Some(Purpose::Flange),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
@@ -4750,6 +4924,10 @@ impl Viewer {
             Act::Extrude => {
                 let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
                 self.extrude(at);
+            }
+            Act::Revolve => {
+                let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                self.revolve(at);
             }
             Act::WorkPlane => {
                 self.leave();
@@ -4932,6 +5110,7 @@ impl Viewer {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::WorkPlane, true);
             self.item(ui, Act::Extrude, true);
+            self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group]) {
@@ -5143,6 +5322,7 @@ impl eframe::App for Viewer {
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
         self.flange_window(ui.ctx());
+        self.revolve_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
         self.settings_said(ui.ctx());
@@ -5282,6 +5462,7 @@ mod tests {
             plane_points: Vec::new(),
             flange_edges: Vec::new(),
             flange: None,
+            revolve: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -7265,5 +7446,72 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(&sent[..], [Request::Command("set_part", p)] if *p == json!({"body": "plate", "rule": "body"})), "{sent:?}");
         assert_eq!(h.state().next_rule, None);
+    }
+
+    /// A harness for R on `model`, whose first feature is the sketch and the rest dropped, so the
+    /// sketch is the only one not used yet.
+    fn revolving(model: &str, rule: Option<&str>) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer(model);
+        v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().truncate(1);
+        v.rules = vec![json!({"name": "Лист", "kind": "sheet", "material": "Сталь"})];
+        v.next_rule = rule.map(String::from);
+        let h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                v.revolve_window(ui.ctx());
+            },
+            v,
+        );
+        (h, inbox)
+    }
+
+    /// R on a sketch of a profile and a construction line turns the profile about that line.
+    #[test]
+    fn r_revolves_the_profile_about_the_construction_line() {
+        let (mut h, inbox) = revolving("revolve.json", Some("Лист"));
+        h.key_press(egui::Key::R);
+        h.run();
+        let f = h.state().revolve.as_ref().expect("the form");
+        assert_eq!((f.axis.as_str(), f.turned == Turned::Revolve), ("axis", true));
+        h.get_by_label("Angle");
+        let want = json!({"name": "revolve1", "op": "revolve", "inputs": ["profile"], "axis": "axis", "angle": 360.0});
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(sent.last(), Some(Request::Preview(Some(("add", p)))) if *p == want), "{sent:?}");
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"body": "revolve1"}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("add", p) if p == want)));
+        assert!(h.state().revolve.is_none());
+    }
+
+    /// A single line beside the axis: R asks for rolled sheet metal, by the rule chosen.
+    #[test]
+    fn r_with_a_rule_and_one_line_rolls_sheet_metal() {
+        let (mut h, inbox) = revolving("rolled.json", Some("Лист"));
+        h.key_press(egui::Key::R);
+        h.run();
+        assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled && f.axis == "axis"));
+        h.get_by_label("Gap, mm");
+        let want = json!({"name": "rolled1", "sketch": "shell_profile", "rule": "Лист", "axis": "axis", "side": "left", "gap": 2.0});
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(sent.last(), Some(Request::Preview(Some(("rolled", p)))) if *p == want), "{sent:?}");
+        // Without a rule the form asks for one and previews nothing.
+        let (mut h, inbox) = revolving("rolled.json", None);
+        h.key_press(egui::Key::R);
+        h.run();
+        assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled));
+        h.get_by_label("choose a sheet rule on the toolbar");
+        assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)))));
+    }
+
+    /// R with no sketch to take only says to open one.
+    #[test]
+    fn r_with_no_sketch_to_take_says_to_open_one() {
+        let (mut h, _) = revolving("revolve.json", None);
+        let used = json!({"name": "b", "op": "revolve", "inputs": ["profile"]});
+        h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(used);
+        h.key_press(egui::Key::R);
+        h.run();
+        assert!(h.state().revolve.is_none() && h.state().contour_hint.is_some());
     }
 }

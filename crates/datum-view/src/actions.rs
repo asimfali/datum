@@ -20,6 +20,7 @@ pub enum Act {
     Touchpad,
     NewSketch,
     Extrude,
+    Revolve,
     Select,
     Line,
     Arc,
@@ -95,7 +96,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 44] = [
+pub const ACTIONS: [Action; 45] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -135,6 +136,15 @@ pub const ACTIONS: [Action; 44] = [
         "Extrude a sketch: the one open, else the only one not used yet, else the one clicked in the tree (E)",
         plain(Key::E),
         Anywhere,
+    ),
+    action(
+        Act::Revolve,
+        "model.revolve",
+        "Revolve",
+        "A closed profile of a sketch turns about a line of it into a body; one line beside the axis with a sheet rule chosen: \
+         rolled sheet metal, a shell or a cone, with a gap at the seam",
+        plain(Key::R),
+        Model,
     ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
