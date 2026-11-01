@@ -403,6 +403,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 let neutral = neutral(c.radius, other.radius, k);
                 Lay::Bend { origin: c.origin, axis: unit(turn), start, span, neutral }
             }
+            Surface::Cone(_) => return Err(unsupported("a cone in a chain of the sheet")),
             Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
         };
         let faces: Vec<Laid> = st.iter().map(|&x| Laid { face: x, u0, lay, branch: None }).collect();

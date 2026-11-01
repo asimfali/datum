@@ -1,0 +1,92 @@
+{
+  "features": [
+    {
+      "name": "profile",
+      "op": "sketch",
+      "sketch": {
+        "lines": {
+          "axis": {
+            "construction": true,
+            "from": "o",
+            "to": "x"
+          },
+          "body": {
+            "from": "d",
+            "to": "e"
+          },
+          "bore": {
+            "from": "a",
+            "to": "b"
+          },
+          "chamfer": {
+            "from": "c",
+            "to": "d"
+          },
+          "collar_face": {
+            "from": "f",
+            "to": "g"
+          },
+          "end": {
+            "from": "b",
+            "to": "c"
+          },
+          "face": {
+            "from": "g",
+            "to": "a"
+          },
+          "step": {
+            "from": "e",
+            "to": "f"
+          }
+        },
+        "points": {
+          "a": [
+            0,
+            5
+          ],
+          "b": [
+            30,
+            5
+          ],
+          "c": [
+            30,
+            7.5
+          ],
+          "d": [
+            28.5,
+            9
+          ],
+          "e": [
+            6,
+            9
+          ],
+          "f": [
+            6,
+            15
+          ],
+          "g": [
+            0,
+            15
+          ],
+          "o": [
+            0,
+            0
+          ],
+          "x": [
+            40,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "axis": "axis",
+      "inputs": [
+        "profile"
+      ],
+      "name": "bushing",
+      "op": "revolve"
+    }
+  ],
+  "format": "datum/1"
+}

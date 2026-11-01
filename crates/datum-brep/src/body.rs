@@ -201,7 +201,7 @@ impl Body {
 
     /// Adds face `f`'s volume and moment terms to `acc`, relative to `o`, and returns its area
     /// and area vector. A plane face is its fans, corrected by circular segments along its arcs;
-    /// a cylinder face is integrated along its curves, a wall over itself between the radii of
+    /// a cylinder or cone face is integrated along its curves, a wall over itself between the radii of
     /// its edges.
     pub(crate) fn integrate_face(&self, f: Ix, o: Vec3, acc: &mut Integrals) -> (f64, Vec3) {
         match &self.faces[f as usize].surface {
@@ -224,12 +224,14 @@ impl Body {
                 acc.moment = acc.moment + seg.moment;
                 (seg.area_vector.dot(seg.area_vector).sqrt(), seg.area_vector)
             }
-            Surface::Cylinder(c) => {
-                let mut cyl = Integrals::default();
-                curve::cylinder(&mut cyl, c, self.face_paths(f), o);
-                acc.six_v += cyl.six_v;
-                acc.moment = acc.moment + cyl.moment;
-                (cyl.area, cyl.area_vector)
+            Surface::Cylinder(_) | Surface::Cone(_) => {
+                let mut rev = Integrals::default();
+                if let Some(c) = self.faces[f as usize].surface.revolution() {
+                    curve::revolution(&mut rev, &c, self.face_paths(f), o);
+                }
+                acc.six_v += rev.six_v;
+                acc.moment = acc.moment + rev.moment;
+                (rev.area, rev.area_vector)
             }
             Surface::Wall(w) => {
                 let (r0, r1) = self.rolled_radii(f).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), r| (lo.min(r), hi.max(r)));
@@ -470,6 +472,13 @@ impl Body {
                 floats(&mut b, &c.origin.to_array());
                 floats(&mut b, &c.axis.to_array());
                 floats(&mut b, &[c.radius]);
+                b.push(u8::from(c.convex));
+            }
+            Surface::Cone(c) => {
+                b.extend_from_slice(b"cone");
+                floats(&mut b, &c.origin.to_array());
+                floats(&mut b, &c.axis.to_array());
+                floats(&mut b, &[c.radius, c.slope]);
                 b.push(u8::from(c.convex));
             }
             Surface::Wall(w) => {

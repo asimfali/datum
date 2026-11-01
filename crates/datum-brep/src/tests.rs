@@ -308,3 +308,111 @@ fn loop_perimeter_counts_chords_and_arcs() {
     assert!(close(ring("half", pts, arcs).perimeter(), 2.0 + std::f64::consts::PI));
     assert!(close(circle("c", Vec2::new(3.0, 1.0), 2.0).perimeter(), 2.0 * std::f64::consts::TAU));
 }
+
+/// A tilted axis away from the origin: revolutions must not lean on coordinate axes.
+fn tilted_axis() -> Axis {
+    let axis = Vec3::new(1.0, 2.0, 2.0) * (1.0 / 3.0);
+    let start = Vec3::new(2.0, -2.0, 1.0) * (1.0 / 3.0);
+    Axis { origin: Vec3::new(5.0, -7.0, 11.0), axis, start }
+}
+
+/// Area and centroid of a polygon by the shoelace formula.
+fn polygon_area_centroid(p: &[Vec2]) -> (f64, Vec2) {
+    let (mut a, mut cx, mut cy) = (0.0, 0.0, 0.0);
+    for k in 0..p.len() {
+        let (u, v) = (p[k], p[(k + 1) % p.len()]);
+        let c = u.x * v.y - v.x * u.y;
+        a += c;
+        cx += (u.x + v.x) * c;
+        cy += (u.y + v.y) * c;
+    }
+    (0.5 * a, Vec2::new(cx / (3.0 * a), cy / (3.0 * a)))
+}
+
+fn revolved(points: &[(f64, f64)], at: &Axis, angle: f64) -> Result<Body, BrepError> {
+    let pts = points.iter().map(|&(x, y)| Vec2::new(x, y)).collect();
+    revolve(&region(ring("rev", pts, Vec::new()), Vec::new()), at, angle)
+}
+
+/// Volume, area and centroid of revolutions against Pappus and the frustum's formulas, in full
+/// turns and in sectors, with cylinders, cones and planes.
+#[test]
+fn revolution_mass_properties() {
+    let pi = std::f64::consts::PI;
+    let at = tilted_axis();
+    // A tube: two cylinders and two rings.
+    let (h, r1, r2) = (4.0, 2.0, 3.0);
+    let tube = revolved(&[(0.0, r1), (h, r1), (h, r2), (0.0, r2)], &at, std::f64::consts::TAU).unwrap();
+    tube.validate().unwrap();
+    assert_eq!((tube.vertices().len(), tube.edges().len(), tube.faces().len()), (12, 18, 8));
+    let m = tube.mass_properties();
+    assert!(close(m.volume, pi * (r2 * r2 - r1 * r1) * h), "{}", m.volume);
+    assert!(close(m.area, 2.0 * pi * (r1 + r2) * h + 2.0 * pi * (r2 * r2 - r1 * r1)), "{}", m.area);
+    let centre = at.origin + at.axis * (0.5 * h);
+    assert!((m.centroid - centre).dot(m.centroid - centre) < 1e-20, "{:?}", m.centroid);
+
+    // A solid frustum: a cone and two discs, the profile clockwise.
+    let frustum = revolved(&[(0.0, 0.0), (0.0, r1), (h, r2), (h, 0.0)], &at, std::f64::consts::TAU).unwrap();
+    frustum.validate().unwrap();
+    let cones = frustum.faces().iter().filter(|f| matches!(f.surface, Surface::Cone(c) if c.convex)).count();
+    assert_eq!((cones, frustum.faces().len()), (3, 5));
+    let m = frustum.mass_properties();
+    assert!(close(m.volume, pi * h * (r1 * r1 + r1 * r2 + r2 * r2) / 3.0), "{}", m.volume);
+    let slant = libm::hypot(h, r2 - r1);
+    assert!(close(m.area, pi * (r1 + r2) * slant + pi * (r1 * r1 + r2 * r2)), "{}", m.area);
+
+    // A sector of an oblique quadrilateral: Pappus, V = A·φ·ȳ, two cones inside and out.
+    let quad = [(0.0, 1.0), (4.0, 1.5), (3.0, 3.0), (1.0, 2.0)];
+    let phi = 2.0;
+    let sector = revolved(&quad, &at, phi).unwrap();
+    sector.validate().unwrap();
+    let (area, c) = polygon_area_centroid(&quad.map(|(x, y)| Vec2::new(x, y)));
+    let m = sector.mass_properties();
+    assert!(close(m.volume, area * phi * c.y), "{} vs {}", m.volume, area * phi * c.y);
+    // The centroid of a sector of revolution: at the mean angle, 2·sin(φ/2)/φ of the way out.
+    // Along the axis ∫ x·y dA / ∫ y dA, out from it ∫ y² dA / ∫ y dA over the profile (by
+    // triangles from the origin), the latter shrunk by 2·sin(φ/2)/φ.
+    let (mut iy, mut ixy, mut iyy) = (0.0, 0.0, 0.0);
+    for k in 0..quad.len() {
+        let (u, v) = (quad[k], quad[(k + 1) % quad.len()]);
+        let cr = u.0 * v.1 - v.0 * u.1;
+        iy += cr * (u.1 + v.1) / 6.0;
+        ixy += cr * (2.0 * u.0 * u.1 + u.0 * v.1 + v.0 * u.1 + 2.0 * v.0 * v.1) / 24.0;
+        iyy += cr * (u.1 * u.1 + u.1 * v.1 + v.1 * v.1) / 12.0;
+    }
+    let expected = at.origin + at.axis * (ixy / iy) + at.radial(0.5 * phi) * (iyy / iy * 2.0 * libm::sin(0.5 * phi) / phi);
+    assert!((m.centroid - expected).dot(m.centroid - expected) < 1e-20, "{:?} vs {expected:?}", m.centroid);
+
+    // A half-turn sector of a profile along the axis: the axis edge joins the two caps.
+    let half = revolved(&[(0.0, 0.0), (3.0, 0.0), (3.0, 1.0), (0.0, 2.0)], &at, pi).unwrap();
+    half.validate().unwrap();
+    let (area, c) = polygon_area_centroid(&[Vec2::new(0.0, 0.0), Vec2::new(3.0, 0.0), Vec2::new(3.0, 1.0), Vec2::new(0.0, 2.0)]);
+    assert!(close(half.volume(), area * pi * c.y), "{}", half.volume());
+}
+
+/// What a revolution refuses: a cone to a point, arcs, holes, a profile across the axis.
+#[test]
+fn revolution_refusals() {
+    let at = tilted_axis();
+    let full = std::f64::consts::TAU;
+    assert!(matches!(revolved(&[(0.0, 0.0), (2.0, 0.0), (0.0, 1.0)], &at, full), Err(BrepError::Unsupported(m)) if m.contains("cone to a point")));
+    assert!(matches!(revolved(&[(0.0, -1.0), (2.0, 1.0), (0.0, 1.0)], &at, full), Err(BrepError::Degenerate(m)) if m.contains("axis")));
+    assert!(matches!(revolved(&[(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (1.0, 2.0)], &at, full), Err(BrepError::Degenerate(_))));
+    let arc = revolve(&region(circle("c", Vec2::new(0.0, 3.0), 1.0), Vec::new()), &at, full);
+    assert!(matches!(arc, Err(BrepError::Unsupported(m)) if m.contains("torus")));
+}
+
+/// Cones on screen and in STEP: the mesh holds about the volume, STEP names the cone.
+#[test]
+fn cone_tessellation_and_step() {
+    let at = tilted_axis();
+    let b = revolved(&[(0.0, 1.0), (3.0, 2.0), (3.0, 4.0), (0.0, 3.0)], &at, std::f64::consts::TAU).unwrap();
+    b.validate().unwrap();
+    let mesh = tessellate(&b).unwrap();
+    let (v, mv) = (b.volume(), mesh_volume(&mesh));
+    // Chords lose up to (2π/64)²/6 ≈ 0.16 % of a round section.
+    assert!((mv - v).abs() < 3e-3 * v, "{mv} vs {v}");
+    let s = step(&[&b], "cone", false).unwrap();
+    assert_eq!(s.text.matches("CONICAL_SURFACE").count(), 6);
+    assert_eq!(s.approximated, 0);
+}

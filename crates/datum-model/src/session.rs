@@ -863,6 +863,10 @@ const COMMANDS: &[Command] = &[
                         Surface::Cylinder(c) => {
                             json!({"id": id, "cylinder": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "convex": c.convex}, "area": area})
                         }
+                        // `radius` at `origin`, growing by `slope` per unit along `axis`.
+                        Surface::Cone(c) => {
+                            json!({"id": id, "cone": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "slope": c.slope, "convex": c.convex}, "area": area})
+                        }
                         // A wall of a cut through a rolled sheet: its piece in the sheet's development.
                         Surface::Wall(w) => {
                             let arc = w.arc.map(|a| json!({"center": a.center, "ccw": a.ccw}));
@@ -1316,7 +1320,8 @@ impl Session {
         self.doc.patches_of(&below, feature, |p| rename_names(p, &renamed));
         let mut ops: Vec<(NodeIx, Op)> = vec![(ix, serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?)];
         // What a feature of this sketch names in it: a sheet's start point and path, an
-        // extrusion's profiles (D191), a plane's points (D204).
+        // extrusion's profiles (D191), a revolution's axis and profiles (D206), a plane's points
+        // (D204).
         for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1).filter(|(_, n)| n.inputs.contains(&ix)) {
             let mut op = n.op.clone();
             let mut follow = |name: &mut String| {
@@ -1327,6 +1332,7 @@ impl Session {
             match &mut op {
                 Op::Sheet { start, path, .. } => start.iter_mut().chain(path.iter_mut()).for_each(&mut follow),
                 Op::Extrude { profiles, .. } | Op::Plate { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
+                Op::Revolve { axis, profiles, .. } => std::iter::once(axis).chain(profiles.iter_mut()).for_each(&mut follow),
                 // A plane through points of this sketch (D204).
                 Op::Plane { points, .. } => {
                     let k = n.inputs.iter().position(|&i| i == ix);

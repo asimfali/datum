@@ -248,6 +248,14 @@ pub fn orient2d(a: Vec2, b: Vec2, c: Vec2) -> Sign {
     Sign::of(robust::orient2d(p(a), p(b), p(c)))
 }
 
+/// Whether the directions `b − a` and `d − c` are parallel, exactly: their cross product is zero.
+pub fn parallel2d(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+    // For a, b at height 0 and c, d at height 1, det [a − d; b − d; c − d] is (a − b) × (c − d):
+    // the heights are exact, so `orient3d` decides the 2D cross product exactly.
+    let at = |v: Vec2, z: f64| Vec3::new(v.x, v.y, z);
+    orient3d_coords(at(a, 0.0), at(b, 0.0), at(c, 1.0), at(d, 1.0)) == Sign::Zero
+}
+
 /// Exact position of `d` relative to the circle through `a, b, c` (counterclockwise):
 /// `Positive` inside, `Zero` on it.
 pub fn incircle(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Sign {
@@ -258,6 +266,17 @@ pub fn incircle(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> Sign {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parallel2d_is_exact() {
+        let (a, b) = (Vec2::new(0.1, 0.3), Vec2::new(0.7, 0.9));
+        // A direction one ulp off: not parallel, though `f64` cross products may round to zero.
+        let (c, d) = (Vec2::new(5.0, 2.0), Vec2::new(5.5, 2.5));
+        assert!(parallel2d(Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0), c, d));
+        assert!(!parallel2d(Vec2::new(0.0, 0.0), Vec2::new(1.0, 1.0), c, Vec2::new(5.5, f64::from_bits(2.5f64.to_bits() + 1))));
+        assert!(parallel2d(a, b, a, b) && parallel2d(a, b, b, a));
+        assert!(parallel2d(Vec2::new(1.0, 2.0), Vec2::new(4.0, 2.0), Vec2::new(-3.0, 7.5), Vec2::new(10.0, 7.5)));
+    }
 
     #[test]
     fn orient2d_is_exact_near_collinear() {

@@ -1,5 +1,5 @@
 //! STEP export of a part (D130): ISO 10303-21 text, schema AP242, with the recommendations of
-//! the CAx-IF. Exact geometry is written as it is: planes, cylinders, lines and circles. What has
+//! the CAx-IF. Exact geometry is written as it is: planes, cylinders, cones, lines and circles. What has
 //! no exact STEP type (a cut through a rolled sheet along a circle or an oblique line of its
 //! development: a helix, or a curve without a name) is refused, or, when the engineer agrees,
 //! written as quintic B-splines within [`DEVIATION`] (D147).
@@ -264,6 +264,13 @@ impl Writer {
                     let at = self.placement(c.origin, c.axis, perpendicular(c.axis));
                     (self.put(format_args!("CYLINDRICAL_SURFACE('',#{at},{})", Real(c.radius))), c.convex)
                 }
+                Surface::Cone(c) => {
+                    // STEP's cone widens along its placement's axis, by a semi-angle in (0, π/2).
+                    let axis = if c.slope > 0.0 { c.axis } else { -c.axis };
+                    let at = self.placement(c.origin, axis, perpendicular(axis));
+                    let angle = libm::atan(c.slope.abs());
+                    (self.put(format_args!("CONICAL_SURFACE('',#{at},{},{})", Real(c.radius), Real(angle))), c.convex)
+                }
                 Surface::Wall(w) if walls[f] > 0 => self.wall(&w, radii(b, f as Ix)?, walls[f]),
                 Surface::Wall(w) => {
                     // A straight piece along the axis or around it: the wall is flat.
@@ -274,7 +281,7 @@ impl Writer {
             };
             let surface = match face.surface {
                 Surface::Plane(_) => self.put(format_args!("PLANE('',#{surface})")),
-                Surface::Cylinder(_) | Surface::Wall(_) => surface,
+                Surface::Cylinder(_) | Surface::Cone(_) | Surface::Wall(_) => surface,
             };
             let mut bounds = Vec::with_capacity(face.loop_count as usize);
             for (k, l) in b.face_loops(f as Ix).enumerate() {

@@ -25,11 +25,30 @@ pub struct Cylinder {
     pub convex: bool,
 }
 
+/// A circular cone (D206): its axis through `origin` along the unit `axis`, `radius` at `origin`
+/// and `slope` the radius gains per unit along the axis (never zero: that is a cylinder). The
+/// apex is never on a face (a cone to a point is refused). `convex` as for [`Cylinder`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cone {
+    pub origin: Vec3,
+    pub axis: Vec3,
+    pub radius: f64,
+    pub slope: f64,
+    pub convex: bool,
+}
+
+impl From<Cylinder> for Cone {
+    fn from(c: Cylinder) -> Self {
+        Self { origin: c.origin, axis: c.axis, radius: c.radius, slope: 0.0, convex: c.convex }
+    }
+}
+
 /// The surface a face lies on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Surface {
     Plane(Plane),
     Cylinder(Cylinder),
+    Cone(Cone),
     /// The wall of a cut through a rolled sheet (M5c): the piece swept along the radius, out of
     /// the body to the left of the piece's direction in the development.
     Wall(Rolled),
@@ -39,7 +58,17 @@ impl Surface {
     pub fn plane(&self) -> Option<&Plane> {
         match self {
             Self::Plane(p) => Some(p),
-            Self::Cylinder(_) | Self::Wall(_) => None,
+            Self::Cylinder(_) | Self::Cone(_) | Self::Wall(_) => None,
+        }
+    }
+
+    /// A cylinder as a cone of no slope, a cone as itself: the surfaces of revolution about an
+    /// axis whose integrals and layout on screen are one formula.
+    pub(crate) fn revolution(&self) -> Option<Cone> {
+        match *self {
+            Self::Cylinder(c) => Some(c.into()),
+            Self::Cone(c) => Some(c),
+            Self::Plane(_) | Self::Wall(_) => None,
         }
     }
 
@@ -48,6 +77,7 @@ impl Surface {
         match *self {
             Self::Plane(p) => Self::Plane(Plane { origin: m.apply(p.origin), normal: m.apply_vector(p.normal) }),
             Self::Cylinder(c) => Self::Cylinder(Cylinder { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
+            Self::Cone(c) => Self::Cone(Cone { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
             Self::Wall(w) => Self::Wall(Rolled { dev: w.dev.moved(m), ..w }),
         }
     }
@@ -57,8 +87,13 @@ impl Surface {
         match self {
             Self::Plane(pl) => unit(pl.normal),
             Self::Cylinder(c) => {
-                let r = radial(c, p);
+                let r = radial(c.origin, c.axis, p);
                 if c.convex { r } else { -r }
+            }
+            Self::Cone(c) => {
+                // Across the surface: away from the axis, tilted back along it by the slope.
+                let n = unit(radial(c.origin, c.axis, p) - c.axis * c.slope);
+                if c.convex { n } else { -n }
             }
             Self::Wall(w) => {
                 let (q, r) = w.dev.unroll(p, w.from.x);
@@ -281,10 +316,10 @@ pub(crate) fn per_turn(radius: f64, chord: f64) -> f64 {
     n.ceil().clamp(SEGMENTS[0], SEGMENTS[1])
 }
 
-/// The unit vector from the axis of `c` towards `p`.
-fn radial(c: &Cylinder, p: Vec3) -> Vec3 {
-    let d = p - c.origin;
-    unit(d - c.axis * d.dot(c.axis))
+/// The unit vector from the axis through `origin` along `axis` towards `p`.
+fn radial(origin: Vec3, axis: Vec3, p: Vec3) -> Vec3 {
+    let d = p - origin;
+    unit(d - axis * d.dot(axis))
 }
 
 pub(crate) fn unit(v: Vec3) -> Vec3 {
@@ -399,7 +434,8 @@ const GAUSS: [(f64, f64); 4] = [
     (0.960_289_856_497_536_2, 0.101_228_536_290_376_3),
 ];
 
-/// Coordinates across a cylinder's axis: `r(θ) = e1·cos θ + e2·sin θ`, `e2 = axis × e1`.
+/// Coordinates across the axis of a surface of revolution: `r(θ) = e1·cos θ + e2·sin θ`,
+/// `e2 = axis × e1`.
 pub(crate) struct Frame {
     pub axis: Vec3,
     origin: Vec3,
@@ -407,7 +443,7 @@ pub(crate) struct Frame {
     e2: Vec3,
 }
 
-pub(crate) fn frame(c: &Cylinder) -> Frame {
+pub(crate) fn frame(c: &Cone) -> Frame {
     let a = c.axis;
     let least = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]
         .into_iter()
@@ -438,25 +474,31 @@ pub(crate) enum Path {
     Rolled(Rolled),
 }
 
-/// Integrals of a cylindrical face, from the curves of its loops.
-pub(crate) fn cylinder(acc: &mut Integrals, c: &Cylinder, paths: impl Iterator<Item = Path>, o: Vec3) {
+/// Integrals of a face on a cylinder or a cone (a cylinder is a cone of no slope), from the
+/// curves of its loops. At `(θ, s)` the point is `x = origin + r(θ)·ρ(s) + axis·s` with
+/// `ρ(s) = radius + slope·s`, and `n dA = ρ(s)·(r(θ) − slope·axis) dθ ds`.
+pub(crate) fn revolution(acc: &mut Integrals, c: &Cone, paths: impl Iterator<Item = Path>, o: Vec3) {
     let fr = frame(c);
-    let (a, e1, e2) = (fr.axis, fr.e1, fr.e2);
-    let (p0, r) = (c.origin - o, c.radius);
+    let (a, e1, e2, k) = (fr.axis, fr.e1, fr.e2, c.slope);
+    let p0 = c.origin - o;
+    let stretch = libm::sqrt(1.0 + k * k);
     // The integrands at (θ, s) without the sign of the normal, which the orientation of the loops
-    // in (θ, z) cancels (see `Integrals`): area, six times volume, moment, area vector.
+    // in (θ, z) cancels (see `Integrals`): area, six times volume, moment, area vector. A slope
+    // of 0 gives the cylinder's terms bit for bit: `x − 0` is `x`.
     let f = |th: f64, s: f64| -> [f64; 8] {
         let (sn, cs) = libm::sincos(th);
         let rv = e1 * cs + e2 * sn;
+        let r = c.radius + k * s;
+        let nv = rv - a * k;
         let x = p0 + rv * r + a * s;
         // (x − o)·n without its sign: the cone from `o` over the patch, as on plane faces.
-        let height = p0.dot(rv) + r;
+        let height = p0.dot(nv) + r - k * s;
         let m = x * (6.0 * r * height);
-        [r, 2.0 * r * height, m.x, m.y, m.z, r * rv.x, r * rv.y, r * rv.z]
+        [r * stretch, 2.0 * r * height, m.x, m.y, m.z, r * nv.x, r * nv.y, r * nv.z]
     };
     let mut sum = [0.0; 8];
     // −∫ P(θ, z) dθ along a path `t ↦ (θ, z, dθ/dt)` over `pieces` pieces of [0, 1], where
-    // P(θ, z) = ∫₀ᶻ f(θ, s) ds, by Simpson: f is quadratic in s.
+    // P(θ, z) = ∫₀ᶻ f(θ, s) ds, by Simpson: f is cubic in s at most.
     let mut along = |pieces: usize, path: &dyn Fn(f64) -> (f64, f64, f64)| {
         let h = 1.0 / pieces as f64;
         for i in 0..pieces {
@@ -480,6 +522,8 @@ pub(crate) fn cylinder(acc: &mut Integrals, c: &Cylinder, paths: impl Iterator<I
                 along((dtheta.abs() / FRAC_PI_4).ceil().max(1.0) as usize, &|t| (th0 + dtheta * t, z, dtheta));
             }
             Path::Rolled(w) => {
+                // Developments are of cylinders only: cuts through a cone are not made yet.
+                debug_assert!(k == 0.0, "a development on a cone");
                 // θ turns with u, the other way if the development's axis is against the cylinder's.
                 let s = if w.dev.axis.dot(a) > 0.0 { 1.0 } else { -1.0 };
                 let (start, z0) = (libm::atan2(w.dev.start.dot(e2), w.dev.start.dot(e1)), (w.dev.origin - c.origin).dot(a));
