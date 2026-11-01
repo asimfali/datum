@@ -34,6 +34,8 @@ pub enum Icon {
     Extrude,
     /// A blank with its bend lines dashed: the flat pattern.
     Flat,
+    /// An axis dashed, a turn around it with an arrow: revolve.
+    Revolve,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -174,6 +176,13 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             painter.add(egui::Shape::closed_line(vec![at(-6.0, 3.0), at(6.0, 3.0), at(6.0, 7.0), at(-6.0, 7.0)], stroke));
             painter.line_segment([at(0.0, 1.0), at(0.0, -7.0)], stroke);
             painter.add(egui::Shape::line(vec![at(-2.5, -4.5), at(0.0, -7.0), at(2.5, -4.5)], stroke));
+        }
+        Icon::Revolve => {
+            painter.add(egui::Shape::dashed_line(&[at(0.0, -8.0), at(0.0, 8.0)], stroke, 2.0, 1.5));
+            // The front half of an ellipse about the axis, ending in an arrow.
+            let turn: Vec<Pos2> = (0..=12).map(|k| k as f32 / 12.0 * std::f32::consts::PI).map(|t| at(-7.0 * t.cos(), 3.0 * t.sin())).collect();
+            painter.add(egui::Shape::line(turn, stroke));
+            painter.add(egui::Shape::line(vec![at(4.0, -1.5), at(7.0, 0.0), at(7.5, -3.5)], stroke));
         }
         Icon::Flat => {
             painter.add(egui::Shape::closed_line(vec![at(-7.0, -5.0), at(7.0, -5.0), at(7.0, 5.0), at(-7.0, 5.0)], stroke));

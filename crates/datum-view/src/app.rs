@@ -1814,6 +1814,7 @@ impl Viewer {
             for (act, icon) in [
                 (Act::NewSketch, Icon::NewSketch),
                 (Act::Extrude, Icon::Extrude),
+                (Act::Revolve, Icon::Revolve),
                 (Act::FlatPane, Icon::Flat),
                 (Act::WorkPlane, Icon::WorkPlane),
                 (Act::LookAt, Icon::LookAt),
@@ -3395,8 +3396,19 @@ impl Viewer {
             let sketch = &f["sketch"];
             let lines: BTreeMap<String, bool> = sketch["lines"].as_object()?.iter().map(|(n, l)| (n.clone(), l["construction"] == true)).collect();
             let curved = ["arcs", "circles"].iter().any(|k| sketch[k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)));
+            // The axis: the only construction line, else a line with a loose end (not in a contour),
+            // else the first.
             let mut construction = lines.iter().filter(|(_, c)| **c).map(|(n, _)| n);
-            let axis = construction.next().filter(|_| construction.next().is_none()).or_else(|| lines.keys().next())?.clone();
+            let ends = |n: &String| ["from", "to"].map(|k| sketch["lines"][n][k].as_str().unwrap_or_default().to_string());
+            let mut degree: BTreeMap<String, usize> = BTreeMap::new();
+            for n in lines.iter().filter(|(_, c)| !**c).map(|(n, _)| n) {
+                ends(n).into_iter().for_each(|p| *degree.entry(p).or_default() += 1);
+            }
+            for a in sketch["arcs"].as_object().into_iter().flat_map(|m| m.values()).filter(|a| a["construction"] != true) {
+                ["from", "to"].iter().filter_map(|e| a[*e].as_str()).for_each(|p| *degree.entry(p.to_string()).or_default() += 1);
+            }
+            let loose = lines.keys().find(|n| !lines[*n] && ends(n).iter().any(|p| degree.get(p) == Some(&1)));
+            let axis = construction.next().filter(|_| construction.next().is_none()).or(loose).or_else(|| lines.keys().next())?.clone();
             let beside = lines.iter().filter(|(n, c)| !**c && **n != axis).count();
             Some((name, lines.into_iter().collect::<Vec<_>>(), axis, beside == 1 && !curved))
         });
@@ -7502,6 +7514,21 @@ mod tests {
         assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled));
         h.get_by_label("choose a sheet rule on the toolbar");
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)))));
+    }
+
+    /// An axis drawn as a plain line beside the profile: the line with a loose end, not one of the
+    /// contour's.
+    #[test]
+    fn r_takes_the_loose_line_for_the_axis() {
+        let (mut h, _) = revolving("revolve.json", None);
+        // Named last, so the first line in name order is one of the contour's.
+        let lines = h.state_mut().model.as_mut().unwrap().inspect["features"][0]["sketch"]["lines"].as_object_mut().unwrap();
+        let mut axis = lines.remove("axis").unwrap();
+        axis["construction"] = json!(false);
+        lines.insert("z_axis".into(), axis);
+        h.key_press(egui::Key::R);
+        h.run();
+        assert!(h.state().revolve.as_ref().is_some_and(|f| f.axis == "z_axis" && f.turned == Turned::Revolve));
     }
 
     /// R with no sketch to take only says to open one.

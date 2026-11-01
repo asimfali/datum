@@ -144,7 +144,7 @@ pub const ACTIONS: [Action; 45] = [
         "A closed profile of a sketch turns about a line of it into a body; one line beside the axis with a sheet rule chosen: \
          rolled sheet metal, a shell or a cone, with a gap at the seam",
         plain(Key::R),
-        Model,
+        Anywhere,
     ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
@@ -167,7 +167,7 @@ pub const ACTIONS: [Action; 45] = [
         plain(Key::F3),
         Anywhere,
     ),
-    action(Act::Rectangle, "sketch.library_first", "Rectangle", "The first element of the library", plain(Key::R), Sketch),
+    action(Act::Rectangle, "sketch.library_first", "Rectangle", "The first element of the library", None, Sketch),
     action(Act::Tangent, "sketch.tangent_arc", "Tangent arc", "The next segment of the line: an arc tangent to the last one", plain(Key::T), Sketch),
     action(Act::NewProject, "file.new_project", "New project…", "A folder made a project: new models and exports go into it", None, Anywhere),
     action(Act::OpenProject, "file.open_project", "Open project…", "New models, dialogs and the library work in it", None, Anywhere),
