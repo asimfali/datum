@@ -84,17 +84,49 @@ fn plane_of(body: &Body, f: usize) -> Result<SketchPlane, BrepError> {
 /// part of the sketch's hash: the plane says where it is.
 pub const ORIGIN: &str = "origin";
 
-/// An edge or vertex of the input body projected into a sketch (D87), by ID. `at` keeps where
-/// its points were when the sketch was drawn, in sketch coordinates: a vertex's point; a line's
-/// start and end; an arc's centre, start and end. Sides (a point above a line, a circle inside or
-/// outside another) are decided there, so a projection moved by an edit upstream does not flip the
-/// sketch. Empty: drawn where the projection is now.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+/// Geometry of an input projected into a sketch (D87, D214): an edge or vertex of a body by `id`,
+/// or a point, line, arc or circle of a sketch by `element`, from the input named `from` (none:
+/// the first). `at` keeps where its points were when the sketch was drawn, in sketch coordinates:
+/// a point's; a line's start and end; an arc's centre, start and end; a circle's centre. Sides (a
+/// point above a line, a circle inside or outside another) are decided there, so a projection
+/// moved by an edit upstream does not flip the sketch. Empty: drawn where the projection is now.
+/// `construction`: whether it bounds no profile; none: it is construction, an edge or an element
+/// being projected to dimension and snap to.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Projection {
-    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub construction: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<Vec2>,
+}
+
+/// What a projection takes its geometry from: an input of the sketch feature.
+#[derive(Clone, Copy)]
+pub enum Source<'a> {
+    Body(&'a Body),
+    Sketch(&'a Placed),
+}
+
+/// A point of projected geometry in the world, and what it is in its source (a body's vertex,
+/// a sketch's point), if anything: curves ending at one such point share it in the sketch.
+type End = (Vec3, Option<String>);
+
+/// Projected geometry in the world, before it is laid on the sketch plane.
+enum Shape {
+    Point(End),
+    /// Start and end.
+    Line(End, End),
+    /// Centre, start, end, and the axis it turns counterclockwise about from start to end.
+    Arc(End, End, End, Vec3),
+    /// Centre, axis, diameter.
+    Circle(End, Vec3, f64),
 }
 
 /// A solved sketch in its place: the value of a sketch feature.
@@ -271,29 +303,45 @@ pub(crate) fn parallel(a: Vec3, b: Vec3) -> bool {
     [minor(0, 1), minor(1, 2), minor(0, 2)] == [Sign::Zero; 3]
 }
 
-/// `sketch` with edges and vertices of `body` projected onto its plane (D87): each entry of
-/// `project` names an edge or vertex by ID. A vertex becomes a fixed point of that name. An edge
-/// becomes a construction line or arc of that name between fixed points `<name>.start` (its
-/// lower-ID vertex) and `<name>.end`, an arc around a fixed `<name>.center`. The sketch's own
-/// constraints tie to them like to any point or line. `normal` is the sketch plane's normal as
-/// given (not made unit), so an arc's axis is tested along it exactly: an arc seen at a slant
-/// would be an ellipse, which a sketch does not have.
+/// `sketch` with the geometry `project` names projected onto its plane (D87, D214), each entry's
+/// from the input `source` gives for its `from`. A vertex or point becomes a fixed point of the
+/// entry's name; an edge or line, a line of that name between fixed points `<name>.start` (a
+/// body edge's lower-ID vertex) and `<name>.end`, or a fixed point `<name>` if it runs across the
+/// plane; an arc, an arc around a fixed `<name>.center`; a circle, a circle of fixed diameter
+/// around it. The sketch's own constraints tie to them like to any point or line. Curves that
+/// meet at one point of their source (a vertex, a sketch's point) meet in the sketch: they all
+/// end at the point of the first projection, in name order, that has it, so projected edges of
+/// a face bound a profile; each projection's own points stay, fixed there too. `normal` is the
+/// sketch plane's normal as given (not made unit), so an arc's axis is tested along it exactly:
+/// an arc seen at a slant would be an ellipse, which a sketch does not have.
 /// Also returns where each projection's points stand.
-fn projected(
+fn projected<'a>(
     sketch: &Sketch,
-    body: &Body,
     frame: &[Vec3; 4],
     normal: Vec3,
     project: &BTreeMap<String, Projection>,
+    source: &dyn Fn(Option<&str>) -> Result<Source<'a>, BrepError>,
 ) -> Result<(Sketch, BTreeMap<String, Vec<Vec2>>), BrepError> {
     let mut s = sketch.clone();
     let mut now = BTreeMap::new();
     let [o, x, y, _] = *frame;
     let flat = |p: Vec3| Vec2::new((p - o).dot(x), (p - o).dot(y));
+    // The sketch's point for each point of a source, by input and what it is there.
+    let mut shared: BTreeMap<(Option<&str>, String), String> = BTreeMap::new();
     for (name, proj) in project {
-        let mut points: Vec<(String, Vec2)> = Vec::with_capacity(3);
+        if s.lines.contains_key(name) || s.arcs.contains_key(name) || s.circles.contains_key(name) {
+            return Err(BrepError::Sketch(format!("the sketch already has a curve `{name}`")));
+        }
+        let shape = match (source(proj.from.as_deref())?, &proj.id, &proj.element) {
+            (Source::Body(b), Some(id), None) => body_shape(name, b, id)?,
+            (Source::Sketch(p), None, Some(e)) => sketch_shape(name, p, e)?,
+            (Source::Body(_), ..) => return Err(BrepError::Sketch(format!("projection `{name}`: a body's edge or vertex is named by `id`"))),
+            (Source::Sketch(_), ..) => return Err(BrepError::Sketch(format!("projection `{name}`: a sketch's element is named by `element`"))),
+        };
+        let construction = proj.construction.unwrap_or(true);
+        let mut points: Vec<Vec2> = Vec::with_capacity(3);
         // The point drawn at its `at`, or where it is; fixed where it is.
-        let mut add = |s: &mut Sketch, n: String, p: Vec3| -> Result<String, BrepError> {
+        let mut add = |s: &mut Sketch, n: String, (p, of): End| -> Result<String, BrepError> {
             let p = flat(p);
             let drawn = match proj.at.len() {
                 0 => p,
@@ -303,61 +351,93 @@ fn projected(
                 return Err(BrepError::Sketch(format!("the sketch already has a point `{n}`")));
             }
             s.constraints.push(Constraint::Fix { point: n.clone(), at: Some(p) });
-            points.push((n.clone(), p));
-            Ok(n)
+            points.push(p);
+            Ok(match of {
+                Some(of) => shared.entry((proj.from.as_deref(), of)).or_insert(n).clone(),
+                None => n,
+            })
         };
-        let id = u128::from_str_radix(&proj.id, 16)
-            .map(TopoId)
-            .map_err(|_| BrepError::Sketch(format!("projection `{name}`: `{}` is not an ID", proj.id)))?;
-        if let Ok(v) = body.vertices().binary_search_by_key(&id, |v| v.id) {
-            add(&mut s, name.clone(), body.vertices()[v].point)?;
-            check_at(name, proj, &points)?;
-            now.insert(name.clone(), points.into_iter().map(|(_, p)| p).collect());
-            continue;
-        }
-        let e = body
-            .edges()
-            .binary_search_by_key(&id, |e| e.id)
-            .map_err(|_| BrepError::LostReference(format!("projection `{name}`: no edge or vertex {id:?} in the input body")))?;
-        let edge = &body.edges()[e];
-        let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
-        let (pa, pb) = (body.point(a), body.point(b));
-        if s.lines.contains_key(name) || s.arcs.contains_key(name) || s.circles.contains_key(name) {
-            return Err(BrepError::Sketch(format!("the sketch already has a curve `{name}`")));
-        }
-        match body.edge_curve(edge) {
-            None => {
-                if flat(pa) == flat(pb) {
-                    return Err(BrepError::Degenerate(format!("projection `{name}`: the edge is across the sketch plane; project a vertex")));
+        let slanted = || BrepError::Unsupported(format!("projection `{name}`: the arc or circle is not parallel to the sketch plane"));
+        match shape {
+            Shape::Point(p) => {
+                add(&mut s, name.clone(), p)?;
+            }
+            // Seen end on, a line is a point.
+            Shape::Line(a, b) if flat(a.0) == flat(b.0) => {
+                add(&mut s, name.clone(), a)?;
+            }
+            Shape::Line(a, b) => {
+                let (from, to) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
+                s.lines.insert(name.clone(), Line { from, to, construction });
+            }
+            Shape::Arc(c, a, b, axis) => {
+                if !parallel(axis, normal) {
+                    return Err(slanted());
                 }
-                let (from, to) = (add(&mut s, format!("{name}.start"), pa)?, add(&mut s, format!("{name}.end"), pb)?);
-                s.lines.insert(name.clone(), Line { from, to, construction: true });
+                let center = add(&mut s, format!("{name}.center"), c)?;
+                let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
+                let (from, to) = if axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
+                s.arcs.insert(name.clone(), Arc { center, from, to, construction });
             }
-            Some(Curve::Arc(arc)) if parallel(arc.axis, normal) => {
-                let center = add(&mut s, format!("{name}.center"), arc.center)?;
-                let (start, end) = (add(&mut s, format!("{name}.start"), pa)?, add(&mut s, format!("{name}.end"), pb)?);
-                // The edge turns counterclockwise about its axis from its lower-ID vertex.
-                let (from, to) = if arc.axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
-                s.arcs.insert(name.clone(), Arc { center, from, to, construction: true });
-            }
-            Some(Curve::Arc(_)) => {
-                return Err(BrepError::Unsupported(format!("projection `{name}`: the arc is not parallel to the sketch plane")));
-            }
-            Some(Curve::Rolled { .. }) => {
-                return Err(BrepError::Unsupported(format!("projection `{name}`: an edge of a cut in a rolled sheet")));
+            Shape::Circle(c, axis, d) => {
+                if !parallel(axis, normal) {
+                    return Err(slanted());
+                }
+                let center = add(&mut s, format!("{name}.center"), c)?;
+                s.circles.insert(name.clone(), Circle { center, diameter: d.into(), construction });
             }
         }
-        check_at(name, proj, &points)?;
-        now.insert(name.clone(), points.into_iter().map(|(_, p)| p).collect());
+        if !proj.at.is_empty() && proj.at.len() != points.len() {
+            return Err(BrepError::Sketch(format!("projection `{name}`: `at` has {} points, the projection {}", proj.at.len(), points.len())));
+        }
+        now.insert(name.clone(), points);
     }
     Ok((s, now))
 }
 
-fn check_at(name: &str, proj: &Projection, points: &[(String, Vec2)]) -> Result<(), BrepError> {
-    if proj.at.is_empty() || proj.at.len() == points.len() {
-        Ok(())
-    } else {
-        Err(BrepError::Sketch(format!("projection `{name}`: `at` has {} points, the projection {}", proj.at.len(), points.len())))
+/// The edge or vertex with ID `id` (hex) of `body`, for projection `name`.
+fn body_shape(name: &str, body: &Body, id: &str) -> Result<Shape, BrepError> {
+    let id = u128::from_str_radix(id, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("projection `{name}`: `{id}` is not an ID")))?;
+    let vertex = |v: Ix| (body.point(v), Some(format!("{:?}", body.vertices()[v as usize].id)));
+    if let Ok(v) = body.vertices().binary_search_by_key(&id, |v| v.id) {
+        return Ok(Shape::Point(vertex(v as Ix)));
+    }
+    let e = body
+        .edges()
+        .binary_search_by_key(&id, |e| e.id)
+        .map_err(|_| BrepError::LostReference(format!("projection `{name}`: no edge or vertex {id:?} in the input body")))?;
+    let edge = &body.edges()[e];
+    let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
+    let (pa, pb) = (vertex(a), vertex(b));
+    match body.edge_curve(edge) {
+        None => Ok(Shape::Line(pa, pb)),
+        // The edge turns counterclockwise about its axis from its lower-ID vertex.
+        Some(Curve::Arc(arc)) => Ok(Shape::Arc((arc.center, None), pa, pb, arc.axis)),
+        Some(Curve::Rolled { .. }) => Err(BrepError::Unsupported(format!("projection `{name}`: an edge of a cut in a rolled sheet"))),
+    }
+}
+
+/// The point, line, arc or circle named `element` of the placed sketch `p`, for projection `name`.
+fn sketch_shape(name: &str, p: &Placed, element: &str) -> Result<Shape, BrepError> {
+    if p.developed.is_some() {
+        return Err(BrepError::Unsupported(format!("projection `{name}`: from a sketch on a cylinder face")));
+    }
+    let [o, x, y, z] = p.frame;
+    let point = |n: &str| p.solved.points.get(n).map(|q| (o + x * q.x + y * q.y, Some(n.to_string())));
+    let lost = || BrepError::LostReference(format!("projection `{name}`: the sketch has no point, line, arc or circle `{element}`"));
+    if let Some(q) = point(element) {
+        return Ok(Shape::Point(q));
+    }
+    let at = |n: &str| point(n).ok_or_else(lost);
+    if let Some(l) = p.lines.get(element) {
+        return Ok(Shape::Line(at(&l.from)?, at(&l.to)?));
+    }
+    if let Some(a) = p.arcs.get(element) {
+        return Ok(Shape::Arc(at(&a.center)?, at(&a.from)?, at(&a.to)?, z));
+    }
+    match p.circles.get(element) {
+        Some(c) => Ok(Shape::Circle(at(&c.center)?, z, diameter(c))),
+        None => Err(lost()),
     }
 }
 
@@ -375,16 +455,17 @@ fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
 /// and Y. The frame follows the face's plane only. On a cylinder face of a rolled sheet the
 /// sketch lies in the sheet's development (see [`Developed`]) with its neutral layer at
 /// `k_factor` of the thickness; on a plane face of sheet metal, `k_factor` lays its bends flat
-/// for a cut across them. With `project`, edges and vertices of `body` are projected into
-/// the sketch (see [`projected`]). A face, edge or vertex gone after a rebuild is a lost
-/// reference.
-pub fn place(
+/// for a cut across them. With `project`, geometry of the inputs `source` gives by name is
+/// projected into the sketch (see [`projected`]). A face, edge, vertex or element gone after a
+/// rebuild is a lost reference.
+pub fn place<'a>(
     sketch: &Sketch,
     plane: Option<&SketchPlane>,
     body: Option<&Body>,
     face: Option<&str>,
     k_factor: Option<f64>,
     project: &BTreeMap<String, Projection>,
+    source: &dyn Fn(Option<&str>) -> Result<Source<'a>, BrepError>,
 ) -> Result<Placed, BrepError> {
     let mut developed = None;
     // The plane's normal as given, for projections.
@@ -443,12 +524,11 @@ pub fn place(
     };
     let with_projections;
     let mut now = BTreeMap::new();
-    let sketch = match body {
+    let sketch = match developed {
         _ if project.is_empty() => sketch,
-        None => return Err(BrepError::Sketch("a projection takes the body as the sketch's input".into())),
-        Some(_) if developed.is_some() => return Err(BrepError::Unsupported("projections into a sketch on a cylinder face".into())),
-        Some(b) => {
-            (with_projections, now) = projected(sketch, b, &frame, normal, project)?;
+        Some(_) => return Err(BrepError::Unsupported("projections into a sketch on a cylinder face".into())),
+        None => {
+            (with_projections, now) = projected(sketch, &frame, normal, project, source)?;
             &with_projections
         }
     };

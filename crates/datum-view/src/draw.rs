@@ -1073,7 +1073,13 @@ mod tests {
             json["plane"] = json!({"origin": [-1000, -1000, 0], "x_axis": [1, 0, 0], "normal": [0, 0, 1]});
             input
         };
-        let mut e = SketchEdit::new("s".into(), Context { id, input }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new(
+            "s".into(),
+            Context { id, inputs: input.map(|v| ("plate".to_string(), v)).into_iter().collect() },
+            json,
+            BTreeMap::new(),
+            None,
+        );
         e.camera.center = [10.0, 10.0];
         e.camera.half_height = 30.0;
         e

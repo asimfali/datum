@@ -170,7 +170,7 @@ mod tests {
             "arcs": {"a1": {"center": "p3", "from": "p2", "to": "p4"}},
             "circles": {"c1": {"center": "p3", "diameter": 2}}});
         let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": sketch});
-        SketchEdit::new("s".into(), Context { id: TopoId::derive("feature").tag("s").finish(), input: None }, json, BTreeMap::new(), None)
+        SketchEdit::new("s".into(), Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new() }, json, BTreeMap::new(), None)
     }
 
     fn c(n: &str) -> Pick2 {

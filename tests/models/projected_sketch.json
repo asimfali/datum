@@ -1,0 +1,126 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "d": 24.0
+  },
+  "features": [
+    {
+      "name": "skeleton",
+      "op": "sketch",
+      "sketch": {
+        "circles": {
+          "ring": {
+            "center": "o",
+            "diameter": "d"
+          }
+        },
+        "constraints": [
+          {
+            "point": "a",
+            "type": "fix"
+          },
+          {
+            "line": "base",
+            "type": "horizontal"
+          },
+          {
+            "line": "base",
+            "type": "length",
+            "value": 80.0
+          },
+          {
+            "points": [
+              "a",
+              "o"
+            ],
+            "type": "horizontal_distance",
+            "value": 40.0
+          },
+          {
+            "points": [
+              "a",
+              "o"
+            ],
+            "type": "vertical_distance",
+            "value": 30.0
+          }
+        ],
+        "lines": {
+          "base": {
+            "from": "a",
+            "to": "b"
+          }
+        },
+        "points": {
+          "a": [
+            0.0,
+            0.0
+          ],
+          "b": [
+            80.0,
+            0.0
+          ],
+          "o": [
+            40.0,
+            30.0
+          ]
+        }
+      }
+    },
+    {
+      "base": "xy",
+      "name": "wp",
+      "offset": 20.0,
+      "op": "plane"
+    },
+    {
+      "inputs": [
+        "wp",
+        "skeleton"
+      ],
+      "name": "part_sketch",
+      "op": "sketch",
+      "project": {
+        "base": {
+          "at": [
+            [
+              0.0,
+              0.0
+            ],
+            [
+              80.0,
+              0.0
+            ]
+          ],
+          "element": "base",
+          "from": "skeleton"
+        },
+        "ring": {
+          "at": [
+            [
+              40.0,
+              30.0
+            ]
+          ],
+          "construction": false,
+          "element": "ring",
+          "from": "skeleton"
+        }
+      },
+      "sketch": {
+        "constraints": [],
+        "lines": {},
+        "points": {}
+      }
+    },
+    {
+      "inputs": [
+        "part_sketch"
+      ],
+      "name": "disk",
+      "op": "extrude",
+      "z0": 0.0,
+      "z1": 5.0
+    }
+  ]
+}

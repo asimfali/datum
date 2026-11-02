@@ -16,11 +16,11 @@ use crate::draw::{Draft, face_edges};
 use crate::measure::{Shape, Taken};
 
 /// What the background thread knows of the sketch being edited: its feature's ID (for
-/// `Op::eval`) and its input body (a face it lies on, edges it projects).
+/// `Op::eval`) and its inputs by name (the body or work plane it lies on, what it projects from).
 #[derive(Clone)]
 pub struct Context {
     pub id: TopoId,
-    pub input: Option<ValueRef>,
+    pub inputs: Vec<(String, ValueRef)>,
 }
 
 /// Something under the cursor or selected.
@@ -452,7 +452,7 @@ impl SketchEdit {
     fn set(&mut self, placed: Result<Placed, String>) {
         self.fill = placed.as_ref().ok().and_then(|p| fill(self.context.id, p)).unwrap_or_default();
         // The face the sketch lies on, to snap to and project from.
-        self.draft.face = match (&self.context.input, &placed) {
+        self.draft.face = match (self.context.inputs.first().map(|(_, v)| v), &placed) {
             (Some(v), Ok(p)) => v.body().map(|b| face_edges(b, p)).unwrap_or_default(),
             _ => Vec::new(),
         };
@@ -480,8 +480,9 @@ impl SketchEdit {
             }
         }
         let op = op.resolve(&lookup)?;
-        let inputs: Vec<&Value> = self.context.input.iter().map(|v| v.as_ref()).collect();
-        match op.eval(self.context.id, &inputs).map_err(|e| e.to_string())? {
+        let inputs: Vec<&Value> = self.context.inputs.iter().map(|(_, v)| v.as_ref()).collect();
+        let names: Vec<&str> = self.context.inputs.iter().map(|(n, _)| n.as_str()).collect();
+        match op.eval_named(self.context.id, &inputs, &names).map_err(|e| e.to_string())? {
             Value::Sketch(p) => Ok(*p),
             _ => Err("not a sketch".into()),
         }
@@ -1649,7 +1650,7 @@ mod tests {
                             {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"}, {"type": "length", "line": "bottom", "value": "w"}],
             "measures": {"height": {"type": "length", "line": "left"}}}});
         let id = TopoId::derive("feature").tag("outline").finish();
-        SketchEdit::new("outline".into(), Context { id, input: None }, json, BTreeMap::from([("w".into(), 12.0)]), None)
+        SketchEdit::new("outline".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::from([("w".into(), 12.0)]), None)
     }
 
     #[test]
@@ -1712,7 +1713,7 @@ mod tests {
             "points": {"p1": [0, 0], "p2": [10, 0], "q": [20, 5]},
             "lines": {"l1": {"from": "p1", "to": "p2"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None)
+        SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None)
     }
 
     #[test]
@@ -1757,7 +1758,7 @@ mod tests {
             "points": {"c": [0, 0], "f": [5, 0], "t": [-5, 0], "q": [3, 9]},
             "arcs": {"a": {"center": "c", "from": "f", "to": "t"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
         e.hover = Some(Pick::Point("q".into()));
         assert!(e.start_drag([3.0, 9.0]));
         e.drag_to([0.2, 5.1], 0.5);
@@ -1774,7 +1775,7 @@ mod tests {
         let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
             "points": {"p1": [0, 0], "p2": [10, 0]}, "lines": {"l1": {"from": "p1", "to": "p2"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
         assert!(e.placed.as_ref().unwrap().solved.points.contains_key(datum_ops::ORIGIN));
         e.hover = Some(Pick::Point("p2".into()));
         assert!(e.start_drag([10.0, 0.0]));
@@ -1817,7 +1818,7 @@ mod tests {
             "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}},
             "circles": {"c": {"center": "q", "diameter": 3}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
         e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into())];
         e.hover = Some(Pick::Curve("l2".into()));
         assert!(e.start_drag([3.5, 5.0]));
@@ -1835,7 +1836,7 @@ mod tests {
             "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}},
             "circles": {"c": {"center": "q", "diameter": 3}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, input: None }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
         e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into()), Pick::Constraint(0)];
         let sent = e.group_selection().unwrap();
         assert_eq!(sent["groups"], json!({"g1": ["l1", "l2"]}), "elements only");
@@ -1985,7 +1986,7 @@ mod tests {
         let model: Json = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let params = model["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), v.as_f64().unwrap())).collect();
         let id = TopoId::derive("feature").tag("outline").finish();
-        let mut e = SketchEdit::new("outline".into(), Context { id, input: None }, model["features"][0].clone(), params, None);
+        let mut e = SketchEdit::new("outline".into(), Context { id, inputs: Vec::new() }, model["features"][0].clone(), params, None);
         e.camera.half_height = 30.0;
         let shot = std::env::var_os("DATUM_PLATE_SHOT");
         let builder = egui_kittest::Harness::builder().with_size([1100.0, 630.0]);

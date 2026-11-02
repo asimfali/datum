@@ -262,15 +262,18 @@ fn projections_are_checked() {
     let empty = serde_json::json!({"points": {}});
     let on_top = |project: serde_json::Value| serde_json::json!({"face": top_face(b), "project": project});
     assert!(fails(empty.clone(), on_top(serde_json::json!({"x": {"id": "0123"}})), &[&plate]).contains("no edge or vertex"));
-    assert!(fails(empty.clone(), on_top(serde_json::json!({"x": {"id": up}})), &[&plate]).contains("across the sketch plane"));
     let taken = serde_json::json!({"points": {"c": [0, 0]}});
     assert!(fails(taken, on_top(serde_json::json!({"c": {"id": corner}})), &[&plate]).contains("already has a point `c`"));
-    assert!(fails(empty.clone(), serde_json::json!({"project": {"c": {"id": corner}}}), &[]).contains("takes the body"));
+    assert!(fails(empty.clone(), serde_json::json!({"project": {"c": {"id": corner}}}), &[]).contains("an input of the sketch"));
     assert!(fails(empty.clone(), serde_json::json!({"project": {"c": {"id": corner, "at": [[0, 0], [1, 1]]}}}), &[&plate]).contains("2 points"));
-    // A vertex alone is a fixed point; a body without face or projections is a mistake.
+    // A vertex alone is a fixed point, and so is an edge seen end on (D214); a body without face
+    // or projections is a mistake.
     let s = eval(&sketch_op(empty.clone(), serde_json::json!({"project": {"c": {"id": corner}}})), "s", &[&plate]).unwrap();
     assert_eq!(s.sketch().unwrap().solved.dof, 0);
-    assert!(fails(empty, serde_json::json!({}), &[&plate]).contains("to project its edges"));
+    let s = eval(&sketch_op(empty.clone(), on_top(serde_json::json!({"x": {"id": up}}))), "s", &[&plate]).unwrap();
+    let s = s.sketch().unwrap();
+    assert_eq!((s.solved.points["x"].x, s.solved.points["x"].y, s.lines.contains_key("x")), (0.0, 0.0, false));
+    assert!(fails(empty, serde_json::json!({}), &[&plate]).contains("nor projected from"));
 }
 
 /// Every plane sketch has the model's origin as a fixed point: a rectangle dimensioned from it
@@ -456,4 +459,224 @@ fn extrude_on_a_plane_through_points() {
     let s = eval(&sketch_op(rect(20.0, 10.0), serde_json::json!({})), "on", &[&plane]).unwrap();
     let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 5})), "x", &[&s]).unwrap();
     assert_close(body(&v).volume(), 20.0 * 10.0 * 5.0);
+}
+
+// ---- Projection from other bodies and sketches (D214) ----
+
+fn eval_named(o: &Op, feature: &str, inputs: &[&Value], names: &[&str]) -> Result<Value, BrepError> {
+    o.eval_named(id(feature), inputs, names)
+}
+
+/// A point, a line, an arc (quarter, counter-clockwise) and a circle on XY.
+fn source_sketch() -> Value {
+    let s = serde_json::json!({
+        "points": {"p": [2, 3], "a": [0, 0], "b": [4, 0], "c": [10, 0], "s": [13, 0], "e": [10, 3], "o": [20, 5]},
+        "lines": {"l": {"from": "a", "to": "b"}},
+        "arcs": {"arc": {"center": "c", "from": "s", "to": "e"}},
+        "circles": {"ring": {"center": "o", "diameter": 6}}
+    });
+    eval(&sketch_op(s, serde_json::json!({})), "src", &[]).unwrap()
+}
+
+fn plane_at(z: f64, normal: Vec3, x_axis: Vec3) -> Value {
+    Value::Plane(datum_ops::SketchPlane { origin: Vec3::new(0.0, 0.0, z), x_axis, normal })
+}
+
+fn world(p: &datum_ops::Placed, name: &str) -> Vec3 {
+    let [o, x, y, _] = p.frame;
+    let q = p.solved.points[name];
+    o + x * q.x + y * q.y
+}
+
+fn near(a: Vec3, b: Vec3) -> bool {
+    (a - b).dot(a - b) < 1e-18
+}
+
+#[test]
+fn sketch_projects_into_a_sketch_on_a_work_plane() {
+    let src = source_sketch();
+    let wp = plane_at(10.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let project = serde_json::json!({
+        "pt": {"from": "src", "element": "p"}, "ln": {"from": "src", "element": "l"},
+        "ac": {"from": "src", "element": "arc"}, "rg": {"from": "src", "element": "ring"}
+    });
+    let target = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": project}));
+    let tv = eval_named(&target, "t", &[&wp, &src], &["wp", "src"]).unwrap();
+    let t = tv.sketch().unwrap();
+    assert_eq!(t.solved.dof, 0, "{:?}", t.solved.free);
+    for (name, at) in [
+        ("pt", Vec3::new(2.0, 3.0, 10.0)),
+        ("ln.start", Vec3::new(0.0, 0.0, 10.0)),
+        ("ln.end", Vec3::new(4.0, 0.0, 10.0)),
+        ("ac.center", Vec3::new(10.0, 0.0, 10.0)),
+        ("ac.start", Vec3::new(13.0, 0.0, 10.0)),
+        ("ac.end", Vec3::new(10.0, 3.0, 10.0)),
+        ("rg.center", Vec3::new(20.0, 5.0, 10.0)),
+    ] {
+        assert!(near(world(t, name), at), "{name}: {:?}", world(t, name));
+    }
+    assert_close(t.circles["rg"].diameter.value().unwrap(), 6.0);
+    assert!(t.lines["ln"].construction && t.arcs["ac"].construction && t.circles["rg"].construction);
+    // The arc keeps its sense: from the start to the end, counter-clockwise about the centre.
+    let a = &t.arcs["ac"];
+    assert_eq!((a.center.as_str(), a.from.as_str(), a.to.as_str()), ("ac.center", "ac.start", "ac.end"));
+    let (c, s, e) = (t.solved.points["ac.center"], t.solved.points["ac.start"], t.solved.points["ac.end"]);
+    assert!((s.x - c.x) * (e.y - c.y) - (s.y - c.y) * (e.x - c.x) > 0.0);
+    // Construction curves bound nothing.
+    match eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 1})), "x", &[&tv]) {
+        Err(BrepError::Sketch(_)) => {}
+        r => panic!("expected no profile, got {:?}", r.map(|_| ())),
+    }
+}
+
+#[test]
+fn projected_circle_makes_a_profile() {
+    let src = source_sketch();
+    let wp = plane_at(10.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let target = sketch_op(
+        serde_json::json!({"points": {}}),
+        serde_json::json!({"project": {"rg": {"from": "src", "element": "ring", "construction": false}}}),
+    );
+    let t = eval_named(&target, "t", &[&wp, &src], &["wp", "src"]).unwrap();
+    assert!(!t.sketch().unwrap().circles["rg"].construction);
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 5})), "x", &[&t]).unwrap();
+    let b = body(&v);
+    assert_close(b.volume(), std::f64::consts::PI * 9.0 * 5.0);
+}
+
+/// The lines of a skeleton's rectangle, projected one by one into the profile, meet at its
+/// corners and bound it (D214).
+#[test]
+fn projected_lines_of_a_skeleton_bound_a_profile() {
+    let skeleton = serde_json::json!({
+        "points": {"a": [0, 0], "b": [6, 0], "c": [6, 4], "d": [0, 4]},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "a"}}
+    });
+    let src = eval(&sketch_op(skeleton, serde_json::json!({})), "src", &[]).unwrap();
+    let wp = plane_at(10.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let project: serde_json::Map<String, serde_json::Value> =
+        ["l1", "l2", "l3", "l4"].iter().map(|l| (format!("p{l}"), serde_json::json!({"from": "src", "element": l, "construction": false}))).collect();
+    let target = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": project}));
+    let t = eval_named(&target, "t", &[&wp, &src], &["wp", "src"]).unwrap();
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 2})), "x", &[&t]).unwrap();
+    assert_close(body(&v).volume(), 6.0 * 4.0 * 2.0);
+}
+
+/// A plane facing the other way sees the same points in the world.
+#[test]
+fn projection_onto_a_flipped_plane() {
+    let src = source_sketch();
+    let wp = plane_at(10.0, Vec3::new(0.0, 0.0, -1.0), Vec3::new(1.0, 0.0, 0.0));
+    let project = serde_json::json!({"ac": {"from": "src", "element": "arc"}, "ln": {"from": "src", "element": "l"}});
+    let t = eval_named(&sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": project})), "t", &[&wp, &src], &["wp", "src"])
+        .unwrap();
+    let t = t.sketch().unwrap();
+    for (name, at) in [("ac.start", Vec3::new(13.0, 0.0, 10.0)), ("ac.end", Vec3::new(10.0, 3.0, 10.0)), ("ln.end", Vec3::new(4.0, 0.0, 10.0))] {
+        assert!(near(world(t, name), at), "{name}: {:?}", world(t, name));
+    }
+}
+
+#[test]
+fn projection_onto_a_side_plane() {
+    let src = source_sketch();
+    // Plane with normal X: the arc and the circle would be ellipses.
+    let side = plane_at(0.0, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    for element in ["arc", "ring"] {
+        let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"x": {"from": "src", "element": element}}}));
+        match eval_named(&t, "t", &[&side, &src], &["wp", "src"]) {
+            Err(BrepError::Unsupported(m)) => assert!(m.contains("not parallel"), "{m}"),
+            r => panic!("expected a refusal for {element}, got {:?}", r.map(|_| ())),
+        }
+    }
+    // The line along X is seen end on from the X axis: a fixed point.
+    let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"ln": {"from": "src", "element": "l"}}}));
+    let t = eval_named(&t, "t", &[&side, &src], &["wp", "src"]).unwrap();
+    let t = t.sketch().unwrap();
+    assert!(!t.lines.contains_key("ln"));
+    assert!(near(world(t, "ln"), Vec3::new(0.0, 0.0, 0.0)), "{:?}", world(t, "ln"));
+}
+
+#[test]
+fn projection_errors() {
+    let src = source_sketch();
+    let wp = plane_at(10.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let plate = Value::Body(cuboid(id("plate"), Vec3::ZERO, Vec3::new(4.0, 3.0, 2.0)).unwrap());
+    let corner = format!("{:?}", plate.body().unwrap().vertices()[0].id);
+    let t = |project: serde_json::Value| sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": project}));
+    let names = ["wp", "src"];
+    // A missing element is a lost reference.
+    match eval_named(&t(serde_json::json!({"x": {"from": "src", "element": "nope"}})), "t", &[&wp, &src], &names) {
+        Err(BrepError::LostReference(_)) => {}
+        r => panic!("expected a lost reference, got {:?}", r.map(|_| ())),
+    }
+    // Unknown `from`.
+    assert!(eval_named(&t(serde_json::json!({"x": {"from": "ghost", "element": "p"}})), "t", &[&wp, &src], &names).is_err());
+    // Without names `from` cannot be resolved.
+    assert!(eval(&t(serde_json::json!({"x": {"from": "src", "element": "p"}})), "t", &[&wp, &src]).is_err());
+    // An input nobody projects from.
+    match eval_named(&t(serde_json::json!({"x": {"from": "src", "element": "p"}})), "t", &[&wp, &src, &plate], &["wp", "src", "plate"]) {
+        Err(e) => assert!(e.to_string().contains("nor projected from"), "{e}"),
+        Ok(_) => panic!("expected an error"),
+    }
+    // A projection on a work plane needs `from`.
+    match eval_named(&t(serde_json::json!({"x": {"element": "p"}})), "t", &[&wp, &src], &names) {
+        Err(e) => assert!(e.to_string().contains("from"), "{e}"),
+        Ok(_) => panic!("expected an error"),
+    }
+    // The wrong field for the kind of source.
+    assert!(matches!(
+        eval_named(&t(serde_json::json!({"x": {"from": "plate", "element": "p"}})), "t", &[&wp, &plate], &["wp", "plate"]),
+        Err(BrepError::Sketch(_))
+    ));
+    assert!(matches!(eval_named(&t(serde_json::json!({"x": {"from": "src", "id": corner}})), "t", &[&wp, &src], &names), Err(BrepError::Sketch(_))));
+}
+
+/// A sketch on a work plane takes edges from the second body by `id`.
+#[test]
+fn work_plane_sketch_projects_edges_of_a_second_body() {
+    let first = Value::Body(cuboid(id("first"), Vec3::ZERO, Vec3::new(10.0, 10.0, 2.0)).unwrap());
+    let second = Value::Body(cuboid(id("second"), Vec3::new(20.0, 0.0, 0.0), Vec3::new(26.0, 8.0, 5.0)).unwrap());
+    let b = second.body().unwrap();
+    let edge = |pick: fn(Vec3, Vec3) -> bool| edge_id(b, pick);
+    let wp = plane_at(5.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let project = serde_json::json!({
+        "s": {"from": "second", "id": edge(|p, q| p.z == 5.0 && q.z == 5.0 && p.y == 0.0 && q.y == 0.0), "construction": false},
+        "e": {"from": "second", "id": edge(|p, q| p.z == 5.0 && q.z == 5.0 && p.x == 26.0 && q.x == 26.0), "construction": false},
+        "n": {"from": "second", "id": edge(|p, q| p.z == 5.0 && q.z == 5.0 && p.y == 8.0 && q.y == 8.0), "construction": false},
+        "w": {"from": "second", "id": edge(|p, q| p.z == 5.0 && q.z == 5.0 && p.x == 20.0 && q.x == 20.0), "construction": false}
+    });
+    let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": project}));
+    let t = eval_named(&t, "t", &[&wp, &second], &["wp", "second"]).unwrap();
+    let placed = t.sketch().unwrap();
+    assert_eq!(placed.lines.len(), 4);
+    assert!(placed.lines.values().all(|l| !l.construction));
+    assert!(near(world(placed, "n.start"), Vec3::new(20.0, 8.0, 5.0)) || near(world(placed, "n.end"), Vec3::new(20.0, 8.0, 5.0)));
+    // Edges meeting at a vertex meet in the sketch: the four bound a profile.
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 3})), "x", &[&t]).unwrap();
+    assert_close(body(&v).volume(), 6.0 * 8.0 * 3.0);
+    // Each keeps its own end points, fixed where the shared one is.
+    assert!(placed.solved.points.contains_key("s.start") && placed.solved.points.contains_key("e.end"));
+    // Or the profile is drawn between projected corners.
+    let corner = |x: f64, y: f64| format!("{:?}", b.vertices().iter().find(|v| v.point == Vec3::new(x, y, 5.0)).unwrap().id);
+    let project = serde_json::json!({
+        "a": {"from": "second", "id": corner(20.0, 0.0)}, "b": {"from": "second", "id": corner(26.0, 0.0)},
+        "c": {"from": "second", "id": corner(26.0, 8.0)}, "d": {"from": "second", "id": corner(20.0, 8.0)}
+    });
+    let outline = serde_json::json!({
+        "points": {},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "a"}}
+    });
+    let t = eval_named(&sketch_op(outline, serde_json::json!({"project": project})), "t", &[&wp, &second], &["wp", "second"]).unwrap();
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 3})), "x", &[&t]).unwrap();
+    assert_close(body(&v).volume(), 6.0 * 8.0 * 3.0);
+    // The first body is no source and no plane: it is an error among the inputs.
+    assert!(
+        eval_named(
+            &sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"x": {"from": "second", "id": "0123"}}})),
+            "t",
+            &[&wp, &second, &first],
+            &["wp", "second", "first"]
+        )
+        .is_err()
+    );
 }

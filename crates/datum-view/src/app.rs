@@ -482,8 +482,12 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
     meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().copied()).collect::<Vec<_>>());
     let context = editing.and_then(|name| {
         let node = graph.nodes().iter().position(|n| n.name == name)?;
-        let input = graph.nodes()[node].inputs.first().and_then(|&i| evaluation.results[i as usize].as_ref().ok().cloned());
-        Some((name.to_string(), Context { id: graph.nodes()[node].id, input }))
+        let inputs = graph.nodes()[node]
+            .inputs
+            .iter()
+            .filter_map(|&i| Some((graph.nodes()[i as usize].name.clone(), evaluation.results[i as usize].as_ref().ok()?.clone())))
+            .collect();
+        Some((name.to_string(), Context { id: graph.nodes()[node].id, inputs }))
     });
     let geometry = Arc::new(Geometry::new(&scene, scene.anchor()));
     let inspect = session.inspect();
@@ -5830,7 +5834,7 @@ mod tests {
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         let id = session.graph().nodes()[0].id;
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id, input: None }));
+            m.editing = Some(("outline".into(), Context { id, inputs: Vec::new() }));
         }
         v.sync_sketch();
         let sk = v.sketch.as_ref().expect("editing");
@@ -5951,7 +5955,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6001,7 +6005,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6072,7 +6076,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6230,7 +6234,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6271,7 +6275,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6304,7 +6308,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6344,7 +6348,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6400,7 +6404,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6470,7 +6474,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6564,7 +6568,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -6621,7 +6625,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();
@@ -7252,7 +7256,7 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
         session.execute("open", &json!({"path": path.display().to_string()})).unwrap();
         if let Some(m) = &mut v.model {
-            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, input: None }));
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new() }));
         }
         v.entering = Some("outline".into());
         v.sync_sketch();

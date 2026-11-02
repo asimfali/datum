@@ -162,7 +162,7 @@ mod tests {
 
     fn editor(sketch: Json) -> SketchEdit {
         let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": sketch});
-        SketchEdit::new("s".into(), Context { id: TopoId::derive("feature").tag("s").finish(), input: None }, json, BTreeMap::new(), None)
+        SketchEdit::new("s".into(), Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new() }, json, BTreeMap::new(), None)
     }
 
     /// Places template `t` by `spots` through the tool, as clicks would, then Enter takes the
