@@ -121,6 +121,8 @@ pub enum Flat {
     },
     /// A face: its loops as closed polylines.
     Region(Vec<Vec<[f64; 2]>>),
+    /// An ellipse or an arc of it (D218), as points along it.
+    Polyline(Vec<[f64; 2]>),
 }
 
 impl Flat {
@@ -129,6 +131,7 @@ impl Flat {
     fn foot(&self, q: [f64; 2]) -> Option<[f64; 2]> {
         match *self {
             Flat::Region(_) => None,
+            Flat::Polyline(ref pts) => foot(pts, q),
             Flat::Point(p) => Some(p),
             Flat::Line(a, b) => foot(&[a, b], q),
             Flat::Arc { c, r, start, sweep } => {
@@ -160,6 +163,7 @@ impl Flat {
     fn curve_points(&self) -> Vec<[f64; 2]> {
         match *self {
             Flat::Region(_) => Vec::new(),
+            Flat::Polyline(ref pts) => pts.clone(),
             Flat::Point(p) => vec![p],
             Flat::Line(a, b) => vec![a, b],
             Flat::Arc { c, r, start, sweep } => {
@@ -279,12 +283,31 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
     let height = |p: datum_math::Vec3| (p - o).dot(z);
     let angle = |c: [f64; 2], p: [f64; 2]| libm::atan2(p[1] - c[1], p[0] - c[0]);
     // An arc from `a` to `b` counterclockwise about `axis`, as it falls.
-    let arc = |c: datum_math::Vec3, r: f64, a: [f64; 2], b: [f64; 2], axis: datum_math::Vec3| {
-        datum_ops::parallel(axis, z).then(|| {
-            let (c, (a, b)) = (flat(c), if axis.dot(z) > 0.0 { (a, b) } else { (b, a) });
-            let sweep = (angle(c, b) - angle(c, a)).rem_euclid(std::f64::consts::TAU);
-            Flat::Arc { c, r, start: angle(c, a), sweep: if sweep == 0.0 { std::f64::consts::TAU } else { sweep } }
-        })
+    // A circle's arc about `axis` from `a` to `b` (none: whole) as it falls: an arc, or at a
+    // slant an ellipse's, as points along it (D218); none seen edge on.
+    let arc = |c: datum_math::Vec3, r: f64, a: datum_math::Vec3, b: Option<datum_math::Vec3>, axis: datum_math::Vec3| {
+        let tau = std::f64::consts::TAU;
+        let n = axis * (1.0 / axis.dot(axis).sqrt());
+        let (u, w) = ((a - c) * (1.0 / r), n.cross((a - c) * (1.0 / r)));
+        let sweep = b.map_or(tau, |b| libm::atan2((b - c).dot(w), (b - c).dot(u)).rem_euclid(tau));
+        let sweep = if sweep == 0.0 { tau } else { sweep };
+        if datum_ops::parallel(axis, z) {
+            let (fc, (fa, fb)) = (flat(c), if axis.dot(z) > 0.0 { (flat(a), b.map_or(flat(a), flat)) } else { (b.map_or(flat(a), flat), flat(a)) });
+            let turn = (angle(fc, fb) - angle(fc, fa)).rem_euclid(tau);
+            return Some(Flat::Arc { c: fc, r, start: angle(fc, fa), sweep: if turn == 0.0 { tau } else { turn } });
+        }
+        if n.dot(z) == 0.0 {
+            return None;
+        }
+        let k = ((sweep / tau) * 64.0).ceil().max(2.0) as usize;
+        Some(Flat::Polyline(
+            (0..=k)
+                .map(|i| {
+                    let (sn, cs) = libm::sincos(sweep * i as f64 / k as f64);
+                    flat(c + (u * cs + w * sn) * r)
+                })
+                .collect(),
+        ))
     };
     let mut out: Vec<Projectable> = Vec::new();
     for (from, v) in sources {
@@ -301,10 +324,10 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
                 .iter()
                 .map(|edge| {
                     let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
-                    let (pa, pb) = (flat(body.point(a)), flat(body.point(b)));
+                    let (pa, pb) = (body.point(a), body.point(b));
                     match body.edge_curve(edge) {
-                        None => Some(Flat::Line(pa, pb)),
-                        Some(Curve::Arc(c)) => arc(c.center, c.radius, pa, pb, c.axis),
+                        None => Some(Flat::Line(flat(pa), flat(pb))),
+                        Some(Curve::Arc(c)) => arc(c.center, c.radius, pa, Some(pb), c.axis),
                         Some(Curve::Rolled { .. }) => None,
                     }
                 })
@@ -359,16 +382,16 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
             for (n, a) in &s.arcs {
                 if let (Some(c), Some(p), Some(q)) = (at(&a.center), at(&a.from), at(&a.to)) {
                     let r = (p - c).dot(p - c).sqrt();
-                    if let Some(shape) = arc(c, r, flat(p), flat(q), sz) {
+                    if let Some(shape) = arc(c, r, p, Some(q), sz) {
                         put("element", n.clone(), shape, c);
                     }
                 }
             }
             for (n, c) in &s.circles {
                 if let (Some(centre), Some(d)) = (at(&c.center), c.diameter.value())
-                    && datum_ops::parallel(sz, z)
+                    && let Some(shape) = arc(centre, 0.5 * d, centre + sx * (0.5 * d), None, sz)
                 {
-                    put("element", n.clone(), Flat::Arc { c: flat(centre), r: 0.5 * d, start: 0.0, sweep: std::f64::consts::TAU }, centre);
+                    put("element", n.clone(), shape, centre);
                 }
             }
         }
@@ -377,6 +400,7 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
     // once. Bits compare exactly: what falls on one place falls there bit for bit or is another.
     let key = |f: &Flat| -> Vec<u64> {
         match f {
+            Flat::Polyline(pts) => pts.iter().flat_map(|p| p.map(f64::to_bits)).collect(),
             // Its corners, in any order.
             Flat::Region(loops) => {
                 let mut pts: Vec<[u64; 2]> = loops.iter().flatten().map(|p| p.map(f64::to_bits)).collect();
@@ -1730,6 +1754,28 @@ mod tests {
         assert_eq!(e.placed.as_ref().unwrap().lines.values().filter(|l| !l.construction).count(), 4);
         // Done once: nothing more to project.
         assert!(e.project_sections().unwrap().is_none());
+    }
+
+    /// A circle of a sketch on a tilted plane is offered and projected as an ellipse (D218).
+    #[test]
+    fn a_slanted_circle_is_projected_as_an_ellipse() {
+        let mut e = editor(json!({"points": {}}), false);
+        let tilted: datum_graph::Op = serde_json::from_value(json!({"op": "sketch",
+            "plane": {"origin": [-1000, -1000, 0], "x_axis": [1, 0, 0], "normal": [0, -1, 1]},
+            "sketch": {"points": {"o": [1010, 1010]}, "circles": {"ring": {"center": "o", "diameter": 8}},
+                       "constraints": [{"type": "fix", "point": "o"}]}}))
+        .unwrap();
+        let ring = tilted.eval(TopoId::derive("feature").tag("tilted").finish(), &[]).unwrap();
+        e.context.sources = vec![("tilted".into(), std::sync::Arc::new(ring))];
+        e.draft.projectable_on = None;
+        let mut patch = Patch::new(&e);
+        patch.set("project", "e1", json!({"from": "tilted", "element": "ring"}));
+        e.apply(patch.done().unwrap());
+        let c = e.draft.projectable.iter().find(|c| c.entry.1 == "ring").expect("offered");
+        assert!(matches!(c.shape, Flat::Polyline(_)), "{c:?}");
+        let p = e.placed.as_ref().unwrap();
+        assert!(p.ellipses["e1"].construction, "{:?}", p.ellipses);
+        assert!(SketchEdit::curve_points(p, "e1").is_some_and(|pts| pts.len() > 2));
     }
 
     #[test]

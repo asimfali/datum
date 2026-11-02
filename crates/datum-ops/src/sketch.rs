@@ -142,6 +142,38 @@ enum Shape {
     Circle(End, Vec3, f64),
 }
 
+/// An ellipse a projection made (D218): a circle or an arc seen at a slant. Its points are
+/// fixed: around point `center`, `major` its half major axis as a vector in sketch coordinates,
+/// `minor` its half minor axis (along `major` turned a quarter counterclockwise); an arc of it
+/// runs counterclockwise from point `ends[0]` to `ends[1]`, none: whole. Not a curve of the
+/// solver: points are dimensioned, nothing is put on it; it bounds no profile yet.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ellipse {
+    pub center: String,
+    pub major: Vec2,
+    pub minor: f64,
+    pub ends: Option<[String; 2]>,
+    pub construction: bool,
+}
+
+impl Ellipse {
+    /// Its point at parameter `t` (radians from the major axis), given its centre.
+    pub fn at(&self, center: Vec2, t: f64) -> Vec2 {
+        let (s, c) = libm::sincos(t);
+        let k = self.minor / (self.major.x * self.major.x + self.major.y * self.major.y).sqrt();
+        Vec2::new(center.x + self.major.x * c - self.major.y * k * s, center.y + self.major.y * c + self.major.x * k * s)
+    }
+
+    /// The parameter of `p`, a point of it, given its centre.
+    pub fn parameter(&self, center: Vec2, p: Vec2) -> f64 {
+        let d = Vec2::new(p.x - center.x, p.y - center.y);
+        let len2 = self.major.x * self.major.x + self.major.y * self.major.y;
+        let along = (d.x * self.major.x + d.y * self.major.y) / len2;
+        let across = (d.y * self.major.x - d.x * self.major.y) / (len2.sqrt() * self.minor);
+        libm::atan2(across, along)
+    }
+}
+
 /// A solved sketch in its place: the value of a sketch feature.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Placed {
@@ -158,6 +190,8 @@ pub struct Placed {
     pub arcs: BTreeMap<String, Arc>,
     /// Circles, each diameter a number.
     pub circles: BTreeMap<String, Circle>,
+    /// Ellipses projections made (D218).
+    pub ellipses: BTreeMap<String, Ellipse>,
     /// The pairs of curves the sketch makes tangent, each in name order: a sheet's path goes
     /// smoothly from one to the other, a fact the sketch states rather than one measured.
     pub tangent: BTreeSet<[String; 2]>,
@@ -334,10 +368,11 @@ fn projected<'a>(
     normal: Vec3,
     project: &BTreeMap<String, Projection>,
     source: &dyn Fn(Option<&str>) -> Result<Source<'a>, BrepError>,
-) -> Result<(Sketch, BTreeMap<String, Vec<Vec2>>), BrepError> {
+) -> Result<Projected, BrepError> {
     let mut s = sketch.clone();
     let mut now = BTreeMap::new();
-    let [o, x, y, _] = *frame;
+    let mut ellipses = BTreeMap::new();
+    let [o, x, y, z] = *frame;
     let flat = |p: Vec3| Vec2::new((p - o).dot(x), (p - o).dot(y));
     // The sketch's point for each point of a source, by input and what it is there.
     let mut shared: BTreeMap<(Option<&str>, String), String> = BTreeMap::new();
@@ -377,7 +412,7 @@ fn projected<'a>(
                 None => n,
             })
         };
-        let slanted = || BrepError::Unsupported(format!("projection `{name}`: an arc or circle is not parallel to the sketch plane"));
+        let edge_on = || BrepError::Unsupported(format!("projection `{name}`: an arc or circle seen edge on falls on a line (later)"));
         for (name, shape) in shapes {
             if s.lines.contains_key(&name) || s.arcs.contains_key(&name) || s.circles.contains_key(&name) {
                 return Err(BrepError::Sketch(format!("the sketch already has a curve `{name}`")));
@@ -394,19 +429,34 @@ fn projected<'a>(
                     let (from, to) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
                     s.lines.insert(name.clone(), Line { from, to, construction });
                 }
+                // At a slant, an ellipse (D218).
+                Shape::Arc(c, a, b, axis) if !parallel(axis, normal) => {
+                    let r = (a.0 - c.0).dot(a.0 - c.0).sqrt();
+                    let (major, minor) = slant(axis, z, x, y).ok_or_else(edge_on)?;
+                    let center = add(&mut s, format!("{name}.center"), c)?;
+                    let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
+                    let ends = if axis.dot(z) > 0.0 { [start, end] } else { [end, start] };
+                    ellipses.insert(
+                        name.clone(),
+                        Ellipse { center, major: Vec2::new(major.x * r, major.y * r), minor: minor * r, ends: Some(ends), construction },
+                    );
+                }
+                Shape::Circle(c, axis, d) if !parallel(axis, normal) => {
+                    let (major, minor) = slant(axis, z, x, y).ok_or_else(edge_on)?;
+                    let center = add(&mut s, format!("{name}.center"), c)?;
+                    let r = 0.5 * d;
+                    ellipses.insert(
+                        name.clone(),
+                        Ellipse { center, major: Vec2::new(major.x * r, major.y * r), minor: minor * r, ends: None, construction },
+                    );
+                }
                 Shape::Arc(c, a, b, axis) => {
-                    if !parallel(axis, normal) {
-                        return Err(slanted());
-                    }
                     let center = add(&mut s, format!("{name}.center"), c)?;
                     let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
                     let (from, to) = if axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
                     s.arcs.insert(name.clone(), Arc { center, from, to, construction });
                 }
-                Shape::Circle(c, axis, d) => {
-                    if !parallel(axis, normal) {
-                        return Err(slanted());
-                    }
+                Shape::Circle(c, _, d) => {
                     let center = add(&mut s, format!("{name}.center"), c)?;
                     s.circles.insert(name.clone(), Circle { center, diameter: d.into(), construction });
                 }
@@ -419,7 +469,23 @@ fn projected<'a>(
             now.insert(name.clone(), points);
         }
     }
-    Ok((s, now))
+    Ok((s, now, ellipses))
+}
+
+/// A sketch with its projections: the sketch with their points and curves, where each single
+/// projection's points stand, and the ellipses they made.
+type Projected = (Sketch, BTreeMap<String, Vec<Vec2>>, BTreeMap<String, Ellipse>);
+
+/// How a circle about `axis` falls on the plane of unit normal `z` and axes `x`, `y`: the unit
+/// direction of its major axis in sketch coordinates (the diameter that stays whole, along the
+/// line its plane meets the sketch's) and how much of its radius is left across it, `|axis·z|`
+/// of a unit axis. None seen edge on: it falls on a line.
+fn slant(axis: Vec3, z: Vec3, x: Vec3, y: Vec3) -> Option<(Vec2, f64)> {
+    let axis = axis * (1.0 / axis.dot(axis).sqrt());
+    let along = axis.cross(z);
+    let len = along.dot(along).sqrt();
+    let minor = axis.dot(z).abs();
+    (minor > 0.0 && len > 0.0).then(|| (Vec2::new(along.dot(x) / len, along.dot(y) / len), minor))
 }
 
 /// The edge or vertex with ID `id` (hex) of `body`, for projection `name`.
@@ -679,11 +745,12 @@ pub fn place<'a>(
     };
     let with_projections;
     let mut now = BTreeMap::new();
+    let mut ellipses = BTreeMap::new();
     let sketch = match developed {
         _ if project.is_empty() => sketch,
         Some(_) => return Err(BrepError::Unsupported("projections into a sketch on a cylinder face".into())),
         None => {
-            (with_projections, now) = projected(sketch, &frame, normal, project, source)?;
+            (with_projections, now, ellipses) = projected(sketch, &frame, normal, project, source)?;
             &with_projections
         }
     };
@@ -698,6 +765,7 @@ pub fn place<'a>(
         lines: sketch.lines.clone(),
         arcs: sketch.arcs.clone(),
         circles: sketch.circles.clone(),
+        ellipses,
         tangent: sketch
             .constraints
             .iter()
@@ -768,6 +836,19 @@ pub fn place<'a>(
                 bytes(&[d.turn.x.to_bits().to_le_bytes(), d.turn.y.to_bits().to_le_bytes()].concat());
             }
         }
+    }
+    // Only a sketch with ellipses hashes them (D218): the rest keep their hashes.
+    for (name, e) in &placed.ellipses {
+        bytes(b"ellipse");
+        bytes(name.as_bytes());
+        bytes(e.center.as_bytes());
+        for c in [e.major.x, e.major.y, e.minor] {
+            bytes(&c.to_bits().to_le_bytes());
+        }
+        for end in e.ends.iter().flatten() {
+            bytes(end.as_bytes());
+        }
+        bytes(&[u8::from(e.construction)]);
     }
     // Only a sketch with tangents hashes them: the rest keep their hashes.
     for [a, b] in &placed.tangent {
@@ -972,6 +1053,7 @@ pub fn chosen<'s>(feature: TopoId, s: &'s Placed, names: &[String]) -> Result<Co
 type Named<'s> = (datum_sketch::Contours<'s>, Vec<Found>, Vec<Vec<&'s str>>);
 
 fn named_loops(feature: TopoId, s: &Placed) -> Result<Named<'_>, BrepError> {
+    no_ellipse(s, &|_| true)?;
     let keep = |_: &str, construction: bool| !construction;
     let found = contours(&s.lines, &s.arcs, &keep);
     if let Some(p) = found.branches.first() {
@@ -981,6 +1063,14 @@ fn named_loops(feature: TopoId, s: &Placed) -> Result<Named<'_>, BrepError> {
     let circles = s.circles.iter().filter(|(_, c)| !c.construction).map(|(n, _)| vec![n.as_str()]);
     let curves = found.loops.iter().map(|c| c.iter().map(|st| st.curve).collect()).chain(circles).collect();
     Ok((found, loops, curves))
+}
+
+/// An ellipse among the profile curves `keep` keeps is refused (D218): it bounds no profile yet.
+fn no_ellipse(s: &Placed, keep: &dyn Fn(&str) -> bool) -> Result<(), BrepError> {
+    match s.ellipses.iter().find(|(n, e)| !e.construction && keep(n)) {
+        Some((n, _)) => Err(BrepError::Unsupported(format!("an ellipse bounds no profile yet: make `{n}` construction (Q)"))),
+        None => Ok(()),
+    }
 }
 
 /// The curves of the innermost closed loop of `s` around point `p` (D191: a click inside a
@@ -998,6 +1088,9 @@ pub fn contour_at(feature: TopoId, s: &Placed, p: Vec2) -> Option<Vec<String>> {
 /// lowest point (see [`contours`]); then circles, each a loop of three arcs from its own points at
 /// 0°, 120° and 240°.
 pub(crate) fn loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool, construction: bool) -> Result<Vec<Found>, BrepError> {
+    if !construction {
+        no_ellipse(s, keep)?;
+    }
     let keep = |name: &str, c: bool| keep(name) && (construction || !c);
     let found = contours(&s.lines, &s.arcs, &keep);
     if let Some(p) = found.odd() {

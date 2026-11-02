@@ -625,7 +625,12 @@ impl SketchEdit {
         let placed = self.placed.as_ref().ok();
         let projected_construction = |n: &str| {
             placed.and_then(|p| {
-                p.lines.get(n).map(|l| l.construction).or(p.arcs.get(n).map(|a| a.construction)).or(p.circles.get(n).map(|c| c.construction))
+                p.lines
+                    .get(n)
+                    .map(|l| l.construction)
+                    .or(p.arcs.get(n).map(|a| a.construction))
+                    .or(p.circles.get(n).map(|c| c.construction))
+                    .or(p.ellipses.get(n).map(|e| e.construction))
             })
         };
         let projected: Vec<(&String, bool)> = self
@@ -1025,6 +1030,19 @@ impl SketchEdit {
         if let Some(l) = p.lines.get(name) {
             return Some(vec![at(&l.from)?, at(&l.to)?]);
         }
+        if let Some(e) = p.ellipses.get(name) {
+            let c = p.solved.points.get(&e.center)?;
+            let (start, sweep) = match &e.ends {
+                Some([f, t]) => {
+                    let (f, t) = (e.parameter(*c, *p.solved.points.get(f)?), e.parameter(*c, *p.solved.points.get(t)?));
+                    let sweep = (t - f).rem_euclid(TAU);
+                    (f, if sweep == 0.0 { TAU } else { sweep })
+                }
+                None => (0.0, TAU),
+            };
+            let n = (sweep / TAU * 64.0).ceil().max(1.0) as usize;
+            return Some((0..=n).map(|k| e.at(*c, start + sweep * k as f64 / n as f64)).map(|q| [q.x, q.y]).collect());
+        }
         let (c, r, start, sweep) = if let Some(a) = p.arcs.get(name) {
             let (c, f, t) = (at(&a.center)?, at(&a.from)?, at(&a.to)?);
             let start = libm::atan2(f[1] - c[1], f[0] - c[0]);
@@ -1071,6 +1089,9 @@ impl SketchEdit {
         }
         if let Some(a) = p.arcs.get(name) {
             return vec![a.center.clone(), a.from.clone(), a.to.clone()];
+        }
+        if let Some(e) = p.ellipses.get(name) {
+            return std::iter::once(e.center.clone()).chain(e.ends.iter().flatten().cloned()).collect();
         }
         p.circles.get(name).map(|c| vec![c.center.clone()]).unwrap_or_default()
     }
@@ -1208,6 +1229,7 @@ impl SketchEdit {
             .keys()
             .chain(p.arcs.keys())
             .chain(p.circles.keys())
+            .chain(p.ellipses.keys())
             .filter_map(|n| Some((distance(n)?, n)))
             .filter(|(d, _)| *d <= NEAR_CURVE)
             .min_by(|a, b| a.0.total_cmp(&b.0))
@@ -1507,9 +1529,10 @@ impl SketchEdit {
                 .map(|l| l.construction)
                 .or_else(|| p.arcs.get(n).map(|a| a.construction))
                 .or_else(|| p.circles.get(n).map(|c| c.construction))
+                .or_else(|| p.ellipses.get(n).map(|e| e.construction))
                 .unwrap_or(false)
         };
-        for n in p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()) {
+        for n in p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()).chain(p.ellipses.keys()) {
             let Some(pts) = Self::curve_points(p, n) else { continue };
             let pick = self.projection_of(n).map_or(Pick::Curve(n.clone()), Pick::Projection);
             let width = if marked(&pick) { 3.0 } else { 1.6 };
