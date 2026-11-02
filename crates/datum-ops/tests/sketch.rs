@@ -241,10 +241,10 @@ fn projected_arc_and_its_centre() {
     let placed = s.sketch().unwrap();
     let h = placed.solved.points["h"];
     assert!((h.x - 7.0).abs() < 1e-12 && (h.y - 3.0).abs() < 1e-12 && placed.arcs["rim"].construction, "{h:?}");
-    // Seen from the side the arc would be an ellipse: refused, not approximated.
+    // Seen edge on from the side the arc falls on a line: refused, not approximated.
     let side = serde_json::json!({"plane": {"origin": [0, 0, 0], "x_axis": [0, 1, 0], "normal": [1, 0, 0]}, "project": {"rim": {"id": rim}}});
     match eval(&sketch_op(serde_json::json!({"points": {}}), side), "s", &[&disk]) {
-        Err(BrepError::Unsupported(m)) => assert!(m.contains("not parallel"), "{m}"),
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("edge on"), "{m}"),
         r => panic!("expected a refusal, got {r:?}"),
     }
 }
@@ -579,12 +579,12 @@ fn projection_onto_a_flipped_plane() {
 #[test]
 fn projection_onto_a_side_plane() {
     let src = source_sketch();
-    // Plane with normal X: the arc and the circle would be ellipses.
+    // Plane with normal X: the arc and the circle are seen edge on.
     let side = plane_at(0.0, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
     for element in ["arc", "ring"] {
         let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"x": {"from": "src", "element": element}}}));
         match eval_named(&t, "t", &[&side, &src], &["wp", "src"]) {
-            Err(BrepError::Unsupported(m)) => assert!(m.contains("not parallel"), "{m}"),
+            Err(BrepError::Unsupported(m)) => assert!(m.contains("edge on"), "{m}"),
             r => panic!("expected a refusal for {element}, got {:?}", r.map(|_| ())),
         }
     }
@@ -807,4 +807,49 @@ fn section_and_face_errors() {
     // A lost face.
     let r = project_into(&wp, &plate, serde_json::json!({"f": {"from": "from", "face": "0123456789abcdef0123456789abcdef"}}));
     assert!(matches!(r, Err(BrepError::LostReference(_))));
+}
+
+/// A circle and an arc seen at a slant fall as an ellipse and an arc of it (D218): centre and
+/// ends fixed where they fall, the half axes the radius and the radius times the cosine of the
+/// slant; construction, and refused as a profile.
+#[test]
+fn a_slanted_circle_projects_as_an_ellipse() {
+    let src = source_sketch();
+    // The plane through the X axis, tilted 60° from XY: normal (0, -sin 60°, cos 60°).
+    let (s60, c60) = (3f64.sqrt() / 2.0, 0.5);
+    let tilted = plane_at(0.0, Vec3::new(0.0, -s60, c60), Vec3::new(1.0, 0.0, 0.0));
+    let t = sketch_op(
+        serde_json::json!({"points": {}}),
+        serde_json::json!({"project": {"rg": {"from": "src", "element": "ring"}, "ac": {"from": "src", "element": "arc"}}}),
+    );
+    let t = eval_named(&t, "t", &[&tilted, &src], &["wp", "src"]).unwrap();
+    let p = t.sketch().unwrap();
+    let ring = &p.ellipses["rg"];
+    let major = (ring.major.x * ring.major.x + ring.major.y * ring.major.y).sqrt();
+    assert_close(major, 3.0);
+    assert_close(ring.minor, 3.0 * c60);
+    assert!(ring.construction && ring.ends.is_none() && !p.circles.contains_key("rg"));
+    // The ring's centre (20, 5) falls at x 20, y 5·cos 60° along the tilted Y.
+    let c = p.solved.points["rg.center"];
+    assert_close(c.x, 20.0);
+    assert_close(c.y, 5.0 * c60);
+    // The arc's ends lie on its ellipse, at its fixed points.
+    let arc = &p.ellipses["ac"];
+    let centre = p.solved.points["ac.center"];
+    for end in arc.ends.as_ref().unwrap() {
+        let q = p.solved.points[end];
+        let back = arc.at(centre, arc.parameter(centre, q));
+        assert!((back.x - q.x).abs() < 1e-9 && (back.y - q.y).abs() < 1e-9, "{end}: {q:?} {back:?}");
+    }
+    // In the profile it is refused, not approximated.
+    let t = sketch_op(
+        serde_json::json!({"points": {}}),
+        serde_json::json!({"project": {"rg": {"from": "src", "element": "ring", "construction": false}}}),
+    );
+    let t = eval_named(&t, "t", &[&tilted, &src], &["wp", "src"]).unwrap();
+    assert!(!t.sketch().unwrap().ellipses["rg"].construction);
+    match eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 1})), "x", &[&t]) {
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("ellipse"), "{m}"),
+        r => panic!("expected a refusal, got {:?}", r.map(|_| ())),
+    }
 }

@@ -127,7 +127,7 @@ impl Scene {
                             s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
                         }
                     };
-                    let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys());
+                    let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()).chain(p.ellipses.keys());
                     for pts in curves.filter_map(|n| SketchEdit::curve_points(p, n)) {
                         chords(pts);
                     }
