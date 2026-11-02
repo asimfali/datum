@@ -17,6 +17,7 @@ use crate::{SketchPatch, add_feature, feature_json, library, parse_doc, to_json_
 
 mod extrude;
 mod sheet;
+pub use sheet::{sheet_extent, sheet_width};
 
 /// The model being edited, its cache and its latest evaluation. Every edit re-evaluates; the
 /// cache makes that cost proportional to what changed.

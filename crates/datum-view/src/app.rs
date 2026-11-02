@@ -756,6 +756,8 @@ struct FlangeForm {
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
+    /// Changing feature `name`, opened from the tree (D217): its edges stay.
+    editing: bool,
 }
 
 /// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
@@ -911,6 +913,42 @@ struct Extrusion {
     sent: Option<Json>,
     /// Whether the depth's text has been selected (on the form's first frame).
     selected: bool,
+    /// Changing feature `name`, opened from the tree (D217): its sketch and target stay.
+    editing: bool,
+}
+
+impl Extrusion {
+    /// The `edit` of the feature it changes (D217): the mode in force and the fields the form
+    /// holds. A body of its own stays one, a change of another body stays a change of it.
+    fn changes(&self, depth: Json) -> (&'static str, Json) {
+        let mut p = json!({"name": self.name});
+        match self.kind {
+            Kind::Extrusion => {
+                let mode = self.mode.unwrap_or("new");
+                p["mode"] = json!(mode);
+                let through = self.through && mode == "cut";
+                p["through"] = json!(through);
+                p["symmetric"] = json!(self.symmetric && !through);
+                p["z1"] = if through { Json::Null } else { depth };
+                (mode, p)
+            }
+            Kind::Sheet(..) => {
+                let (z0, z1) = datum_model::sheet_extent(&depth, self.symmetric).unwrap_or((json!(0), depth));
+                (p["z0"], p["z1"], p["side"]) = (z0, z1, json!(self.side));
+                ("sheet", p)
+            }
+            Kind::Face => {
+                (p["flip"], p["symmetric"]) = (json!(self.flip && !self.symmetric), json!(self.symmetric));
+                ("plate", p)
+            }
+            Kind::SheetCut => ("cut", p),
+        }
+    }
+
+    /// The command it sends: the feature's, or `edit`.
+    fn command(&self) -> &'static str {
+        if self.editing { "edit" } else { self.kind.command() }
+    }
 }
 
 /// The modes of an extrusion, as the form offers them.
@@ -921,6 +959,9 @@ impl Extrusion {
     /// a new body takes `next_rule`, the rule of a part (of a sheet, for sheet metal).
     fn params(&self, sketch: &str, on_face: bool, next_rule: Option<&str>) -> (&'static str, Json) {
         let depth = value_of(&self.depth);
+        if self.editing {
+            return self.changes(depth);
+        }
         if let Kind::Face = self.kind {
             let mut params = json!({"name": self.name, "sketch": sketch});
             if !self.profiles.is_empty() {
@@ -2744,20 +2785,6 @@ impl Viewer {
                             }
                         });
                     }
-                    // Sheet metal: the side of the path its thickness lies on, flipped by a click.
-                    None if op == "sheet" => {
-                        ui.horizontal(|ui| {
-                            tree.label(ui, &self.i18n, f, "✔", op);
-                            let side = serde_json::from_value::<datum_ops::Side>(f["side"].clone()).unwrap_or(datum_ops::Side::Left);
-                            if ui
-                                .button(self.i18n.f("side", "Side: { $side }", &[("side", side_name(&self.i18n, side))]))
-                                .on_hover_text(self.i18n.t("side-hint", "Thickness side of the path: left, right, middle"))
-                                .clicked()
-                            {
-                                edit = Some((bare.to_string(), json!({"side": side.next()})));
-                            }
-                        });
-                    }
                     // A work plane: what it is offset from, and the offset, changed in place.
                     None if op == "plane" => {
                         ui.horizontal(|ui| {
@@ -2778,7 +2805,7 @@ impl Viewer {
                         });
                     }
                     // Changed in the form it was made in, its values in it.
-                    None if matches!(op, "revolve" | "rolled" | "trim") => {
+                    None if matches!(op, "revolve" | "rolled" | "trim" | "extrude" | "sheet" | "plate" | "flange") => {
                         ui.horizontal(|ui| {
                             tree.label(ui, &self.i18n, f, "✔", op);
                             let hint = self.i18n.t("edit-feature", "Change it");
@@ -3502,6 +3529,7 @@ impl Viewer {
             at,
             sent: None,
             selected: false,
+            editing: false,
         });
     }
 
@@ -3606,6 +3634,53 @@ impl Viewer {
             Some("trim") => {
                 self.trim =
                     Some(TrimForm { name: name.to_string(), body: input(0), plane: input(1), flip: f["flip"] == true, editing: true, sent: None });
+            }
+            Some("flange") => {
+                self.flange = Some(FlangeForm {
+                    name: name.to_string(),
+                    height: definition(&f["height"]),
+                    angle: if f["angle"].is_null() { "90".into() } else { definition(&f["angle"]) },
+                    flip: f["flip"] == true,
+                    fresh: true,
+                    sent: None,
+                    editing: true,
+                });
+            }
+            Some(op @ ("extrude" | "sheet" | "plate")) => {
+                let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array().cloned()).unwrap_or_default();
+                let is_sketch = |n: &str| features.iter().any(|g| g["name"] == n && g["op"] == "sketch");
+                let sketch = f["inputs"].as_array().into_iter().flatten().filter_map(Json::as_str).find(|n| is_sketch(n)).map(String::from);
+                let (depth, symmetric) = match op {
+                    "sheet" => {
+                        let (w, s) = datum_model::sheet_width(&f["z0"], &f["z1"]);
+                        (definition(&w), s)
+                    }
+                    _ => (if f["z1"].is_null() { "10".into() } else { definition(&f["z1"]) }, f["symmetric"] == true),
+                };
+                let kind = match op {
+                    "sheet" => Kind::Sheet(f["path"].as_str().unwrap_or_default().to_string(), f["start"].as_str().map(String::from)),
+                    "plate" => Kind::Face,
+                    _ if f["wall"] == true => Kind::SheetCut,
+                    _ => Kind::Extrusion,
+                };
+                // A body of its own is written without `mode`.
+                let mode = EXTRUDE_MODES.into_iter().chain(["intersect"]).find(|m| f["mode"] == *m).or(Some("new"));
+                self.extrusion = Some(Extrusion {
+                    sketch,
+                    name: name.to_string(),
+                    profiles: f["profiles"].as_array().into_iter().flatten().filter_map(Json::as_str).map(String::from).collect(),
+                    depth,
+                    symmetric,
+                    through: f["through"] == true,
+                    mode,
+                    kind,
+                    flip: f["flip"] == true,
+                    side: serde_json::from_value(f["side"].clone()).unwrap_or(datum_ops::Side::Left),
+                    at: self.viewport.center(),
+                    sent: None,
+                    selected: false,
+                    editing: true,
+                });
             }
             _ => {}
         }
@@ -3826,8 +3901,15 @@ impl Viewer {
         self.close_revolve();
         self.picking = None;
         self.under = None;
-        self.flange =
-            Some(FlangeForm { name: self.feature_name("flange"), height: "20".into(), angle: "90".into(), flip: false, fresh: true, sent: None });
+        self.flange = Some(FlangeForm {
+            name: self.feature_name("flange"),
+            height: "20".into(),
+            angle: "90".into(),
+            flip: false,
+            fresh: true,
+            sent: None,
+            editing: false,
+        });
     }
 
     /// The flange form: height and angle (numbers or formulas), the side; the command previewed at
@@ -3835,12 +3917,15 @@ impl Viewer {
     /// Esc or Cancel drops it.
     fn flange_window(&mut self, ctx: &egui::Context) {
         let Some(f) = &mut self.flange else { return };
-        let Some((body, _)) = self.flange_edges.first().cloned() else {
-            self.flange = None;
-            return;
-        };
         let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
-        let params = flange_params(&f.name, &body, &edges, &f.height, &f.angle, f.flip);
+        let (command, params) = match self.flange_edges.first() {
+            _ if f.editing => ("edit", json!({"name": f.name, "height": value_of(&f.height), "angle": value_of(&f.angle), "flip": f.flip})),
+            Some((body, _)) => ("add", flange_params(&f.name, body, &edges, &f.height, &f.angle, f.flip)),
+            None => {
+                self.flange = None;
+                return;
+            }
+        };
         // The preview of what the form says now; until it comes, none.
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
@@ -3890,11 +3975,10 @@ impl Viewer {
             self.flange = None;
             self.flange_edges.clear();
             self.send(Request::Preview(None));
-            self.send(Request::Command("add", params));
+            self.send(Request::Command(command, params));
         } else if f.sent.as_ref() != Some(&params) {
-            let params = flange_params(&f.name, &body, &edges, &f.height, &f.angle, f.flip);
             f.sent = Some(params.clone());
-            self.send(Request::Preview(Some(("add", params))));
+            self.send(Request::Preview(Some((command, params))));
         }
     }
 
@@ -3932,8 +4016,9 @@ impl Viewer {
         let Some(x) = &self.extrusion else { return };
         let (sheet, face, cut) = (matches!(x.kind, Kind::Sheet(..)), matches!(x.kind, Kind::Face), matches!(x.kind, Kind::SheetCut));
         let next_rule = if sheet || face { self.sheet_rule() } else { self.part_rule() };
-        // Sheet metal is made by a sheet rule: without one the form only says so.
-        let refused = (sheet || face) && next_rule.is_none();
+        // Sheet metal is made by a sheet rule: without one the form only says so. A change keeps
+        // the part's rule.
+        let refused = (sheet || face) && next_rule.is_none() && !x.editing;
         let Some(x) = &mut self.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         let Some(sketch) = x.sketch.clone() else {
@@ -4003,8 +4088,10 @@ impl Viewer {
                             }
                             return;
                         }
-                        // Every mode at once, the one in force lit: a click chooses that one.
-                        for mode in EXTRUDE_MODES {
+                        // Every mode at once, the one in force lit: a click chooses that one. In
+                        // a change, a body of its own stays one; a change of a body, of it.
+                        let modes = EXTRUDE_MODES.into_iter().filter(|m| !x.editing || (*m == "new") == (shown == "new"));
+                        for mode in modes.filter(|m| !x.editing || *m != "new") {
                             if ui.selectable_label(shown == mode, mode_name(&self.i18n, mode)).clicked() {
                                 x.mode = Some(mode);
                             }
@@ -4024,6 +4111,9 @@ impl Viewer {
                     }
                     None => {
                         ui.weak("…");
+                    }
+                    Some(Ok(_)) if x.editing => {
+                        ui.weak(self.i18n.t("edit-ready", "Enter: change it"));
                     }
                     Some(Ok(reply)) if face => {
                         let (body, rule) = (reply["body"].as_str().unwrap_or_default(), next_rule.as_deref().unwrap_or_default());
@@ -4047,7 +4137,7 @@ impl Viewer {
             });
         });
         let params = x.params(&sketch, on_face, next_rule.as_deref()).1;
-        let command = x.kind.command();
+        let command = x.command();
         if esc {
             self.close_extrusion();
         } else if !refused {
@@ -7184,18 +7274,25 @@ mod tests {
         assert_eq!(names(Some("sketch1")), ["plate"]);
     }
 
-    /// A sheet's thickness side flips with one click: left, right, middle.
+    /// A sheet's pencil opens its form (D217): its width and side as the file has them, a change.
     #[test]
-    fn the_side_of_a_sheet_flips() {
-        let (mut v, inbox) = viewer("sheet_panel.json");
-        let mut h = egui_kittest::Harness::builder().with_size([360.0, 600.0]).build_ui(|ui| {
-            egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
-        });
+    fn a_sheet_is_changed_from_its_row() {
+        let (v, _inbox) = viewer("sheet_panel.json");
+        let mut h = egui_kittest::Harness::builder().with_size([360.0, 600.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
+            },
+            v,
+        );
         h.run();
-        h.get_by_label("Side: left").click();
+        let sheet = h.state().model.as_ref().unwrap().inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == "panel").unwrap().clone();
+        h.get_all_by_label("Change it").next().unwrap().click();
         h.run();
-        let sent = inbox.try_recv();
-        assert!(matches!(&sent, Ok(Request::Command("edit", fields)) if *fields == json!({"name": "panel", "side": "right"})), "an edit of the side");
+        let x = h.state().extrusion.as_ref().expect("the form");
+        let (width, symmetric) = datum_model::sheet_width(&sheet["z0"], &sheet["z1"]);
+        assert!(x.editing && x.name == "panel" && matches!(x.kind, Kind::Sheet(..)));
+        assert_eq!((x.depth.clone(), x.symmetric), (definition(&width), symmetric));
+        assert_eq!(json!(x.side), sheet["side"]);
     }
 
     /// A work plane's row says what it is offset from; its offset changes in place, Enter.
@@ -7752,6 +7849,7 @@ mod tests {
             at: egui::Pos2::ZERO,
             sent: None,
             selected: false,
+            editing: false,
         };
         let rule = h.state().part_rule();
         assert_eq!(x("new").params("s", false, rule.as_deref()).1["rule"], "body");
@@ -7834,6 +7932,37 @@ mod tests {
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)));
+    }
+
+    /// The pencil of an extrusion opens its form with its values (D217): its depth formula, not
+    /// symmetric, a body of its own; made symmetric, the form previews and sends an `edit`.
+    #[test]
+    fn an_extrusion_is_changed_from_the_tree() {
+        let (v, inbox) = viewer("symmetric_plate.json");
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.extrusion_form(ui.ctx()), v);
+        h.state_mut().reedit("plate");
+        h.run();
+        let x = h.state().extrusion.as_ref().unwrap();
+        assert!(x.editing && x.depth == "t" && !x.symmetric && x.sketch.as_deref() == Some("outline") && x.mode == Some("new"));
+        h.state_mut().extrusion.as_mut().unwrap().symmetric = true;
+        h.run();
+        let want = json!({"name": "plate", "mode": "new", "through": false, "symmetric": true, "z1": "t"});
+        let previews: Vec<Request> = inbox.try_iter().collect();
+        assert!(matches!(previews.last(), Some(Request::Preview(Some(("edit", p)))) if *p == want), "{previews:?}");
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)));
+    }
+
+    /// A sheet's width and symmetry come back from its `z0` and `z1`, as the session made them.
+    #[test]
+    fn a_sheet_width_reads_back() {
+        for (w, sym) in [(json!(30.0), true), (json!("w + 2"), true), (json!(12.0), false)] {
+            let (z0, z1) = datum_model::sheet_extent(&w, sym).unwrap();
+            assert_eq!(datum_model::sheet_width(&z0, &z1), (w.clone(), sym), "{z0} {z1}");
+        }
     }
 
     /// Esc drops the trim form and its preview.

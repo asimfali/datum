@@ -185,6 +185,7 @@ side-middle = посередине
 offset = смещение
 edit-sketch = Править эскиз
 edit-feature = Изменить
+edit-ready = Enter — изменить
 feature-reset-hint = Изменено в этом варианте: вернуть как у родителя
 feature-on-hint = Включена, пока { $formula } не равно 0
 feature-off-hint = Выключена: операция передаёт вход дальше без изменений — так вариант обходится без операции родителя

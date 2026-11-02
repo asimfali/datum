@@ -9,20 +9,46 @@ use serde_json::{Map, Value, json};
 use super::{Session, text};
 use crate::add_feature;
 
+/// The `z0` and `z1` of sheet metal `width` wide (a number or a formula) along the sketch's
+/// normal: from the sketch, or half each way if `symmetric`. One place for the session and the
+/// window's form.
+pub fn sheet_extent(width: &Value, symmetric: bool) -> Result<(Value, Value), String> {
+    match (symmetric, width) {
+        (false, _) => Ok((json!(0), width.clone())),
+        (true, Value::Number(n)) => {
+            let h = n.as_f64().ok_or("`z1`: a number or a formula")? / 2.0;
+            Ok((json!(-h), json!(h)))
+        }
+        (true, Value::String(f)) => Ok((json!(format!("-({f}) / 2")), json!(format!("({f}) / 2")))),
+        _ => Err("`z1`: a number or a formula".into()),
+    }
+}
+
+/// The width of sheet metal from `z0` to `z1`, and whether it is symmetric: as [`sheet_extent`]
+/// makes them, back. Else the width from `z0` (given as is if `z0` is not 0).
+pub fn sheet_width(z0: &Value, z1: &Value) -> (Value, bool) {
+    match (z0, z1) {
+        (Value::Number(a), Value::Number(b)) if a.as_f64().zip(b.as_f64()).is_some_and(|(a, b)| a == -b && b > 0.0) => {
+            (json!(2.0 * b.as_f64().unwrap_or(0.0)), true)
+        }
+        (Value::String(a), Value::String(b)) => {
+            match (a.strip_prefix("-(").and_then(|r| r.strip_suffix(") / 2")), b.strip_prefix('(').and_then(|r| r.strip_suffix(") / 2"))) {
+                (Some(f), Some(g)) if f == g => (json!(f), true),
+                _ => (z1.clone(), false),
+            }
+        }
+        _ => (z1.clone(), false),
+    }
+}
+
 impl Session {
     /// Adds the sheet metal the `sheet` command's parameters `p` describe and says what it is:
     /// the part and its rule.
     pub(super) fn sheet(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
         let width = p.get("z1").cloned().ok_or("sheet metal needs `z1`: how far it goes along the sketch's normal")?;
-        // Symmetric: half each way.
-        let (z0, z1) = match (p.get("symmetric").and_then(Value::as_bool).unwrap_or(false), &width) {
-            (false, _) => (p.get("z0").cloned().unwrap_or(json!(0)), width),
-            (true, Value::Number(n)) => {
-                let h = n.as_f64().ok_or("`z1`: a number or a formula")? / 2.0;
-                (json!(-h), json!(h))
-            }
-            (true, Value::String(f)) => (json!(format!("-({f}) / 2")), json!(format!("({f}) / 2"))),
-            _ => return Err("`z1`: a number or a formula".into()),
+        let (z0, z1) = match p.get("symmetric").and_then(Value::as_bool).unwrap_or(false) {
+            false => (p.get("z0").cloned().unwrap_or(json!(0)), width),
+            true => sheet_extent(&width, true)?,
         };
         let mut fields: Map<String, Value> = ["path", "start"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();
         fields.insert("op".into(), "sheet".into());
