@@ -26,6 +26,7 @@ pub enum Act {
     Arc,
     Circle,
     Point,
+    Project,
     Dimension,
     Measure,
     Rectangle,
@@ -98,7 +99,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 47] = [
+pub const ACTIONS: [Action; 48] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -152,7 +153,15 @@ pub const ACTIONS: [Action; 47] = [
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
     action(Act::Arc, "sketch.arc", "Arc", "Centre, start, end", None, Sketch),
     action(Act::Circle, "sketch.circle", "Circle", "Centre, then a point on it", plain(Key::C), Sketch),
-    action(Act::Point, "sketch.point", "Point", "A point", plain(Key::P), Sketch),
+    action(Act::Point, "sketch.point", "Point", "A point", plain(Key::Period), Sketch),
+    action(
+        Act::Project,
+        "sketch.project",
+        "Project",
+        "Click an edge or vertex of a body, or a point, line, arc or circle of another sketch: it follows its source; Esc ends",
+        plain(Key::P),
+        Sketch,
+    ),
     action(
         Act::Dimension,
         "sketch.dimension",

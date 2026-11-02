@@ -124,3 +124,29 @@ fn a_sketch_follows_the_sketch_it_projects_from() {
     let text = failed.iter().map(|f| f.to_string()).collect::<Vec<_>>().join("; ");
     assert!(text.contains("\"t\"") && text.contains("leg"), "{r}");
 }
+
+/// `edit_sketch` keeps a sketch's inputs to its projections (D214): a projection from another
+/// feature adds it as an input, the last one from it removed takes it away; the work plane the
+/// sketch lies on stays first. A feature after the sketch is no source.
+#[test]
+fn a_sketch_takes_its_sources_as_inputs() {
+    let mut s = Session::default();
+    let src = json!({"points": {"a": [0, 0], "b": [30, 0], "c": [0, 20]}, "lines": {"ab": {"from": "a", "to": "b"}, "ca": {"from": "c", "to": "a"}}});
+    run(&mut s, "add", json!({"name": "skeleton", "op": "sketch", "sketch": src}));
+    run(&mut s, "add", json!({"name": "wp", "op": "plane", "base": "xy", "offset": 15}));
+    run(&mut s, "add", json!({"name": "part", "op": "sketch", "inputs": ["wp"], "sketch": {"points": {}}}));
+    let inputs = |s: &mut Session| feature(s, "part")["inputs"].clone();
+    run(&mut s, "edit_sketch", json!({"name": "part", "project": {"e1": {"from": "skeleton", "element": "ab"}}}));
+    assert_eq!(inputs(&mut s), json!(["wp", "skeleton"]));
+    let f = feature(&mut s, "part");
+    assert!(f.get("error").is_none(), "{f}");
+    assert_eq!(f["status"]["sketch"]["points"]["e1.end"], json!([30.0, 0.0]), "{f}");
+    run(&mut s, "edit_sketch", json!({"name": "part", "project": {"e2": {"from": "skeleton", "element": "ca"}}}));
+    run(&mut s, "edit_sketch", json!({"name": "part", "project": {"e1": null}}));
+    assert_eq!(inputs(&mut s), json!(["wp", "skeleton"]));
+    run(&mut s, "edit_sketch", json!({"name": "part", "project": {"e2": null}}));
+    assert_eq!(inputs(&mut s), json!(["wp"]));
+    run(&mut s, "add", json!({"name": "later", "op": "sketch", "sketch": {"points": {"q": [1, 1]}}}));
+    let e = s.execute("edit_sketch", &json!({"name": "part", "project": {"x": {"from": "later", "element": "q"}}})).unwrap_err();
+    assert!(e.contains("not a feature before it"), "{e}");
+}

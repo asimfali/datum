@@ -4,7 +4,7 @@
 //! of undo each. Snap and inference tolerances are pixels and degrees on the screen: they only
 //! choose which constraints to add, and the solver then holds those exactly.
 
-use datum_brep::{Body, Curve, Ix};
+use datum_brep::Curve;
 use datum_model::SketchPatch;
 use datum_ops::Placed;
 use serde_json::{Map, Value as Json, json};
@@ -24,6 +24,9 @@ pub enum Tool {
     Dimension,
     /// Measure what is clicked (D177): nothing is changed.
     Measure,
+    /// Project what is clicked of the features before the sketch (D214): an edge or vertex of a
+    /// body, a point, line, arc or circle of another sketch.
+    Project,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
     /// Add a geometric constraint of this kind: click what it ties (D118).
@@ -47,10 +50,8 @@ pub enum Snap {
     Middle(String),
     /// A curve of the sketch.
     On(String),
-    /// A vertex of the face the sketch lies on, by ID: projected when used.
-    Vertex(String),
-    /// An edge of that face, by ID: projected when used.
-    Edge(String),
+    /// Geometry to project (D214): [`Draft::projectable`]'s, by index.
+    Source(usize),
     /// Free, but in line with points of the sketch, as AutoCAD's tracking: plumb under point `x`
     /// (its X), level with point `y` (its Y), or both. The new point is tied to them so.
     Track {
@@ -94,13 +95,55 @@ pub struct Heading {
     pub dir: [f64; 2],
 }
 
-/// An edge of the face the sketch lies on, in sketch coordinates: its ID, its ends (vertex ID
-/// and point), and its circle if it is an arc.
-#[derive(Clone, Debug)]
-pub struct FaceEdge {
-    pub id: String,
-    pub ends: [(String, [f64; 2]); 2],
-    pub circle: Option<([f64; 2], f64)>,
+/// Geometry the sketch can project (D214), as it falls on its plane: of feature `from`, the
+/// projection's `entry` (`id` of a body's edge or vertex, `element` of a sketch) and its shape.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Projectable {
+    pub from: String,
+    pub entry: (&'static str, String),
+    pub shape: Flat,
+}
+
+/// A shape in sketch coordinates. An arc runs counterclockwise from angle `start` through
+/// `sweep` (a full turn: a circle).
+#[derive(Clone, Debug, PartialEq)]
+pub enum Flat {
+    Point([f64; 2]),
+    Line([f64; 2], [f64; 2]),
+    Arc { c: [f64; 2], r: f64, start: f64, sweep: f64 },
+}
+
+impl Flat {
+    /// The point of it nearest `q`, if it is beside it (on a line between its ends, on an arc
+    /// within its sweep).
+    fn foot(&self, q: [f64; 2]) -> Option<[f64; 2]> {
+        match *self {
+            Flat::Point(p) => Some(p),
+            Flat::Line(a, b) => foot(&[a, b], q),
+            Flat::Arc { c, r, start, sweep } => {
+                let d = libm::hypot(q[0] - c[0], q[1] - c[1]);
+                let turn = (libm::atan2(q[1] - c[1], q[0] - c[0]) - start).rem_euclid(std::f64::consts::TAU);
+                (d > 0.0 && turn <= sweep).then(|| [c[0] + (q[0] - c[0]) * r / d, c[1] + (q[1] - c[1]) * r / d])
+            }
+        }
+    }
+
+    /// Points along it, to draw.
+    fn points(&self) -> Vec<[f64; 2]> {
+        match *self {
+            Flat::Point(p) => vec![p],
+            Flat::Line(a, b) => vec![a, b],
+            Flat::Arc { c, r, start, sweep } => {
+                let n = ((sweep / std::f64::consts::TAU) * 64.0).ceil().max(2.0) as usize;
+                (0..=n)
+                    .map(|k| {
+                        let (s, co) = libm::sincos(start + sweep * k as f64 / n as f64);
+                        [c[0] + r * co, c[1] + r * s]
+                    })
+                    .collect()
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -147,8 +190,10 @@ pub struct Draft {
     /// Where the cursor would click, and the inferred constraint of a line.
     pub cursor: Option<Spot>,
     pub lean: Option<Lean>,
-    /// The face the sketch lies on, edge by edge.
-    pub face: Vec<FaceEdge>,
+    /// What the sketch can project (D214), offered by the projection tool alone, and the
+    /// sketch's frame it was found for: found again only when the plane moves.
+    pub projectable: Vec<Projectable>,
+    pub projectable_on: Option<[datum_math::Vec3; 4]>,
 }
 
 impl Default for Draft {
@@ -177,7 +222,8 @@ impl Default for Draft {
             last: None,
             cursor: None,
             lean: None,
-            face: Vec::new(),
+            projectable: Vec::new(),
+            projectable_on: None,
         }
     }
 }
@@ -193,26 +239,96 @@ const LEAN_DEG: f64 = 3.0;
 
 const DRAFT: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 
-/// The edges of face `placed.face` of `body`, in the sketch's coordinates. Its arcs lie in its
-/// plane, so they stay circles.
-pub fn face_edges(body: &Body, placed: &Placed) -> Vec<FaceEdge> {
-    let Some(id) = placed.face else { return Vec::new() };
-    let Ok(f) = body.faces().binary_search_by_key(&id, |f| f.id) else { return Vec::new() };
-    let [o, x, y, _] = placed.frame;
+/// What of `sources` (features by name) sketch `placed` can project, as it falls on its plane:
+/// a body's vertices and edges, another sketch's points and curves; an arc or circle only if
+/// it lies parallel to the plane (else it would fall as an ellipse), a line seen end on as its
+/// vertex. Of things that fall on one another (a box's top and bottom edges), the one nearest
+/// the eye, above the plane.
+pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed) -> Vec<Projectable> {
+    let [o, x, y, z] = placed.frame;
     let flat = |p: datum_math::Vec3| [(p - o).dot(x), (p - o).dot(y)];
-    let mut out = Vec::new();
-    for h in body.face_loops(f as Ix).flat_map(|l| body.loop_half_edges(l)) {
-        let edge = &body.edges()[body.half_edges()[h as usize].edge as usize];
-        let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
-        let end = |v: Ix| (format!("{:?}", body.vertices()[v as usize].id), flat(body.point(v)));
-        let circle = match body.edge_curve(edge) {
-            None => None,
-            Some(Curve::Arc(arc)) => Some((flat(arc.center), arc.radius)),
-            Some(Curve::Rolled { .. }) => continue,
+    let height = |p: datum_math::Vec3| (p - o).dot(z);
+    let angle = |c: [f64; 2], p: [f64; 2]| libm::atan2(p[1] - c[1], p[0] - c[0]);
+    // An arc from `a` to `b` counterclockwise about `axis`, as it falls.
+    let arc = |c: datum_math::Vec3, r: f64, a: [f64; 2], b: [f64; 2], axis: datum_math::Vec3| {
+        datum_ops::parallel(axis, z).then(|| {
+            let (c, (a, b)) = (flat(c), if axis.dot(z) > 0.0 { (a, b) } else { (b, a) });
+            let sweep = (angle(c, b) - angle(c, a)).rem_euclid(std::f64::consts::TAU);
+            Flat::Arc { c, r, start: angle(c, a), sweep: if sweep == 0.0 { std::f64::consts::TAU } else { sweep } }
+        })
+    };
+    let mut out: Vec<(f64, Projectable)> = Vec::new();
+    for (from, v) in sources {
+        let mut put = |key: &'static str, name: String, shape: Flat, at: datum_math::Vec3| {
+            out.push((height(at), Projectable { from: from.clone(), entry: (key, name), shape }));
         };
-        out.push(FaceEdge { id: format!("{:?}", edge.id), ends: [end(a), end(b)], circle });
+        if let Some(body) = v.body() {
+            for vx in body.vertices() {
+                put("id", format!("{:?}", vx.id), Flat::Point(flat(vx.point)), vx.point);
+            }
+            for edge in body.edges() {
+                let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
+                let (pa, pb) = (flat(body.point(a)), flat(body.point(b)));
+                let shape = match body.edge_curve(edge) {
+                    None if pa != pb => Some(Flat::Line(pa, pb)),
+                    Some(Curve::Arc(c)) => arc(c.center, c.radius, pa, pb, c.axis),
+                    _ => None,
+                };
+                if let Some(shape) = shape {
+                    put("id", format!("{:?}", edge.id), shape, body.point(a));
+                }
+            }
+        } else if let Some(s) = v.sketch().filter(|s| s.developed.is_none()) {
+            let [so, sx, sy, sz] = s.frame;
+            let at = |n: &str| s.solved.points.get(n).map(|q| so + sx * q.x + sy * q.y);
+            for n in s.solved.points.keys().filter(|n| n.as_str() != datum_ops::ORIGIN) {
+                let p = at(n).unwrap_or(so);
+                put("element", n.clone(), Flat::Point(flat(p)), p);
+            }
+            for (n, l) in &s.lines {
+                if let (Some(a), Some(b)) = (at(&l.from), at(&l.to))
+                    && flat(a) != flat(b)
+                {
+                    put("element", n.clone(), Flat::Line(flat(a), flat(b)), a);
+                }
+            }
+            for (n, a) in &s.arcs {
+                if let (Some(c), Some(p), Some(q)) = (at(&a.center), at(&a.from), at(&a.to)) {
+                    let r = (p - c).dot(p - c).sqrt();
+                    if let Some(shape) = arc(c, r, flat(p), flat(q), sz) {
+                        put("element", n.clone(), shape, c);
+                    }
+                }
+            }
+            for (n, c) in &s.circles {
+                if let (Some(centre), Some(d)) = (at(&c.center), c.diameter.value())
+                    && datum_ops::parallel(sz, z)
+                {
+                    put("element", n.clone(), Flat::Arc { c: flat(centre), r: 0.5 * d, start: 0.0, sweep: std::f64::consts::TAU }, centre);
+                }
+            }
+        }
     }
-    out
+    // Of equal shapes the highest, then the first given: sorted by shape, height down, and kept
+    // once. Bits compare exactly: what falls on one place falls there bit for bit or is another.
+    let key = |f: &Flat| -> Vec<u64> {
+        match *f {
+            Flat::Point(p) => p.map(f64::to_bits).to_vec(),
+            // Either way along.
+            Flat::Line(a, b) => {
+                let mut ends = [a.map(f64::to_bits), b.map(f64::to_bits)];
+                ends.sort_unstable();
+                ends.concat()
+            }
+            Flat::Arc { c, r, start, sweep } => [c[0], c[1], r, start, sweep].map(f64::to_bits).to_vec(),
+        }
+    };
+    let mut keyed: Vec<(Vec<u64>, usize)> = out.iter().enumerate().map(|(i, (_, p))| (key(&p.shape), i)).collect();
+    keyed.sort_by(|a, b| a.0.cmp(&b.0).then(out[b.1].0.total_cmp(&out[a.1].0)).then(a.1.cmp(&b.1)));
+    keyed.dedup_by(|b, a| a.0 == b.0);
+    let mut kept: Vec<usize> = keyed.into_iter().map(|(_, i)| i).collect();
+    kept.sort_unstable();
+    kept.into_iter().map(|i| out[i].1.clone()).collect()
 }
 
 impl Draft {
@@ -386,6 +502,19 @@ impl Draft {
         let skip = self.chain.as_ref().map(|c| c.point.as_str());
         let nearest =
             |cands: Vec<(f64, Spot)>, within: f64| cands.into_iter().filter(|(d, _)| *d <= within).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, s)| s);
+        // Projecting: only what is not projected yet, a point before a curve.
+        if self.tool == Tool::Project {
+            let done = edit.projected();
+            let left = || self.projectable.iter().enumerate().filter(|(_, c)| !done.contains(&(c.from.clone(), c.entry.1.clone())));
+            let points = left().filter_map(|(i, c)| match c.shape {
+                Flat::Point(q) => Some((px(q), Spot { at: q, snap: Snap::Source(i) })),
+                _ => None,
+            });
+            let curves = left()
+                .filter(|(_, c)| !matches!(c.shape, Flat::Point(_)))
+                .filter_map(|(i, c)| c.shape.foot(at).map(|q| (px(q), Spot { at: q, snap: Snap::Source(i) })));
+            return nearest(points.collect(), SNAP_POINT).or_else(|| nearest(curves.collect(), SNAP_CURVE)).unwrap_or(free_spot);
+        }
         let points = p
             .solved
             .points
@@ -397,34 +526,14 @@ impl Draft {
             .keys()
             .chain(p.arcs.keys())
             .filter_map(|n| SketchEdit::middle(p, n).map(|m| (px(m), Spot { at: m, snap: Snap::Middle(n.clone()) })));
-        let projected: Vec<&str> =
-            edit.json["project"].as_object().map(|m| m.values().filter_map(|v| v["id"].as_str()).collect()).unwrap_or_default();
-        let vertices = self
-            .face
-            .iter()
-            .flat_map(|e| e.ends.iter())
-            .filter(|(id, _)| !projected.contains(&id.as_str()))
-            .map(|(id, q)| (px(*q), Spot { at: *q, snap: Snap::Vertex(id.clone()) }));
-        if let Some(s) = nearest(points.chain(middles).chain(vertices).collect(), SNAP_POINT) {
+        if let Some(s) = nearest(points.chain(middles).collect(), SNAP_POINT) {
             return s;
         }
-        // On a curve of the sketch, or an edge of its face: the nearest point of it.
+        // On a curve of the sketch: the nearest point of it.
         let mut on = Vec::new();
         for n in p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()) {
             if let Some(q) = SketchEdit::curve_points(p, n).and_then(|pts| foot(&pts, at)) {
                 on.push((px(q), Spot { at: q, snap: Snap::On(n.clone()) }));
-            }
-        }
-        for e in self.face.iter().filter(|e| !projected.contains(&e.id.as_str())) {
-            let q = match e.circle {
-                None => foot(&[e.ends[0].1, e.ends[1].1], at),
-                Some((c, r)) => {
-                    let d = libm::hypot(at[0] - c[0], at[1] - c[1]);
-                    (d > 0.0).then(|| [c[0] + (at[0] - c[0]) * r / d, c[1] + (at[1] - c[1]) * r / d])
-                }
-            };
-            if let Some(q) = q {
-                on.push((px(q), Spot { at: q, snap: Snap::Edge(e.id.clone()) }));
             }
         }
         nearest(on, SNAP_CURVE).unwrap_or(free_spot)
@@ -591,9 +700,17 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
+            Tool::Project => {
+                let Snap::Source(i) = spot.snap else { return None };
+                let c = self.projectable.get(i)?;
+                let name = patch.fresh(if matches!(c.shape, Flat::Point(_)) { "v" } else { "e" });
+                let mut entry = json!({"from": c.from});
+                entry[c.entry.0] = json!(c.entry.1);
+                patch.set("project", &name, entry);
+            }
             Tool::Template => return self.step(edit, Some(spot)),
             Tool::Point => {
-                // A point already there needs no other; a vertex of the face is projected.
+                // A point already there needs no other.
                 if matches!(spot.snap, Snap::Point(_)) {
                     return None;
                 }
@@ -632,7 +749,7 @@ impl Draft {
                 }
                 // The end at the start's distance from the centre, toward the cursor.
                 let end = match spot.snap {
-                    Snap::Point(_) | Snap::Vertex(_) => spot,
+                    Snap::Point(_) => spot,
                     _ => Spot { at: [c.at[0] + (spot.at[0] - c.at[0]) * r / d, c.at[1] + (spot.at[1] - c.at[1]) * r / d], snap: Snap::Free },
                 };
                 let (cn, sn, en) = (patch.point(&c), patch.point(&s), patch.point(&end));
@@ -699,7 +816,7 @@ impl Draft {
                 self.tangent = false;
                 // Closing on a point of the sketch ends the chain, as Inventor does.
                 self.chain = match spot.snap {
-                    Snap::Point(_) | Snap::Vertex(_) => None,
+                    Snap::Point(_) => None,
                     _ => Some(Chain { point: end, at: spot.at, last: Some(next_dir) }),
                 };
             }
@@ -726,6 +843,23 @@ impl Draft {
                 })
                 .collect::<Vec<_>>()
         };
+        // Projecting: what can be projected, faint; what the click would project, bold.
+        if self.tool == Tool::Project {
+            let faint = egui::Stroke::new(1.0, DRAFT.gamma_multiply(0.45));
+            let bold = egui::Stroke::new(2.5, DRAFT);
+            let done = edit.projected();
+            for (i, c) in self.projectable.iter().enumerate().filter(|(_, c)| !done.contains(&(c.from.clone(), c.entry.1.clone()))) {
+                let stroke = if spot.snap == Snap::Source(i) { bold } else { faint };
+                match c.shape {
+                    Flat::Point(q) => {
+                        painter.circle_stroke(screen(q), 2.5, stroke);
+                    }
+                    _ => {
+                        painter.add(egui::Shape::line(c.shape.points().into_iter().map(screen).collect(), stroke));
+                    }
+                }
+            }
+        }
         // What the dimension or constraint tool has picked so far, marked.
         if let Ok(p) = &edit.placed {
             let mark = egui::Stroke::new(3.0, DRAFT);
@@ -807,18 +941,22 @@ impl Draft {
         // Where the click lands, and what it ties to.
         let at = screen(spot.at);
         painter.circle_stroke(at, 5.0, egui::Stroke::new(1.5, DRAFT));
-        let mark = match (&spot.snap, &self.lean) {
-            (Snap::Point(_), _) => i18n.t("snap-point", "point"),
-            (Snap::Middle(_), _) => i18n.t("snap-middle", "middle"),
-            (Snap::On(_), _) => i18n.t("snap-on", "on"),
-            (Snap::Vertex(_), _) => i18n.t("snap-vertex", "vertex"),
-            (Snap::Edge(_), _) => i18n.t("snap-edge", "edge"),
-            (Snap::Free | Snap::Track { .. }, Some(Lean::Horizontal)) => "H",
-            (Snap::Free | Snap::Track { .. }, Some(Lean::Vertical)) => "V",
-            (Snap::Free | Snap::Track { .. }, Some(Lean::Parallel(_))) => i18n.t("snap-parallel", "parallel"),
-            (Snap::Free | Snap::Track { .. }, Some(Lean::Perpendicular(_))) => i18n.t("snap-perpendicular", "perpendicular"),
-            (Snap::Free | Snap::Track { .. }, Some(Lean::Tangent(_))) => i18n.t("snap-tangent", "tangent"),
-            (Snap::Free | Snap::Track { .. }, None) => "",
+        let mark: std::borrow::Cow<str> = match (&spot.snap, &self.lean) {
+            (Snap::Point(_), _) => i18n.t("snap-point", "point").into(),
+            (Snap::Middle(_), _) => i18n.t("snap-middle", "middle").into(),
+            (Snap::On(_), _) => i18n.t("snap-on", "on").into(),
+            (Snap::Source(i), _) => match self.projectable.get(*i) {
+                Some(c) if c.entry.0 == "element" => format!("{}: {}", c.from, c.entry.1).into(),
+                Some(c) if matches!(c.shape, Flat::Point(_)) => format!("{}: {}", c.from, i18n.t("snap-vertex", "vertex")).into(),
+                Some(c) => format!("{}: {}", c.from, i18n.t("snap-edge", "edge")).into(),
+                None => "".into(),
+            },
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Horizontal)) => "H".into(),
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Vertical)) => "V".into(),
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Parallel(_))) => i18n.t("snap-parallel", "parallel").into(),
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Perpendicular(_))) => i18n.t("snap-perpendicular", "perpendicular").into(),
+            (Snap::Free | Snap::Track { .. }, Some(Lean::Tangent(_))) => i18n.t("snap-tangent", "tangent").into(),
+            (Snap::Free | Snap::Track { .. }, None) => "".into(),
         };
         if !mark.is_empty() {
             painter.text(at + egui::vec2(9.0, -9.0), egui::Align2::LEFT_BOTTOM, mark, egui::FontId::proportional(12.0), DRAFT);
@@ -999,17 +1137,11 @@ impl Patch {
         }
     }
 
-    /// The point a spot names, made as it needs: an existing point as it is; a vertex of the
-    /// face projected; otherwise a new point there, on what it snapped to.
+    /// The point a spot names, made as it needs: an existing point as it is; otherwise a new
+    /// point there, on what it snapped to.
     pub(crate) fn point(&mut self, spot: &Spot) -> String {
-        match &spot.snap {
-            Snap::Point(n) => return n.clone(),
-            Snap::Vertex(id) => {
-                let v = self.fresh("v");
-                self.set("project", &v, json!({"id": id}));
-                return v;
-            }
-            _ => {}
+        if let Snap::Point(n) = &spot.snap {
+            return n.clone();
         }
         let p = self.fresh("p");
         self.set("points", &p, json!(spot.at));
@@ -1017,8 +1149,8 @@ impl Patch {
         p
     }
 
-    /// New point `p` held on what `spot` snapped to: a middle, a curve, an edge of the face, the
-    /// points it is in line with.
+    /// New point `p` held on what `spot` snapped to: a middle, a curve, the points it is in line
+    /// with.
     pub(crate) fn tie(&mut self, p: &str, spot: &Spot) {
         match &spot.snap {
             Snap::Track { x, y } => {
@@ -1031,11 +1163,6 @@ impl Patch {
             }
             Snap::Middle(l) => self.constrain(json!({"type": "midpoint", "point": p, "line": l})),
             Snap::On(c) => self.constrain(json!({"type": "on", "point": p, "curve": c})),
-            Snap::Edge(id) => {
-                let e = self.fresh("e");
-                self.set("project", &e, json!({"id": id}));
-                self.constrain(json!({"type": "on", "point": p, "curve": e}));
-            }
             _ => {}
         }
     }
@@ -1075,7 +1202,11 @@ mod tests {
         };
         let mut e = SketchEdit::new(
             "s".into(),
-            Context { id, inputs: input.map(|v| ("plate".to_string(), v)).into_iter().collect() },
+            Context {
+                id,
+                inputs: input.clone().map(|v| ("plate".to_string(), v)).into_iter().collect(),
+                sources: input.map(|v| ("plate".to_string(), v)).into_iter().collect(),
+            },
             json,
             BTreeMap::new(),
             None,
@@ -1453,20 +1584,35 @@ mod tests {
         assert_eq!(p["circles"]["c1"], json!({"center": "p1", "diameter": 10.0, "construction": true}));
     }
 
-    /// The face's corner and edges are snapped to and projected.
+    /// The face's corner and edges are no snaps of a drawing tool (no projection behind the
+    /// engineer's back); the projection tool projects them, named by the feature (D214).
     #[test]
-    fn the_face_is_projected_when_used() {
+    fn the_face_is_projected_by_the_projection_tool() {
         let mut e = editor(json!({"points": {}}), true);
-        assert_eq!(e.draft.face.len(), 4);
         e.draft.tool = Tool::Point;
         let p = click_at(&mut e, [40.2, 0.1], false).unwrap();
-        assert_eq!(p["project"].as_object().unwrap().keys().collect::<Vec<_>>(), ["v1"], "{p}");
+        assert!(p.get("project").is_none() && p["points"].get("p1").is_some(), "{p}");
+        e.draft.tool = Tool::Project;
+        // The top's corners and edges: the bottom's fall on them, the upright edges are seen end on.
+        assert_eq!(e.draft.projectable.len(), 4 + 4);
+        let p = click_at(&mut e, [40.2, 0.1], false).unwrap();
+        let v = &p["project"]["v1"];
+        assert_eq!(v["from"], "plate", "{p}");
         let p = click_at(&mut e, [20.0, 30.3], false).unwrap();
-        assert_eq!(p["add_constraints"], json!([{"type": "on", "point": "p1", "curve": "e1"}]), "{p}");
+        assert!(p["project"]["e1"]["id"].is_string(), "{p}");
         let placed = e.placed.as_ref().unwrap();
         assert!(placed.lines["e1"].construction && placed.solved.points.contains_key("v1"));
-        // Projected now, the corner is a point like any: no second projection.
-        assert!(click_at(&mut e, [40.2, 0.1], false).is_none());
+        // Projected now, the corner is offered no more (nor the bottom one under it): the click
+        // lands on an edge beside it.
+        let p = click_at(&mut e, [40.2, 0.1], false).unwrap();
+        assert!(p["project"].get("v2").is_none() && p["project"]["e2"]["id"].is_string(), "{p} {v}");
+        // Q puts a projected edge into the profile, and back.
+        e.selected = vec![crate::sketch::Pick::Projection("e1".into())];
+        let p = e.toggle_construction().unwrap();
+        assert_eq!(p["project"]["e1"]["construction"], json!(false), "{p}");
+        assert!(!e.placed.as_ref().unwrap().lines["e1"].construction);
+        let p = e.toggle_construction().unwrap();
+        assert!(p["project"]["e1"].get("construction").is_none(), "{p}");
     }
 
     #[test]

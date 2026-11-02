@@ -112,7 +112,7 @@ pub fn place(
         .map(|s| Anchor {
             at: s.at,
             point: match &s.snap {
-                Snap::Point(_) | Snap::Vertex(_) => Some(patch.point(s)),
+                Snap::Point(_) => Some(patch.point(s)),
                 _ => None,
             },
         })
@@ -162,7 +162,13 @@ mod tests {
 
     fn editor(sketch: Json) -> SketchEdit {
         let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": sketch});
-        SketchEdit::new("s".into(), Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new() }, json, BTreeMap::new(), None)
+        SketchEdit::new(
+            "s".into(),
+            Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new(), sources: Vec::new() },
+            json,
+            BTreeMap::new(),
+            None,
+        )
     }
 
     /// Places template `t` by `spots` through the tool, as clicks would, then Enter takes the

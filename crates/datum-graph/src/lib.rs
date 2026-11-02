@@ -146,6 +146,18 @@ impl Graph {
         (0..self.nodes.len() as NodeIx).filter(|&i| !used[i as usize]).collect()
     }
 
+    /// Replaces a node's inputs: earlier nodes, as many as its operation takes (a sketch's
+    /// projections taking geometry from other features, D214).
+    pub fn set_inputs(&mut self, ix: NodeIx, inputs: &[NodeIx]) -> Result<(), GraphError> {
+        let node = &self.nodes[ix as usize];
+        if let Some(&input) = inputs.iter().find(|&&i| i >= ix) {
+            return Err(GraphError::UnknownInput { node: node.name.clone(), input });
+        }
+        check_arity(&node.name, &node.op, inputs.len())?;
+        self.nodes[ix as usize].inputs = inputs.to_vec();
+        Ok(())
+    }
+
     /// Replaces a node's operation (a parameter edit) keeping its inputs.
     pub fn set_op(&mut self, ix: NodeIx, op: Op) -> Result<(), GraphError> {
         let node = &mut self.nodes[ix as usize];

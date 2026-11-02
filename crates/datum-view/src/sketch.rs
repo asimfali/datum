@@ -12,15 +12,18 @@ use datum_ops::Placed;
 use serde_json::{Value as Json, json};
 
 use crate::camera::SketchCamera;
-use crate::draw::{Draft, face_edges};
+use crate::draw::{Draft, projectable};
 use crate::measure::{Shape, Taken};
 
 /// What the background thread knows of the sketch being edited: its feature's ID (for
-/// `Op::eval`) and its inputs by name (the body or work plane it lies on, what it projects from).
+/// `Op::eval`), its inputs by name (the body or work plane it lies on, what it projects from)
+/// and what it could project from (D214): the features before it, bodies as they stand there
+/// and sketches.
 #[derive(Clone)]
 pub struct Context {
     pub id: TopoId,
     pub inputs: Vec<(String, ValueRef)>,
+    pub sources: Vec<(String, ValueRef)>,
 }
 
 /// Something under the cursor or selected.
@@ -451,11 +454,12 @@ impl SketchEdit {
     /// extrusion would sweep), triangulated as a face of a body one unit thick.
     fn set(&mut self, placed: Result<Placed, String>) {
         self.fill = placed.as_ref().ok().and_then(|p| fill(self.context.id, p)).unwrap_or_default();
-        // The face the sketch lies on, to snap to and project from.
-        self.draft.face = match (self.context.inputs.first().map(|(_, v)| v), &placed) {
-            (Some(v), Ok(p)) => v.body().map(|b| face_edges(b, p)).unwrap_or_default(),
-            _ => Vec::new(),
-        };
+        if let Ok(p) = &placed
+            && self.draft.projectable_on != Some(p.frame)
+        {
+            self.draft.projectable = projectable(&self.context.sources, p);
+            self.draft.projectable_on = Some(p.frame);
+        }
         self.placed = placed;
     }
 
@@ -480,8 +484,13 @@ impl SketchEdit {
             }
         }
         let op = op.resolve(&lookup)?;
-        let inputs: Vec<&Value> = self.context.inputs.iter().map(|(_, v)| v.as_ref()).collect();
-        let names: Vec<&str> = self.context.inputs.iter().map(|(n, _)| n.as_str()).collect();
+        // Its inputs as the model will make them of its projections, drawn ahead of it.
+        let now: Vec<String> = self.context.inputs.iter().map(|(n, _)| n.clone()).collect();
+        let on_plane = self.context.inputs.first().is_some_and(|(_, v)| matches!(**v, Value::Plane(_)));
+        let names = datum_model::sketch_inputs(&op, &now, on_plane);
+        let value = |n: &str| self.context.inputs.iter().chain(&self.context.sources).find(|(m, _)| m == n).map(|(_, v)| v.as_ref());
+        let inputs = names.iter().map(|n| value(n).ok_or_else(|| format!("no feature `{n}` to project from"))).collect::<Result<Vec<_>, _>>()?;
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
         match op.eval_named(self.context.id, &inputs, &names).map_err(|e| e.to_string())? {
             Value::Sketch(p) => Ok(*p),
             _ => Err("not a sketch".into()),
@@ -494,6 +503,18 @@ impl SketchEdit {
             .as_object()
             .map(|m| m.iter().filter_map(|(n, v)| Some((n.clone(), [v[0].as_f64()?, v[1].as_f64()?]))).collect())
             .unwrap_or_default()
+    }
+
+    /// What is projected already: the feature (none: the first input) and the edge, vertex or
+    /// element of it.
+    pub(crate) fn projected(&self) -> BTreeSet<(String, String)> {
+        let first = self.context.inputs.first().map(|(n, _)| n.clone()).unwrap_or_default();
+        let entries = self.json["project"].as_object().into_iter().flat_map(|m| m.values());
+        entries
+            .filter_map(|p| {
+                Some((p["from"].as_str().map_or_else(|| first.clone(), String::from), p["id"].as_str().or(p["element"].as_str())?.to_string()))
+            })
+            .collect()
     }
 
     fn projections(&self) -> Vec<String> {
@@ -586,21 +607,34 @@ impl SketchEdit {
 
     /// `edit_sketch` parameters turning the selected curves into construction geometry, or back
     /// into profile geometry when all of them are construction already; none if no curve is
-    /// selected.
+    /// selected. A projected curve too (D214): construction is its default, `false` puts it in
+    /// the profile.
     pub fn toggle_construction(&mut self) -> Option<Json> {
         let sketch = &self.json["sketch"];
-        let curves: Vec<(&str, &String)> = self
+        let own: Vec<(&str, &String)> = self
             .selected
             .iter()
             .filter_map(|p| if let Pick::Curve(n) = p { Some(n) } else { None })
             .filter_map(|n| ["lines", "arcs", "circles"].into_iter().find(|k| sketch[*k].get(n).is_some()).map(|k| (k, n)))
             .collect();
-        if curves.is_empty() {
+        let placed = self.placed.as_ref().ok();
+        let projected_construction = |n: &str| {
+            placed.and_then(|p| {
+                p.lines.get(n).map(|l| l.construction).or(p.arcs.get(n).map(|a| a.construction)).or(p.circles.get(n).map(|c| c.construction))
+            })
+        };
+        let projected: Vec<(&String, bool)> = self
+            .selected
+            .iter()
+            .filter_map(|p| if let Pick::Projection(n) = p { Some(n) } else { None })
+            .filter_map(|n| projected_construction(n).map(|c| (n, c)))
+            .collect();
+        if own.is_empty() && projected.is_empty() {
             return None;
         }
-        let make = !curves.iter().all(|(k, n)| sketch[*k][n.as_str()]["construction"] == true);
+        let make = !(own.iter().all(|(k, n)| sketch[*k][n.as_str()]["construction"] == true) && projected.iter().all(|(_, c)| *c));
         let mut patch = serde_json::Map::new();
-        for (k, n) in curves {
+        for (k, n) in own {
             let mut curve = sketch[k][n.as_str()].clone();
             if let Some(fields) = curve.as_object_mut() {
                 if make {
@@ -610,6 +644,17 @@ impl SketchEdit {
                 }
             }
             patch.entry(k).or_insert_with(|| json!({}))[n.as_str()] = curve;
+        }
+        for (n, _) in projected {
+            let mut entry = self.json["project"][n.as_str()].clone();
+            if let Some(fields) = entry.as_object_mut() {
+                if make {
+                    fields.remove("construction");
+                } else {
+                    fields.insert("construction".into(), json!(false));
+                }
+            }
+            patch.entry("project").or_insert_with(|| json!({}))[n.as_str()] = entry;
         }
         Some(self.apply(patch))
     }
@@ -1650,7 +1695,7 @@ mod tests {
                             {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"}, {"type": "length", "line": "bottom", "value": "w"}],
             "measures": {"height": {"type": "length", "line": "left"}}}});
         let id = TopoId::derive("feature").tag("outline").finish();
-        SketchEdit::new("outline".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::from([("w".into(), 12.0)]), None)
+        SketchEdit::new("outline".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::from([("w".into(), 12.0)]), None)
     }
 
     #[test]
@@ -1713,7 +1758,7 @@ mod tests {
             "points": {"p1": [0, 0], "p2": [10, 0], "q": [20, 5]},
             "lines": {"l1": {"from": "p1", "to": "p2"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None)
+        SketchEdit::new("s".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None)
     }
 
     #[test]
@@ -1758,7 +1803,7 @@ mod tests {
             "points": {"c": [0, 0], "f": [5, 0], "t": [-5, 0], "q": [3, 9]},
             "arcs": {"a": {"center": "c", "from": "f", "to": "t"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None);
         e.hover = Some(Pick::Point("q".into()));
         assert!(e.start_drag([3.0, 9.0]));
         e.drag_to([0.2, 5.1], 0.5);
@@ -1775,7 +1820,7 @@ mod tests {
         let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
             "points": {"p1": [0, 0], "p2": [10, 0]}, "lines": {"l1": {"from": "p1", "to": "p2"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None);
         assert!(e.placed.as_ref().unwrap().solved.points.contains_key(datum_ops::ORIGIN));
         e.hover = Some(Pick::Point("p2".into()));
         assert!(e.start_drag([10.0, 0.0]));
@@ -1818,7 +1863,7 @@ mod tests {
             "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}},
             "circles": {"c": {"center": "q", "diameter": 3}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None);
         e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into())];
         e.hover = Some(Pick::Curve("l2".into()));
         assert!(e.start_drag([3.5, 5.0]));
@@ -1836,7 +1881,7 @@ mod tests {
             "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}},
             "circles": {"c": {"center": "q", "diameter": 3}}}});
         let id = TopoId::derive("feature").tag("s").finish();
-        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new() }, json, BTreeMap::new(), None);
+        let mut e = SketchEdit::new("s".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None);
         e.selected = vec![Pick::Curve("l1".into()), Pick::Curve("l2".into()), Pick::Constraint(0)];
         let sent = e.group_selection().unwrap();
         assert_eq!(sent["groups"], json!({"g1": ["l1", "l2"]}), "elements only");
@@ -1986,7 +2031,8 @@ mod tests {
         let model: Json = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         let params = model["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), v.as_f64().unwrap())).collect();
         let id = TopoId::derive("feature").tag("outline").finish();
-        let mut e = SketchEdit::new("outline".into(), Context { id, inputs: Vec::new() }, model["features"][0].clone(), params, None);
+        let mut e =
+            SketchEdit::new("outline".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, model["features"][0].clone(), params, None);
         e.camera.half_height = 30.0;
         let shot = std::env::var_os("DATUM_PLATE_SHOT");
         let builder = egui_kittest::Harness::builder().with_size([1100.0, 630.0]);
