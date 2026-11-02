@@ -1,0 +1,90 @@
+{
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [],
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        },
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            20,
+            0
+          ],
+          "c": [
+            20,
+            12
+          ],
+          "d": [
+            0,
+            12
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "outline"
+      ],
+      "name": "block",
+      "op": "extrude",
+      "z0": 0,
+      "z1": 8
+    },
+    {
+      "base": "xy",
+      "name": "mid",
+      "offset": 4,
+      "op": "plane"
+    },
+    {
+      "inputs": [
+        "mid",
+        "block"
+      ],
+      "name": "cut",
+      "op": "sketch",
+      "project": {
+        "s": {
+          "from": "block",
+          "section": true
+        }
+      },
+      "sketch": {
+        "constraints": [],
+        "points": {}
+      }
+    },
+    {
+      "inputs": [
+        "cut"
+      ],
+      "name": "slice",
+      "op": "extrude",
+      "z0": 0,
+      "z1": 2
+    }
+  ],
+  "format": "datum/1"
+}

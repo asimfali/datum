@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 use datum_brep::{Body, BrepError, Curve, Cylinder, Development, Ix, ProfileArc, ProfileLoop, Region, Surface, TopoId, extrude};
-use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
+use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d, orient3d_coords};
 use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, Step, contours, solve};
 use rayon::prelude::*;
 
@@ -84,14 +84,16 @@ fn plane_of(body: &Body, f: usize) -> Result<SketchPlane, BrepError> {
 /// part of the sketch's hash: the plane says where it is.
 pub const ORIGIN: &str = "origin";
 
-/// Geometry of an input projected into a sketch (D87, D214): an edge or vertex of a body by `id`,
-/// or a point, line, arc or circle of a sketch by `element`, from the input named `from` (none:
-/// the first). `at` keeps where its points were when the sketch was drawn, in sketch coordinates:
+/// Geometry of an input projected into a sketch (D87, D214, D216): an edge or vertex of a body by
+/// `id`, the outline of its face by `face`, its section by the sketch plane (`section`), or a
+/// point, line, arc or circle of a sketch by `element`, from the input named `from` (none: the
+/// first). `at` keeps where its points were when the sketch was drawn, in sketch coordinates:
 /// a point's; a line's start and end; an arc's centre, start and end; a circle's centre. Sides (a
 /// point above a line, a circle inside or outside another) are decided there, so a projection
-/// moved by an edit upstream does not flip the sketch. Empty: drawn where the projection is now.
-/// `construction`: whether it bounds no profile; none: it is construction, an edge or an element
-/// being projected to dimension and snap to.
+/// moved by an edit upstream does not flip the sketch. Empty: drawn where the projection is now;
+/// a face or a section, of many curves, is always drawn so. `construction`: whether it bounds no
+/// profile; none: an edge or an element is construction (projected to dimension and snap to), a
+/// face or a section is not (projected to be a profile).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Projection {
@@ -102,9 +104,20 @@ pub struct Projection {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub element: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub section: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub construction: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<Vec2>,
+}
+
+impl Projection {
+    /// Whether it is one edge, vertex or element, with `at`: not a face or a section.
+    pub fn single(&self) -> bool {
+        self.face.is_none() && !self.section
+    }
 }
 
 /// What a projection takes its geometry from: an input of the sketch feature.
@@ -329,16 +342,23 @@ fn projected<'a>(
     // The sketch's point for each point of a source, by input and what it is there.
     let mut shared: BTreeMap<(Option<&str>, String), String> = BTreeMap::new();
     for (name, proj) in project {
-        if s.lines.contains_key(name) || s.arcs.contains_key(name) || s.circles.contains_key(name) {
-            return Err(BrepError::Sketch(format!("the sketch already has a curve `{name}`")));
-        }
-        let shape = match (source(proj.from.as_deref())?, &proj.id, &proj.element) {
-            (Source::Body(b), Some(id), None) => body_shape(name, b, id)?,
-            (Source::Sketch(p), None, Some(e)) => sketch_shape(name, p, e)?,
-            (Source::Body(_), ..) => return Err(BrepError::Sketch(format!("projection `{name}`: a body's edge or vertex is named by `id`"))),
+        let one = |shape: Shape| vec![(name.clone(), shape)];
+        let shapes = match (source(proj.from.as_deref())?, &proj.id, &proj.element, &proj.face, proj.section) {
+            (Source::Body(b), Some(id), None, None, false) => one(body_shape(name, b, id)?),
+            (Source::Body(b), None, None, Some(f), false) => face_shapes(name, b, f)?,
+            (Source::Body(b), None, None, None, true) => section_shapes(name, b, frame)?,
+            (Source::Sketch(p), None, Some(e), None, false) => one(sketch_shape(name, p, e)?),
+            (Source::Body(_), ..) => {
+                return Err(BrepError::Sketch(format!(
+                    "projection `{name}`: a body's edge or vertex is named by `id`, a face by `face`, or its section is `section`"
+                )));
+            }
             (Source::Sketch(_), ..) => return Err(BrepError::Sketch(format!("projection `{name}`: a sketch's element is named by `element`"))),
         };
-        let construction = proj.construction.unwrap_or(true);
+        if !proj.single() && !proj.at.is_empty() {
+            return Err(BrepError::Sketch(format!("projection `{name}`: a face or a section is drawn where it is, without `at`")));
+        }
+        let construction = proj.construction.unwrap_or(proj.single());
         let mut points: Vec<Vec2> = Vec::with_capacity(3);
         // The point drawn at its `at`, or where it is; fixed where it is.
         let mut add = |s: &mut Sketch, n: String, (p, of): End| -> Result<String, BrepError> {
@@ -357,40 +377,47 @@ fn projected<'a>(
                 None => n,
             })
         };
-        let slanted = || BrepError::Unsupported(format!("projection `{name}`: the arc or circle is not parallel to the sketch plane"));
-        match shape {
-            Shape::Point(p) => {
-                add(&mut s, name.clone(), p)?;
+        let slanted = || BrepError::Unsupported(format!("projection `{name}`: an arc or circle is not parallel to the sketch plane"));
+        for (name, shape) in shapes {
+            if s.lines.contains_key(&name) || s.arcs.contains_key(&name) || s.circles.contains_key(&name) {
+                return Err(BrepError::Sketch(format!("the sketch already has a curve `{name}`")));
             }
-            // Seen end on, a line is a point.
-            Shape::Line(a, b) if flat(a.0) == flat(b.0) => {
-                add(&mut s, name.clone(), a)?;
-            }
-            Shape::Line(a, b) => {
-                let (from, to) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
-                s.lines.insert(name.clone(), Line { from, to, construction });
-            }
-            Shape::Arc(c, a, b, axis) => {
-                if !parallel(axis, normal) {
-                    return Err(slanted());
+            match shape {
+                Shape::Point(p) => {
+                    add(&mut s, name.clone(), p)?;
                 }
-                let center = add(&mut s, format!("{name}.center"), c)?;
-                let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
-                let (from, to) = if axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
-                s.arcs.insert(name.clone(), Arc { center, from, to, construction });
-            }
-            Shape::Circle(c, axis, d) => {
-                if !parallel(axis, normal) {
-                    return Err(slanted());
+                // Seen end on, a line is a point.
+                Shape::Line(a, b) if flat(a.0) == flat(b.0) => {
+                    add(&mut s, name.clone(), a)?;
                 }
-                let center = add(&mut s, format!("{name}.center"), c)?;
-                s.circles.insert(name.clone(), Circle { center, diameter: d.into(), construction });
+                Shape::Line(a, b) => {
+                    let (from, to) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
+                    s.lines.insert(name.clone(), Line { from, to, construction });
+                }
+                Shape::Arc(c, a, b, axis) => {
+                    if !parallel(axis, normal) {
+                        return Err(slanted());
+                    }
+                    let center = add(&mut s, format!("{name}.center"), c)?;
+                    let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
+                    let (from, to) = if axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
+                    s.arcs.insert(name.clone(), Arc { center, from, to, construction });
+                }
+                Shape::Circle(c, axis, d) => {
+                    if !parallel(axis, normal) {
+                        return Err(slanted());
+                    }
+                    let center = add(&mut s, format!("{name}.center"), c)?;
+                    s.circles.insert(name.clone(), Circle { center, diameter: d.into(), construction });
+                }
             }
         }
         if !proj.at.is_empty() && proj.at.len() != points.len() {
             return Err(BrepError::Sketch(format!("projection `{name}`: `at` has {} points, the projection {}", proj.at.len(), points.len())));
         }
-        now.insert(name.clone(), points);
+        if proj.single() {
+            now.insert(name.clone(), points);
+        }
     }
     Ok((s, now))
 }
@@ -406,6 +433,12 @@ fn body_shape(name: &str, body: &Body, id: &str) -> Result<Shape, BrepError> {
         .edges()
         .binary_search_by_key(&id, |e| e.id)
         .map_err(|_| BrepError::LostReference(format!("projection `{name}`: no edge or vertex {id:?} in the input body")))?;
+    edge_shape(name, body, e)
+}
+
+/// Edge `e` of `body`, for projection `name`.
+fn edge_shape(name: &str, body: &Body, e: usize) -> Result<Shape, BrepError> {
+    let vertex = |v: Ix| (body.point(v), Some(format!("{:?}", body.vertices()[v as usize].id)));
     let edge = &body.edges()[e];
     let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
     let (pa, pb) = (vertex(a), vertex(b));
@@ -415,6 +448,128 @@ fn body_shape(name: &str, body: &Body, id: &str) -> Result<Shape, BrepError> {
         Some(Curve::Arc(arc)) => Ok(Shape::Arc((arc.center, None), pa, pb, arc.axis)),
         Some(Curve::Rolled { .. }) => Err(BrepError::Unsupported(format!("projection `{name}`: an edge of a cut in a rolled sheet"))),
     }
+}
+
+/// The short name of the curve element `id` makes of projection `name`: `<name>.<the ID's first
+/// 8 hex digits>`, as stable as the ID (D216). Numbers in order would shift when the face gains
+/// a hole, and a dimension on one would move to another.
+fn part_name(name: &str, id: TopoId) -> String {
+    let hex = format!("{id:?}");
+    format!("{name}.{}", &hex[..hex.len().min(8)])
+}
+
+/// Two curves of one projection named alike: refused rather than one taken for the other.
+fn named_once(name: &str, parts: Vec<(String, Shape)>) -> Result<Vec<(String, Shape)>, BrepError> {
+    let mut names: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
+    names.sort_unstable();
+    match names.windows(2).find(|w| w[0] == w[1]) {
+        Some(w) => Err(BrepError::Degenerate(format!("projection `{name}`: two of its curves are named `{}`", w[0]))),
+        None => Ok(parts),
+    }
+}
+
+/// The edges of face `id` (hex) of `body`, each a curve `<name>.<its ID>` (see [`part_name`]).
+fn face_shapes(name: &str, body: &Body, id: &str) -> Result<Vec<(String, Shape)>, BrepError> {
+    let (f, _) = find_face(body, id)?;
+    let mut edges: Vec<usize> =
+        body.face_loops(f as Ix).flat_map(|l| body.loop_half_edges(l)).map(|h| body.half_edges()[h as usize].edge as usize).collect();
+    edges.sort_unstable();
+    edges.dedup();
+    let parts = edges.into_iter().map(|e| Ok((part_name(name, body.edges()[e].id), edge_shape(name, body, e)?))).collect::<Result<_, BrepError>>()?;
+    named_once(name, parts)
+}
+
+/// The section of `body` by the sketch plane (`frame`): where it crosses each plane face, a
+/// line `<name>.<the face's ID>` (`.1`, `.2`… along it if it crosses the face more than once).
+/// The sides of every vertex are decided exactly; a crossing point lies on its edge, one point
+/// for both faces of it. The plane through a vertex, across an arc, or crossing a curved face
+/// (a circle or an ellipse there) is refused for now.
+fn section_shapes(name: &str, body: &Body, frame: &[Vec3; 4]) -> Result<Vec<(String, Shape)>, BrepError> {
+    let parts = section_parts(name, body, frame)?;
+    if parts.is_empty() {
+        return Err(BrepError::Degenerate(format!("projection `{name}`: the sketch plane does not cross the body")));
+    }
+    named_once(name, parts)
+}
+
+/// Whether the plane of `frame` crosses `body` so that its section can be projected (see
+/// [`section_shapes`]): false if it misses the body; why not, if it cannot be.
+pub fn crosses(body: &Body, frame: &[Vec3; 4]) -> Result<bool, BrepError> {
+    section_parts("section", body, frame).map(|p| !p.is_empty())
+}
+
+fn section_parts(name: &str, body: &Body, frame: &[Vec3; 4]) -> Result<Vec<(String, Shape)>, BrepError> {
+    let [o, x, y, z] = *frame;
+    let side = |q: Vec3| orient3d_coords(o, o + x, o + y, q);
+    let signs: Vec<Sign> = body.vertices().iter().map(|v| side(v.point)).collect();
+    if signs.contains(&Sign::Zero) {
+        return Err(BrepError::Degenerate(format!(
+            "projection `{name}`: the sketch plane passes through a vertex of the body: project the face, or move the plane"
+        )));
+    }
+    let unsupported = |m: &str| BrepError::Unsupported(format!("projection `{name}`: {m}"));
+    let height = |q: Vec3| (q - o).dot(z);
+    // Where the edge crosses the plane, if it does: from its own ends, the same for both its faces.
+    let crossing = |e: usize| -> Result<Option<End>, BrepError> {
+        let edge = &body.edges()[e];
+        let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
+        if signs[a as usize] == signs[b as usize] {
+            return Ok(None);
+        }
+        if body.edge_curve(edge).is_some() {
+            return Err(unsupported("the sketch plane crosses an arc of the body (a section through a curve: later)"));
+        }
+        let (pa, pb) = (body.point(a), body.point(b));
+        let (ha, hb) = (height(pa), height(pb));
+        Ok(Some((pa + (pb - pa) * (ha / (ha - hb)), Some(format!("cross {:?}", edge.id)))))
+    };
+    let mut parts = Vec::new();
+    for (f, face) in body.faces().iter().enumerate() {
+        let edges: Vec<usize> =
+            body.face_loops(f as Ix).flat_map(|l| body.loop_half_edges(l)).map(|h| body.half_edges()[h as usize].edge as usize).collect();
+        let crossed = edges.iter().any(|&e| {
+            let edge = &body.edges()[e];
+            signs[body.half_edges()[edge.half as usize].origin as usize] != signs[body.half_edges()[body.next(edge.half) as usize].origin as usize]
+        });
+        // An arc across the plane bulges between its ends: refused if it may reach the plane. One
+        // parallel to it stays at its centre's height, on the side its ends are.
+        let reaches = edges.iter().any(|&e| match body.edge_curve(&body.edges()[e]) {
+            Some(Curve::Arc(a)) => !parallel(a.axis, z) && height(a.center).abs() <= a.radius,
+            Some(Curve::Rolled { .. }) => true,
+            None => false,
+        });
+        if reaches {
+            return Err(unsupported("the sketch plane may cross an arc of the body (a section through a curve: later)"));
+        }
+        let Surface::Plane(plane) = face.surface else {
+            if crossed {
+                return Err(unsupported("the sketch plane crosses a curved face (a circle or an ellipse there: later)"));
+            }
+            continue;
+        };
+        if !crossed {
+            continue;
+        }
+        let mut ends: Vec<End> = Vec::new();
+        for &e in &edges {
+            if let Some(c) = crossing(e)? {
+                ends.push(c);
+            }
+        }
+        // Along the line the face meets the plane in: in, out, in, out.
+        let along = plane.normal.cross(z);
+        ends.sort_by(|a, b| a.0.dot(along).total_cmp(&b.0.dot(along)));
+        if !ends.len().is_multiple_of(2) || ends.windows(2).any(|w| w[0].0.dot(along) == w[1].0.dot(along)) {
+            return Err(BrepError::Degenerate(format!("projection `{name}`: the sketch plane meets a face of the body along its edge")));
+        }
+        let base = part_name(name, face.id);
+        let many = ends.len() > 2;
+        for (k, pair) in ends.chunks(2).enumerate() {
+            let n = if many { format!("{base}.{}", k + 1) } else { base.clone() };
+            parts.push((n, Shape::Line(pair[0].clone(), pair[1].clone())));
+        }
+    }
+    Ok(parts)
 }
 
 /// The point, line, arc or circle named `element` of the placed sketch `p`, for projection `name`.

@@ -96,6 +96,8 @@ pub struct SketchEdit {
     /// dimension that would over-constrain the sketch.
     pub field: Option<crate::dims::Field>,
     pub conflict: Option<crate::dims::Conflict>,
+    /// Why the last command did nothing (a section that cannot be projected), until the next.
+    pub notice: Option<String>,
 }
 
 /// What a drag moves: the sketch's own points, each from where it stood, by the cursor's way
@@ -400,6 +402,7 @@ impl SketchEdit {
             draft: Draft::default(),
             field: None,
             conflict: None,
+            notice: None,
         };
         s.solve();
         s.fit(scene);
@@ -466,6 +469,7 @@ impl SketchEdit {
     /// Applies an `edit_sketch` patch drawn in the window at once, without waiting for the
     /// model, and returns it as the command's parameters.
     pub fn apply(&mut self, mut patch: serde_json::Map<String, Json>) -> Json {
+        self.notice = None;
         if let Some(fields) = self.json.as_object_mut() {
             let _ = datum_model::patch_sketch(fields, &patch);
         }
@@ -505,14 +509,15 @@ impl SketchEdit {
             .unwrap_or_default()
     }
 
-    /// What is projected already: the feature (none: the first input) and the edge, vertex or
-    /// element of it.
+    /// What is projected already: the feature (none: the first input) and the edge, vertex,
+    /// face or element of it, or `section`.
     pub(crate) fn projected(&self) -> BTreeSet<(String, String)> {
         let first = self.context.inputs.first().map(|(n, _)| n.clone()).unwrap_or_default();
         let entries = self.json["project"].as_object().into_iter().flat_map(|m| m.values());
         entries
             .filter_map(|p| {
-                Some((p["from"].as_str().map_or_else(|| first.clone(), String::from), p["id"].as_str().or(p["element"].as_str())?.to_string()))
+                let what = p["id"].as_str().or(p["element"].as_str()).or(p["face"].as_str()).or((p["section"] == true).then_some("section"))?;
+                Some((p["from"].as_str().map_or_else(|| first.clone(), String::from), what.to_string()))
             })
             .collect()
     }
@@ -657,6 +662,33 @@ impl SketchEdit {
             patch.entry("project").or_insert_with(|| json!({}))[n.as_str()] = entry;
         }
         Some(self.apply(patch))
+    }
+
+    /// `edit_sketch` parameters projecting the section of every body before the sketch that its
+    /// plane crosses (D216, Inventor's Project Cut Edges), none projected yet; none if there is
+    /// none, and why, if a body's section cannot be projected.
+    pub fn project_sections(&mut self) -> Result<Option<Json>, String> {
+        let Ok(placed) = &self.placed else { return Ok(None) };
+        let frame = placed.frame;
+        let done = self.projected();
+        let mut patch = datum_model::SketchPatch::new(&self.json);
+        let mut why = Vec::new();
+        for (from, v) in &self.context.sources {
+            let Some(body) = v.body().filter(|_| !done.contains(&(from.clone(), "section".into()))) else { continue };
+            match datum_ops::crosses(body, &frame) {
+                Ok(true) => {
+                    let n = patch.fresh("cut");
+                    patch.set("project", &n, json!({"from": from, "section": true}));
+                }
+                Ok(false) => {}
+                Err(e) => why.push(format!("{from}: {e}")),
+            }
+        }
+        match patch.done() {
+            Some(p) => Ok(Some(self.apply(p))),
+            None if why.is_empty() => Ok(None),
+            None => Err(why.join("; ")),
+        }
     }
 
     /// `edit_sketch` parameters taking group `g` apart: its elements stay.

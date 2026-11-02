@@ -4,7 +4,7 @@
 //! of undo each. Snap and inference tolerances are pixels and degrees on the screen: they only
 //! choose which constraints to add, and the solver then holds those exactly.
 
-use datum_brep::Curve;
+use datum_brep::{Curve, Ix, Surface};
 use datum_model::SketchPatch;
 use datum_ops::Placed;
 use serde_json::{Map, Value as Json, json};
@@ -95,13 +95,16 @@ pub struct Heading {
     pub dir: [f64; 2],
 }
 
-/// Geometry the sketch can project (D214), as it falls on its plane: of feature `from`, the
-/// projection's `entry` (`id` of a body's edge or vertex, `element` of a sketch) and its shape.
+/// Geometry the sketch can project (D214, D216), as it falls on its plane: of feature `from`,
+/// the projection's `entry` (`id` of a body's edge or vertex, `face` of its face, `element` of a
+/// sketch), its shape and how high above the plane it is (of things one over another, the
+/// highest is offered).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Projectable {
     pub from: String,
     pub entry: (&'static str, String),
     pub shape: Flat,
+    pub height: f64,
 }
 
 /// A shape in sketch coordinates. An arc runs counterclockwise from angle `start` through
@@ -110,7 +113,14 @@ pub struct Projectable {
 pub enum Flat {
     Point([f64; 2]),
     Line([f64; 2], [f64; 2]),
-    Arc { c: [f64; 2], r: f64, start: f64, sweep: f64 },
+    Arc {
+        c: [f64; 2],
+        r: f64,
+        start: f64,
+        sweep: f64,
+    },
+    /// A face: its loops as closed polylines.
+    Region(Vec<Vec<[f64; 2]>>),
 }
 
 impl Flat {
@@ -118,6 +128,7 @@ impl Flat {
     /// within its sweep).
     fn foot(&self, q: [f64; 2]) -> Option<[f64; 2]> {
         match *self {
+            Flat::Region(_) => None,
             Flat::Point(p) => Some(p),
             Flat::Line(a, b) => foot(&[a, b], q),
             Flat::Arc { c, r, start, sweep } => {
@@ -128,9 +139,27 @@ impl Flat {
         }
     }
 
-    /// Points along it, to draw.
-    fn points(&self) -> Vec<[f64; 2]> {
+    /// Whether a face holds `q`: inside an odd number of its loops.
+    fn holds(&self, q: [f64; 2]) -> bool {
+        let Flat::Region(loops) = self else { return false };
+        let crossings = loops
+            .iter()
+            .flat_map(|l| l.iter().zip(l.iter().cycle().skip(1)))
+            .filter(|(a, b)| (a[1] > q[1]) != (b[1] > q[1]) && q[0] < a[0] + (q[1] - a[1]) * (b[0] - a[0]) / (b[1] - a[1]));
+        crossings.count() % 2 == 1
+    }
+
+    /// Points along it, to draw: a polyline per loop of a face, one for anything else.
+    fn polylines(&self) -> Vec<Vec<[f64; 2]>> {
+        match self {
+            Flat::Region(loops) => loops.iter().map(|l| l.iter().chain(l.first()).copied().collect()).collect(),
+            _ => vec![self.curve_points()],
+        }
+    }
+
+    fn curve_points(&self) -> Vec<[f64; 2]> {
         match *self {
+            Flat::Region(_) => Vec::new(),
             Flat::Point(p) => vec![p],
             Flat::Line(a, b) => vec![a, b],
             Flat::Arc { c, r, start, sweep } => {
@@ -257,25 +286,60 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
             Flat::Arc { c, r, start: angle(c, a), sweep: if sweep == 0.0 { std::f64::consts::TAU } else { sweep } }
         })
     };
-    let mut out: Vec<(f64, Projectable)> = Vec::new();
+    let mut out: Vec<Projectable> = Vec::new();
     for (from, v) in sources {
         let mut put = |key: &'static str, name: String, shape: Flat, at: datum_math::Vec3| {
-            out.push((height(at), Projectable { from: from.clone(), entry: (key, name), shape }));
+            out.push(Projectable { from: from.clone(), entry: (key, name), shape, height: height(at) });
         };
         if let Some(body) = v.body() {
             for vx in body.vertices() {
                 put("id", format!("{:?}", vx.id), Flat::Point(flat(vx.point)), vx.point);
             }
-            for edge in body.edges() {
-                let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
-                let (pa, pb) = (flat(body.point(a)), flat(body.point(b)));
-                let shape = match body.edge_curve(edge) {
-                    None if pa != pb => Some(Flat::Line(pa, pb)),
-                    Some(Curve::Arc(c)) => arc(c.center, c.radius, pa, pb, c.axis),
-                    _ => None,
-                };
-                if let Some(shape) = shape {
-                    put("id", format!("{:?}", edge.id), shape, body.point(a));
+            // Each edge as it falls; none if it cannot be projected.
+            let edges: Vec<Option<Flat>> = body
+                .edges()
+                .iter()
+                .map(|edge| {
+                    let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
+                    let (pa, pb) = (flat(body.point(a)), flat(body.point(b)));
+                    match body.edge_curve(edge) {
+                        None => Some(Flat::Line(pa, pb)),
+                        Some(Curve::Arc(c)) => arc(c.center, c.radius, pa, pb, c.axis),
+                        Some(Curve::Rolled { .. }) => None,
+                    }
+                })
+                .collect();
+            for (e, shape) in body.edges().iter().zip(&edges) {
+                if let Some(shape) = shape.as_ref().filter(|s| !matches!(s, Flat::Line(a, b) if a == b)) {
+                    put("id", format!("{:?}", e.id), shape.clone(), body.point(body.half_edges()[e.half as usize].origin));
+                }
+            }
+            // A plane face not seen edge on, all its edges projectable: its loops, each edge's
+            // points in the loop's order.
+            for (f, face) in body.faces().iter().enumerate() {
+                let Surface::Plane(plane) = face.surface else { continue };
+                if plane.normal.dot(z) == 0.0 {
+                    continue;
+                }
+                let loops: Option<Vec<Vec<[f64; 2]>>> = body
+                    .face_loops(f as Ix)
+                    .map(|l| {
+                        let mut pts = Vec::new();
+                        for h in body.loop_half_edges(l) {
+                            let he = &body.half_edges()[h as usize];
+                            let mut along = edges[he.edge as usize].as_ref()?.curve_points();
+                            if body.edges()[he.edge as usize].half != h {
+                                along.reverse();
+                            }
+                            along.pop();
+                            pts.extend(along);
+                        }
+                        Some(pts)
+                    })
+                    .collect();
+                if let Some(loops) = loops {
+                    let at = body.point(body.half_edges()[body.loop_half_edges(body.face_loops(f as Ix).start).start as usize].origin);
+                    put("face", format!("{:?}", face.id), Flat::Region(loops), at);
                 }
             }
         } else if let Some(s) = v.sketch().filter(|s| s.developed.is_none()) {
@@ -312,23 +376,33 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
     // Of equal shapes the highest, then the first given: sorted by shape, height down, and kept
     // once. Bits compare exactly: what falls on one place falls there bit for bit or is another.
     let key = |f: &Flat| -> Vec<u64> {
-        match *f {
-            Flat::Point(p) => p.map(f64::to_bits).to_vec(),
+        match f {
+            // Its corners, in any order.
+            Flat::Region(loops) => {
+                let mut pts: Vec<[u64; 2]> = loops.iter().flatten().map(|p| p.map(f64::to_bits)).collect();
+                pts.sort_unstable();
+                pts.concat()
+            }
+            &Flat::Point(p) => p.map(f64::to_bits).to_vec(),
             // Either way along.
-            Flat::Line(a, b) => {
+            &Flat::Line(a, b) => {
                 let mut ends = [a.map(f64::to_bits), b.map(f64::to_bits)];
                 ends.sort_unstable();
                 ends.concat()
             }
-            Flat::Arc { c, r, start, sweep } => [c[0], c[1], r, start, sweep].map(f64::to_bits).to_vec(),
+            &Flat::Arc { c, r, start, sweep } => [c[0], c[1], r, start, sweep].map(f64::to_bits).to_vec(),
         }
     };
-    let mut keyed: Vec<(Vec<u64>, usize)> = out.iter().enumerate().map(|(i, (_, p))| (key(&p.shape), i)).collect();
-    keyed.sort_by(|a, b| a.0.cmp(&b.0).then(out[b.1].0.total_cmp(&out[a.1].0)).then(a.1.cmp(&b.1)));
-    keyed.dedup_by(|b, a| a.0 == b.0);
-    let mut kept: Vec<usize> = keyed.into_iter().map(|(_, i)| i).collect();
+    // A face and an edge never share a key: a face's has an even number of corners' bits, and
+    // is marked.
+    let mut keyed: Vec<(&'static str, Vec<u64>, usize)> = out.iter().enumerate().map(|(i, p)| (p.entry.0, key(&p.shape), i)).collect();
+    keyed.sort_by(|a, b| {
+        (a.0 == "face").cmp(&(b.0 == "face")).then(a.1.cmp(&b.1)).then(out[b.2].height.total_cmp(&out[a.2].height)).then(a.2.cmp(&b.2))
+    });
+    keyed.dedup_by(|b, a| (a.0 == "face") == (b.0 == "face") && a.1 == b.1);
+    let mut kept: Vec<usize> = keyed.into_iter().map(|(_, _, i)| i).collect();
     kept.sort_unstable();
-    kept.into_iter().map(|i| out[i].1.clone()).collect()
+    kept.into_iter().map(|i| out[i].clone()).collect()
 }
 
 impl Draft {
@@ -513,7 +587,14 @@ impl Draft {
             let curves = left()
                 .filter(|(_, c)| !matches!(c.shape, Flat::Point(_)))
                 .filter_map(|(i, c)| c.shape.foot(at).map(|q| (px(q), Spot { at: q, snap: Snap::Source(i) })));
-            return nearest(points.collect(), SNAP_POINT).or_else(|| nearest(curves.collect(), SNAP_CURVE)).unwrap_or(free_spot);
+            // Away from edges, the highest face under the cursor.
+            let face = || {
+                left()
+                    .filter(|(_, c)| c.shape.holds(at))
+                    .max_by(|a, b| a.1.height.total_cmp(&b.1.height))
+                    .map(|(i, _)| Spot { at, snap: Snap::Source(i) })
+            };
+            return nearest(points.collect(), SNAP_POINT).or_else(|| nearest(curves.collect(), SNAP_CURVE)).or_else(face).unwrap_or(free_spot);
         }
         let points = p
             .solved
@@ -703,7 +784,11 @@ impl Draft {
             Tool::Project => {
                 let Snap::Source(i) = spot.snap else { return None };
                 let c = self.projectable.get(i)?;
-                let name = patch.fresh(if matches!(c.shape, Flat::Point(_)) { "v" } else { "e" });
+                let name = patch.fresh(match c.shape {
+                    Flat::Point(_) => "v",
+                    Flat::Region(_) => "f",
+                    _ => "e",
+                });
                 let mut entry = json!({"from": c.from});
                 entry[c.entry.0] = json!(c.entry.1);
                 patch.set("project", &name, entry);
@@ -854,8 +939,12 @@ impl Draft {
                     Flat::Point(q) => {
                         painter.circle_stroke(screen(q), 2.5, stroke);
                     }
+                    // A face only when it would be projected: its edges are drawn anyway.
+                    Flat::Region(_) if stroke == faint => {}
                     _ => {
-                        painter.add(egui::Shape::line(c.shape.points().into_iter().map(screen).collect(), stroke));
+                        for line in c.shape.polylines() {
+                            painter.add(egui::Shape::line(line.into_iter().map(screen).collect(), stroke));
+                        }
                     }
                 }
             }
@@ -948,6 +1037,7 @@ impl Draft {
             (Snap::Source(i), _) => match self.projectable.get(*i) {
                 Some(c) if c.entry.0 == "element" => format!("{}: {}", c.from, c.entry.1).into(),
                 Some(c) if matches!(c.shape, Flat::Point(_)) => format!("{}: {}", c.from, i18n.t("snap-vertex", "vertex")).into(),
+                Some(c) if matches!(c.shape, Flat::Region(_)) => format!("{}: {}", c.from, i18n.t("snap-face", "face")).into(),
                 Some(c) => format!("{}: {}", c.from, i18n.t("snap-edge", "edge")).into(),
                 None => "".into(),
             },
@@ -1593,8 +1683,9 @@ mod tests {
         let p = click_at(&mut e, [40.2, 0.1], false).unwrap();
         assert!(p.get("project").is_none() && p["points"].get("p1").is_some(), "{p}");
         e.draft.tool = Tool::Project;
-        // The top's corners and edges: the bottom's fall on them, the upright edges are seen end on.
-        assert_eq!(e.draft.projectable.len(), 4 + 4);
+        // The top's corners, edges and face: the bottom's fall on them, the upright edges are seen
+        // end on, the sides edge on.
+        assert_eq!(e.draft.projectable.len(), 4 + 4 + 1);
         let p = click_at(&mut e, [40.2, 0.1], false).unwrap();
         let v = &p["project"]["v1"];
         assert_eq!(v["from"], "plate", "{p}");
@@ -1613,6 +1704,32 @@ mod tests {
         assert!(!e.placed.as_ref().unwrap().lines["e1"].construction);
         let p = e.toggle_construction().unwrap();
         assert!(p["project"]["e1"].get("construction").is_none(), "{p}");
+    }
+
+    /// Inside the face, away from its edges, the projection tool projects the face; Project cut
+    /// edges takes the section of a body the plane crosses (D216).
+    #[test]
+    fn faces_and_sections_are_projected() {
+        let mut e = editor(json!({"points": {}}), true);
+        e.draft.tool = Tool::Project;
+        let p = click_at(&mut e, [20.0, 15.0], false).unwrap();
+        assert!(p["project"]["f1"]["face"].is_string(), "{p}");
+        let placed = e.placed.as_ref().unwrap();
+        assert_eq!(placed.lines.values().filter(|l| !l.construction).count(), 4);
+        // The sketch's plane at z = 0 through a block from z = -4 to 4.
+        let mut e = editor(json!({"points": {}}), false);
+        let block = datum_brep::cuboid(
+            TopoId::derive("feature").tag("block").finish(),
+            datum_math::Vec3::new(0.0, 0.0, -4.0),
+            datum_math::Vec3::new(40.0, 30.0, 4.0),
+        )
+        .unwrap();
+        e.context.sources = vec![("block".into(), std::sync::Arc::new(datum_graph::Value::Body(block)))];
+        let p = e.project_sections().unwrap().unwrap();
+        assert_eq!(p["project"]["cut1"], json!({"from": "block", "section": true}), "{p}");
+        assert_eq!(e.placed.as_ref().unwrap().lines.values().filter(|l| !l.construction).count(), 4);
+        // Done once: nothing more to project.
+        assert!(e.project_sections().unwrap().is_none());
     }
 
     #[test]
