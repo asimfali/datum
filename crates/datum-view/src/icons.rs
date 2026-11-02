@@ -17,12 +17,14 @@ pub enum Icon {
     Home,
     /// Two arrows opposite: the other way.
     Flip,
-    /// Sketch tools: the cursor, a line, an arc, a circle, a point, a dimension.
+    /// Sketch tools: the cursor, a line, an arc, a circle, a point, a projection, a dimension.
     Select,
     Line,
     Arc,
     Circle,
     Point,
+    /// An edge above, an arrow down to its line on the plane: project.
+    Project,
     Dimension,
     /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
     /// a ruler.
@@ -140,6 +142,12 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             painter.rect_filled(egui::Rect::from_center_size(c, vec2(4.0, 4.0)), 0.0, colour);
             painter.line_segment([at(-6.0, 0.0), at(-3.5, 0.0)], stroke);
             painter.line_segment([at(3.5, 0.0), at(6.0, 0.0)], stroke);
+        }
+        Icon::Project => {
+            painter.line_segment([at(-6.0, -6.0), at(6.0, -6.0)], stroke);
+            painter.line_segment([at(0.0, -4.0), at(0.0, 1.0)], stroke);
+            painter.add(egui::Shape::convex_polygon(vec![at(0.0, 4.0), at(-2.5, 0.5), at(2.5, 0.5)], colour, Stroke::NONE));
+            painter.line_segment([at(-6.0, 6.0), at(6.0, 6.0)], Stroke::new(2.0, colour));
         }
         Icon::Dimension => {
             painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);

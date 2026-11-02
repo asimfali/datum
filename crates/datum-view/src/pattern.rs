@@ -536,7 +536,7 @@ mod tests {
         let id = datum_brep::TopoId::derive("s").finish();
         SketchEdit::new(
             "s".into(),
-            crate::sketch::Context { id, inputs: Vec::new() },
+            crate::sketch::Context { id, inputs: Vec::new(), sources: Vec::new() },
             json!({"name": "s", "op": "sketch", "sketch": sketch}),
             BTreeMap::new(),
             None,

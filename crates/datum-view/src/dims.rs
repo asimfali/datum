@@ -358,7 +358,7 @@ mod tests {
                             {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"}]}});
         SketchEdit::new(
             "s".into(),
-            Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new() },
+            Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new(), sources: Vec::new() },
             json,
             BTreeMap::from([("w".into(), 25.0)]),
             None,

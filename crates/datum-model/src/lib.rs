@@ -25,7 +25,7 @@ mod session;
 pub mod workspace;
 
 pub use patch::SketchPatch;
-pub use session::{Session, patch_sketch, visit_names};
+pub use session::{Session, patch_sketch, sketch_inputs, visit_names};
 
 use datum_graph::{Graph, GraphError, NodeIx, Op};
 use serde::{Deserialize, Serialize};

@@ -32,8 +32,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
-    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, depth_to, extrude_sketch, face_plane, place,
-    profile_regions,
+    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, depth_to, extrude_sketch, face_plane, parallel,
+    place, profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 

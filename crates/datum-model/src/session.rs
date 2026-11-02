@@ -1,7 +1,7 @@
 //! An editing session and the command registry (ARCHITECTURE §6.1): one table of commands with
 //! JSON parameters, used by MCP and any other front end.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -998,7 +998,19 @@ impl Session {
         }
         let also = patch_sketch(&mut op, p)?;
         let op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
+        // Its inputs follow its projections (D214): a source added, one no longer projected from gone.
+        let node = &self.graph.nodes()[ix as usize];
+        let now: Vec<String> = node.inputs.iter().map(|&i| self.graph.nodes()[i as usize].name.clone()).collect();
+        let on_plane = node.inputs.first().is_some_and(|&i| matches!(self.graph.nodes()[i as usize].op, Op::Plane { .. }));
+        let inputs = sketch_inputs(&op, &now, on_plane)
+            .iter()
+            .map(|n| match self.graph.find(n) {
+                Some(i) if i < ix => Ok(i),
+                _ => Err(format!("`{name}` projects from `{n}`, not a feature before it")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         self.graph.set_op(ix, op).map_err(|e| e.to_string())?;
+        self.graph.set_inputs(ix, &inputs).map_err(|e| e.to_string())?;
         let mut reply = self.rebuild_recording(ix);
         reply["also_removed"] = json!(also);
         Ok(reply)
@@ -1749,6 +1761,24 @@ fn find_again(old: &Body, new: &Body, id: &str, kinds: &[Kind]) -> Option<String
         };
     }
     None
+}
+
+/// The inputs sketch feature `op` needs, by name, its inputs now `inputs` (the first a work plane
+/// if `on_plane`): what it lies on first (a work plane; a body, with `face`), then what its
+/// projections take geometry from (D214): those it had, in their order, then new ones by name.
+/// A projection without `from` keeps the first input. One place for the session and the window.
+pub fn sketch_inputs(op: &Op, inputs: &[String], on_plane: bool) -> Vec<String> {
+    let Op::Sketch { face, project, .. } = op else { return inputs.to_vec() };
+    let first = inputs.first().filter(|_| on_plane || face.is_some() || project.values().any(|p| p.from.is_none()));
+    let from: BTreeSet<&str> = project.values().filter_map(|p| p.from.as_deref()).collect();
+    let mut out: Vec<String> = first.into_iter().cloned().collect();
+    let kept = inputs.iter().filter(|n| from.contains(n.as_str())).cloned();
+    for n in kept.chain(from.iter().map(|n| n.to_string())) {
+        if !out.contains(&n) {
+            out.push(n);
+        }
+    }
+    out
 }
 
 /// Applies an `edit_sketch` patch to a sketch feature's JSON (`op` and its fields): element maps
