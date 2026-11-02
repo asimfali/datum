@@ -581,7 +581,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "rename_in_sketch",
         description: "Rename a point, line, arc, circle, reference dimension, group or projection of sketch feature `name` from `from` \
-                      to `to`, everywhere it is used: the sketch's constraints and groups, a sheet's `start`. Names of faces made from the sketch \
+                      to `to`, everywhere it is used: the sketch's constraints and groups, a sheet's `start`, projections of it into other sketches                       (`element`). Names of faces made from the sketch \
                       change with it; faces, edges and vertices referred to downstream by ID are found again by their geometry, \
                       which a rename leaves as it was. The reply lists references it could not find again.",
         params: || {
@@ -1364,6 +1364,12 @@ impl Session {
                 Op::Extrude { profiles, .. } | Op::Plate { profiles, .. } => profiles.iter_mut().for_each(&mut follow),
                 Op::Revolve { axis, profiles, .. } => std::iter::once(axis).chain(profiles.iter_mut()).for_each(&mut follow),
                 Op::Rolled { axis, path, .. } => std::iter::once(axis).chain(path.iter_mut()).for_each(&mut follow),
+                // Elements of this sketch projected into another (D214).
+                Op::Sketch { project, .. } => project
+                    .values_mut()
+                    .filter(|p| projected_from(self.graph.nodes(), n, p) == Some(ix))
+                    .filter_map(|p| p.element.as_mut())
+                    .for_each(&mut follow),
                 // A plane through points of this sketch (D204).
                 Op::Plane { points, .. } => {
                     let k = n.inputs.iter().position(|&i| i == ix);
@@ -1384,28 +1390,35 @@ impl Session {
         let mut lost = Vec::new();
         let mut remapped = Vec::new();
         for (j, n) in self.graph.nodes().iter().enumerate().skip(ix as usize + 1) {
-            let Some(&input) = n.inputs.first() else { continue };
-            let (Some(old), Some(new)) = (body_of(&before, input), body_of(&self.last.results, input)) else { continue };
             let mut op = n.op.clone();
             let mut changed = false;
-            let mut again = |id: &mut String, kinds: &[Kind], what: String| match find_again(old, new, id, kinds) {
-                Some(found) if found != *id => {
-                    *id = found;
-                    changed = true;
+            // The ID `id` of an element of input `input`'s body, found again in its new body.
+            let mut again = |input: Option<NodeIx>, id: &mut String, kinds: &[Kind], what: String| {
+                let Some(input) = input else { return };
+                let (Some(old), Some(new)) = (body_of(&before, input), body_of(&self.last.results, input)) else { return };
+                match find_again(old, new, id, kinds) {
+                    Some(found) if found != *id => {
+                        *id = found;
+                        changed = true;
+                    }
+                    Some(_) => {}
+                    None => lost.push(what),
                 }
-                Some(_) => {}
-                None => lost.push(what),
             };
+            let first = n.inputs.first().copied();
             match &mut op {
                 Op::Sketch { face, project, .. } => {
                     if let Some(f) = face {
-                        again(f, &[Kind::Face], format!("{}: face", n.name));
+                        again(first, f, &[Kind::Face], format!("{}: face", n.name));
                     }
                     for (pn, pr) in project.iter_mut() {
-                        again(&mut pr.id, &[Kind::Vertex, Kind::Edge], format!("{}: projection `{pn}`", n.name));
+                        let input = projected_from(self.graph.nodes(), n, pr);
+                        if let Some(id) = &mut pr.id {
+                            again(input, id, &[Kind::Vertex, Kind::Edge], format!("{}: projection `{pn}`", n.name));
+                        }
                     }
                 }
-                Op::Unfold { face, .. } => again(face, &[Kind::Face], format!("{}: face", n.name)),
+                Op::Unfold { face, .. } => again(first, face, &[Kind::Face], format!("{}: face", n.name)),
                 _ => {}
             }
             if changed {
@@ -1669,6 +1682,15 @@ pub fn visit_names(v: &mut Value, f: &mut impl FnMut(&mut String)) {
             }
         }
         _ => {}
+    }
+}
+
+/// The input of sketch feature `node` that projection `p` takes its geometry from: the one named
+/// `from`, else the first (D214).
+fn projected_from(nodes: &[datum_graph::Node], node: &datum_graph::Node, p: &datum_ops::Projection) -> Option<NodeIx> {
+    match &p.from {
+        Some(name) => node.inputs.iter().copied().find(|&i| nodes[i as usize].name == *name),
+        None => node.inputs.first().copied(),
     }
 }
 

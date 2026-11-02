@@ -115,11 +115,26 @@
     "window": "f9857d10a45d22979916bed9a4c9ae1ce6d03fefa8196c501f79d797495939ad",
     "window_sketch": "f7c22a72d8ac747c246628677be64d215dda847b981c66ffbaf7d2c15dab28dd"
   },
+  "projected_bodies.json": {
+    "copy": "3bef270a115a96925d0afd19edc198ff121a52d05527fbc54393d59dc9463d92",
+    "lid": "7c2fddfbe575ae381af74a1ea355750c7071d888c5076175316042d7854c2c24",
+    "one": "2b7a25a3b1e3796825d480eb8b244691f76746180f069d55650616aece56f677",
+    "one_outline": "b9ce6a2db0bced303236e4112f21edf3460d3507ee67f16bbacca1590f6ac305",
+    "two": "7ac3547a0a9c5a8cc22acd3f55f57ff23ee4040ad11093b8b77684a55c088b53",
+    "two_outline": "9d9677fab88665d2615330d4f6c0cf51f1a053e7780bfe8e728b0a916f2653fe",
+    "wp": "45d3ea39ff46e0ea2b1115ec237c0b0214a536979292a44a9776908ff6839a55"
+  },
   "projected_hole.json": {
     "drilled": "a3591556a0b80d9f13ed6f01f3647e0b3220a403ac31c0238c3ee6e4f23d4c51",
-    "hole_sketch": "0a467550af23475b56543986f23e0fd8cfefe7b3ee91f75182b4bca43a6b347a",
+    "hole_sketch": "a1390e748c0bf4e5e2cead181bd047bb854b0506152916b6cb4e55f7aa87e41a",
     "outline": "3d42ee5e3823835548e75d21541600167199ea1dc4ac809fe4d18582d4b8d862",
     "plate": "363e6d76fc8b9e3edf44e922ffbbd4852fb697c0a400ef33e89f8483bbb8c2fa"
+  },
+  "projected_sketch.json": {
+    "disk": "397d5963a8efabafefeac32ab0f77e348dbda0d73eb5b43043be37e73c08c639",
+    "part_sketch": "8c322972654478d142b38a9e5635b1b54a28f1f74c003d488ad46f1b0684fae2",
+    "skeleton": "bafd636c6d1f7988669c81295a78b05cc47d8d9ad19d806067bf1e501aad6180",
+    "wp": "8c9ee53cd7da9930ae5ae1da42d4d1fef5605965be9965bf1a7eefa5706a97cf"
   },
   "revolve.json": {
     "bushing": "a31ebaa14cce81fc56a529a5454c10ea01ab1ec72c5afa4f3395be102f508b1a",

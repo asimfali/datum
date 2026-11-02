@@ -32,7 +32,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
-    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, chosen, contour_at, depth_to, extrude_sketch, face_plane, place, profile_regions,
+    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, depth_to, extrude_sketch, face_plane, place,
+    profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 
@@ -72,9 +73,10 @@ pub enum Op {
     /// sketch lies in the sheet's development, lengths along its neutral layer at `k_factor` of
     /// the thickness from the inside (0.5: the middle): coordinates of the flat blank; on a plane
     /// face of sheet metal, the K-factor a cut across its bends goes on through the blank at (D197). `project`
-    /// names edges and vertices of the input body (by ID) projected into the sketch as fixed
-    /// construction geometry to dimension from. No input, or the body holding the face or the
-    /// projected edges.
+    /// names geometry projected into the sketch as fixed curves and points to dimension from (see
+    /// [`Projection`]): edges and vertices of a body by `id`, elements of another sketch by
+    /// `element`, from the input named `from` (none: the first). Inputs: a work plane or the body
+    /// holding the face first, if it lies on one; then the bodies and sketches it projects from.
     Sketch {
         sketch: datum_sketch::Sketch,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,6 +282,53 @@ fn zero3() -> [Num; 3] {
 }
 
 /// A number of a resolved operation (see [`Op::resolve`]).
+/// A sketch feature's value (see [`Op::Sketch`]). Its first input is what it lies on, if it lies
+/// on a work plane or on a face (`face`); every other input is one its projections take
+/// geometry from, by name (`from`, D214); a projection without `from` takes the first.
+fn sketch_value(
+    sketch: &datum_sketch::Sketch,
+    plane: Option<&SketchPlane>,
+    face: Option<&str>,
+    k_factor: Option<&Num>,
+    project: &BTreeMap<String, Projection>,
+    values: &[&Value],
+    names: &[&str],
+) -> Result<Placed, BrepError> {
+    // What it lies on, and whether the first input is that.
+    let (on, host, lies_on) = match values.first() {
+        Some(Value::Plane(p)) => {
+            if plane.is_some() || face.is_some() || k_factor.is_some() {
+                return Err(BrepError::Sketch("a sketch on a work plane takes no `plane`, `face` or `k_factor`".into()));
+            }
+            (Some(p), None, 1)
+        }
+        Some(v) if face.is_some() => {
+            (plane, Some(v.body().ok_or_else(|| BrepError::Sketch("a sketch on a face takes the body as its first input".into()))?), 1)
+        }
+        _ => (plane, None, 0),
+    };
+    let input = |from: Option<&str>| match from {
+        None => Ok(0),
+        Some(n) => names.iter().position(|m| *m == n).ok_or_else(|| BrepError::Sketch(format!("a projection is `from` `{n}`, not an input"))),
+    };
+    for k in lies_on..values.len() {
+        if !project.values().any(|p| input(p.from.as_deref()).is_ok_and(|i| i == k)) {
+            return Err(BrepError::Sketch(format!(
+                "input {} of a sketch is neither what it lies on (a work plane, a body with `face`) nor projected from (`project`)",
+                k + 1
+            )));
+        }
+    }
+    let source = |from: Option<&str>| match values.get(input(from)?) {
+        Some(Value::Body(b)) => Ok(Source::Body(b)),
+        Some(Value::Sketch(s)) => Ok(Source::Sketch(s)),
+        Some(Value::Plane(_)) => Err(BrepError::Sketch("a projection names the input it takes geometry from (`from`), not the work plane".into())),
+        Some(_) => Err(BrepError::Sketch("a projection takes geometry from a body or a sketch".into())),
+        None => Err(BrepError::Sketch("a projection takes geometry from an input of the sketch".into())),
+    };
+    place(sketch, on, host, face, k_factor.map(num).transpose()?, project, &source)
+}
+
 fn num(n: &Num) -> Result<f64, BrepError> {
     n.value().ok_or_else(|| BrepError::Invalid(format!("`{n}` is not evaluated: resolve the operation's parameters first")))
 }
@@ -388,7 +437,7 @@ impl Op {
     pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
             Self::Prism { .. } | Self::Terrain { .. } => 0..=0,
-            Self::Sketch { .. } => 0..=1,
+            Self::Sketch { .. } => 0..=usize::MAX,
             Self::Plane { .. } => 0..=3,
             Self::Extrude { .. } => 1..=3,
             Self::Transform { .. }
@@ -526,6 +575,12 @@ impl Op {
     /// Evaluates the operation for the feature with ID `feature`. In debug builds the result is
     /// validated here, once for every operation.
     pub fn eval(&self, feature: TopoId, values: &[&Value]) -> Result<Value, BrepError> {
+        self.eval_named(feature, values, &[])
+    }
+
+    /// [`Op::eval`] with the inputs' names, which a sketch's projections take their geometry
+    /// from by (`from`, D214).
+    pub fn eval_named(&self, feature: TopoId, values: &[&Value], names: &[&str]) -> Result<Value, BrepError> {
         if !self.arity().contains(&values.len()) {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
         }
@@ -551,17 +606,12 @@ impl Op {
             let n = from.normal * (1.0 / from.normal.dot(from.normal).sqrt());
             return Ok(Value::Plane(SketchPlane { origin: from.origin + n * num(offset)?, ..from }));
         }
-        if let (Self::Sketch { sketch, plane, face, k_factor, project }, Some(Value::Plane(on))) = (self, values.first().copied()) {
-            if plane.is_some() || face.is_some() || !project.is_empty() || k_factor.is_some() {
-                return Err(BrepError::Sketch("a sketch on a work plane takes no `plane`, `face`, `project` or `k_factor`".into()));
-            }
-            return Ok(Value::Sketch(Box::new(place(sketch, Some(on), None, None, None, project)?)));
-        }
         // Every operation but those of sketches takes bodies.
         let sketch =
             |k: usize| values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("{} takes a sketch, input {} is a body", self.kind(), k + 1)));
         let inputs: Vec<&Body> = match self {
             Self::Extrude { .. }
+            | Self::Sketch { .. }
             | Self::Sheet { .. }
             | Self::Plate { .. }
             | Self::Plane { .. }
@@ -595,13 +645,15 @@ impl Op {
                 terrain(feature, &Grid { origin: *origin, step: *step, count: *count, heights }, *base)?
             }
             Self::Sketch { sketch, plane, face, k_factor, project } => {
-                if !inputs.is_empty() && face.is_none() && project.is_empty() {
-                    return Err(BrepError::Sketch(
-                        "a sketch takes a body to lie on one of its faces (`face`) or to project its edges (`project`)".into(),
-                    ));
-                }
-                let k = k_factor.as_ref().map(num).transpose()?;
-                return Ok(Value::Sketch(Box::new(place(sketch, plane.as_ref(), inputs.first().copied(), face.as_deref(), k, project)?)));
+                return Ok(Value::Sketch(Box::new(sketch_value(
+                    sketch,
+                    plane.as_ref(),
+                    face.as_deref(),
+                    k_factor.as_ref(),
+                    project,
+                    values,
+                    names,
+                )?)));
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
             Self::Extrude { .. } => extrude(feature, values, self)?,

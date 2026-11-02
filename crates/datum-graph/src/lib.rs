@@ -318,7 +318,8 @@ impl<'a> Run<'a> {
             return Ok(b);
         }
         let refs: Vec<&Value> = inputs.iter().map(|b| b.as_ref()).collect();
-        let body = Arc::new(op.eval(node.id, &refs).map_err(EvalError::Op)?);
+        let names: Vec<&str> = node.inputs.iter().map(|&j| self.graph.nodes[j as usize].name.as_str()).collect();
+        let body = Arc::new(op.eval_named(node.id, &refs, &names).map_err(EvalError::Op)?);
         self.computed.fetch_add(1, Ordering::Relaxed);
         self.evaluator.cache().insert(key, body.clone());
         Ok(body)
