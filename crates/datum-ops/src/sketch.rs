@@ -140,6 +140,9 @@ enum Shape {
     Arc(End, End, End, Vec3),
     /// Centre, axis, diameter.
     Circle(End, Vec3, f64),
+    /// A cylinder about `axis` of radius `r` cut by the sketch plane (D219): around its point
+    /// on the plane, from start to end counterclockwise about `axis`, or whole.
+    Cut(End, Option<(End, End)>, Vec3, f64),
 }
 
 /// An ellipse a projection made (D218): a circle or an arc seen at a slant. Its points are
@@ -450,6 +453,40 @@ fn projected<'a>(
                         Ellipse { center, major: Vec2::new(major.x * r, major.y * r), minor: minor * r, ends: None, construction },
                     );
                 }
+                // Cut square to its axis, a cylinder is a circle; at a slant, an ellipse whose
+                // half axes are the radius and the radius over the slant's cosine (D219).
+                Shape::Cut(c, ends, axis, r) if parallel(axis, normal) => {
+                    let center = add(&mut s, format!("{name}.center"), c)?;
+                    match ends {
+                        Some((a, b)) => {
+                            let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
+                            let (from, to) = if axis.dot(normal) > 0.0 { (start, end) } else { (end, start) };
+                            s.arcs.insert(name.clone(), Arc { center, from, to, construction });
+                        }
+                        None => {
+                            s.circles.insert(name.clone(), Circle { center, diameter: (2.0 * r).into(), construction });
+                        }
+                    }
+                }
+                Shape::Cut(c, ends, axis, r) => {
+                    let a = axis * (1.0 / axis.dot(axis).sqrt());
+                    let across = a.cross(z);
+                    let v = across * (1.0 / across.dot(across).sqrt());
+                    let u = v.cross(a);
+                    // The cylinder's point at turn φ about `a` from `u` lies on the plane at
+                    // `c + r·cos φ·major + r·sin φ·v`.
+                    let major = (u - a * (u.dot(z) / a.dot(z))) * r;
+                    let center = add(&mut s, format!("{name}.center"), c)?;
+                    let ends = match ends {
+                        Some((p, q)) => {
+                            let (start, end) = (add(&mut s, format!("{name}.start"), p)?, add(&mut s, format!("{name}.end"), q)?);
+                            // Turning about `a` turns counterclockwise in the sketch, or the other way.
+                            Some(if major.cross(v).dot(z) > 0.0 { [start, end] } else { [end, start] })
+                        }
+                        None => None,
+                    };
+                    ellipses.insert(name.clone(), Ellipse { center, major: Vec2::new(major.dot(x), major.dot(y)), minor: r, ends, construction });
+                }
                 Shape::Arc(c, a, b, axis) => {
                     let center = add(&mut s, format!("{name}.center"), c)?;
                     let (start, end) = (add(&mut s, format!("{name}.start"), a)?, add(&mut s, format!("{name}.end"), b)?);
@@ -597,21 +634,34 @@ fn section_parts(name: &str, body: &Body, frame: &[Vec3; 4]) -> Result<Vec<(Stri
             let edge = &body.edges()[e];
             signs[body.half_edges()[edge.half as usize].origin as usize] != signs[body.half_edges()[body.next(edge.half) as usize].origin as usize]
         });
-        // An arc across the plane bulges between its ends: refused if it may reach the plane. One
-        // parallel to it stays at its centre's height, on the side its ends are.
+        // An arc across the plane bulges between its ends: refused if its circle may reach the
+        // plane, which it does within its radius times the sine of its slant. One parallel to
+        // the plane stays at its centre's height, on the side its ends are.
         let reaches = edges.iter().any(|&e| match body.edge_curve(&body.edges()[e]) {
-            Some(Curve::Arc(a)) => !parallel(a.axis, z) && height(a.center).abs() <= a.radius,
+            Some(Curve::Arc(a)) => {
+                let slant = (a.axis * (1.0 / a.axis.dot(a.axis).sqrt())).cross(z);
+                height(a.center).abs() <= a.radius * slant.dot(slant).sqrt()
+            }
             Some(Curve::Rolled { .. }) => true,
             None => false,
         });
         if reaches {
-            return Err(unsupported("the sketch plane may cross an arc of the body (a section through a curve: later)"));
+            return Err(unsupported("the sketch plane may cross an arc of the body: through the end of a cylinder (later)"));
         }
-        let Surface::Plane(plane) = face.surface else {
-            if crossed {
-                return Err(unsupported("the sketch plane crosses a curved face (a circle or an ellipse there: later)"));
+        let plane = match face.surface {
+            Surface::Plane(plane) => plane,
+            Surface::Cylinder(cyl) if crossed => {
+                let mut ends: Vec<End> = Vec::new();
+                for &e in &edges {
+                    if let Some(c) = crossing(e)?.filter(|c| !ends.iter().any(|d| d.1 == c.1)) {
+                        ends.push(c);
+                    }
+                }
+                parts.push((part_name(name, face.id), cylinder_cut(name, body, &cyl, &edges, ends, frame)?));
+                continue;
             }
-            continue;
+            _ if crossed => return Err(unsupported("the sketch plane crosses a cone or a cut's wall (later)")),
+            _ => continue,
         };
         if !crossed {
             continue;
@@ -636,6 +686,42 @@ fn section_parts(name: &str, body: &Body, frame: &[Vec3; 4]) -> Result<Vec<(Stri
         }
     }
     Ok(parts)
+}
+
+/// Where the sketch plane (`frame`) cuts cylinder face `cyl` of `body`, its edges `edges`, across
+/// its straight edges at `ends` (D219): an arc between them, turning as an arc edge of the face
+/// does (its span is the face's), or the whole turn if the face closes round. Refused along the
+/// axis (lines there, later) and across the face more than once.
+fn cylinder_cut(name: &str, body: &Body, cyl: &Cylinder, edges: &[usize], ends: Vec<End>, frame: &[Vec3; 4]) -> Result<Shape, BrepError> {
+    let [o, _, _, z] = *frame;
+    let unsupported = |m: &str| BrepError::Unsupported(format!("projection `{name}`: {m}"));
+    let a = cyl.axis * (1.0 / cyl.axis.dot(cyl.axis).sqrt());
+    if a.dot(z) == 0.0 {
+        return Err(unsupported("the sketch plane runs along a cylinder's axis: its section is lines (later)"));
+    }
+    let c = (cyl.origin - a * ((cyl.origin - o).dot(z) / a.dot(z)), None);
+    match ends.len() {
+        0 | 1 => Ok(Shape::Cut(c, None, a, cyl.radius)),
+        2 => {
+            // An arc edge of the face: from its first vertex counterclockwise about its axis.
+            let (e, arc) = edges
+                .iter()
+                .find_map(|&e| match body.edge_curve(&body.edges()[e]) {
+                    Some(Curve::Arc(arc)) => Some((e, arc)),
+                    _ => None,
+                })
+                .ok_or_else(|| unsupported("a cylinder face with no arc edge"))?;
+            let n = arc.axis * (1.0 / arc.axis.dot(arc.axis).sqrt());
+            let from = body.point(body.half_edges()[body.edges()[e].half as usize].origin) - arc.center;
+            let u = from - n * from.dot(n);
+            let (u, w) = (u * (1.0 / u.dot(u).sqrt()), n.cross(u * (1.0 / u.dot(u).sqrt())));
+            let turn = |p: Vec3| libm::atan2((p - arc.center).dot(w), (p - arc.center).dot(u)).abs();
+            let (start, end) =
+                if turn(ends[0].0) <= turn(ends[1].0) { (ends[0].clone(), ends[1].clone()) } else { (ends[1].clone(), ends[0].clone()) };
+            Ok(Shape::Cut(c, Some((start, end)), n, cyl.radius))
+        }
+        _ => Err(unsupported("the sketch plane crosses a cylinder face more than once")),
+    }
 }
 
 /// The point, line, arc or circle named `element` of the placed sketch `p`, for projection `name`.

@@ -785,7 +785,9 @@ fn a_section_crosses_a_face_twice() {
 #[test]
 fn section_and_face_errors() {
     let plate = square_with_hole();
-    assert!(matches!(section_of(plate.body().unwrap(), 2.0), Err(BrepError::Unsupported(_))));
+    // Through the hole square to its axis: its circle, arc by arc (D219).
+    let t = section_of(plate.body().unwrap(), 1.0).unwrap();
+    assert!(!t.sketch().unwrap().arcs.is_empty());
     let wp = plane_at(8.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
     let src = source_sketch();
     let sketch_err = eval_named(
@@ -850,6 +852,83 @@ fn a_slanted_circle_projects_as_an_ellipse() {
     assert!(!t.sketch().unwrap().ellipses["rg"].construction);
     match eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 1})), "x", &[&t]) {
         Err(BrepError::Unsupported(m)) => assert!(m.contains("ellipse"), "{m}"),
+        r => panic!("expected a refusal, got {:?}", r.map(|_| ())),
+    }
+}
+
+/// A block 100 × 60 × 40 with a vertical hole of radius 10 at (50, 30).
+fn holed_block() -> Value {
+    let outline = serde_json::json!({
+        "points": {"a": [0, 0], "b": [100, 0], "c": [100, 60], "d": [0, 60], "o": [50, 30]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
+        "circles": {"hole": {"center": "o", "diameter": 20}}
+    });
+    let s = eval(&sketch_op(outline, serde_json::json!({})), "outline", &[]).unwrap();
+    eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 40})), "block", &[&s]).unwrap()
+}
+
+/// Cut square to its axis, the hole is a circle in the section (D219): arcs of its faces that
+/// meet at its seams, so the section is a profile with a hole.
+#[test]
+fn a_section_square_to_a_hole_is_a_circle() {
+    let block = holed_block();
+    let wp = plane_at(15.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"s": {"from": "block", "section": true}}}));
+    let t = eval_named(&t, "t", &[&wp, &block], &["wp", "block"]).unwrap();
+    let p = t.sketch().unwrap();
+    assert_eq!(p.lines.len(), 4);
+    assert!(!p.arcs.is_empty() && p.ellipses.is_empty());
+    for a in p.arcs.values() {
+        let (c, f) = (p.solved.points[&a.center], p.solved.points[&a.from]);
+        assert_close(libm::hypot(c.x - 50.0, c.y - 30.0), 0.0);
+        assert_close(libm::hypot(f.x - c.x, f.y - c.y), 10.0);
+    }
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 2})), "x", &[&t]).unwrap();
+    assert_close(body(&v).volume(), (6000.0 - std::f64::consts::PI * 100.0) * 2.0);
+}
+
+/// Cut at a slant, the hole is an ellipse (D219): half axes 10 and 10 over the slant's cosine,
+/// its arcs ending at the points where the plane crosses the hole's seams; it bounds no profile.
+#[test]
+fn a_slanted_section_of_a_hole_is_an_ellipse() {
+    let block = holed_block();
+    // Through (0, 30, 20), rising 1 in 5 along Y.
+    let n = Vec3::new(0.0, -0.2, 1.0);
+    let wp = Value::Plane(datum_ops::SketchPlane { origin: Vec3::new(0.0, 30.0, 20.0), x_axis: Vec3::new(1.0, 0.0, 0.0), normal: n });
+    let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"s": {"from": "block", "section": true}}}));
+    let t = eval_named(&t, "t", &[&wp, &block], &["wp", "block"]).unwrap();
+    let p = t.sketch().unwrap();
+    assert_eq!(p.lines.len(), 4);
+    assert!(!p.ellipses.is_empty() && p.arcs.is_empty());
+    let cos = 1.0 / (1.0f64 + 0.04).sqrt();
+    for e in p.ellipses.values() {
+        let major = libm::hypot(e.major.x, e.major.y);
+        assert_close(major, 10.0 / cos);
+        assert_close(e.minor, 10.0);
+        let c = p.solved.points[&e.center];
+        for end in e.ends.as_ref().unwrap() {
+            let q = p.solved.points[end];
+            let back = e.at(c, e.parameter(c, q));
+            assert!((back.x - q.x).abs() < 1e-9 && (back.y - q.y).abs() < 1e-9, "{end}");
+        }
+    }
+    match eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 2})), "x", &[&t]) {
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("ellipse"), "{m}"),
+        r => panic!("expected a refusal, got {:?}", r.map(|_| ())),
+    }
+    // Along the hole's axis: lines, not yet.
+    let along = plane_at(0.0, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    let along = Value::Plane(match along {
+        Value::Plane(p) => datum_ops::SketchPlane { origin: Vec3::new(50.0, 0.0, 0.0), ..p },
+        _ => unreachable!(),
+    });
+    match eval_named(
+        &sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"s": {"from": "block", "section": true}}})),
+        "t",
+        &[&along, &block],
+        &["wp", "block"],
+    ) {
+        Err(BrepError::Unsupported(m)) => assert!(m.contains("cylinder"), "{m}"),
         r => panic!("expected a refusal, got {:?}", r.map(|_| ())),
     }
 }
