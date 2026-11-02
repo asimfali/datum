@@ -2971,7 +2971,7 @@ impl Viewer {
                 // On a dimension, a double click changes it; elsewhere it fits the view.
                 Some(sk) if r.double_clicked() => {
                     if sk.hover.is_none() {
-                        sk.fit(scene);
+                        sk.fit(scene, true);
                     }
                 }
                 _ => self.camera.fit(Some((lo, hi)), aspect),
@@ -7691,6 +7691,25 @@ mod tests {
         h.get_by_label("✔ other  ·  sketch").click();
         h.run();
         assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
+    }
+
+    /// A new sketch opens on what it can project (D220): a skeleton far bigger than the sketch's
+    /// own nothing is in the view, the other sketch's elements offered to P.
+    #[test]
+    fn a_new_sketch_shows_what_it_can_project() {
+        let mut s = Session::default();
+        let skeleton = json!({"points": {"a": [0, 0], "b": [400, 0], "c": [400, 300]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}});
+        s.execute("add", &json!({"name": "skeleton", "op": "sketch", "sketch": skeleton})).unwrap();
+        s.execute("add", &json!({"name": "s2", "op": "sketch", "sketch": {"points": {}}})).unwrap();
+        let p = picture(&s, Some("s2"), &mut MeshCache::default());
+        let (_, context) = p.editing.clone().unwrap();
+        let feature = p.inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == "s2").unwrap().clone();
+        let sk = SketchEdit::new("s2".into(), context, feature, BTreeMap::new(), None);
+        assert!(sk.draft.projectable.iter().any(|c| c.from == "skeleton" && c.entry.1 == "ab"));
+        // The whole skeleton in the view: its middle in the middle, all of it within the height.
+        assert_eq!(sk.camera.center, [200.0, 150.0]);
+        assert!(sk.camera.half_height >= 200.0, "{}", sk.camera.half_height);
     }
 
     /// In the base, a part as the base has it is a body of the scene, not around it: a ray from

@@ -405,34 +405,48 @@ impl SketchEdit {
             notice: None,
         };
         s.solve();
-        s.fit(scene);
+        // A new sketch shows what there is to project, however small it starts (D220).
+        let new = s.drawn().is_empty() && s.projections().is_empty();
+        s.fit(scene, new);
         s
     }
 
-    /// Looks at the whole sketch, or at the model's middle when the sketch is empty.
-    pub fn fit(&mut self, scene: Option<(datum_math::Vec3, f64)>) {
+    /// Looks at the whole sketch, and with `around` at what it can project; at the model's middle
+    /// when that is a point.
+    pub fn fit(&mut self, scene: Option<(datum_math::Vec3, f64)>, around: bool) {
         let Ok(p) = &self.placed else { return };
         self.camera.frame = p.frame;
-        let pts: Vec<[f64; 2]> = p.solved.points.values().map(|v| [v.x, v.y]).collect();
+        // With `around`, what it can project too (the sketches and bodies before it, D220).
+        let around = self.draft.projectable.iter().filter(|_| around).flat_map(|c| c.shape.polylines()).flatten();
+        let pts: Vec<[f64; 2]> = p.solved.points.values().map(|v| [v.x, v.y]).chain(around).collect();
         let [o, x, y, _] = p.frame;
-        if pts.is_empty() {
-            if let Some((middle, radius)) = scene {
+        let lo = pts.iter().fold([f64::INFINITY; 2], |m, p| [m[0].min(p[0]), m[1].min(p[1])]);
+        let hi = pts.iter().fold([f64::NEG_INFINITY; 2], |m, p| [m[0].max(p[0]), m[1].max(p[1])]);
+        let half = 0.5 * (hi[0] - lo[0]).max(hi[1] - lo[1]);
+        match scene {
+            // Nothing but a point: the scene around it.
+            Some((middle, radius)) if half.is_nan() || half <= 0.0 => {
                 self.camera.center = [(middle - o).dot(x), (middle - o).dot(y)];
                 self.camera.half_height = radius.max(f64::MIN_POSITIVE);
             }
-            return;
+            _ => {
+                self.camera.center = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
+                self.camera.half_height = if half > 0.0 { half * 1.4 } else { 10.0 };
+            }
         }
-        let lo = pts.iter().fold([f64::INFINITY; 2], |m, p| [m[0].min(p[0]), m[1].min(p[1])]);
-        let hi = pts.iter().fold([f64::NEG_INFINITY; 2], |m, p| [m[0].max(p[0]), m[1].max(p[1])]);
-        self.camera.center = [(lo[0] + hi[0]) * 0.5, (lo[1] + hi[1]) * 0.5];
-        let half = 0.5 * (hi[0] - lo[0]).max(hi[1] - lo[1]);
-        self.camera.half_height = if half > 0.0 { half * 1.4 } else { scene.map_or(10.0, |s| s.1 * 0.5) };
     }
 
     /// Takes the feature as the model now has it, unless a point is being dragged.
     pub fn refresh(&mut self, context: Context, json: Json, params: BTreeMap<String, f64>) {
         if self.drag.is_some() {
             return;
+        }
+        // Other features to project from, or the same changed: what can be projected is found again.
+        let same = |a: &[(String, ValueRef)], b: &[(String, ValueRef)]| {
+            a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && x.1.hash() == y.1.hash())
+        };
+        if !same(&self.context.sources, &context.sources) {
+            self.draft.projectable_on = None;
         }
         (self.context, self.json, self.params) = (context, json, params);
         self.solve();

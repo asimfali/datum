@@ -153,7 +153,7 @@ impl Flat {
     }
 
     /// Points along it, to draw: a polyline per loop of a face, one for anything else.
-    fn polylines(&self) -> Vec<Vec<[f64; 2]>> {
+    pub(crate) fn polylines(&self) -> Vec<Vec<[f64; 2]>> {
         match self {
             Flat::Region(loops) => loops.iter().map(|l| l.iter().chain(l.first()).copied().collect()).collect(),
             _ => vec![self.curve_points()],
