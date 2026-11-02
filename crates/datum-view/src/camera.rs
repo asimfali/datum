@@ -229,13 +229,16 @@ impl Camera {
     }
 
     /// View-projection matrix (column-major, wgpu clip space with depth 0..1) for points given
-    /// relative to `anchor`, and the eye relative to it. The near and far planes enclose a
-    /// sphere of `radius` around the target.
+    /// relative to `anchor`, and the eye relative to it. The near and far planes enclose the
+    /// scene, a sphere of `radius` around `anchor`, wherever the view looks: zoomed in on one end
+    /// of a long part, the other end is not cut off.
     pub fn matrices(&self, anchor: Vec3, aspect: f64, radius: f64) -> ([f32; 16], [f32; 3]) {
         let eye = self.eye() - anchor;
         let (r, u, f) = self.axes();
-        let far = self.distance + radius * 1.5;
-        let near = (self.distance - radius * 1.5).max(far * 1e-5);
+        // How far ahead of the eye the scene's middle is.
+        let middle = -eye.dot(f);
+        let far = (middle + radius * 1.5).max(self.distance);
+        let near = (middle - radius * 1.5).max(far * 1e-5);
         let t = 1.0 / libm::tan(self.fov * 0.5);
         let (sx, sy) = (t / aspect.max(1e-6), t);
         // Rows of the view matrix: right, up, back; then perspective with depth near → 0, far → 1.
@@ -352,6 +355,26 @@ impl SketchCamera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Zoomed in on one end of a long part, both ends lie between the near and far planes.
+    #[test]
+    fn a_long_part_is_not_cut_off() {
+        let mut c = Camera::default();
+        // A part 500 long along X, the view on its far end, close.
+        let (lo, hi) = (Vec3::new(0.0, 0.0, 0.0), Vec3::new(500.0, 20.0, 20.0));
+        let anchor = (lo + hi) * 0.5;
+        let radius = (hi - lo).dot(hi - lo).sqrt() * 0.5;
+        c.target = Vec3::new(500.0, 10.0, 10.0);
+        c.distance = 30.0;
+        let (m, _) = c.matrices(anchor, 1.5, radius);
+        for x in [0.0, 250.0, 500.0] {
+            for (y, z) in [(0.0, 0.0), (20.0, 20.0)] {
+                let q = clip(&m, Vec3::new(x, y, z) - anchor);
+                let depth = q[2] / q[3];
+                assert!(q[3] <= 0.0 || (0.0..=1.0).contains(&depth), "({x}, {y}, {z}) at depth {depth}");
+            }
+        }
+    }
 
     /// A point put beyond the picture's edge: the view zooms out to it and to all it showed, with
     /// a margin; one well inside changes nothing.
