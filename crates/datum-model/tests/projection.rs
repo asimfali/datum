@@ -150,3 +150,69 @@ fn a_sketch_takes_its_sources_as_inputs() {
     let e = s.execute("edit_sketch", &json!({"name": "part", "project": {"x": {"from": "later", "element": "q"}}})).unwrap_err();
     assert!(e.contains("not a feature before it"), "{e}");
 }
+
+/// A block of size `w` (a parameter) by 6 by 4 in the root, and a work plane above it.
+fn block(s: &mut Session) -> String {
+    run(s, "set_parameter", json!({"name": "w", "value": 10}));
+    let outline = json!({"points": {"a": [0, 0], "b": [9, 0.2], "c": [9.5, 5], "d": [0.3, 6]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
+        "constraints": [{"type": "fix", "point": "a"}, {"type": "horizontal", "line": "ab"}, {"type": "vertical", "line": "bc"},
+            {"type": "horizontal", "line": "cd"}, {"type": "vertical", "line": "da"},
+            {"type": "length", "line": "ab", "value": "w"}, {"type": "length", "line": "da", "value": 6}]});
+    run(s, "add", json!({"name": "outline", "op": "sketch", "sketch": outline}));
+    run(s, "extrude", json!({"name": "block", "sketch": "outline", "mode": "new", "z1": 4}));
+    run(s, "add", json!({"name": "wp", "op": "plane", "base": "xy", "offset": 9}));
+    run(s, "query_faces", json!({"name": "block", "normal": [0, 0, 1]}))["faces"][0]["id"].as_str().unwrap().to_string()
+}
+
+/// A body's face is projected, a dimension is tied to one of its points; removing the
+/// projection takes the dimension with it (listed), and the sketch still builds.
+#[test]
+fn a_projected_face_and_its_removal() {
+    let mut s = Session::default();
+    let top = block(&mut s);
+    let sketch = json!({"points": {"p": [0, 0]}, "constraints": [{"type": "fix", "point": "p"}]});
+    run(
+        &mut s,
+        "add",
+        json!({"name": "t", "op": "sketch", "inputs": ["wp", "block"], "project": {"f": {"from": "block", "face": top}}, "sketch": sketch}),
+    );
+    let f = feature(&mut s, "t");
+    assert!(f.get("error").is_none(), "{f}");
+    // Four lines in the profile, and no `at` recorded for the face.
+    assert_eq!(f["project"]["f"].get("at"), None, "{f}");
+    let points = f["status"]["sketch"]["points"].as_object().unwrap();
+    let start = points.keys().find(|k| k.starts_with("f.") && k.ends_with(".start")).unwrap().clone();
+    assert!(points.keys().filter(|k| k.starts_with("f.")).count() >= 4, "{f}");
+    run(&mut s, "extrude", json!({"name": "lid", "sketch": "t", "mode": "new", "z1": 2}));
+    assert!((volume(&mut s, "lid") - 10.0 * 6.0 * 2.0).abs() < 1e-6);
+
+    let tie = json!({"type": "horizontal_distance", "points": ["p", start], "value": 3});
+    let r = s.execute("edit_sketch", &json!({"name": "t", "add_constraints": [tie]}));
+    assert!(r.is_ok(), "{r:?}");
+    assert_eq!(feature(&mut s, "t")["sketch"]["constraints"].as_array().unwrap().len(), 2);
+    let r = run(&mut s, "edit_sketch", json!({"name": "t", "project": {"f": null}}));
+    assert_eq!(r["also_removed"], json!(["constraints: 1"]), "{r}");
+    let f = feature(&mut s, "t");
+    assert!(f.get("error").is_none(), "{f}");
+    assert_eq!(f["sketch"]["constraints"].as_array().unwrap().len(), 1, "{f}");
+    assert!(f["project"].as_object().is_none_or(|p| p.is_empty()), "{f}");
+}
+
+/// The face follows its body: a parameter changes the block, the extrusion of the projection with it.
+#[test]
+fn a_projected_face_follows_a_parameter() {
+    let mut s = Session::default();
+    let top = block(&mut s);
+    run(
+        &mut s,
+        "add",
+        json!({"name": "t", "op": "sketch", "inputs": ["wp", "block"], "project": {"f": {"from": "block", "face": top}}, "sketch": {"points": {}}}),
+    );
+    run(&mut s, "extrude", json!({"name": "lid", "sketch": "t", "mode": "new", "z1": 2}));
+    assert!((volume(&mut s, "lid") - 120.0).abs() < 1e-6);
+    run(&mut s, "set_parameter", json!({"name": "w", "value": 25}));
+    let f = feature(&mut s, "t");
+    assert!(f.get("error").is_none(), "{f}");
+    assert!((volume(&mut s, "lid") - 25.0 * 6.0 * 2.0).abs() < 1e-6);
+}

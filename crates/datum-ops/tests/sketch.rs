@@ -680,3 +680,131 @@ fn work_plane_sketch_projects_edges_of_a_second_body() {
         .is_err()
     );
 }
+
+// ---- Projection of a face and of a section ----
+
+fn square_with_hole() -> Value {
+    let s = serde_json::json!({
+        "points": {"a": [0, 0], "b": [10, 0], "c": [10, 10], "d": [0, 10], "o": [5, 5]},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "a"}},
+        "circles": {"ring": {"center": "o", "diameter": 4}}
+    });
+    let s = eval(&sketch_op(s, serde_json::json!({})), "plate_sketch", &[]).unwrap();
+    eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 4})), "plate", &[&s]).unwrap()
+}
+
+fn project_into(plane: &Value, from: &Value, project: serde_json::Value) -> Result<Value, BrepError> {
+    let t = sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": project}));
+    eval_named(&t, "t", &[plane, from], &["wp", "from"])
+}
+
+fn line_names(v: &Value) -> Vec<String> {
+    v.sketch().unwrap().lines.keys().cloned().collect()
+}
+
+fn extrude_volume(t: &Value, z1: f64) -> f64 {
+    let v = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": z1})), "x", &[t]).unwrap();
+    body(&v).volume()
+}
+
+#[test]
+fn a_face_projects_as_a_profile() {
+    let block = Value::Body(cuboid(id("block"), Vec3::ZERO, Vec3::new(10.0, 6.0, 4.0)).unwrap());
+    let wp = plane_at(8.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let top = top_face(block.body().unwrap());
+    let t = project_into(&wp, &block, serde_json::json!({"f": {"from": "from", "face": top}})).unwrap();
+    let lines = t.sketch().unwrap().lines.clone();
+    assert_eq!(lines.len(), 4);
+    for (n, l) in &lines {
+        assert!(!l.construction, "{n}");
+        let (p, hex) = n.split_once('.').unwrap();
+        assert!(p == "f" && hex.len() == 8 && hex.chars().all(|c| c.is_ascii_hexdigit()), "{n}");
+    }
+    assert_close(extrude_volume(&t, 3.0), 10.0 * 6.0 * 3.0);
+}
+
+#[test]
+fn a_face_with_a_hole_projects_its_outline_and_the_hole() {
+    let plate = square_with_hole();
+    let wp = plane_at(8.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let top = top_face(plate.body().unwrap());
+    let t = project_into(&wp, &plate, serde_json::json!({"f": {"from": "from", "face": top}})).unwrap();
+    let p = t.sketch().unwrap();
+    assert_eq!(p.lines.len(), 4);
+    // The round hole is a few arcs (a circle is split at its seam).
+    assert!(!p.arcs.is_empty() && p.circles.is_empty());
+    assert_close(extrude_volume(&t, 2.0), (100.0 - std::f64::consts::PI * 4.0) * 2.0);
+    // The outer edges are named alike with and without the hole.
+    let outline = serde_json::json!({
+        "points": {"a": [0, 0], "b": [10, 0], "c": [10, 10], "d": [0, 10]},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "a"}}
+    });
+    let bare = eval(&sketch_op(outline, serde_json::json!({})), "plate_sketch", &[]).unwrap();
+    let bare = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 4})), "plate", &[&bare]).unwrap();
+    let top = top_face(bare.body().unwrap());
+    let w = project_into(&wp, &bare, serde_json::json!({"f": {"from": "from", "face": top}})).unwrap();
+    assert_eq!(line_names(&t), line_names(&w));
+}
+
+fn section_of(b: &Body, z: f64) -> Result<Value, BrepError> {
+    let wp = plane_at(z, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    project_into(&wp, &Value::Body(b.clone()), serde_json::json!({"s": {"from": "from", "section": true}}))
+}
+
+#[test]
+fn a_section_projects_as_a_profile() {
+    let block = cuboid(id("block"), Vec3::ZERO, Vec3::new(10.0, 6.0, 4.0)).unwrap();
+    let t = section_of(&block, 2.0).unwrap();
+    assert_eq!(t.sketch().unwrap().lines.len(), 4);
+    assert!(t.sketch().unwrap().lines.values().all(|l| !l.construction));
+    assert_close(extrude_volume(&t, 1.0), 60.0);
+    // Through the top vertices, and above the body.
+    assert!(matches!(section_of(&block, 4.0), Err(BrepError::Degenerate(_))));
+    assert!(matches!(section_of(&block, 10.0), Err(BrepError::Degenerate(_))));
+}
+
+#[test]
+fn a_section_crosses_a_face_twice() {
+    let u = serde_json::json!({
+        "points": {"a": [0, 0], "b": [10, 0], "c": [10, 10], "d": [7, 10], "e": [7, 4], "f": [3, 4], "g": [3, 10], "h": [0, 10]},
+        "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"}, "l4": {"from": "d", "to": "e"},
+            "l5": {"from": "e", "to": "f"}, "l6": {"from": "f", "to": "g"}, "l7": {"from": "g", "to": "h"}, "l8": {"from": "h", "to": "a"}}
+    });
+    let u = eval(&sketch_op(u, serde_json::json!({})), "u", &[]).unwrap();
+    let u = eval(&op(serde_json::json!({"op": "extrude", "z0": 0, "z1": 4})), "ub", &[&u]).unwrap();
+    // Plane y = 7 cuts both arms of the U; X along the world X, normal along Y.
+    let wp =
+        Value::Plane(datum_ops::SketchPlane { origin: Vec3::new(0.0, 7.0, 0.0), x_axis: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::new(0.0, 1.0, 0.0) });
+    let t = project_into(&wp, &u, serde_json::json!({"s": {"from": "from", "section": true}})).unwrap();
+    let names = line_names(&t);
+    assert_eq!(names.len(), 8, "{names:?}");
+    assert!(names.iter().any(|n| n.ends_with(".1")) && names.iter().any(|n| n.ends_with(".2")), "{names:?}");
+    assert_close(extrude_volume(&t, 1.0), 2.0 * 3.0 * 4.0);
+}
+
+#[test]
+fn section_and_face_errors() {
+    let plate = square_with_hole();
+    assert!(matches!(section_of(plate.body().unwrap(), 2.0), Err(BrepError::Unsupported(_))));
+    let wp = plane_at(8.0, Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0));
+    let src = source_sketch();
+    let sketch_err = eval_named(
+        &sketch_op(serde_json::json!({"points": {}}), serde_json::json!({"project": {"s": {"from": "src", "section": true}}})),
+        "t",
+        &[&wp, &src],
+        &["wp", "src"],
+    );
+    assert!(matches!(sketch_err, Err(BrepError::Sketch(_))));
+    let top = top_face(plate.body().unwrap());
+    for p in [serde_json::json!({"face": top, "at": [[1, 1]]}), serde_json::json!({"section": true, "at": [[1, 1]]})] {
+        let mut p = p;
+        p["from"] = "from".into();
+        match project_into(&wp, &plate, serde_json::json!({"f": p})) {
+            Err(e) => assert!(e.to_string().contains("at"), "{e}"),
+            Ok(_) => panic!("expected an error"),
+        }
+    }
+    // A lost face.
+    let r = project_into(&wp, &plate, serde_json::json!({"f": {"from": "from", "face": "0123456789abcdef0123456789abcdef"}}));
+    assert!(matches!(r, Err(BrepError::LostReference(_))));
+}

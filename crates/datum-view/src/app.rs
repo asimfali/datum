@@ -2417,6 +2417,9 @@ impl Viewer {
                 ),
                 Err(e) => ui.colored_label(ui.visuals().error_fg_color, e),
             };
+            if let Some(n) = &sk.notice {
+                ui.colored_label(ui.visuals().warn_fg_color, n);
+            }
             // What the sketch breaks downstream: why the model behind did not change.
             for f in m.inspect["features"].as_array().into_iter().flatten().filter(|f| f["name"] != sk.feature.as_str()) {
                 if let (Some(name), Some(e)) = (f["name"].as_str(), f["error"].as_str()) {
@@ -5272,6 +5275,15 @@ impl Viewer {
                     self.send(Request::Command("edit_sketch", p));
                 }
             }
+            Act::ProjectSection => {
+                if let Some(sk) = &mut self.sketch {
+                    match sk.project_sections() {
+                        Ok(Some(p)) => self.send(Request::Command("edit_sketch", p)),
+                        Ok(None) => sk.notice = Some(self.i18n.t("no-section", "The sketch plane crosses no body before the sketch").to_string()),
+                        Err(e) => sk.notice = Some(e),
+                    }
+                }
+            }
             // The curves selected change kind; with none, the next ones drawn do.
             Act::Construction => {
                 if let Some(sk) = &mut self.sketch {
@@ -5425,7 +5437,7 @@ impl Viewer {
             self.item(ui, Act::Flange, true);
             self.item(ui, Act::Trim, true);
             ui.separator();
-            for act in TOOLS.into_iter().chain([Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Construction]) {
+            for act in TOOLS.into_iter().chain([Act::ProjectSection, Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Construction]) {
                 self.item(ui, act, true);
             }
             ui.separator();

@@ -1428,6 +1428,9 @@ impl Session {
                         if let Some(id) = &mut pr.id {
                             again(input, id, &[Kind::Vertex, Kind::Edge], format!("{}: projection `{pn}`", n.name));
                         }
+                        if let Some(f) = &mut pr.face {
+                            again(input, f, &[Kind::Face], format!("{}: projection `{pn}`", n.name));
+                        }
                     }
                 }
                 Op::Unfold { face, .. } => again(first, face, &[Kind::Face], format!("{}: face", n.name)),
@@ -1459,12 +1462,12 @@ impl Session {
         else {
             return summary;
         };
-        if project.values().all(|p| !p.at.is_empty()) {
+        if project.values().all(|p| !p.single() || !p.at.is_empty()) {
             return summary;
         }
         let mut op = node.op.clone();
         if let Op::Sketch { project, .. } = &mut op {
-            for (name, p) in project.iter_mut().filter(|(_, p)| p.at.is_empty()) {
+            for (name, p) in project.iter_mut().filter(|(_, p)| p.single() && p.at.is_empty()) {
                 p.at = placed.projected.get(name).cloned().unwrap_or_default();
             }
         }
@@ -1806,8 +1809,9 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
         p.get(key).and_then(Value::as_object).map(|m| m.iter().filter(|(_, v)| v.is_null()).map(|(n, _)| n.clone()).collect()).unwrap_or_default()
     };
     let mut gone: Vec<String> = ["points", "lines", "arcs", "circles", "measures", "groups", "patterns"].iter().flat_map(|k| removed_in(k)).collect();
+    // A projection's points and curves are `<name>` and `<name>.…` (a face's: `<name>.<id>.start`).
     let projections = removed_in("project");
-    gone.extend(projections.iter().flat_map(|n| [n.clone(), format!("{n}.start"), format!("{n}.end"), format!("{n}.center")]));
+    let projected = |n: &str| projections.iter().any(|p| n.strip_prefix(p.as_str()).is_some_and(|r| r.is_empty() || r.starts_with('.')));
     merge(op, "project", p.get("project"))?;
     let sketch = op.get_mut("sketch").and_then(Value::as_object_mut).ok_or("the sketch is missing")?;
     // Constraints removed by name first: those of an element removed with them go with it below,
@@ -1827,7 +1831,7 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     let refers = |v: &Value, gone: &[String]| {
         let mut v = v.clone();
         let mut found = false;
-        visit_names(&mut v, &mut |n| found |= gone.contains(n));
+        visit_names(&mut v, &mut |n| found |= gone.contains(n) || projected(n));
         found
     };
     // Curves on removed points, then dimensions on anything removed.
@@ -1844,7 +1848,7 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
     // Groups lose what was removed; one left empty goes.
     if let Some(groups) = sketch.get_mut("groups").and_then(Value::as_object_mut) {
         for members in groups.values_mut().filter_map(Value::as_array_mut) {
-            members.retain(|n| !n.as_str().is_some_and(|n| gone.iter().any(|g| g == n)));
+            members.retain(|n| !n.as_str().is_some_and(|n| gone.iter().any(|g| g == n) || projected(n)));
         }
         let empty: Vec<String> = groups.iter().filter(|(_, m)| m.as_array().is_some_and(Vec::is_empty)).map(|(n, _)| n.clone()).collect();
         for n in empty {

@@ -130,6 +130,13 @@
     "outline": "3d42ee5e3823835548e75d21541600167199ea1dc4ac809fe4d18582d4b8d862",
     "plate": "363e6d76fc8b9e3edf44e922ffbbd4852fb697c0a400ef33e89f8483bbb8c2fa"
   },
+  "projected_section.json": {
+    "block": "667a430abd68b7fc53919e6e280c52198e7c43997586f398b1ecd33a84fb446e",
+    "cut": "4915e32c399238b3a09124f57ce0c2c0b1f84a11acff0bee381e25f416dea4bc",
+    "mid": "00d7dd1366a16a3c2fcf528a6daf3128402227d83aeef5e9901ee055d5399561",
+    "outline": "9abf4f329182c4c4f346df40e1fb43e535bff8423f68fe3d7411b515157f7ccb",
+    "slice": "cb7849a7e43ed63c206f0619a1a83574ca9bf5ac7ff5e2596721443a08afdd84"
+  },
   "projected_sketch.json": {
     "disk": "397d5963a8efabafefeac32ab0f77e348dbda0d73eb5b43043be37e73c08c639",
     "part_sketch": "8c322972654478d142b38a9e5635b1b54a28f1f74c003d488ad46f1b0684fae2",
