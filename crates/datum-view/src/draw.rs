@@ -813,7 +813,8 @@ impl Draft {
                     Flat::Region(_) => "f",
                     _ => "e",
                 });
-                let mut entry = json!({"from": c.from});
+                // A line of the blank is the sketch's own blank's: from no input.
+                let mut entry = if c.entry.0 == "blank" { json!({}) } else { json!({"from": c.from}) };
                 entry[c.entry.0] = json!(c.entry.1);
                 patch.set("project", &name, entry);
             }
@@ -1754,6 +1755,37 @@ mod tests {
         assert_eq!(e.placed.as_ref().unwrap().lines.values().filter(|l| !l.construction).count(), 4);
         // Done once: nothing more to project.
         assert!(e.project_sections().unwrap().is_none());
+    }
+
+    /// On the blank (D222), P offers the blank's lines by name, the outline no more once it is
+    /// projected whole, and projects one as `blank`, from no input.
+    #[test]
+    fn the_projection_tool_projects_lines_of_the_blank() {
+        let op = |j: Json| serde_json::from_value::<datum_graph::Op>(j).unwrap();
+        let feature = |n: &str| TopoId::derive("feature").tag(n).finish();
+        let plate = datum_brep::cuboid(feature("plate"), datum_math::Vec3::ZERO, datum_math::Vec3::new(40.0, 30.0, 2.0)).unwrap();
+        let top = plate.faces().iter().find(|f| f.surface.plane().is_some_and(|q| q.normal.z > 0.0)).unwrap().id;
+        let plate = datum_graph::Value::Body(plate);
+        let hole = op(json!({"op": "sketch", "face": format!("{top:?}"), "sketch": {"points": {"c": [20, 15]}, "circles": {"h": {"center": "c", "diameter": 6}}}}))
+            .eval(feature("hole"), &[&plate])
+            .unwrap();
+        let cut = op(json!({"op": "extrude", "mode": "cut", "through": true, "wall": true})).eval(feature("cut"), &[&plate, &hole]).unwrap();
+        let blank = datum_ops::unfold_side(cut.body().unwrap(), false, 0.5).unwrap();
+        let json = json!({"name": "s", "op": "sketch", "inputs": ["cut"], "flat": "front", "k_factor": 0.5,
+            "project": {"blank": {"blank": "outline"}}, "sketch": {"points": {}}});
+        let cut = std::sync::Arc::new(cut);
+        let context = Context { id: feature("s"), inputs: vec![("cut".into(), cut.clone())], sources: vec![("cut".into(), cut)] };
+        let mut e = SketchEdit::new("s".into(), context, json, BTreeMap::new(), None);
+        e.draft.tool = Tool::Project;
+        // The outline is in already: the hole alone is offered.
+        assert_eq!(e.draft.projectable.len(), 1, "{:?}", e.draft.projectable);
+        let circle = blank.pieces.iter().position(|p| matches!(p, datum_ops::FlatPiece::Circle { .. })).unwrap();
+        assert_eq!(e.draft.projectable[0].entry, ("blank", format!("{:?}", blank.ids[circle])));
+        // On the hole's edge (its centre is where the blank has it), a click projects it.
+        let datum_ops::FlatPiece::Circle { center, radius } = blank.pieces[circle] else { unreachable!() };
+        let p = click_at(&mut e, [center.x + radius, center.y], false).unwrap();
+        assert_eq!(p["project"]["e1"], json!({"blank": format!("{:?}", blank.ids[circle])}), "{p}");
+        assert!(e.placed.as_ref().unwrap().circles["e1"].construction);
     }
 
     /// A circle of a sketch on a tilted plane is offered and projected as an ellipse (D218).

@@ -441,6 +441,34 @@ impl SketchEdit {
         !self.json["flat"].is_null()
     }
 
+    /// What P projects into a sketch on the blank (D222): the lines of the blank it lies on (its
+    /// coordinates are the blank's), each by its name; the outline and the bend lines unless
+    /// projected whole already.
+    fn blank_projectable(&self, placed: &Placed) -> Vec<crate::draw::Projectable> {
+        use crate::draw::{Flat, Projectable};
+        let Some((first, body)) = self.context.inputs.first().and_then(|(n, v)| Some((n, v.body()?))) else { return Vec::new() };
+        let Some(Ok(blank)) = placed.k_factor.map(|k| datum_ops::unfold_side(body, self.json["flat"] == "back", k)) else { return Vec::new() };
+        let whole = |group: &str| self.json["project"].as_object().is_some_and(|m| m.values().any(|p| p["blank"] == group));
+        let take = |id: TopoId, shape: Flat| Projectable { from: first.clone(), entry: ("blank", format!("{id:?}")), shape, height: 0.0 };
+        let pieces = blank.pieces.iter().zip(&blank.ids).enumerate().filter(|(i, _)| !(whole("outline") && blank.outer.contains(i)));
+        let bends = blank.bends.iter().zip(&blank.bend_ids).filter(|_| !whole("bends"));
+        pieces
+            .map(|(_, (piece, &id))| {
+                let shape = match piece {
+                    datum_ops::FlatPiece::Line(a, b) => Flat::Line([a.x, a.y], [b.x, b.y]),
+                    datum_ops::FlatPiece::Arc { center, radius, start, end } => {
+                        let sweep = (end - start).rem_euclid(TAU);
+                        Flat::Arc { c: [center.x, center.y], r: *radius, start: *start, sweep: if sweep == 0.0 { TAU } else { sweep } }
+                    }
+                    datum_ops::FlatPiece::Circle { center, radius } => Flat::Arc { c: [center.x, center.y], r: *radius, start: 0.0, sweep: TAU },
+                    datum_ops::FlatPiece::Polyline(pts) => Flat::Polyline(pts.iter().map(|q| [q.x, q.y]).collect()),
+                };
+                take(id, shape)
+            })
+            .chain(bends.map(|(b, &id)| take(id, Flat::Line([b[0].x, b[0].y], [b[1].x, b[1].y]))))
+            .collect()
+    }
+
     /// Looks at the blank of `size`, its corner at the origin, in a picture of width / height `aspect`.
     pub fn fit_blank(&mut self, size: [f64; 2], aspect: f64) {
         self.camera.center = [size[0] * 0.5, size[1] * 0.5];
@@ -456,7 +484,8 @@ impl SketchEdit {
         let same = |a: &[(String, ValueRef)], b: &[(String, ValueRef)]| {
             a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.0 == y.0 && x.1.hash() == y.1.hash())
         };
-        if !same(&self.context.sources, &context.sources) {
+        // On the blank, what is projected already (the outline, the bend lines) is offered no more.
+        if !same(&self.context.sources, &context.sources) || (self.on_blank() && self.json["project"] != json["project"]) {
             self.draft.projectable_on = None;
         }
         (self.context, self.json, self.params) = (context, json, params);
@@ -485,7 +514,7 @@ impl SketchEdit {
         if let Ok(p) = &placed
             && self.draft.projectable_on != Some(p.frame)
         {
-            self.draft.projectable = projectable(&self.context.sources, p);
+            self.draft.projectable = if self.on_blank() { self.blank_projectable(p) } else { projectable(&self.context.sources, p) };
             self.draft.projectable_on = Some(p.frame);
         }
         self.placed = placed;
@@ -541,7 +570,12 @@ impl SketchEdit {
         let entries = self.json["project"].as_object().into_iter().flat_map(|m| m.values());
         entries
             .filter_map(|p| {
-                let what = p["id"].as_str().or(p["element"].as_str()).or(p["face"].as_str()).or((p["section"] == true).then_some("section"))?;
+                let what = p["id"]
+                    .as_str()
+                    .or(p["element"].as_str())
+                    .or(p["face"].as_str())
+                    .or(p["blank"].as_str())
+                    .or((p["section"] == true).then_some("section"))?;
                 Some((p["from"].as_str().map_or_else(|| first.clone(), String::from), what.to_string()))
             })
             .collect()
