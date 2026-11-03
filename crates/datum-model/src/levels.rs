@@ -279,7 +279,8 @@ impl Doc {
 
     /// Graph `g` of level `level` (none: the root) as it is built (D193, D197): each sheet metal
     /// part's thickness and bend radius from its rule (the library of `project`), their only
-    /// place, and its K-factor, if the rule gives one, into the sketches on faces of its body. A
+    /// place, and its K-factor into the sketches on faces of its body (or on its blank), its rolled
+    /// sheets and trims: the rule's, else the one its blank is laid at (D223). A
     /// part without a rule, or whose rule the library lacks, keeps the feature as it is: a file
     /// from before rules has its own numbers, a new one fails asking for a rule. The library is
     /// read only when a sheet metal part has a rule.
@@ -305,6 +306,22 @@ impl Doc {
         let rules = crate::library::load("rule", project);
         let mut out = g.clone();
         let mut ks = std::collections::BTreeMap::new();
+        // Without one from the rule, the K the body's blank is laid at (its settings, 0.5 by
+        // default, D164): the sheet's cuts, gaps and trims are laid as its blank is, never apart.
+        let laid_at = |begun: NodeIx| {
+            let set = self.flats.iter().find(|(name, _)| g.find(name).is_some_and(|ix| body_chain(g, ix).last() == Some(begun)));
+            set.map_or_else(half, |(_, s)| s.k_factor.clone())
+        };
+        let k_of = |ks: &std::collections::BTreeMap<NodeIx, f64>, ix: NodeIx| match ks.get(&ix) {
+            Some(&k) => Num::Value(k),
+            None => laid_at(body_chain(g, ix).last().unwrap_or(ix)),
+        };
+        // The sheet parts' first features whose rule the library has.
+        let ruled: std::collections::BTreeSet<NodeIx> = sheets
+            .iter()
+            .filter(|(ix, r)| matches!(g.nodes()[*ix].op, Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. }) && rules.get(r).is_some())
+            .map(|(ix, _)| *ix as NodeIx)
+            .collect();
         for (ix, rule) in sheets {
             let Some(rule) = rules.get(&rule) else { continue };
             if let Some(k) = rule.element["k_factor"].as_f64() {
@@ -318,28 +335,26 @@ impl Doc {
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
                 Op::Flange { radius, .. } => *radius = Some(Num::Value(r)),
                 // The cut follows the neutral layer: no K, no trim.
-                Op::Trim { k_factor, .. } => *k_factor = ks.get(&(ix as NodeIx)).map(|&k| Num::Value(k)),
+                Op::Trim { k_factor, .. } => *k_factor = Some(k_of(&ks, ix as NodeIx)),
                 // The gap is along the neutral layer: no K, no rolled sheet.
-                Op::Rolled { thickness, k_factor, .. } => {
-                    (*thickness, *k_factor) = (Some(Num::Value(t)), ks.get(&(ix as NodeIx)).map(|&k| Num::Value(k)))
-                }
+                Op::Rolled { thickness, k_factor, .. } => (*thickness, *k_factor) = (Some(Num::Value(t)), Some(k_of(&ks, ix as NodeIx))),
                 _ => {}
             }
             // The same operation with other numbers: its arity holds.
             let _ = out.set_op(ix as NodeIx, op);
         }
-        // A sketch on a face of a part's body, or on its flat blank, lays its bends flat with the
-        // rule's K.
+        // A sketch on a face of a sheet part's body, or on its flat blank, lays its bends flat at
+        // the rule's K, or at its blank's.
         for (ix, n) in g.nodes().iter().enumerate() {
             let Op::Sketch { face, flat, .. } = &n.op else { continue };
             if face.is_none() && flat.is_none() {
                 continue;
             }
             let Some(&body) = n.inputs.first() else { continue };
-            let Some(&k) = body_chain(g, body).last().and_then(|begun| ks.get(&begun)) else { continue };
+            let Some(begun) = body_chain(g, body).last().filter(|b| ruled.contains(b)) else { continue };
             let mut op = n.op.clone();
             if let Op::Sketch { k_factor, .. } = &mut op {
-                *k_factor = Some(Num::Value(k));
+                *k_factor = Some(k_of(&ks, begun));
             }
             let _ = out.set_op(ix as NodeIx, op);
         }

@@ -332,9 +332,9 @@ fn a_slot_along_the_whole_bend_is_refused() {
     assert!(failure(&r).contains("two parts"), "{r}");
 }
 
-/// A rule without a K-factor: a cut across a bend asks for one.
+/// A rule without a K-factor: a cut across a bend is laid at the blank's (D223), one circle on it.
 #[test]
-fn a_cut_across_a_bend_needs_a_k_factor() {
+fn a_cut_across_a_bend_without_k_in_the_rule_takes_the_blanks() {
     let mut s = project(
         "bend_cut_no_k",
         json!({"points": {"a": [0, 0], "b": [0, 60], "c": [80, 60]}, "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}}),
@@ -347,7 +347,8 @@ fn a_cut_across_a_bend_needs_a_k_factor() {
     run(&mut s, "sheet", json!({"name": "l", "sketch": "path", "rule": "Без K", "side": "left", "z1": 40}));
     let flat = first_wall(&mut s, "l").flat;
     let r = punch_circle(&mut s, "l", "hole", flat - 2.0, 20.0, 10.0);
-    assert!(failure(&r).contains("k_factor"), "{r}");
+    assert_cut(&r);
+    assert_eq!(pieces(&mut s, "hole_cut")[2], 1);
 }
 
 /// A flange on an end of a sheet of the rule `Лист` takes the rule's radius (D205): nothing

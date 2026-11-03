@@ -690,6 +690,8 @@ const COMMANDS: &[Command] = &[
             } else {
                 s.doc.flats.insert(feature.to_string(), set);
             }
+            // A sheet whose rule gives no K lays its cuts at the blank's (see `Doc::built`).
+            s.rebuild();
             Ok(s.flats_report())
         },
     },
