@@ -54,6 +54,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             }
             viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
             viewer.touchpad = kept(TOUCHPAD) == "true";
+            viewer.camera.perspective = kept(PERSPECTIVE) == "true";
             // What the menu chose last wins over the settings file's.
             viewer.set_language(&kept(LANGUAGE));
             match crate::settings::theme(&kept(THEME)) {
@@ -83,6 +84,7 @@ const THEME: &str = "datum_theme";
 const SIDE_BAR: &str = "datum_side_bar";
 /// Touchpad navigation on.
 const TOUCHPAD: &str = "datum_touchpad";
+const PERSPECTIVE: &str = "datum_perspective";
 
 /// The models opened or saved last, the latest first: state beside the window's, not a setting.
 const RECENT: &str = "datum_recent";
@@ -535,7 +537,7 @@ fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editi
 }
 
 /// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
-type Drawn = (u64, [f32; 16], [f32; 3], [u32; 3]);
+type Drawn = (u64, [f32; 16], [f32; 4], [u32; 3]);
 
 /// A feature's title being typed in its row.
 struct Renaming {
@@ -3011,7 +3013,7 @@ impl Viewer {
         self.pick_input(ui, rect, &r, offset);
         let Some(m) = &self.model else { return };
         let (lo, hi) = crate::origin::held(m.scene.bounds);
-        let radius = (hi - lo).dot(hi - lo).sqrt() * 0.5;
+        let radius = sphere(&m.scene).1;
         let scene = m.scene.bounds.map(|_| (m.scene.anchor(), radius));
         // A model just opened is fitted once, where the view's shape is known; an empty one to
         // the origin planes, until something is in it.
@@ -3227,9 +3229,8 @@ impl Viewer {
             // A work plane through points: the point nearest the cursor within a few pixels.
             let spot = match (purpose, offset) {
                 (Purpose::Plane, Some((x, y))) => {
-                    let (lo, hi) = crate::origin::held(m.scene.bounds);
-                    let anchor = m.scene.anchor();
-                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let (anchor, radius) = sphere(&m.scene);
+                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     m.spots
                         .iter()
@@ -3245,13 +3246,13 @@ impl Viewer {
                 if let Some(k) = spot {
                     return Some(Under::Spot(k));
                 }
-                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
+                let (anchor, radius) = sphere(&m.scene);
+                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
                 if purpose == Purpose::Flange {
                     // An end by its edge, within a few pixels, as a flange is picked in Inventor;
                     // else the narrow end face itself under the cursor.
-                    let (lo, hi) = crate::origin::held(m.scene.bounds);
-                    let anchor = m.scene.anchor();
-                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let (anchor, radius) = sphere(&m.scene);
+                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     let near = m
                         .ends
@@ -3306,7 +3307,8 @@ impl Viewer {
             && r.clicked()
             && let (Some(m), Some((x, y))) = (&self.model, offset)
         {
-            let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect);
+            let (anchor, radius) = sphere(&m.scene);
+            let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect, anchor, radius);
             let hit = m.scene.pick(origin, dir);
             let named = hit.and_then(|f| m.bodies.get(f.body)).cloned();
             // A body is named by its last feature, its part by the first.
@@ -5288,6 +5290,7 @@ impl Viewer {
         match act {
             Act::SmoothEdges => self.smooth,
             Act::Touchpad => self.touchpad,
+            Act::Perspective => self.camera.perspective,
             Act::NewSketch => self.picking == Some(Purpose::Sketch),
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::Extrude => self.extrusion.is_some(),
@@ -5333,6 +5336,7 @@ impl Viewer {
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
             Act::Touchpad => self.touchpad = !self.touchpad,
+            Act::Perspective => self.camera.perspective = !self.camera.perspective,
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
@@ -5529,6 +5533,7 @@ impl Viewer {
             self.item(ui, Act::RuleTable, true);
             self.item(ui, Act::SmoothEdges, true);
             self.item(ui, Act::Touchpad, true);
+            self.item(ui, Act::Perspective, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
                 self.item(ui, act, true);
@@ -5614,6 +5619,13 @@ fn recent_menu(ui: &mut egui::Ui, list: &[PathBuf], there: impl Fn(&std::path::P
         }
     }
     chosen
+}
+
+/// The sphere the view keeps between its near and far planes: about the scene's anchor, half
+/// the diagonal of what is held in view (the origin planes with no body yet).
+fn sphere(scene: &Scene) -> (datum_math::Vec3, f64) {
+    let (lo, hi) = crate::origin::held(scene.bounds);
+    (scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5)
 }
 
 /// The panes' contents (D161).
@@ -5861,6 +5873,7 @@ impl eframe::App for Viewer {
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
         storage.set_string(TOUCHPAD, self.touchpad.to_string());
+        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
         if self.language_chosen {
             storage.set_string(LANGUAGE, self.language.clone());
         }
@@ -6421,7 +6434,7 @@ mod tests {
     fn the_theme_menu_switches_at_once() {
         let (v, _inbox) = viewer("parametric.json");
         assert!(!v.theme_chosen, "nothing chosen yet: the settings file's word stands");
-        let mut h = egui_kittest::Harness::builder().with_size([800.0, 300.0]).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 egui::Panel::top("menu").show(ui, |ui| egui::MenuBar::new().ui(ui, |ui| v.menu(ui)));
             },

@@ -37,7 +37,8 @@ struct TriOut {
     var o: TriOut;
     o.clip = u.vp * vec4<f32>(pos, 1.0);
     o.normal = normal;
-    o.to_eye = u.eye.xyz - pos;
+    // Toward the eye; orthographic (w 0) the same direction everywhere.
+    o.to_eye = u.eye.xyz - pos * u.eye.w;
     o.colour = colour;
     return o;
 }
@@ -76,8 +77,9 @@ pub struct Frame {
     pub geometry: Arc<Geometry>,
     /// View-projection matrix, column-major, for vertices relative to the anchor.
     pub view_projection: [f32; 16],
-    /// The eye relative to the anchor.
-    pub eye: [f32; 3],
+    /// Where the light comes from (see [`crate::camera::Camera::matrices`]): the eye relative to
+    /// the anchor (w 1), or the direction toward the viewer (w 0).
+    pub eye: [f32; 4],
 }
 
 /// Samples per pixel of a smooth (multisampled) picture.
@@ -305,7 +307,7 @@ impl Renderer {
         }
         self.visible = [&frame.geometry.triangles, &frame.geometry.lines].map(|p| visible(p, &frame.view_projection));
         let mut u = Vec::with_capacity(80);
-        for f in frame.view_projection.iter().chain(&frame.eye).chain(&[0.0]) {
+        for f in frame.view_projection.iter().chain(&frame.eye) {
             u.extend_from_slice(&f.to_le_bytes());
         }
         queue.write_buffer(&self.uniform, 0, &u);
@@ -435,8 +437,10 @@ mod tests {
         // Close to the middle cube, looking straight down: the others are beside the view.
         let middle = Camera { target: Vec3::new(10.5, 0.5, 0.5), distance: 3.0, ..Camera::view("top").unwrap() };
         assert_eq!(ranges(&middle), [30..60]);
-        // From x = 13.5 along −X: the first two ahead, the last behind the eye.
+        // From x = 13.5 along −X: in perspective the first two ahead, the last behind the eye;
+        // orthographic (the default) the view holds the whole scene in depth, the eye or not.
         let along = Camera { target: Vec3::new(10.5, 0.5, 0.5), distance: 3.0, ..Camera::view("right").unwrap() };
-        assert_eq!(ranges(&along), [0..60]);
+        assert_eq!(ranges(&Camera { perspective: true, ..along }), [0..60]);
+        assert_eq!(ranges(&along), [0..90]);
     }
 }
