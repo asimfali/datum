@@ -436,6 +436,17 @@ impl SketchEdit {
         }
     }
 
+    /// Whether it lies on a sheet's flat blank, edited in the flat pattern pane.
+    pub fn on_blank(&self) -> bool {
+        !self.json["flat"].is_null()
+    }
+
+    /// Looks at the blank of `size`, its corner at the origin, in a picture of width / height `aspect`.
+    pub fn fit_blank(&mut self, size: [f64; 2], aspect: f64) {
+        self.camera.center = [size[0] * 0.5, size[1] * 0.5];
+        self.camera.half_height = (size[1] * 0.5).max(size[0] * 0.5 / aspect.max(1e-6)).max(f64::MIN_POSITIVE) * 1.1;
+    }
+
     /// Takes the feature as the model now has it, unless a point is being dragged.
     pub fn refresh(&mut self, context: Context, json: Json, params: BTreeMap<String, f64>) {
         if self.drag.is_some() {

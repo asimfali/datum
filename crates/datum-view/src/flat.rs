@@ -60,36 +60,7 @@ impl FlatView {
                 rect.center().y - ((q[1] - self.center[1]) * self.scale) as f32,
             )
         };
-        let guide = egui::Stroke::new(1.0, BEND);
-        for [a, b] in &flat.bends {
-            crate::draw::dashed(&painter, &[screen([a.x, a.y]), screen([b.x, b.y])], guide, 7.0, 4.0);
-        }
-        let stroke = egui::Stroke::new(1.2, LINE);
-        for piece in &flat.pieces {
-            match *piece {
-                FlatPiece::Line(a, b) => {
-                    painter.line_segment([screen([a.x, a.y]), screen([b.x, b.y])], stroke);
-                }
-                FlatPiece::Arc { center, radius, start, end } => {
-                    let sweep = (end - start).rem_euclid(std::f64::consts::TAU);
-                    let sweep = if sweep == 0.0 { std::f64::consts::TAU } else { sweep };
-                    let n = (sweep / std::f64::consts::TAU * 64.0).ceil().max(2.0) as usize;
-                    let pts = (0..=n)
-                        .map(|k| {
-                            let (s, c) = libm::sincos(start + sweep * k as f64 / n as f64);
-                            screen([center.x + radius * c, center.y + radius * s])
-                        })
-                        .collect();
-                    painter.add(egui::Shape::line(pts, stroke));
-                }
-                FlatPiece::Circle { center, radius } => {
-                    painter.circle_stroke(screen([center.x, center.y]), (radius * self.scale) as f32, stroke);
-                }
-                FlatPiece::Polyline(ref pts) => {
-                    painter.add(egui::Shape::line(pts.iter().map(|q| screen([q.x, q.y])).collect(), stroke));
-                }
-            }
-        }
+        paint(&painter, flat, screen, self.scale, LINE, BEND);
         painter.text(
             rect.left_bottom() + egui::vec2(8.0, -8.0),
             egui::Align2::LEFT_BOTTOM,
@@ -98,4 +69,50 @@ impl FlatView {
             LINE,
         );
     }
+}
+
+/// The blank's outline in `ink` and its bend lines dashed in `bend`, `screen` taking a blank
+/// point to the painter's, `scale` pixels per millimetre.
+fn paint(painter: &egui::Painter, flat: &Flat, screen: impl Fn([f64; 2]) -> egui::Pos2, scale: f64, ink: egui::Color32, bend: egui::Color32) {
+    let guide = egui::Stroke::new(1.0, bend);
+    for [a, b] in &flat.bends {
+        crate::draw::dashed(painter, &[screen([a.x, a.y]), screen([b.x, b.y])], guide, 7.0, 4.0);
+    }
+    let stroke = egui::Stroke::new(1.2, ink);
+    for piece in &flat.pieces {
+        match *piece {
+            FlatPiece::Line(a, b) => {
+                painter.line_segment([screen([a.x, a.y]), screen([b.x, b.y])], stroke);
+            }
+            FlatPiece::Arc { center, radius, start, end } => {
+                let sweep = (end - start).rem_euclid(std::f64::consts::TAU);
+                let sweep = if sweep == 0.0 { std::f64::consts::TAU } else { sweep };
+                let n = (sweep / std::f64::consts::TAU * 64.0).ceil().max(2.0) as usize;
+                let pts = (0..=n)
+                    .map(|k| {
+                        let (s, c) = libm::sincos(start + sweep * k as f64 / n as f64);
+                        screen([center.x + radius * c, center.y + radius * s])
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(pts, stroke));
+            }
+            FlatPiece::Circle { center, radius } => {
+                painter.circle_stroke(screen([center.x, center.y]), (radius * scale) as f32, stroke);
+            }
+            FlatPiece::Polyline(ref pts) => {
+                painter.add(egui::Shape::line(pts.iter().map(|q| screen([q.x, q.y])).collect(), stroke));
+            }
+        }
+    }
+}
+
+/// The paper and the blank faint beneath a sketch drawn on it, seen as the sketch's camera does.
+pub fn paint_under(painter: &egui::Painter, rect: egui::Rect, flat: &Flat, camera: &crate::camera::SketchCamera) {
+    painter.rect_filled(rect, 0.0, PAPER);
+    let h = f64::from(rect.height());
+    let screen = |q: [f64; 2]| {
+        let (x, y) = camera.offset(q, h);
+        rect.center() + egui::vec2(x as f32, y as f32)
+    };
+    paint(painter, flat, screen, h / (2.0 * camera.half_height), LINE.gamma_multiply(0.35), BEND.gamma_multiply(0.6));
 }

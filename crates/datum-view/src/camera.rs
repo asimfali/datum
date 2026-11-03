@@ -13,8 +13,12 @@ pub struct Camera {
     /// `up × right`, the eye `distance` behind the target.
     pub right: Vec3,
     pub up: Vec3,
-    /// Vertical field of view, radians.
+    /// Vertical field of view, radians. Orthographic, the view is as tall as a perspective one's
+    /// at the target: zooming, panning and fitting work alike.
     pub fov: f64,
+    /// Whether far things look smaller, as to the eye; else (the default, as a drawing) lengths
+    /// across the view are true wherever they are.
+    pub perspective: bool,
 }
 
 impl Default for Camera {
@@ -22,7 +26,7 @@ impl Default for Camera {
     /// angles to the three axes, Z up.
     fn default() -> Self {
         let [right, up] = frame(Vec3::new(1.0, -1.0, 1.0), Z);
-        Self { target: Vec3::ZERO, distance: 10.0, right, up, fov: 35f64.to_radians() }
+        Self { target: Vec3::ZERO, distance: 10.0, right, up, fov: 35f64.to_radians(), perspective: false }
     }
 }
 
@@ -170,7 +174,8 @@ impl Camera {
                 if k & 2 == 0 { -half.y } else { half.y },
                 if k & 4 == 0 { -half.z } else { half.z },
             );
-            d.max(-p.dot(f) + (p.dot(r).abs() / (t * aspect.max(1e-6))).max(p.dot(u).abs() / t))
+            let across = (p.dot(r).abs() / (t * aspect.max(1e-6))).max(p.dot(u).abs() / t);
+            d.max(if self.perspective { -p.dot(f) + across } else { across })
         });
         self.distance = (distance * 1.05).max(f64::MIN_POSITIVE);
     }
@@ -205,7 +210,7 @@ impl Camera {
     /// Moves the target with a drag of `dx, dy` pixels in a view `height` pixels tall.
     pub fn pan(&mut self, dx: f64, dy: f64, height: f64) {
         let (right, up, _) = self.axes();
-        let per_pixel = 2.0 * self.distance * libm::tan(self.fov * 0.5) / height.max(1.0);
+        let per_pixel = 2.0 * self.half_height() / height.max(1.0);
         self.target = self.target - right * (dx * per_pixel) + up * (dy * per_pixel);
     }
 
@@ -214,49 +219,83 @@ impl Camera {
         self.distance = (self.distance * factor).max(f64::MIN_POSITIVE);
     }
 
+    /// Half the view's height at the target, in model units.
+    fn half_height(&self) -> f64 {
+        self.distance * libm::tan(self.fov * 0.5)
+    }
+
+    /// How far ahead of the eye the near and far planes are, around the scene, a sphere of
+    /// `radius` about `anchor`; orthographic, the near one may be behind the eye.
+    fn depths(&self, anchor: Vec3, radius: f64) -> (f64, f64) {
+        let middle = (anchor - self.eye()).dot(-self.back());
+        let far = (middle + radius * 1.5).max(self.distance);
+        let near = middle - radius * 1.5;
+        (if self.perspective { near.max(far * 1e-5) } else { near }, far)
+    }
+
     /// Right, up and forward directions of the view.
     pub fn axes(&self) -> (Vec3, Vec3, Vec3) {
         (self.right, self.up, -self.back())
     }
 
     /// The ray through a point of the picture, `x` and `y` from −1 to 1 (right, up), of width /
-    /// height `aspect`: from the eye, a unit direction.
-    pub fn ray(&self, x: f64, y: f64, aspect: f64) -> (Vec3, Vec3) {
+    /// height `aspect`: where it starts and a unit direction. In perspective from the eye;
+    /// orthographic along the view from the near plane of the scene, a sphere of `radius` about
+    /// `anchor` (as [`Camera::matrices`] takes it), so that nothing in view lies behind it.
+    pub fn ray(&self, x: f64, y: f64, aspect: f64, anchor: Vec3, radius: f64) -> (Vec3, Vec3) {
         let (r, u, f) = self.axes();
+        if !self.perspective {
+            let h = self.half_height();
+            let (near, _) = self.depths(anchor, radius);
+            return (self.eye() + r * (x * h * aspect) + u * (y * h) + f * near, f);
+        }
         let t = libm::tan(self.fov * 0.5);
         let d = f + r * (x * t * aspect) + u * (y * t);
         (self.eye(), d * (1.0 / d.dot(d).sqrt()))
     }
 
     /// View-projection matrix (column-major, wgpu clip space with depth 0..1) for points given
-    /// relative to `anchor`, and the eye relative to it. The near and far planes enclose the
-    /// scene, a sphere of `radius` around `anchor`, wherever the view looks: zoomed in on one end
-    /// of a long part, the other end is not cut off.
-    pub fn matrices(&self, anchor: Vec3, aspect: f64, radius: f64) -> ([f32; 16], [f32; 3]) {
+    /// relative to `anchor`, and where the light comes from: in perspective the eye relative to
+    /// the anchor (w 1), orthographic the direction back toward the viewer (w 0). The near and
+    /// far planes enclose the scene, a sphere of `radius` around `anchor`, wherever the view
+    /// looks: zoomed in on one end of a long part, the other end is not cut off.
+    pub fn matrices(&self, anchor: Vec3, aspect: f64, radius: f64) -> ([f32; 16], [f32; 4]) {
         let eye = self.eye() - anchor;
         let (r, u, f) = self.axes();
-        // How far ahead of the eye the scene's middle is.
-        let middle = -eye.dot(f);
-        let far = (middle + radius * 1.5).max(self.distance);
-        let near = (middle - radius * 1.5).max(far * 1e-5);
-        let t = 1.0 / libm::tan(self.fov * 0.5);
-        let (sx, sy) = (t / aspect.max(1e-6), t);
-        // Rows of the view matrix: right, up, back; then perspective with depth near → 0, far → 1.
+        let (near, far) = self.depths(anchor, radius);
+        // Rows of the view matrix: right, up, back.
         let view = [[r.x, r.y, r.z, -r.dot(eye)], [u.x, u.y, u.z, -u.dot(eye)], [-f.x, -f.y, -f.z, f.dot(eye)]];
-        let (a, b) = (far / (near - far), near * far / (near - far));
-        let rows = [
-            view[0].map(|v| v * sx),
-            view[1].map(|v| v * sy),
-            [a * view[2][0], a * view[2][1], a * view[2][2], a * view[2][3] + b],
-            view[2].map(|v| -v),
-        ];
+        let rows = if self.perspective {
+            let t = 1.0 / libm::tan(self.fov * 0.5);
+            let (sx, sy) = (t / aspect.max(1e-6), t);
+            // Depth near → 0, far → 1, over the distance ahead.
+            let (a, b) = (far / (near - far), near * far / (near - far));
+            [
+                view[0].map(|v| v * sx),
+                view[1].map(|v| v * sy),
+                [a * view[2][0], a * view[2][1], a * view[2][2], a * view[2][3] + b],
+                view[2].map(|v| -v),
+            ]
+        } else {
+            let h = self.half_height();
+            let (sx, sy) = (1.0 / (h * aspect.max(1e-6)), 1.0 / h);
+            // Depth near → 0, far → 1, straight along the view: `−back·q` is how far ahead.
+            let a = -1.0 / (far - near);
+            [
+                view[0].map(|v| v * sx),
+                view[1].map(|v| v * sy),
+                [a * view[2][0], a * view[2][1], a * view[2][2], a * view[2][3] - near / (far - near)],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        };
         let mut m = [0f32; 16];
         for (row, values) in rows.iter().enumerate() {
             for (col, v) in values.iter().enumerate() {
                 m[col * 4 + row] = *v as f32;
             }
         }
-        (m, [eye.x as f32, eye.y as f32, eye.z as f32])
+        let light = if self.perspective { [eye.x, eye.y, eye.z, 1.0] } else { [-f.x, -f.y, -f.z, 0.0] };
+        (m, light.map(|v| v as f32))
     }
 }
 
@@ -328,8 +367,8 @@ impl SketchCamera {
     }
 
     /// Orthographic view-projection matrix (as [`Camera::matrices`]) for points relative to
-    /// `anchor`, the scene within `radius` of it, and an eye far along the plane's normal.
-    pub fn matrices(&self, anchor: Vec3, aspect: f64, radius: f64) -> ([f32; 16], [f32; 3]) {
+    /// `anchor`, the scene within `radius` of it, and the light along the plane's normal (w 0).
+    pub fn matrices(&self, anchor: Vec3, aspect: f64, radius: f64) -> ([f32; 16], [f32; 4]) {
         let [o, x, y, z] = self.frame;
         let c = o + x * self.center[0] + y * self.center[1] - anchor;
         // Depth: the camera looks down −Z; the whole scene lies within `reach` of the plane.
@@ -347,8 +386,7 @@ impl SketchCamera {
                 m[col * 4 + row] = *v as f32;
             }
         }
-        let eye = c + z * (reach * 100.0);
-        (m, [eye.x as f32, eye.y as f32, eye.z as f32])
+        (m, [z.x as f32, z.y as f32, z.z as f32, 0.0])
     }
 }
 
@@ -374,6 +412,33 @@ mod tests {
                 assert!(q[3] <= 0.0 || (0.0..=1.0).contains(&depth), "({x}, {y}, {z}) at depth {depth}");
             }
         }
+    }
+
+    /// Orthographic (the default), a length across the view is the same near and far, and the
+    /// ray through where a point shows reaches it, even one behind the eye: picked as seen.
+    #[test]
+    fn orthographic_lengths_are_true_and_rays_reach_what_shows() {
+        let c = Camera { target: Vec3::new(500.0, 10.0, 10.0), distance: 30.0, ..Camera::view("right").unwrap() };
+        assert!(!c.perspective);
+        let (anchor, radius, aspect) = (Vec3::new(250.0, 10.0, 10.0), 260.0, 1.5);
+        let (m, light) = c.matrices(anchor, aspect, radius);
+        assert_eq!(light[3], 0.0, "the light a direction");
+        let at = |q: Vec3| {
+            let v = clip(&m, q - anchor);
+            [f64::from(v[0] / v[3]), f64::from(v[1] / v[3]), f64::from(v[2] / v[3])]
+        };
+        // 10 apart across the view, at x 0 (far behind the eye at x 530) and at x 500.
+        for x in [0.0, 500.0] {
+            let (a, b) = (at(Vec3::new(x, 0.0, 0.0)), at(Vec3::new(x, 10.0, 0.0)));
+            assert!(((b[0] - a[0]).abs() - (at(Vec3::new(500.0, 10.0, 0.0))[0] - at(Vec3::new(500.0, 0.0, 0.0))[0]).abs()).abs() < 1e-6);
+            assert!((0.0..=1.0).contains(&a[2]), "in depth: {a:?}");
+        }
+        let p = Vec3::new(560.0, 4.0, 13.0);
+        let q = at(p);
+        let (origin, dir) = c.ray(q[0], q[1], aspect, anchor, radius);
+        let t = (p - origin).dot(dir);
+        let miss = p - (origin + dir * t);
+        assert!(t > 0.0 && miss.dot(miss) < 1e-6, "t {t}, miss {miss:?}");
     }
 
     /// A point put beyond the picture's edge: the view zooms out to it and to all it showed, with

@@ -690,6 +690,8 @@ const COMMANDS: &[Command] = &[
             } else {
                 s.doc.flats.insert(feature.to_string(), set);
             }
+            // A sheet whose rule gives no K lays its cuts at the blank's (see `Doc::built`).
+            s.rebuild();
             Ok(s.flats_report())
         },
     },
@@ -1768,12 +1770,12 @@ fn find_again(old: &Body, new: &Body, id: &str, kinds: &[Kind]) -> Option<String
 }
 
 /// The inputs sketch feature `op` needs, by name, its inputs now `inputs` (the first a work plane
-/// if `on_plane`): what it lies on first (a work plane; a body, with `face`), then what its
+/// if `on_plane`): what it lies on first (a work plane; a body, with `face` or `flat`), then what its
 /// projections take geometry from (D214): those it had, in their order, then new ones by name.
 /// A projection without `from` keeps the first input. One place for the session and the window.
 pub fn sketch_inputs(op: &Op, inputs: &[String], on_plane: bool) -> Vec<String> {
-    let Op::Sketch { face, project, .. } = op else { return inputs.to_vec() };
-    let first = inputs.first().filter(|_| on_plane || face.is_some() || project.values().any(|p| p.from.is_none()));
+    let Op::Sketch { face, flat, project, .. } = op else { return inputs.to_vec() };
+    let first = inputs.first().filter(|_| on_plane || face.is_some() || flat.is_some() || project.values().any(|p| p.from.is_none()));
     let from: BTreeSet<&str> = project.values().filter_map(|p| p.from.as_deref()).collect();
     let mut out: Vec<String> = first.into_iter().cloned().collect();
     let kept = inputs.iter().filter(|n| from.contains(n.as_str())).cloned();

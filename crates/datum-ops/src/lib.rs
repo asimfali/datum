@@ -32,8 +32,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
-    Developed, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch, face_plane,
-    parallel, place, profile_regions,
+    Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
+    face_plane, parallel, place, profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 
@@ -77,6 +77,10 @@ pub enum Op {
     /// [`Projection`]): edges and vertices of a body by `id`, elements of another sketch by
     /// `element`, from the input named `from` (none: the first). Inputs: a work plane or the body
     /// holding the face first, if it lies on one; then the bodies and sketches it projects from.
+    /// `flat`: the sketch lies on the flat blank of its first input, a sheet body, seen from
+    /// that side (D222): its coordinates are the blank's, `k_factor` (required) the K-factor the
+    /// bends are laid flat at; not with `plane` or `face`. A cut from it is the sheet cut at that
+    /// place on the blank. `project` also takes the blank's outline and bend lines (`blank`).
     Sketch {
         sketch: datum_sketch::Sketch,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +89,8 @@ pub enum Op {
         face: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         k_factor: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        flat: Option<FlatSide>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         project: BTreeMap<String, Projection>,
     },
@@ -285,11 +291,13 @@ fn zero3() -> [Num; 3] {
 /// A sketch feature's value (see [`Op::Sketch`]). Its first input is what it lies on, if it lies
 /// on a work plane or on a face (`face`); every other input is one its projections take
 /// geometry from, by name (`from`, D214); a projection without `from` takes the first.
+#[allow(clippy::too_many_arguments)]
 fn sketch_value(
     sketch: &datum_sketch::Sketch,
     plane: Option<&SketchPlane>,
     face: Option<&str>,
     k_factor: Option<&Num>,
+    flat: Option<FlatSide>,
     project: &BTreeMap<String, Projection>,
     values: &[&Value],
     names: &[&str],
@@ -297,15 +305,26 @@ fn sketch_value(
     // What it lies on, and whether the first input is that.
     let (on, host, lies_on) = match values.first() {
         Some(Value::Plane(p)) => {
-            if plane.is_some() || face.is_some() || k_factor.is_some() {
-                return Err(BrepError::Sketch("a sketch on a work plane takes no `plane`, `face` or `k_factor`".into()));
+            if plane.is_some() || face.is_some() || k_factor.is_some() || flat.is_some() {
+                return Err(BrepError::Sketch("a sketch on a work plane takes no `plane`, `face`, `k_factor` or `flat`".into()));
             }
             (Some(p), None, 1)
         }
-        Some(v) if face.is_some() => {
-            (plane, Some(v.body().ok_or_else(|| BrepError::Sketch("a sketch on a face takes the body as its first input".into()))?), 1)
+        Some(v) if face.is_some() || flat.is_some() => {
+            (plane, Some(v.body().ok_or_else(|| BrepError::Sketch("a sketch on a face or the blank takes the body as its first input".into()))?), 1)
         }
         _ => (plane, None, 0),
+    };
+    // The sheet's blank, if the sketch lies on it.
+    let blank = match (flat, host) {
+        (Some(side), Some(body)) => {
+            if plane.is_some() || face.is_some() {
+                return Err(BrepError::Sketch("a sketch on the blank takes no plane or face".into()));
+            }
+            let k = k_factor.ok_or_else(|| BrepError::Sketch("a sketch on the blank needs the sheet's k_factor".into()))?;
+            Some(unfold_side(body, side == FlatSide::Back, num(k)?)?)
+        }
+        _ => None,
     };
     let input = |from: Option<&str>| match from {
         None => Ok(0),
@@ -326,7 +345,7 @@ fn sketch_value(
         Some(_) => Err(BrepError::Sketch("a projection takes geometry from a body or a sketch".into())),
         None => Err(BrepError::Sketch("a projection takes geometry from an input of the sketch".into())),
     };
-    place(sketch, on, host, face, k_factor.map(num).transpose()?, project, &source)
+    place(sketch, on, host, face, k_factor.map(num).transpose()?, project, &source, blank.as_ref())
 }
 
 fn num(n: &Num) -> Result<f64, BrepError> {
@@ -466,11 +485,12 @@ impl Op {
             Self::PatternGrid { count, step } => {
                 Self::PatternGrid { count: [r(&count[0], "count")?, r(&count[1], "count")?], step: [r3(&step[0], "step")?, r3(&step[1], "step")?] }
             }
-            Self::Sketch { sketch, plane, face, k_factor, project } => Self::Sketch {
+            Self::Sketch { sketch, plane, face, k_factor, flat, project } => Self::Sketch {
                 sketch: sketch.resolve(lookup)?,
                 plane: *plane,
                 face: face.clone(),
                 k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()?,
+                flat: *flat,
                 project: project.clone(),
             },
             Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles } => Self::Extrude {
@@ -644,12 +664,13 @@ impl Op {
             Self::Terrain { origin, step, count, heights, base } => {
                 terrain(feature, &Grid { origin: *origin, step: *step, count: *count, heights }, *base)?
             }
-            Self::Sketch { sketch, plane, face, k_factor, project } => {
+            Self::Sketch { sketch, plane, face, k_factor, flat, project } => {
                 return Ok(Value::Sketch(Box::new(sketch_value(
                     sketch,
                     plane.as_ref(),
                     face.as_deref(),
                     k_factor.as_ref(),
+                    *flat,
                     project,
                     values,
                     names,

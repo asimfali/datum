@@ -71,3 +71,22 @@ fn a_k_factor_out_of_range_is_refused() {
         assert!(e.contains("k_factor"), "{e}");
     }
 }
+
+/// A rule without K (most of a project's own): a hole across the bend is laid at the K the blank
+/// is laid at, the settings', so the cut and the blank agree whatever the settings say: one
+/// circle on the blank, before and after the K is changed.
+#[test]
+fn without_k_in_the_rule_a_cut_across_a_bend_takes_the_blanks() {
+    let mut s = project("rule_k_none_cut", None);
+    let outer = run(&mut s, "query_faces", json!({"name": "l", "normal": [0, -1, 0]}))["faces"][0]["id"].as_str().unwrap().to_string();
+    let hole = json!({"points": {"h": [48, 10]}, "circles": {"c": {"center": "h", "diameter": 10}}});
+    run(&mut s, "add", json!({"name": "hole", "op": "sketch", "inputs": ["l"], "face": outer, "sketch": hole}));
+    run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
+    let circles = |s: &mut Session| {
+        let r = run(s, "flats", json!({}));
+        r["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "cut").unwrap_or_else(|| panic!("{r}"))["pieces"]["circles"].clone()
+    };
+    assert_eq!(circles(&mut s), 1);
+    run(&mut s, "set_flat", json!({"feature": "cut", "k_factor": 0.3}));
+    assert_eq!(circles(&mut s), 1, "the cut follows the blank's K");
+}

@@ -24,7 +24,12 @@ fn op(json: serde_json::Value) -> Op {
 
 /// An L of sheet metal: up 60 from the origin, then 80 along X, on the left of its path.
 fn sheet() -> Body {
-    let path = serde_json::json!({"points": {"a": [0, 0], "b": [0, 60], "c": [80, 60]},
+    sheet_of(80.0)
+}
+
+/// The L with its second wall `length` along X.
+fn sheet_of(length: f64) -> Body {
+    let path = serde_json::json!({"points": {"a": [0, 0], "b": [0, 60], "c": [length, 60]},
         "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}});
     let p = op(serde_json::json!({"op": "sketch", "sketch": path})).eval(id("path"), &[]).unwrap();
     let s =
@@ -41,11 +46,17 @@ fn first_wall(b: &Body) -> String {
 
 /// A circle of `diameter` at `along` the wall and height `z`, cut through the wall of `b`.
 fn punched(b: &Body, along: f64, z: f64, diameter: f64) -> Result<Body, BrepError> {
+    punched_as("cut", b, along, z, diameter)
+}
+
+/// [`punched`] by a cut named `name`.
+fn punched_as(name: &str, b: &Body, along: f64, z: f64, diameter: f64) -> Result<Body, BrepError> {
     let target = Value::Body(b.clone());
     let sketch = serde_json::json!({"points": {"h": [along, -z]}, "circles": {"c": {"center": "h", "diameter": diameter}}});
-    let placed = op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch})).eval(id("hole"), &[&target])?;
+    let placed = op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch}))
+        .eval(id(&format!("{name}.sketch")), &[&target])?;
     let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
-    let r = cut.eval(id("cut"), &[&target, &placed])?.body().unwrap().clone();
+    let r = cut.eval(id(name), &[&target, &placed])?.body().unwrap().clone();
     r.validate().unwrap();
     Ok(r)
 }
@@ -75,6 +86,32 @@ fn a_hole_near_a_bend_is_told() {
     // Not a cut of sheet metal (through all the body): nothing to tell.
     let target = Value::Body(b.clone());
     assert_eq!(near_bends(id("x"), &[&target], &op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}))).unwrap(), []);
+}
+
+/// How close a rectangle from `from` to `to` along the first wall of `b`, `z` from `z0` to `z1`,
+/// cut through it, comes to a bend.
+fn near_rectangle(b: &Body, [from, to]: [f64; 2], [z0, z1]: [f64; 2]) -> Vec<NearBend> {
+    let target = Value::Body(b.clone());
+    let sketch = serde_json::json!({"points": {"a": [from, -z0], "b": [to, -z0], "c": [to, -z1], "d": [from, -z1]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch})).eval(id("slot"), &[&target]).unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    near_bends(id("cut"), &[&target, &placed], &cut).unwrap()
+}
+
+/// A slot or a notch across the bend keeps its shape: its sides square to the bend lines distort
+/// nothing, nor do its ends beside the bend it cuts away. A slot ending short of the bend line,
+/// the bend still there beside its end, is told of.
+#[test]
+fn a_cut_square_across_a_bend_is_not_told() {
+    let b = sheet();
+    assert_eq!(near_rectangle(&b, [40.0, 80.0], [15.0, 25.0]), [], "a slot, its ends far from the bend");
+    assert_eq!(near_rectangle(&b, [FLAT - 4.0, 80.0], [15.0, 25.0]), [], "a slot, its end 4 before the bend it cuts across");
+    assert_eq!(near_rectangle(&b, [FLAT - 4.0, 80.0], [-5.0, 10.0]), [], "a notch in the edge across the bend");
+    let short = near_rectangle(&b, [40.0, FLAT - 2.0], [15.0, 25.0]);
+    let [NearBend { distance: Some(d), .. }] = short[..] else { panic!("{short:?}") };
+    assert!((d - 2.0).abs() < 1e-9, "{d}");
 }
 
 /// The circles of the blank of `b` seen from the front or the back, as their radii.
@@ -559,5 +596,72 @@ proptest! {
         let got = holed.volume() - cut.volume();
         prop_assert!((got - want).abs() < 1e-9 * want, "{} {}: {} against {}", x0, b, got, want);
         prop_assert_eq!(blank(&cut).1[2], 0, "{} {}", x0, b);
+    }
+}
+
+/// Every line of a blank has a name of its own, from where it comes (D222), kept when the sheet
+/// or a cut changes size or moves; a cut's or an end's the same on either side, a bend line's
+/// its side's.
+#[test]
+fn lines_of_a_blank_keep_their_names() {
+    let names = |len: f64, along: f64, diameter: f64, back: bool| {
+        let b = punched_as("second", &punched(&sheet_of(len), FLAT, 20.0, 10.0).unwrap(), along, 20.0, diameter).unwrap();
+        let flat = unfold_side(&b, back, K).unwrap();
+        let mut ids = flat.ids.clone();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), flat.pieces.len(), "{:?}", flat.ids);
+        assert_eq!(flat.bend_ids.len(), flat.bends.len());
+        let circles: Vec<TopoId> =
+            flat.pieces.iter().zip(&flat.ids).filter(|(p, _)| matches!(p, FlatPiece::Circle { .. })).map(|(_, i)| *i).collect();
+        (ids, circles, flat.bend_ids)
+    };
+    let (ids, circles, front) = names(80.0, 20.0, 6.0, false);
+    let back = names(80.0, 20.0, 6.0, true).2;
+    assert_eq!(circles.len(), 2);
+    assert_eq!(front.len(), 2, "both tangent lines of the bend");
+    assert_ne!(front[0], front[1]);
+    for (len, along, diameter, side) in [(80.0, 20.0, 6.0, true), (120.0, 20.0, 6.0, false), (80.0, 25.0, 8.0, false), (95.0, 30.0, 4.0, true)] {
+        let (i, c, b) = names(len, along, diameter, side);
+        assert_eq!(i, ids, "{len} {along} {diameter} {side}");
+        assert_eq!(&b, if side { &back } else { &front }, "bend lines lie between the faces of their side");
+        let mut c = c;
+        let mut want = circles.clone();
+        c.sort_unstable();
+        want.sort_unstable();
+        assert_eq!(c, want, "the circles, whichever order the side lists them in");
+    }
+}
+
+/// Sketched on either face of the second wall of an L, a hole across the bend, one on the first
+/// wall beyond it and a notch in the free end each take their metal and no more: the sheet's two
+/// sides pair wall by wall, not the first wall with the second (an L pairs either way round).
+#[test]
+fn cuts_sketched_on_the_second_wall_take_what_they_cover() {
+    let b = sheet_of(80.0);
+    let hole = std::f64::consts::PI * 25.0 * T;
+    for f in b.faces().iter().filter(|f| matches!(f.surface, Surface::Plane(p) if p.normal.y.abs() > 0.5 && p.origin.y > 30.0)) {
+        let Surface::Plane(p) = f.surface else { unreachable!() };
+        // The sketch's Y runs along +Z on the inner face, along −Z on the outer.
+        let z = if p.normal.y < 0.0 { 20.0 } else { -20.0 };
+        for (along, taken) in [(5.0, None), (-12.0, Some(hole)), (40.0, Some(hole)), (80.0, Some(0.5 * hole))] {
+            let target = Value::Body(b.clone());
+            let sketch = serde_json::json!({"points": {"h": [along, z]}, "circles": {"c": {"center": "h", "diameter": 10.0}}});
+            let placed = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", f.id), "k_factor": K, "sketch": sketch}))
+                .eval(id("hole"), &[&target])
+                .unwrap();
+            let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+            let r = cut.eval(id("cut"), &[&target, &placed]).unwrap_or_else(|e| panic!("{:?} at {along}: {e}", p.normal)).body().unwrap().clone();
+            r.validate().unwrap();
+            let gone = b.volume() - r.volume();
+            // Across the bend, the part on it takes the metal between the bend's radii: its mean
+            // radius over the neutral layer's more than on a wall.
+            let stretch = (T + 0.5 * T) / (T + K * T);
+            match taken {
+                Some(v) => assert!((gone - v).abs() < 1e-6, "{:?} at {along}: {gone} not {v}", p.normal),
+                None => assert!(hole < gone && gone < hole * stretch, "{:?} at {along}: {gone}", p.normal),
+            }
+            unfold_side(&r, false, K).unwrap();
+        }
     }
 }

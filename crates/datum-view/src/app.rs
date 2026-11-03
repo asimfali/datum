@@ -54,6 +54,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             }
             viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
             viewer.touchpad = kept(TOUCHPAD) == "true";
+            viewer.camera.perspective = kept(PERSPECTIVE) == "true";
             // What the menu chose last wins over the settings file's.
             viewer.set_language(&kept(LANGUAGE));
             match crate::settings::theme(&kept(THEME)) {
@@ -83,6 +84,7 @@ const THEME: &str = "datum_theme";
 const SIDE_BAR: &str = "datum_side_bar";
 /// Touchpad navigation on.
 const TOUCHPAD: &str = "datum_touchpad";
+const PERSPECTIVE: &str = "datum_perspective";
 
 /// The models opened or saved last, the latest first: state beside the window's, not a setting.
 const RECENT: &str = "datum_recent";
@@ -535,7 +537,7 @@ fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editi
 }
 
 /// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
-type Drawn = (u64, [f32; 16], [f32; 3], [u32; 3]);
+type Drawn = (u64, [f32; 16], [f32; 4], [u32; 3]);
 
 /// A feature's title being typed in its row.
 struct Renaming {
@@ -745,6 +747,10 @@ struct Viewer {
     material: Option<(Option<String>, String)>,
     /// The viewport's rectangle at the last frame: where the sketch's pixels are.
     viewport: egui::Rect,
+    /// The rectangle of the pane showing the sketch edited (the 3D view's, or the flat pattern's
+    /// for a sketch on the blank) at the last frame, and whether such a sketch was framed yet.
+    sketch_rect: egui::Rect,
+    blank_fitted: bool,
 }
 
 /// The form of a flange: its name, height and angle as typed, the side, the preview sent last.
@@ -1200,6 +1206,8 @@ impl Viewer {
             next_rule: None,
             material: None,
             viewport: egui::Rect::ZERO,
+            sketch_rect: egui::Rect::ZERO,
+            blank_fitted: false,
         };
         v.reload_library_records();
         if let Some(p) = path {
@@ -1914,6 +1922,12 @@ impl Viewer {
                     let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
                     let mut sk = SketchEdit::new(name, context.clone(), json, params, scene);
                     sk.modes = self.modes;
+                    // On the blank: in the flat pattern pane, framing the blank (there).
+                    if sk.on_blank() {
+                        self.flat.chosen = sk.json["inputs"][0].as_str().map(String::from);
+                        self.blank_fitted = false;
+                        crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+                    }
                     self.sketch = Some(sk);
                     // Its section under the part's, the library beside the 3D view (D163).
                     self.side_bar.visible = true;
@@ -2816,6 +2830,11 @@ impl Viewer {
                     }
                     None if op == "sketch" => {
                         ui.horizontal(|ui| {
+                            if !f["flat"].is_null() {
+                                let (rect, r) = ui.allocate_exact_size(egui::Vec2::splat(16.0), egui::Sense::hover());
+                                crate::icons::paint(ui.painter(), rect.center(), crate::icons::Icon::Flat, ui.visuals().text_color());
+                                r.on_hover_text(self.i18n.t("feature-flat-sketch", "Drawn on the blank"));
+                            }
                             tree.label(ui, &self.i18n, f, "✔", op);
                             if crate::icons::button(
                                 ui,
@@ -2948,12 +2967,44 @@ impl Viewer {
         }
     }
 
+    /// The sketch edited, as the pane showing it paints it: the model's view for most, the flat
+    /// pattern for one on the blank.
+    fn sketch_in_3d(&self) -> Option<&SketchEdit> {
+        self.sketch.as_ref().filter(|s| !s.on_blank())
+    }
+
+    /// The sketch edited, its draft, measures and frame, over what the pane has painted.
+    fn paint_sketch(&self, painter: &egui::Painter, rect: egui::Rect) {
+        let Some(sk) = &self.sketch else { return };
+        sk.paint(painter, rect);
+        sk.draft.paint(sk, painter, rect, &self.i18n);
+        let measured = crate::measure::lines(&sk.draft.measured, &self.i18n);
+        sk.paint_measure(painter, rect, &measured);
+        sk.paint_frame(painter, rect);
+        // The values along the bottom too, as a status line: Ctrl+C copies them (D177).
+        if !measured.is_empty() {
+            painter.text(
+                rect.center_bottom() - egui::vec2(0.0, 12.0),
+                egui::Align2::CENTER_BOTTOM,
+                measured.join(" · "),
+                egui::FontId::proportional(13.0),
+                egui::Color32::from_rgb(60, 65, 75),
+            );
+        }
+        if let Some(k) = self.keeping.as_ref().filter(|k| !k.of_library) {
+            sk.paint_anchors(painter, rect, &datum_model::library::anchors(&k.element));
+        }
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.viewport = rect;
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
         let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
-        if self.sketch.is_some() {
+        // A sketch on the blank is edited in the flat pattern pane: here the model stays a model.
+        let sketched = self.sketch_in_3d().is_some();
+        if sketched {
+            self.sketch_rect = rect;
             self.sketch_input(ui, rect, &r, offset);
             self.sketch_menu(ui.ctx());
         } else {
@@ -2962,12 +3013,12 @@ impl Viewer {
         self.pick_input(ui, rect, &r, offset);
         let Some(m) = &self.model else { return };
         let (lo, hi) = crate::origin::held(m.scene.bounds);
-        let radius = (hi - lo).dot(hi - lo).sqrt() * 0.5;
+        let radius = sphere(&m.scene).1;
         let scene = m.scene.bounds.map(|_| (m.scene.anchor(), radius));
         // A model just opened is fitted once, where the view's shape is known; an empty one to
         // the origin planes, until something is in it.
         if r.double_clicked() || !self.fitted {
-            match &mut self.sketch {
+            match self.sketch.as_mut().filter(|_| sketched) {
                 // On a dimension, a double click changes it; elsewhere it fits the view.
                 Some(sk) if r.double_clicked() => {
                     if sk.hover.is_none() {
@@ -2979,7 +3030,7 @@ impl Viewer {
             self.fitted = true;
         }
         let anchor = m.scene.anchor();
-        let (view_projection, eye) = match &self.sketch {
+        let (view_projection, eye) = match self.sketch.as_ref().filter(|_| sketched) {
             Some(sk) => sk.camera.matrices(anchor, aspect, radius),
             None => self.camera.matrices(anchor, aspect, radius),
         };
@@ -3022,31 +3073,14 @@ impl Viewer {
             ui.painter().image(id, rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
         }
         let painter = ui.painter().with_clip_rect(rect);
-        if let Some(sk) = &self.sketch {
-            sk.paint(&painter, rect);
-            sk.draft.paint(sk, &painter, rect, &self.i18n);
-            let measured = crate::measure::lines(&sk.draft.measured, &self.i18n);
-            sk.paint_measure(&painter, rect, &measured);
-            sk.paint_frame(&painter, rect);
-            // The values along the bottom too, as a status line: Ctrl+C copies them (D177).
-            if !measured.is_empty() {
-                painter.text(
-                    rect.center_bottom() - egui::vec2(0.0, 12.0),
-                    egui::Align2::CENTER_BOTTOM,
-                    measured.join(" · "),
-                    egui::FontId::proportional(13.0),
-                    egui::Color32::from_rgb(60, 65, 75),
-                );
-            }
-            if let Some(k) = self.keeping.as_ref().filter(|k| !k.of_library) {
-                sk.paint_anchors(&painter, rect, &datum_model::library::anchors(&k.element));
-            }
+        if sketched {
+            self.paint_sketch(&painter, rect);
         }
         // Work planes always; what a click would take lit while picking (a face tinted).
         let size = crate::origin::half(m.scene.bounds);
         let (clip, screen) = (|q| crate::camera::clip(&view_projection, q - anchor), |c| in_rect(c, rect));
         let work: Vec<crate::origin::Square> = self.work_planes().into_iter().map(|(_, s)| s).collect();
-        if self.sketch.is_none() {
+        if !sketched {
             let lit = match (self.picking, self.under) {
                 (Some(_), Some(Under::Work(k))) => Some(k),
                 _ => None,
@@ -3055,7 +3089,7 @@ impl Viewer {
         }
         // The origin planes while picking, and with no body yet: what work planes and sketches
         // are placed by.
-        if self.picking.is_some_and(|p| p != Purpose::Flange) || (self.sketch.is_none() && m.scene.bodies.is_empty()) {
+        if self.picking.is_some_and(|p| p != Purpose::Flange) || (!sketched && m.scene.bodies.is_empty()) {
             let lit = self.picking.and_then(|purpose| match self.under {
                 Some(Under::Origin(k)) => Some(k),
                 Some(_) => None,
@@ -3063,7 +3097,7 @@ impl Viewer {
             });
             crate::origin::paint(&painter, clip, screen, &crate::origin::origin_squares(), size, lit, false);
         }
-        if self.sketch.is_none() {
+        if !sketched {
             crate::origin::paint_origin(&painter, clip, screen, size);
             // The points of the sketches shown, as their lines are; while a work plane is picked
             // through points (D204), every corner of the bodies too.
@@ -3102,7 +3136,7 @@ impl Viewer {
                 }
             }
         };
-        if self.sketch.is_none() {
+        if !sketched {
             for (feature, face) in &self.flange_edges {
                 if let Some(body) = m.bodies.iter().position(|b| b == feature) {
                     tint(*face, body, 150);
@@ -3195,9 +3229,8 @@ impl Viewer {
             // A work plane through points: the point nearest the cursor within a few pixels.
             let spot = match (purpose, offset) {
                 (Purpose::Plane, Some((x, y))) => {
-                    let (lo, hi) = crate::origin::held(m.scene.bounds);
-                    let anchor = m.scene.anchor();
-                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let (anchor, radius) = sphere(&m.scene);
+                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     m.spots
                         .iter()
@@ -3213,13 +3246,13 @@ impl Viewer {
                 if let Some(k) = spot {
                     return Some(Under::Spot(k));
                 }
-                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect);
+                let (anchor, radius) = sphere(&m.scene);
+                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
                 if purpose == Purpose::Flange {
                     // An end by its edge, within a few pixels, as a flange is picked in Inventor;
                     // else the narrow end face itself under the cursor.
-                    let (lo, hi) = crate::origin::held(m.scene.bounds);
-                    let anchor = m.scene.anchor();
-                    let (vp, _) = self.camera.matrices(anchor, aspect, (hi - lo).dot(hi - lo).sqrt() * 0.5);
+                    let (anchor, radius) = sphere(&m.scene);
+                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     let near = m
                         .ends
@@ -3270,11 +3303,12 @@ impl Viewer {
         // A click on a body in 3D (no pick asked for) takes its part for the toolbar's material and
         // rule, and brings its flat pattern forward (D164).
         if self.picking.is_none()
-            && self.sketch.is_none()
+            && self.sketch_in_3d().is_none()
             && r.clicked()
             && let (Some(m), Some((x, y))) = (&self.model, offset)
         {
-            let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect);
+            let (anchor, radius) = sphere(&m.scene);
+            let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect, anchor, radius);
             let hit = m.scene.pick(origin, dir);
             let named = hit.and_then(|f| m.bodies.get(f.body)).cloned();
             // A body is named by its last feature, its part by the first.
@@ -3497,7 +3531,7 @@ impl Viewer {
             };
             sk.selected.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n.clone()) } else { None }).filter(|n| keeps(n)).collect()
         });
-        let chain = self.sketch.as_ref().and_then(|sk| sheet_chain(sk, &profiles, at, self.viewport));
+        let chain = self.sketch.as_ref().and_then(|sk| sheet_chain(sk, &profiles, at, self.sketch_rect));
         let profiles = if chain.is_some() { Vec::new() } else { profiles };
         if profiles.is_empty()
             && chain.is_none()
@@ -3806,10 +3840,14 @@ impl Viewer {
         }
     }
 
-    /// Whether the sketch feature `sketch` lies on a face of a body.
+    /// Whether the sketch feature `sketch` lies on a face of a body, or on its flat blank.
     fn on_face(model: Option<&Model>, sketch: &str) -> bool {
         model.is_some_and(|m| {
-            m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"].as_str() == Some(sketch) && !f["face"].is_null())
+            m.inspect["features"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|f| f["name"].as_str() == Some(sketch) && !(f["face"].is_null() && f["flat"].is_null()))
         })
     }
 
@@ -4225,7 +4263,7 @@ impl Viewer {
     /// The navigation cube over the model's view; not while a sketch is edited, whose view
     /// looks straight at it.
     fn view_cube(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
-        if self.sketch.is_some() {
+        if self.sketch_in_3d().is_some() {
             return;
         }
         let now = ui.input(|i| i.time);
@@ -5252,6 +5290,7 @@ impl Viewer {
         match act {
             Act::SmoothEdges => self.smooth,
             Act::Touchpad => self.touchpad,
+            Act::Perspective => self.camera.perspective,
             Act::NewSketch => self.picking == Some(Purpose::Sketch),
             Act::WorkPlane => self.picking == Some(Purpose::Plane),
             Act::Extrude => self.extrusion.is_some(),
@@ -5297,6 +5336,7 @@ impl Viewer {
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
             Act::Touchpad => self.touchpad = !self.touchpad,
+            Act::Perspective => self.camera.perspective = !self.camera.perspective,
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
@@ -5493,6 +5533,7 @@ impl Viewer {
             self.item(ui, Act::RuleTable, true);
             self.item(ui, Act::SmoothEdges, true);
             self.item(ui, Act::Touchpad, true);
+            self.item(ui, Act::Perspective, true);
             ui.separator();
             for act in [Act::SideBar, Act::SideBarRight, Act::FlatPane] {
                 self.item(ui, act, true);
@@ -5580,6 +5621,13 @@ fn recent_menu(ui: &mut egui::Ui, list: &[PathBuf], there: impl Fn(&std::path::P
     chosen
 }
 
+/// The sphere the view keeps between its near and far planes: about the scene's anchor, half
+/// the diagonal of what is held in view (the origin planes with no body yet).
+fn sphere(scene: &Scene) -> (datum_math::Vec3, f64) {
+    let (lo, hi) = crate::origin::held(scene.bounds);
+    (scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5)
+}
+
 /// The panes' contents (D161).
 struct Tabs<'a> {
     v: &'a mut Viewer,
@@ -5630,6 +5678,49 @@ impl egui_dock::TabViewer for Tabs<'_> {
 }
 
 impl Viewer {
+    /// A new sketch on the blank of body feature `body`, seen from its back or front: the K-factor
+    /// the model reports for it (the sheet rule's overrides it there), its outline and bend lines
+    /// projected.
+    fn sketch_on_blank(&mut self, body: &str, back: bool) {
+        let k = self.model.as_ref().map_or(Json::Null, |m| m.inspect["flats"][body]["k_factor"].clone());
+        let k = if k.is_null() { json!(0.5) } else { k };
+        self.new_sketch(json!({
+            "inputs": [body],
+            "flat": if back { "back" } else { "front" },
+            "k_factor": k,
+            "project": {"blank": {"blank": "outline"}, "bends": {"blank": "bends"}},
+        }));
+    }
+
+    /// The sketch on the blank, edited in the pane's place of the picture: the paper, the blank
+    /// faint under it, then the sketch as the 3D view has it.
+    fn blank_sketch(&mut self, ui: &mut egui::Ui) {
+        let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        self.sketch_rect = rect;
+        let Some(sk) = &self.sketch else { return };
+        let blank = self.model.as_ref().and_then(|m| {
+            let input = sk.json["inputs"][0].as_str()?;
+            m.flats.iter().find(|(n, _)| n == input).and_then(|(_, f)| f.as_ref().ok().cloned())
+        });
+        let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+        if let (Some(sk), Some(flat)) = (&mut self.sketch, &blank)
+            && (!self.blank_fitted || (r.double_clicked() && sk.hover.is_none()))
+        {
+            sk.fit_blank([flat.size.x, flat.size.y], f64::from(rect.width() / rect.height().max(1.0)));
+            self.blank_fitted = true;
+        }
+        let painter = ui.painter_at(rect);
+        match (&blank, &self.sketch) {
+            (Some(flat), Some(sk)) => crate::flat::paint_under(&painter, rect, flat, &sk.camera),
+            _ => {
+                painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
+            }
+        }
+        self.sketch_input(ui, rect, &r, offset);
+        self.sketch_menu(ui.ctx());
+        self.paint_sketch(&painter, rect);
+    }
+
     /// The flat pattern pane (D161, D164): the blank of a body of what the level worked in makes
     /// (of the several, the one chosen here or by a click on the body in 3D), its side, its bend
     /// lines as guides.
@@ -5645,7 +5736,9 @@ impl Viewer {
         let chosen = self.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
         let by_hand = m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == chosen.as_str() && f["op"] == "unfold");
         let back = m.inspect["flats"][&chosen]["back"].as_bool().unwrap_or(false);
-        let (mut set_back, mut export) = (None, false);
+        let blank_ok = matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_))));
+        let sketching = self.sketch.is_some();
+        let (mut set_back, mut export, mut sketch) = (None, false, false);
         ui.horizontal(|ui| {
             if m.flats.len() > 1 {
                 egui::ComboBox::from_id_salt("datum_flat_chosen").selected_text(chosen.as_str()).show_ui(ui, |ui| {
@@ -5666,16 +5759,30 @@ impl Viewer {
                     set_back = Some(on);
                 }
             }
-            if matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_)))) {
+            if blank_ok {
                 let hint = self.i18n.t("flat-dxf-hint", "The blank for the turret press: DXF R2000, lines, arcs and circles, no bend lines");
                 export = ui.button("DXF…").on_hover_text(hint).clicked();
             }
+            if blank_ok && !by_hand {
+                let hint = self.i18n.t(
+                    "flat-sketch-hint",
+                    "A sketch on the blank: its outline and bend lines to dimension from; E cuts a closed profile through the sheet",
+                );
+                sketch = ui.add_enabled(!sketching, egui::Button::new(self.i18n.t("flat-sketch", "Sketch"))).on_hover_text(hint).clicked();
+            }
         });
+        if sketch {
+            self.sketch_on_blank(&chosen, back);
+        }
         if export
             && let Some(approximate) = self.dxf_approved(&chosen)
             && let Some(p) = self.exported("dxf", &chosen).save_file()
         {
             self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string(), "approximate": approximate})));
+        }
+        if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) {
+            self.blank_sketch(ui);
+            return;
         }
         let Some(m) = &self.model else { return };
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
@@ -5754,6 +5861,10 @@ impl eframe::App for Viewer {
                 .show_inside(ui, &mut Tabs { v: self, rs: frame.wgpu_render_state() });
             self.dock = dock;
         });
+        // The flat pattern pane closed on a sketch on the blank finishes the sketch, as Done does.
+        if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) && !crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
+            self.leave();
+        }
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
     }
 
@@ -5762,6 +5873,7 @@ impl eframe::App for Viewer {
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
         storage.set_string(TOUCHPAD, self.touchpad.to_string());
+        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
         if self.language_chosen {
             storage.set_string(LANGUAGE, self.language.clone());
         }
@@ -5888,6 +6000,8 @@ mod tests {
             next_rule: None,
             material: None,
             viewport: egui::Rect::ZERO,
+            sketch_rect: egui::Rect::ZERO,
+            blank_fitted: false,
         };
         (v, inbox)
     }
@@ -6320,7 +6434,7 @@ mod tests {
     fn the_theme_menu_switches_at_once() {
         let (v, _inbox) = viewer("parametric.json");
         assert!(!v.theme_chosen, "nothing chosen yet: the settings file's word stands");
-        let mut h = egui_kittest::Harness::builder().with_size([800.0, 300.0]).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 egui::Panel::top("menu").show(ui, |ui| egui::MenuBar::new().ui(ui, |ui| v.menu(ui)));
             },
@@ -7784,6 +7898,37 @@ mod tests {
             json!({"name": "k", "op": "sketch", "inputs": ["f"]}),
         ];
         assert!(on_sheet(&features, "k"));
+    }
+
+    /// A sketch on the blank is made from the Flat pane with the K-factor the model reports, the
+    /// blank's outline and bend lines projected; E on it cuts through the sheet.
+    #[test]
+    fn a_sketch_on_the_blank() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let m = v.model.as_mut().unwrap();
+        m.inspect["flats"] = json!({"sheet1": {"back": true, "k_factor": 0.4}});
+        v.sketch_on_blank("sheet1", true);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let want = json!({
+            "name": "sketch1", "op": "sketch", "sketch": {"points": {}}, "inputs": ["sheet1"], "flat": "back", "k_factor": 0.4,
+            "project": {"blank": {"blank": "outline"}, "bends": {"blank": "bends"}},
+        });
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("add", p) if *p == want)), "{sent:?}");
+
+        // Edited, it is no sketch of the 3D pane; E makes a cut of sheet metal.
+        let m = v.model.as_mut().unwrap();
+        m.inspect["features"] = json!([
+            {"name": "sheet1", "op": "sheet", "inputs": ["path"]},
+            {"name": "sketch1", "op": "sketch", "inputs": ["sheet1"], "flat": "front"},
+        ]);
+        assert!(matches!(v.plain_kind(Some("sketch1")), Kind::SheetCut));
+        let json = v.model.as_ref().unwrap().inspect["features"][1].clone();
+        let context = Context { id: datum_brep::TopoId(0), inputs: Vec::new(), sources: Vec::new() };
+        v.sketch = Some(SketchEdit::new("sketch1".into(), context, json, BTreeMap::new(), None));
+        assert!(v.sketch.as_ref().is_some_and(SketchEdit::on_blank));
+        assert!(v.sketch_in_3d().is_none());
+        v.sketch.as_mut().unwrap().json["flat"] = Json::Null;
+        assert!(v.sketch_in_3d().is_some());
     }
 
     /// A warning is said by its code in the window's language; one the window does not know, as

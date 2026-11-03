@@ -332,9 +332,9 @@ fn a_slot_along_the_whole_bend_is_refused() {
     assert!(failure(&r).contains("two parts"), "{r}");
 }
 
-/// A rule without a K-factor: a cut across a bend asks for one.
+/// A rule without a K-factor: a cut across a bend is laid at the blank's (D223), one circle on it.
 #[test]
-fn a_cut_across_a_bend_needs_a_k_factor() {
+fn a_cut_across_a_bend_without_k_in_the_rule_takes_the_blanks() {
     let mut s = project(
         "bend_cut_no_k",
         json!({"points": {"a": [0, 0], "b": [0, 60], "c": [80, 60]}, "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}}),
@@ -347,7 +347,8 @@ fn a_cut_across_a_bend_needs_a_k_factor() {
     run(&mut s, "sheet", json!({"name": "l", "sketch": "path", "rule": "Без K", "side": "left", "z1": 40}));
     let flat = first_wall(&mut s, "l").flat;
     let r = punch_circle(&mut s, "l", "hole", flat - 2.0, 20.0, 10.0);
-    assert!(failure(&r).contains("k_factor"), "{r}");
+    assert_cut(&r);
+    assert_eq!(pieces(&mut s, "hole_cut")[2], 1);
 }
 
 /// A flange on an end of a sheet of the rule `Лист` takes the rule's radius (D205): nothing
@@ -374,4 +375,35 @@ fn a_flange_takes_the_rules_radius() {
     let added = 40.0 * (std::f64::consts::FRAC_PI_4 * (big * big - t * t) + (20.0 - big) * t);
     let v = volume(&mut s, "f");
     assert!((v - whole - added).abs() < 1e-9 * added, "{v} − {whole} against {added}");
+}
+
+/// A hole drawn on the blank of a U (D222), across its first bend line, as the window draws it:
+/// a sketch on the blank with its outline and bend lines, the K-factor the part's rule's, then E.
+/// The cut goes to the U, through one wall and the bend, and the blank shows one circle: the
+/// sketch's K (0.5) gave way to the rule's, or the blank would refuse a cut laid at another.
+#[test]
+fn a_hole_drawn_on_the_blank_cuts_its_sheet() {
+    let u = json!({"points": {"a": [0, 60], "b": [0, 0], "c": [80, 0], "d": [80, 60]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}}});
+    let mut s = project("sheet_cut_blank", u);
+    run(&mut s, "sheet", json!({"name": "u", "sketch": "path", "rule": "Лист", "side": "right", "z1": 40}));
+    let whole = volume(&mut s, "u");
+    let flats = run(&mut s, "flats", json!({}));
+    let k = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "u").unwrap()["k_factor"].clone();
+    assert_eq!(k, json!(0.44), "the rule's K: {flats}");
+    // The first wall is 58 long on the blank's outer side: the hole is centred 2 past its bend line.
+    let hole = json!({"points": {"h": [60, 20]}, "circles": {"c": {"center": "h", "diameter": 10}}});
+    let project = json!({"blank": {"blank": "outline"}, "bends": {"blank": "bends"}});
+    run(
+        &mut s,
+        "add",
+        json!({"name": "hole", "op": "sketch", "inputs": ["u"], "flat": "front", "k_factor": 0.5, "project": project, "sketch": hole}),
+    );
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
+    assert_eq!(r["body"], "u", "{r}");
+    let gone = whole - volume(&mut s, "cut");
+    assert!(gone > HOLE * 2.0 && gone < HOLE * 2.0 * 1.1, "a hole through one wall and the bend: {gone}");
+    let flats = run(&mut s, "flats", json!({}));
+    let cut = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "cut").unwrap_or_else(|| panic!("{flats}")).clone();
+    assert_eq!(cut["pieces"]["circles"], 1, "{cut}");
 }

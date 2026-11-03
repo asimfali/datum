@@ -18,6 +18,7 @@ pub enum Act {
     Redo,
     SmoothEdges,
     Touchpad,
+    Perspective,
     NewSketch,
     Extrude,
     Revolve,
@@ -100,7 +101,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 49] = [
+pub const ACTIONS: [Action; 50] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -122,6 +123,14 @@ pub const ACTIONS: [Action; 49] = [
         "view.touchpad",
         "Touchpad",
         "Two fingers move the view, a pinch zooms; off, the wheel zooms. Space with a drag moves the view either way",
+        None,
+        Anywhere,
+    ),
+    action(
+        Act::Perspective,
+        "view.perspective",
+        "Perspective",
+        "Far things look smaller, as to the eye; off (the default), lengths across the view are true, as on a drawing",
         None,
         Anywhere,
     ),

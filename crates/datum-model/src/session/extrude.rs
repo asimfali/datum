@@ -86,10 +86,12 @@ impl Session {
         if let Some(b) = body {
             return one(all.iter().filter(|(begun, last)| begun == b || last == b).collect(), format!("no body `{b}`; the bodies are {}", list()));
         }
-        // On a face: the body the face is of.
+        // On a face, or on the blank (D222): the body it is of.
         let s = self.find(sketch)?;
         let node = &self.graph.nodes()[s as usize];
-        if let (Op::Sketch { face: Some(_), .. }, Some(&on)) = (&node.op, node.inputs.first()) {
+        if let (Op::Sketch { face, flat, .. }, Some(&on)) = (&node.op, node.inputs.first())
+            && (face.is_some() || flat.is_some())
+        {
             let holding: Vec<&(String, String)> =
                 all.iter().filter(|(_, last)| self.graph.find(last).is_some_and(|l| body_chain(&self.graph, l).any(|i| i == on))).collect();
             if !holding.is_empty() {
