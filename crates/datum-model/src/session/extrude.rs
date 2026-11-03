@@ -33,12 +33,13 @@ impl Session {
             Mode::New => None,
             _ => Some(self.target(name, mode, sketch, plane, &fields, p.get("body").map(|_| text(p, "body")).transpose()?)?),
         };
-        // Sheet metal is only cut, through its thickness, as its blank is punched (D196).
+        // Sheet metal is cut through its thickness, as its blank is punched (D196), or added to at
+        // an edge of its blank (`join`, D222).
         if let Some((begun, _)) = &target
             && self.doc.kind(begun) == "sheet"
         {
-            if mode != Mode::Cut {
-                return Err(format!("`{begun}` is sheet metal: it is only cut (`mode: cut`), through its thickness"));
+            if !matches!(mode, Mode::Cut | Mode::Join) {
+                return Err(format!("`{begun}` is sheet metal: it is cut (`mode: cut`) through its thickness, or added to (`join`) at an edge"));
             }
             if let Some(k) = ["z0", "z1", "symmetric", "plane"].into_iter().find(|k| p.contains_key(*k)) {
                 return Err(format!("`{begun}` is sheet metal: its cut goes through its thickness, no `{k}`"));

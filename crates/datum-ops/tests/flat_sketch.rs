@@ -207,3 +207,96 @@ fn an_outline_with_rounded_corners_projects_closed() {
         assert!(placed.arcs[n].construction);
     }
 }
+
+/// A plate 100 × 60, its corner at the origin.
+fn plate() -> Body {
+    let outline = serde_json::json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 60], "d": [0, 60]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let s = op(serde_json::json!({"op": "sketch", "sketch": outline})).eval(id("outline"), &[]).unwrap();
+    op(serde_json::json!({"op": "plate", "thickness": T})).eval(id("plate"), &[&s]).unwrap().body().unwrap().clone()
+}
+
+/// A closed profile of points `pts` in order, lines between them, but for an arc about `arc` (centre)
+/// from point `k` to the next where given.
+fn profile(pts: &[[f64; 2]], arc: Option<(usize, [f64; 2])>) -> serde_json::Value {
+    let mut points = serde_json::Map::new();
+    let (mut lines, mut arcs) = (serde_json::Map::new(), serde_json::Map::new());
+    for (k, p) in pts.iter().enumerate() {
+        points.insert(format!("p{k}"), serde_json::json!(p));
+        let next = format!("p{}", (k + 1) % pts.len());
+        match arc {
+            Some((j, c)) if j == k => {
+                points.insert("c".into(), serde_json::json!(c));
+                arcs.insert(format!("a{k}"), serde_json::json!({"center": "c", "from": format!("p{k}"), "to": next}));
+            }
+            _ => {
+                lines.insert(format!("l{k}"), serde_json::json!({"from": format!("p{k}"), "to": next}));
+            }
+        }
+    }
+    serde_json::json!({"sketch": {"points": points, "lines": lines, "arcs": arcs}})
+}
+
+/// `b` with `sketch` (fields of a sketch on its front blank) added to it (`join`) or cut from it.
+fn on_sheet(b: &Body, sketch: serde_json::Value, mode: &str) -> Result<Body, BrepError> {
+    let placed = on_blank(b, "front", sketch)?;
+    let op = op(serde_json::json!({"op": "extrude", "mode": mode, "through": true, "wall": true}));
+    let r = op.eval(id("edit"), &[&Value::Body(b.clone()), &Value::Sketch(Box::new(placed))])?.body().unwrap().clone();
+    r.validate().unwrap();
+    Ok(r)
+}
+
+/// A tab drawn on the blank from its edge (D222): the wall goes on in its plane by just the tab,
+/// whether its side lies on the edge or reaches into the metal; a rounded end too; the blank
+/// grows by it.
+#[test]
+fn a_tab_drawn_on_the_blank_adds_metal() {
+    let b = plate();
+    let square = 20.0 * 20.0 * T;
+    for base in [50.0, 60.0] {
+        let tab = on_sheet(&b, profile(&[[30.0, base], [50.0, base], [50.0, 80.0], [30.0, 80.0]], None), "join").unwrap();
+        assert!((tab.volume() - b.volume() - square).abs() < 1e-6, "base at {base}: {}", tab.volume() - b.volume());
+        let flat = unfold_side(&tab, false, K).unwrap();
+        assert!((flat.size.y - 80.0).abs() < 1e-9 && flat.counts() == [8, 0, 0], "{:?} {:?}", flat.size, flat.counts());
+    }
+    // 20 wide, its end a half circle from (30, 70) round to (50, 70).
+    let round = on_sheet(&b, profile(&[[30.0, 60.0], [50.0, 60.0], [50.0, 70.0], [30.0, 70.0]], Some((2, [40.0, 70.0]))), "join").unwrap();
+    let area = 20.0 * 10.0 + 0.5 * std::f64::consts::PI * 100.0;
+    assert!((round.volume() - b.volume() - area * T).abs() < 1e-6, "{}", round.volume() - b.volume());
+    assert_eq!(unfold_side(&round, false, K).unwrap().counts(), [7, 1, 0]);
+    // On a bent sheet, from the side edge of a wall, either side of the blank.
+    let l = sheet_of(80.0);
+    for side in ["front", "back"] {
+        let flat = unfold_side(&l, side == "back", K).unwrap();
+        let (x, h) = (flat.bends[0][0].x, flat.size.y);
+        let placed = on_blank(&l, side, profile(&[[x - 30.0, h], [x - 20.0, h], [x - 20.0, h + 10.0], [x - 30.0, h + 10.0]], None)).unwrap();
+        let op = op(serde_json::json!({"op": "extrude", "mode": "join", "through": true, "wall": true}));
+        let r = op.eval(id("tab"), &[&Value::Body(l.clone()), &Value::Sketch(Box::new(placed))]).unwrap().body().unwrap().clone();
+        r.validate().unwrap();
+        assert!((r.volume() - l.volume() - 100.0 * T).abs() < 1e-6, "{side}: {}", r.volume() - l.volume());
+        let grown = unfold_side(&r, side == "back", K).unwrap();
+        assert!((grown.size.y - h - 10.0).abs() < 1e-9 && grown.bends.len() == 2, "{side}: {:?}", grown.size);
+    }
+}
+
+/// A notch drawn with a side on the edge of the blank cuts as one crossing it.
+#[test]
+fn a_cut_with_a_side_on_the_edge_is_a_notch() {
+    let b = plate();
+    let notch = on_sheet(&b, profile(&[[30.0, 50.0], [50.0, 50.0], [50.0, 60.0], [30.0, 60.0]], None), "cut").unwrap();
+    assert!((b.volume() - notch.volume() - 200.0 * T).abs() < 1e-6, "{}", b.volume() - notch.volume());
+    assert_eq!(unfold_side(&notch, false, K).unwrap().counts(), [8, 0, 0]);
+}
+
+/// What an addition does not do yet, or cannot: a tab across a bend line, a profile off the edge.
+#[test]
+fn an_addition_refuses_what_it_does_not_do() {
+    let b = sheet_of(40.0);
+    let flat = unfold_side(&b, false, K).unwrap();
+    let x = flat.bends[0][0].x;
+    let h = flat.size.y;
+    let across = on_sheet(&b, profile(&[[x - 5.0, h], [x + 10.0, h], [x + 10.0, h + 10.0], [x - 5.0, h + 10.0]], None), "join").unwrap_err();
+    assert!(across.to_string().contains("across a bend line"), "{across}");
+    let off = on_sheet(&plate(), profile(&[[30.0, 70.0], [50.0, 70.0], [50.0, 80.0], [30.0, 80.0]], None), "join").unwrap_err();
+    assert!(off.to_string().contains("meets none"), "{off}");
+}

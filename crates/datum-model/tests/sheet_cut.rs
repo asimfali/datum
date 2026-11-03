@@ -40,7 +40,7 @@ fn hole_on(s: &mut Session, name: &str, body: &str, face: &str, x: f64, y: f64) 
 
 const HOLE: f64 = 25.0 * std::f64::consts::PI;
 
-/// A face of sheet metal: a hole through it; a boss or a depth refused.
+/// A face of sheet metal: a hole through it; a boss's or a pocket's depth refused.
 #[test]
 fn a_plate_is_cut_through_its_thickness() {
     let rectangle = json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]},
@@ -50,7 +50,7 @@ fn a_plate_is_cut_through_its_thickness() {
     let top = run(&mut s, "query_faces", json!({"name": "face", "normal": [0, 0, 1]}))["faces"][0]["id"].as_str().unwrap().to_string();
     hole_on(&mut s, "hole", "face", &top, 30.0, 25.0);
     let e = s.execute("extrude", &json!({"name": "boss", "sketch": "hole", "mode": "join", "z1": 5})).unwrap_err();
-    assert!(e.contains("only cut"), "{e}");
+    assert!(e.contains("no `z1`"), "{e}");
     let e = s.execute("extrude", &json!({"name": "pocket", "sketch": "hole", "mode": "cut", "z1": -1})).unwrap_err();
     assert!(e.contains("no `z1`"), "{e}");
     let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
@@ -406,4 +406,21 @@ fn a_hole_drawn_on_the_blank_cuts_its_sheet() {
     let flats = run(&mut s, "flats", json!({}));
     let cut = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "cut").unwrap_or_else(|| panic!("{flats}")).clone();
     assert_eq!(cut["pieces"]["circles"], 1, "{cut}");
+}
+
+/// A tab drawn on the blank of a plate from its edge (D222): `join` adds it, the wall going on in
+/// its plane; the reply names the plate.
+#[test]
+fn a_tab_drawn_on_the_blank_is_added() {
+    let rectangle = json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let mut s = project("sheet_tab", rectangle);
+    run(&mut s, "plate", json!({"name": "face", "sketch": "path", "rule": "Лист"}));
+    let whole = volume(&mut s, "face");
+    let tab = json!({"points": {"p": [30, 50], "q": [50, 50], "r": [50, 70], "t": [30, 70]},
+        "lines": {"pq": {"from": "p", "to": "q"}, "qr": {"from": "q", "to": "r"}, "rt": {"from": "r", "to": "t"}, "tp": {"from": "t", "to": "p"}}});
+    run(&mut s, "add", json!({"name": "tab", "op": "sketch", "inputs": ["face"], "flat": "front", "k_factor": 0.5, "sketch": tab}));
+    let r = run(&mut s, "extrude", json!({"name": "grow", "sketch": "tab", "mode": "join"}));
+    assert_eq!(r["body"], "face", "{r}");
+    assert!((volume(&mut s, "grow") - whole - 400.0 * 2.0).abs() < 1e-6);
 }

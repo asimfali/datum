@@ -117,7 +117,8 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         through: bool,
         /// Through one wall only, the one the sketch lies on: sheet metal's cut, as the blank is
-        /// punched (D196). With `through`.
+        /// punched (D196); with `join`, metal added to an edge of the blank, the wall going on in
+        /// its plane (D222). With `through`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         wall: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -825,15 +826,19 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
     let s = &*chosen(feature, s, profiles)?;
     let plane = values.get(k + 1).map(|v| v.plane());
     if through {
-        let Some(t) = target.filter(|_| mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
-            return Err(BrepError::Sketch("`through` is a cut of the target along the sketch's normal: no `z0`, `z1`, `symmetric` or plane".into()));
+        let fits = mode == Mode::Cut || (mode == Mode::Join && *wall);
+        let Some(t) = target.filter(|_| fits && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
+            return Err(BrepError::Sketch(
+                "`through` is a cut of the target along the sketch's normal (or with `wall`, metal added to a sheet): no `z0`, `z1`, `symmetric` or plane"
+                    .into(),
+            ));
         };
         // Through the walls from a face, one plate after another, made directly; through anything
         // else (a wall the profiles cross, a sketch off the body) by the general Boolean, the tool
         // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
         let local = match s.face {
             // Sheet metal: through its thickness alone, made directly or refused.
-            Some(_) if *wall => return bent::punch(feature, t, s),
+            Some(_) if *wall => return bent::punch(feature, t, s, mode == Mode::Join),
             Some(_) => through_walls(feature, t, s),
             None if *wall => return Err(BrepError::Sketch("a cut of sheet metal takes a sketch on a face of it".into())),
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),
