@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
+use datum_math::{Sign, Vec2, orient2d};
 use datum_model::Session;
 use egui_wgpu::wgpu;
 use serde_json::{Value as Json, json};
@@ -921,6 +922,8 @@ struct Extrusion {
     selected: bool,
     /// Changing feature `name`, opened from the tree (D217): its sketch and target stay.
     editing: bool,
+    /// A cut of sheet metal on its blank only (D226): in the DXF, not in the part.
+    blank_only: bool,
 }
 
 impl Extrusion {
@@ -947,8 +950,23 @@ impl Extrusion {
                 (p["flip"], p["symmetric"]) = (json!(self.flip && !self.symmetric), json!(self.symmetric));
                 ("plate", p)
             }
-            Kind::SheetCut => ("cut", p),
+            Kind::SheetCut => {
+                let mode = self.sheet_cut_mode();
+                p["mode"] = json!(mode);
+                p["blank_only"] = json!(self.blank_only());
+                (mode, p)
+            }
         }
+    }
+
+    /// What a profile on sheet metal does: `join` adds metal (a tab from the blank's edge), else `cut`.
+    fn sheet_cut_mode(&self) -> &'static str {
+        if self.mode == Some("join") { "join" } else { "cut" }
+    }
+
+    /// Whether it is a cut of sheet metal on its blank only: an addition never is.
+    fn blank_only(&self) -> bool {
+        self.blank_only && matches!(self.kind, Kind::SheetCut) && self.sheet_cut_mode() == "cut"
     }
 
     /// The command it sends: the feature's, or `edit`.
@@ -985,11 +1003,15 @@ impl Extrusion {
             return ("plate", params);
         }
         if let Kind::SheetCut = self.kind {
-            let mut params = json!({"name": self.name, "sketch": sketch, "mode": "cut"});
+            let mode = self.sheet_cut_mode();
+            let mut params = json!({"name": self.name, "sketch": sketch, "mode": mode});
             if !self.profiles.is_empty() {
                 params["profiles"] = json!(self.profiles);
             }
-            return ("cut", params);
+            if self.blank_only() {
+                params["blank_only"] = json!(true);
+            }
+            return (mode, params);
         }
         if let Kind::Sheet(path, start) = &self.kind {
             let mut params = json!({"name": self.name, "sketch": sketch, "path": path, "side": self.side, "z1": depth});
@@ -1027,6 +1049,31 @@ impl Extrusion {
         }
         (mode, params)
     }
+}
+
+/// Whether a profile of `points` on the blank bounded by `outline` is to add metal by default: some
+/// of its points lie off the blank and none within it (those on its edge count for neither).
+fn adds_to_blank(outline: &[Vec2], points: &[Vec2]) -> bool {
+    let n = outline.len();
+    let ring = datum_brep::ProfileLoop { points: outline.to_vec(), vertices: Vec::new(), sides: Vec::new(), arcs: vec![None; n] };
+    let on_edge = |p: Vec2| {
+        (0..n).any(|i| {
+            let (a, b) = (outline[i], outline[(i + 1) % n]);
+            orient2d(a, b, p) == Sign::Zero && a.x.min(b.x) <= p.x && p.x <= a.x.max(b.x) && a.y.min(b.y) <= p.y && p.y <= a.y.max(b.y)
+        })
+    };
+    let inside: Vec<bool> = points.iter().filter(|&&p| !on_edge(p)).map(|&p| ring.winding(p) != 0).collect();
+    inside.contains(&false) && !inside.contains(&true)
+}
+
+/// The points of the curves of a sketch that E takes (`profiles`; none: all but construction): the
+/// ends of lines and arcs, the centres of circles.
+fn profile_points(p: &datum_ops::Placed, profiles: &[String]) -> Vec<Vec2> {
+    let wanted = |n: &String, construction: bool| if profiles.is_empty() { !construction } else { profiles.contains(n) };
+    let lines = p.lines.iter().filter(|(n, l)| wanted(n, l.construction)).flat_map(|(_, l)| [&l.from, &l.to]);
+    let arcs = p.arcs.iter().filter(|(n, a)| wanted(n, a.construction)).flat_map(|(_, a)| [&a.from, &a.to]);
+    let circles = p.circles.iter().filter(|(n, c)| wanted(n, c.construction)).map(|(_, c)| &c.center);
+    lines.chain(arcs).chain(circles).filter_map(|n| p.solved.points.get(n).copied()).collect()
 }
 
 /// The names of the rules of `material` that suit a part of `kind` (any, if none).
@@ -3549,6 +3596,7 @@ impl Viewer {
             None => self.plain_kind(sketch.as_deref()),
         };
         let name = self.feature_name(kind.command());
+        let mode = if matches!(kind, Kind::SheetCut) && self.adds_by_default(&profiles) { Some("join") } else { None };
         self.extrusion = Some(Extrusion {
             sketch,
             name,
@@ -3556,7 +3604,7 @@ impl Viewer {
             depth: "10".into(),
             symmetric: false,
             through: false,
-            mode: None,
+            mode,
             kind,
             flip: false,
             side: datum_ops::Side::Left,
@@ -3564,7 +3612,18 @@ impl Viewer {
             sent: None,
             selected: false,
             editing: false,
+            blank_only: false,
         });
+    }
+
+    /// Whether the open sketch lies on a blank and its profile `profiles` is off it (`adds_to_blank`).
+    fn adds_by_default(&self, profiles: &[String]) -> bool {
+        let Some(sk) = self.sketch.as_ref().filter(|sk| sk.on_blank()) else { return false };
+        let Ok(placed) = &sk.placed else { return false };
+        let input = sk.json["inputs"][0].as_str();
+        let Some((_, Ok(flat))) = self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| Some(n.as_str()) == input)) else { return false };
+        let outline: Vec<Vec2> = flat.ends.iter().map(|e| e[0]).collect();
+        adds_to_blank(&outline, &profile_points(placed, profiles))
     }
 
     /// The sketch E and R work on: the one open (left, as the form comes), else the only one drawn
@@ -3714,6 +3773,7 @@ impl Viewer {
                     sent: None,
                     selected: false,
                     editing: true,
+                    blank_only: f["blank_only"] == true,
                 });
             }
             _ => {}
@@ -4080,7 +4140,30 @@ impl Viewer {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 let through = x.through && shown == "cut";
                 if cut {
-                    ui.label(self.i18n.t("sheet-cut", "Cut through the sheet's thickness"));
+                    let adds = shown == "join";
+                    ui.label(if adds {
+                        self.i18n.t("sheet-add", "Sheet metal added — a tab from the edge")
+                    } else {
+                        self.i18n.t("sheet-cut", "Cut through the sheet's thickness")
+                    });
+                    ui.horizontal(|ui| {
+                        let hint = self.i18n.t(
+                            "sheet-cut-mode-hint",
+                            "Cut through the sheet, or add metal: a profile off the blank meeting its edge, the wall going on in its plane",
+                        );
+                        if ui.selectable_label(!adds, self.i18n.t("sheet-cut-mode-cut", "Cut")).on_hover_text(hint).clicked() {
+                            x.mode = Some("cut");
+                        }
+                        if ui.selectable_label(adds, self.i18n.t("sheet-cut-mode-add", "Add")).on_hover_text(hint).clicked() {
+                            x.mode = Some("join");
+                        }
+                    });
+                    if !adds {
+                        let hint = self
+                            .i18n
+                            .t("sheet-blank-only-hint", "In the blank and its DXF alone, not in the part: a mark at a bend line for the press brake");
+                        ui.checkbox(&mut x.blank_only, self.i18n.t("sheet-blank-only", "On the blank only")).on_hover_text(hint);
+                    }
                 } else {
                     ui.horizontal(|ui| {
                         if face {
@@ -7931,6 +8014,48 @@ mod tests {
         assert!(v.sketch_in_3d().is_some());
     }
 
+    /// A profile off the blank adds metal by default, one within it cuts; a tab meets the edge.
+    #[test]
+    fn a_profile_off_the_blank_adds() {
+        let outline = [Vec2::new(0.0, 0.0), Vec2::new(100.0, 0.0), Vec2::new(100.0, 60.0), Vec2::new(0.0, 60.0)];
+        let pts = |v: &[[f64; 2]]| v.iter().map(|p| Vec2::new(p[0], p[1])).collect::<Vec<_>>();
+        assert!(adds_to_blank(&outline, &pts(&[[110.0, 10.0], [130.0, 10.0], [130.0, 30.0], [110.0, 30.0]])));
+        assert!(!adds_to_blank(&outline, &pts(&[[10.0, 10.0], [20.0, 10.0], [20.0, 20.0], [10.0, 20.0]])));
+        assert!(adds_to_blank(&outline, &pts(&[[100.0, 10.0], [120.0, 10.0], [120.0, 30.0], [100.0, 30.0]])));
+        assert!(!adds_to_blank(&outline, &[]));
+    }
+
+    /// The form of a cut on sheet metal sends the mode chosen: join to add, else cut.
+    #[test]
+    fn a_sheet_cut_sends_its_mode() {
+        let x = |mode| Extrusion {
+            sketch: None,
+            name: "e".into(),
+            profiles: Vec::new(),
+            depth: "5".into(),
+            symmetric: false,
+            through: false,
+            mode,
+            kind: Kind::SheetCut,
+            flip: false,
+            side: datum_ops::Side::Left,
+            at: egui::Pos2::ZERO,
+            sent: None,
+            selected: false,
+            editing: false,
+            blank_only: false,
+        };
+        assert_eq!(x(Some("join")).params("s", true, None).1["mode"], "join");
+        assert_eq!(x(Some("cut")).params("s", true, None).1["mode"], "cut");
+        assert_eq!(x(None).params("s", true, None).1["mode"], "cut");
+        let marked = Extrusion { blank_only: true, ..x(None) };
+        assert_eq!(marked.params("s", true, None).1["blank_only"], true, "a cut on the blank only");
+        assert!(
+            Extrusion { blank_only: true, ..x(Some("join")) }.params("s", true, None).1.get("blank_only").is_none(),
+            "an addition is in the part"
+        );
+    }
+
     /// A warning is said by its code in the window's language; one the window does not know, as
     /// the model says it.
     #[test]
@@ -8014,6 +8139,7 @@ mod tests {
             sent: None,
             selected: false,
             editing: false,
+            blank_only: false,
         };
         let rule = h.state().part_rule();
         assert_eq!(x("new").params("s", false, rule.as_deref()).1["rule"], "body");

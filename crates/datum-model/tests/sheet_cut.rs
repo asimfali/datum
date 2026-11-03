@@ -445,3 +445,19 @@ fn a_mark_on_the_blank_only_leaves_the_part() {
     let after = s.flat_of("marked").unwrap();
     assert_eq!(after.counts()[1], 1, "the mark an arc of the edge: {:?}", after.pieces);
 }
+
+/// A cut of sheet metal changed from the tree (D217): onto the blank only and back, its mode kept.
+#[test]
+fn a_sheet_cut_is_edited_onto_the_blank_only() {
+    let mut s = l_sheet("sheet_edit_blank_only");
+    let whole = volume(&mut s, "l");
+    let hole = json!({"points": {"c": [20, 20]}, "circles": {"m": {"center": "c", "diameter": 10}}});
+    run(&mut s, "add", json!({"name": "hole", "op": "sketch", "inputs": ["l"], "flat": "front", "k_factor": 0.5, "sketch": hole}));
+    assert_cut(&run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"})));
+    assert!(volume(&mut s, "cut") < whole);
+    run(&mut s, "edit", json!({"name": "cut", "mode": "cut", "blank_only": true}));
+    assert!((volume(&mut s, "cut") - whole).abs() < 1e-9, "on the blank only");
+    assert_eq!(s.flat_of("cut").unwrap().counts()[2], 1, "the blank still has the hole");
+    run(&mut s, "edit", json!({"name": "cut", "mode": "cut", "blank_only": false}));
+    assert!(volume(&mut s, "cut") < whole, "in the part again");
+}
