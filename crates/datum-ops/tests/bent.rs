@@ -88,10 +88,11 @@ fn a_hole_near_a_bend_is_told() {
     assert_eq!(near_bends(id("x"), &[&target], &op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}))).unwrap(), []);
 }
 
-/// How close a slot from `from` to `to` along the first wall of `b`, `z` 15 to 25, comes to a bend.
-fn near_slot(b: &Body, from: f64, to: f64) -> Vec<NearBend> {
+/// How close a rectangle from `from` to `to` along the first wall of `b`, `z` from `z0` to `z1`,
+/// cut through it, comes to a bend.
+fn near_rectangle(b: &Body, [from, to]: [f64; 2], [z0, z1]: [f64; 2]) -> Vec<NearBend> {
     let target = Value::Body(b.clone());
-    let sketch = serde_json::json!({"points": {"a": [from, -15], "b": [to, -15], "c": [to, -25], "d": [from, -25]},
+    let sketch = serde_json::json!({"points": {"a": [from, -z0], "b": [to, -z0], "c": [to, -z1], "d": [from, -z1]},
         "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
     let placed =
         op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch})).eval(id("slot"), &[&target]).unwrap();
@@ -99,14 +100,18 @@ fn near_slot(b: &Body, from: f64, to: f64) -> Vec<NearBend> {
     near_bends(id("cut"), &[&target, &placed], &cut).unwrap()
 }
 
-/// A slot across the bend keeps its shape: its sides square to the bend lines distort nothing;
-/// an end within 2t + R of a bend line does, and is told of.
+/// A slot or a notch across the bend keeps its shape: its sides square to the bend lines distort
+/// nothing, nor do its ends beside the bend it cuts away. A slot ending short of the bend line,
+/// the bend still there beside its end, is told of.
 #[test]
-fn a_slot_square_across_a_bend_is_not_told() {
+fn a_cut_square_across_a_bend_is_not_told() {
     let b = sheet();
-    assert_eq!(near_slot(&b, 40.0, 80.0), [], "both ends far from the bend");
-    let [NearBend { distance: Some(d), .. }] = near_slot(&b, FLAT - 4.0, 80.0)[..] else { panic!("{:?}", near_slot(&b, FLAT - 4.0, 80.0)) };
-    assert!((d - 4.0).abs() < 1e-9, "{d}");
+    assert_eq!(near_rectangle(&b, [40.0, 80.0], [15.0, 25.0]), [], "a slot, its ends far from the bend");
+    assert_eq!(near_rectangle(&b, [FLAT - 4.0, 80.0], [15.0, 25.0]), [], "a slot, its end 4 before the bend it cuts across");
+    assert_eq!(near_rectangle(&b, [FLAT - 4.0, 80.0], [-5.0, 10.0]), [], "a notch in the edge across the bend");
+    let short = near_rectangle(&b, [40.0, FLAT - 2.0], [15.0, 25.0]);
+    let [NearBend { distance: Some(d), .. }] = short[..] else { panic!("{short:?}") };
+    assert!((d - 2.0).abs() < 1e-9, "{d}");
 }
 
 /// The circles of the blank of `b` seen from the front or the back, as their radii.

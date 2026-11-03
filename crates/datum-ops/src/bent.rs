@@ -220,7 +220,8 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
 /// to the bend's nearer bend line, or none when it reaches into the bend; under `clearance`,
 /// 2t + R (R the bend's inner radius). Closer than that a hole distorts on bending, as process
 /// engineers check before a blank is cut. Only its edges that would: a line square to the bend
-/// lines (a slot or a relief across the bend) keeps its shape, and is left out.
+/// lines (a slot or a relief across the bend) keeps its shape, and so does an edge beside which
+/// the profile cuts the bend away across its width: nothing there bends.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NearBend {
     pub distance: Option<f64>,
@@ -237,16 +238,26 @@ pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Res
     for l in blank.laid(feature, sketch)? {
         // The edges that distort: arcs, and lines not square to the bend lines (along the
         // blank's Y), decided exactly: a slant by rounding is told of, never let pass.
-        let distorting: Vec<(f64, f64)> = (0..l.points.len())
-            .filter(|&k| l.arc(k).is_some() || l.points[k].y != l.points[(k + 1) % l.points.len()].y)
-            .map(|k| reach(&l, k))
-            .collect();
+        let boxes: Vec<(Vec2, Vec2)> = (0..l.points.len()).map(|k| reach(&l, k)).collect();
+        let distorting: Vec<(Vec2, Vec2)> =
+            (0..l.points.len()).filter(|&k| l.arc(k).is_some() || l.points[k].y != l.points[(k + 1) % l.points.len()].y).map(|k| boxes[k]).collect();
+        // Whether the profile cuts the bend from `lo` to `hi` away across its width over `y0`…`y1`:
+        // no edge of it inside that band (so its middle lies on none), and the middle within it.
+        let cuts_away = |lo: f64, hi: f64, y0: f64, y1: f64| {
+            y0 < y1
+                && boxes.iter().all(|(a, b)| b.x <= lo || a.x >= hi || b.y <= y0 || a.y >= y1)
+                && l.winding(Vec2::new(0.5 * (lo + hi), 0.5 * (y0 + y1))) != 0
+        };
         let nearest = blank
             .strips
             .iter()
             .filter_map(|s| match s.lay {
                 Lay::Bend { radii, .. } => {
-                    let gap = distorting.iter().map(|&(lo, hi)| (s.lo - hi).max(lo - s.hi)).min_by(f64::total_cmp)?;
+                    let gap = distorting
+                        .iter()
+                        .filter(|(a, b)| !cuts_away(s.lo, s.hi, a.y, b.y))
+                        .map(|(a, b)| (s.lo - b.x).max(a.x - s.hi))
+                        .min_by(f64::total_cmp)?;
                     Some((gap, 2.0 * blank.thickness + radii[0].min(radii[1])))
                 }
                 Lay::Plane { .. } => None,
@@ -261,11 +272,11 @@ pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Res
     Ok(near)
 }
 
-/// How far edge `k` of loop `l` reaches along X: its ends and, an arc, its extremes.
-fn reach(l: &ProfileLoop, k: usize) -> (f64, f64) {
+/// The box edge `k` of loop `l` lies in: its ends and, an arc, its extremes.
+fn reach(l: &ProfileLoop, k: usize) -> (Vec2, Vec2) {
     let n = l.points.len();
     let (a, b) = (l.points[k], l.points[(k + 1) % n]);
-    let (mut lo, mut hi) = (a.x.min(b.x), a.x.max(b.x));
+    let (mut lo, mut hi) = (Vec2::new(a.x.min(b.x), a.y.min(b.y)), Vec2::new(a.x.max(b.x), a.y.max(b.y)));
     if let Some(arc) = l.arc(k) {
         let c = arc.center;
         let angle = |p: Vec2| libm::atan2(p.y - c.y, p.x - c.x);
@@ -277,10 +288,16 @@ fn reach(l: &ProfileLoop, k: usize) -> (f64, f64) {
         let (start, sweep) = (angle(a), turn(angle(a), angle(b)));
         let r = libm::hypot(a.x - c.x, a.y - c.y);
         if turn(start, 0.0) <= sweep {
-            hi = hi.max(c.x + r);
+            hi.x = hi.x.max(c.x + r);
+        }
+        if turn(start, 0.5 * PI) <= sweep {
+            hi.y = hi.y.max(c.y + r);
         }
         if turn(start, PI) <= sweep {
-            lo = lo.min(c.x - r);
+            lo.x = lo.x.min(c.x - r);
+        }
+        if turn(start, -0.5 * PI) <= sweep {
+            lo.y = lo.y.min(c.y - r);
         }
     }
     (lo, hi)
