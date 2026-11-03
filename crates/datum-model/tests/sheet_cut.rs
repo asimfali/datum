@@ -40,7 +40,7 @@ fn hole_on(s: &mut Session, name: &str, body: &str, face: &str, x: f64, y: f64) 
 
 const HOLE: f64 = 25.0 * std::f64::consts::PI;
 
-/// A face of sheet metal: a hole through it; a boss or a depth refused.
+/// A face of sheet metal: a hole through it; a boss's or a pocket's depth refused.
 #[test]
 fn a_plate_is_cut_through_its_thickness() {
     let rectangle = json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]},
@@ -50,7 +50,7 @@ fn a_plate_is_cut_through_its_thickness() {
     let top = run(&mut s, "query_faces", json!({"name": "face", "normal": [0, 0, 1]}))["faces"][0]["id"].as_str().unwrap().to_string();
     hole_on(&mut s, "hole", "face", &top, 30.0, 25.0);
     let e = s.execute("extrude", &json!({"name": "boss", "sketch": "hole", "mode": "join", "z1": 5})).unwrap_err();
-    assert!(e.contains("only cut"), "{e}");
+    assert!(e.contains("no `z1`"), "{e}");
     let e = s.execute("extrude", &json!({"name": "pocket", "sketch": "hole", "mode": "cut", "z1": -1})).unwrap_err();
     assert!(e.contains("no `z1`"), "{e}");
     let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
@@ -406,4 +406,58 @@ fn a_hole_drawn_on_the_blank_cuts_its_sheet() {
     let flats = run(&mut s, "flats", json!({}));
     let cut = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "cut").unwrap_or_else(|| panic!("{flats}")).clone();
     assert_eq!(cut["pieces"]["circles"], 1, "{cut}");
+}
+
+/// A tab drawn on the blank of a plate from its edge (D222): `join` adds it, the wall going on in
+/// its plane; the reply names the plate.
+#[test]
+fn a_tab_drawn_on_the_blank_is_added() {
+    let rectangle = json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let mut s = project("sheet_tab", rectangle);
+    run(&mut s, "plate", json!({"name": "face", "sketch": "path", "rule": "Лист"}));
+    let whole = volume(&mut s, "face");
+    let tab = json!({"points": {"p": [30, 50], "q": [50, 50], "r": [50, 70], "t": [30, 70]},
+        "lines": {"pq": {"from": "p", "to": "q"}, "qr": {"from": "q", "to": "r"}, "rt": {"from": "r", "to": "t"}, "tp": {"from": "t", "to": "p"}}});
+    run(&mut s, "add", json!({"name": "tab", "op": "sketch", "inputs": ["face"], "flat": "front", "k_factor": 0.5, "sketch": tab}));
+    let r = run(&mut s, "extrude", json!({"name": "grow", "sketch": "tab", "mode": "join"}));
+    assert_eq!(r["body"], "face", "{r}");
+    assert!((volume(&mut s, "grow") - whole - 400.0 * 2.0).abs() < 1e-6);
+}
+
+/// A mark at a bend line on the blank only (D226): a half circle in the sheet's edge where the
+/// bend line meets it, for the press brake. The part keeps its metal; its blank and DXF show the
+/// mark, an arc of the edge.
+#[test]
+fn a_mark_on_the_blank_only_leaves_the_part() {
+    let mut s = l_sheet("sheet_mark");
+    let whole = volume(&mut s, "l");
+    let flat = run(&mut s, "flats", json!({}));
+    let before = flat["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "l").unwrap()["pieces"].clone();
+    assert_eq!(before["arcs"], 0, "{before}");
+    let exported = s.flat_of("l").unwrap();
+    let x = exported.bends[0][0].x - 1.0;
+    let mark = json!({"points": {"c": [x, 0]}, "circles": {"m": {"center": "c", "diameter": 4}}});
+    run(&mut s, "add", json!({"name": "mark", "op": "sketch", "inputs": ["l"], "flat": "front", "k_factor": 0.5, "sketch": mark}));
+    let r = run(&mut s, "extrude", json!({"name": "marked", "sketch": "mark", "mode": "cut", "blank_only": true}));
+    assert_cut(&r);
+    assert!((volume(&mut s, "marked") - whole).abs() < 1e-9, "the part keeps its metal");
+    let after = s.flat_of("marked").unwrap();
+    assert_eq!(after.counts()[1], 1, "the mark an arc of the edge: {:?}", after.pieces);
+}
+
+/// A cut of sheet metal changed from the tree (D217): onto the blank only and back, its mode kept.
+#[test]
+fn a_sheet_cut_is_edited_onto_the_blank_only() {
+    let mut s = l_sheet("sheet_edit_blank_only");
+    let whole = volume(&mut s, "l");
+    let hole = json!({"points": {"c": [20, 20]}, "circles": {"m": {"center": "c", "diameter": 10}}});
+    run(&mut s, "add", json!({"name": "hole", "op": "sketch", "inputs": ["l"], "flat": "front", "k_factor": 0.5, "sketch": hole}));
+    assert_cut(&run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"})));
+    assert!(volume(&mut s, "cut") < whole);
+    run(&mut s, "edit", json!({"name": "cut", "mode": "cut", "blank_only": true}));
+    assert!((volume(&mut s, "cut") - whole).abs() < 1e-9, "on the blank only");
+    assert_eq!(s.flat_of("cut").unwrap().counts()[2], 1, "the blank still has the hole");
+    run(&mut s, "edit", json!({"name": "cut", "mode": "cut", "blank_only": false}));
+    assert!(volume(&mut s, "cut") < whole, "in the part again");
 }

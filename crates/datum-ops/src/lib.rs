@@ -117,11 +117,16 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         through: bool,
         /// Through one wall only, the one the sketch lies on: sheet metal's cut, as the blank is
-        /// punched (D196). With `through`.
+        /// punched (D196); with `join`, metal added to an edge of the blank, the wall going on in
+        /// its plane (D222). With `through`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         wall: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         profiles: Vec<String>,
+        /// A cut of sheet metal on its blank only (D226): the body stays as it is, its blank and
+        /// DXF take the cut (see [`blank_cut`]). With `wall`, `mode: cut`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        blank_only: bool,
     },
     /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
     /// given), from the input work plane, from plane face `face` of the input body, or through
@@ -493,7 +498,7 @@ impl Op {
                 flat: *flat,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles } => Self::Extrude {
+            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only } => Self::Extrude {
                 z0: r(z0, "z0")?,
                 z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?,
                 symmetric: *symmetric,
@@ -501,6 +506,7 @@ impl Op {
                 through: *through,
                 wall: *wall,
                 profiles: profiles.clone(),
+                blank_only: *blank_only,
             },
             Self::Plane { base, face, points, offset } => {
                 Self::Plane { base: *base, face: face.clone(), points: points.clone(), offset: r(offset, "offset")? }
@@ -800,12 +806,29 @@ pub fn near_bends(feature: TopoId, values: &[&Value], op: &Op) -> Result<Vec<Nea
     bent::near_bends(feature, t, &*chosen(feature, s, profiles)?)
 }
 
+/// Body `body` with the cut `op` makes on the blank only (an extrusion with `blank_only`, D226),
+/// `sketch` its sketch's value: as the sheet cut would make it, for the blank to be laid flat.
+pub fn blank_cut(feature: TopoId, body: &Body, sketch: &Value, op: &Op) -> Result<Body, BrepError> {
+    let Op::Extrude { blank_only: true, profiles, .. } = op else { return Err(BrepError::Invalid("not a cut on the blank only".into())) };
+    let s = sketch.sketch().ok_or_else(|| BrepError::Sketch("a cut on the blank takes a sketch".into()))?;
+    bent::punch(feature, body, &*chosen(feature, s, profiles)?, false)
+}
+
 /// An extrusion (see [`Op::Extrude`]), its numbers evaluated.
 fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepError> {
-    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles } = op else { return Err(BrepError::Invalid("not an extrusion".into())) };
+    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only } = op else {
+        return Err(BrepError::Invalid("not an extrusion".into()));
+    };
     let (z0, z1, symmetric, mode, through) = (num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through);
     if *wall && !through {
         return Err(BrepError::Sketch("`wall` is a cut through one wall: with `through`".into()));
+    }
+    // On the blank only: the body as it was; its blank takes the cut.
+    if *blank_only {
+        return match (values.first().and_then(|v| v.body()), *wall && mode == Mode::Cut) {
+            (Some(t), true) => Ok(t.clone()),
+            _ => Err(BrepError::Sketch("`blank_only` is a cut of sheet metal (`wall`, `mode: cut`) its blank alone takes".into())),
+        };
     }
     // The target body first unless the extrusion makes a new one.
     let k = usize::from(mode != Mode::New);
@@ -825,15 +848,19 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
     let s = &*chosen(feature, s, profiles)?;
     let plane = values.get(k + 1).map(|v| v.plane());
     if through {
-        let Some(t) = target.filter(|_| mode == Mode::Cut && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
-            return Err(BrepError::Sketch("`through` is a cut of the target along the sketch's normal: no `z0`, `z1`, `symmetric` or plane".into()));
+        let fits = mode == Mode::Cut || (mode == Mode::Join && *wall);
+        let Some(t) = target.filter(|_| fits && z0 == 0.0 && z1.is_none() && !symmetric && plane.is_none()) else {
+            return Err(BrepError::Sketch(
+                "`through` is a cut of the target along the sketch's normal (or with `wall`, metal added to a sheet): no `z0`, `z1`, `symmetric` or plane"
+                    .into(),
+            ));
         };
         // Through the walls from a face, one plate after another, made directly; through anything
         // else (a wall the profiles cross, a sketch off the body) by the general Boolean, the tool
         // stretched past the body on both sides: so no face of it lies on the sketch's (D186).
         let local = match s.face {
             // Sheet metal: through its thickness alone, made directly or refused.
-            Some(_) if *wall => return bent::punch(feature, t, s),
+            Some(_) if *wall => return bent::punch(feature, t, s, mode == Mode::Join),
             Some(_) => through_walls(feature, t, s),
             None if *wall => return Err(BrepError::Sketch("a cut of sheet metal takes a sketch on a face of it".into())),
             None => Err(BrepError::Unsupported("cut: the sketch lies on no face of the body".into())),
