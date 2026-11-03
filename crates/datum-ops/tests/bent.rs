@@ -88,6 +88,27 @@ fn a_hole_near_a_bend_is_told() {
     assert_eq!(near_bends(id("x"), &[&target], &op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true}))).unwrap(), []);
 }
 
+/// How close a slot from `from` to `to` along the first wall of `b`, `z` 15 to 25, comes to a bend.
+fn near_slot(b: &Body, from: f64, to: f64) -> Vec<NearBend> {
+    let target = Value::Body(b.clone());
+    let sketch = serde_json::json!({"points": {"a": [from, -15], "b": [to, -15], "c": [to, -25], "d": [from, -25]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let placed =
+        op(serde_json::json!({"op": "sketch", "face": first_wall(b), "k_factor": K, "sketch": sketch})).eval(id("slot"), &[&target]).unwrap();
+    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+    near_bends(id("cut"), &[&target, &placed], &cut).unwrap()
+}
+
+/// A slot across the bend keeps its shape: its sides square to the bend lines distort nothing;
+/// an end within 2t + R of a bend line does, and is told of.
+#[test]
+fn a_slot_square_across_a_bend_is_not_told() {
+    let b = sheet();
+    assert_eq!(near_slot(&b, 40.0, 80.0), [], "both ends far from the bend");
+    let [NearBend { distance: Some(d), .. }] = near_slot(&b, FLAT - 4.0, 80.0)[..] else { panic!("{:?}", near_slot(&b, FLAT - 4.0, 80.0)) };
+    assert!((d - 4.0).abs() < 1e-9, "{d}");
+}
+
 /// The circles of the blank of `b` seen from the front or the back, as their radii.
 fn circles(b: &Body, back: bool) -> Vec<f64> {
     let flat = unfold_side(b, back, K).unwrap();

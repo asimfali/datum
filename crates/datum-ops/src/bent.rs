@@ -219,7 +219,8 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed) -> Result<B
 /// How close a profile of a cut of sheet metal comes to a bend: `distance` on the blank from it
 /// to the bend's nearer bend line, or none when it reaches into the bend; under `clearance`,
 /// 2t + R (R the bend's inner radius). Closer than that a hole distorts on bending, as process
-/// engineers check before a blank is cut.
+/// engineers check before a blank is cut. Only its edges that would: a line square to the bend
+/// lines (a slot or a relief across the bend) keeps its shape, and is left out.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NearBend {
     pub distance: Option<f64>,
@@ -234,12 +235,20 @@ pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Res
     let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return Ok(Vec::new()) };
     let mut near = Vec::new();
     for l in blank.laid(feature, sketch)? {
-        let (lo, hi) = reach(&l);
+        // The edges that distort: arcs, and lines not square to the bend lines (along the
+        // blank's Y), decided exactly: a slant by rounding is told of, never let pass.
+        let distorting: Vec<(f64, f64)> = (0..l.points.len())
+            .filter(|&k| l.arc(k).is_some() || l.points[k].y != l.points[(k + 1) % l.points.len()].y)
+            .map(|k| reach(&l, k))
+            .collect();
         let nearest = blank
             .strips
             .iter()
             .filter_map(|s| match s.lay {
-                Lay::Bend { radii, .. } => Some(((s.lo - hi).max(lo - s.hi), 2.0 * blank.thickness + radii[0].min(radii[1]))),
+                Lay::Bend { radii, .. } => {
+                    let gap = distorting.iter().map(|&(lo, hi)| (s.lo - hi).max(lo - s.hi)).min_by(f64::total_cmp)?;
+                    Some((gap, 2.0 * blank.thickness + radii[0].min(radii[1])))
+                }
                 Lay::Plane { .. } => None,
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
@@ -252,14 +261,13 @@ pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Res
     Ok(near)
 }
 
-/// How far loop `l` reaches along X: its points and the extremes of its arcs.
-fn reach(l: &ProfileLoop) -> (f64, f64) {
-    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+/// How far edge `k` of loop `l` reaches along X: its ends and, an arc, its extremes.
+fn reach(l: &ProfileLoop, k: usize) -> (f64, f64) {
     let n = l.points.len();
-    for (k, &a) in l.points.iter().enumerate() {
-        (lo, hi) = (lo.min(a.x), hi.max(a.x));
-        let Some(arc) = l.arc(k) else { continue };
-        let (c, b) = (arc.center, l.points[(k + 1) % n]);
+    let (a, b) = (l.points[k], l.points[(k + 1) % n]);
+    let (mut lo, mut hi) = (a.x.min(b.x), a.x.max(b.x));
+    if let Some(arc) = l.arc(k) {
+        let c = arc.center;
         let angle = |p: Vec2| libm::atan2(p.y - c.y, p.x - c.x);
         // The turn from `a` toward `b` the arc's way, and whether it passes direction `t`.
         let turn = |from: f64, to: f64| {
