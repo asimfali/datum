@@ -9,8 +9,17 @@ use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, Step, contours
 use rayon::prelude::*;
 
 use crate::copies::{Copies, moved, place_patterns};
+use crate::unfold::{Flat, FlatPiece};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+/// The side of a sheet's flat blank a sketch is seen from (D222).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum FlatSide {
+    Front,
+    Back,
+}
 
 /// An explicit sketch plane: its origin, the direction of the sketch's X axis (projected into
 /// the plane) and the normal, along which extrusions go.
@@ -84,16 +93,22 @@ fn plane_of(body: &Body, f: usize) -> Result<SketchPlane, BrepError> {
 /// part of the sketch's hash: the plane says where it is.
 pub const ORIGIN: &str = "origin";
 
+/// What `blank` of a projection names: every piece of the blank's outer outline, every bend line.
+const OUTLINE: &str = "outline";
+const BENDS: &str = "bends";
+
 /// Geometry of an input projected into a sketch (D87, D214, D216): an edge or vertex of a body by
 /// `id`, the outline of its face by `face`, its section by the sketch plane (`section`), or a
 /// point, line, arc or circle of a sketch by `element`, from the input named `from` (none: the
-/// first). `at` keeps where its points were when the sketch was drawn, in sketch coordinates:
+/// first), or, in a sketch on the flat blank, `blank` (D222): the blank's `outline`, its `bends`
+/// (every bend line), or one piece of it or one bend line by its ID (hex). Exactly one of `id`,
+/// `element`, `face`, `section` and `blank`. `at` keeps where its points were when the sketch was drawn, in sketch coordinates:
 /// a point's; a line's start and end; an arc's centre, start and end; a circle's centre. Sides (a
 /// point above a line, a circle inside or outside another) are decided there, so a projection
 /// moved by an edit upstream does not flip the sketch. Empty: drawn where the projection is now;
 /// a face or a section, of many curves, is always drawn so. `construction`: whether it bounds no
-/// profile; none: an edge or an element is construction (projected to dimension and snap to), a
-/// face or a section is not (projected to be a profile).
+/// profile; none: an edge, an element or the blank is construction (projected to dimension and
+/// snap to), a face or a section is not (projected to be a profile).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Projection {
@@ -108,15 +123,18 @@ pub struct Projection {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub section: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blank: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub construction: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub at: Vec<Vec2>,
 }
 
 impl Projection {
-    /// Whether it is one edge, vertex or element, with `at`: not a face or a section.
+    /// Whether it is one edge, vertex, element or piece of the blank, with `at`: not a face, a
+    /// section, or the blank's outline or bend lines.
     pub fn single(&self) -> bool {
-        self.face.is_none() && !self.section
+        self.face.is_none() && !self.section && !self.blank.as_deref().is_some_and(|b| b == OUTLINE || b == BENDS)
     }
 }
 
@@ -371,6 +389,7 @@ fn projected<'a>(
     normal: Vec3,
     project: &BTreeMap<String, Projection>,
     source: &dyn Fn(Option<&str>) -> Result<Source<'a>, BrepError>,
+    blank: Option<&Flat>,
 ) -> Result<Projected, BrepError> {
     let mut s = sketch.clone();
     let mut now = BTreeMap::new();
@@ -381,22 +400,37 @@ fn projected<'a>(
     let mut shared: BTreeMap<(Option<&str>, String), String> = BTreeMap::new();
     for (name, proj) in project {
         let one = |shape: Shape| vec![(name.clone(), shape)];
-        let shapes = match (source(proj.from.as_deref())?, &proj.id, &proj.element, &proj.face, proj.section) {
-            (Source::Body(b), Some(id), None, None, false) => one(body_shape(name, b, id)?),
-            (Source::Body(b), None, None, Some(f), false) => face_shapes(name, b, f)?,
-            (Source::Body(b), None, None, None, true) => section_shapes(name, b, frame)?,
-            (Source::Sketch(p), None, Some(e), None, false) => one(sketch_shape(name, p, e)?),
-            (Source::Body(_), ..) => {
-                return Err(BrepError::Sketch(format!(
-                    "projection `{name}`: a body's edge or vertex is named by `id`, a face by `face`, or its section is `section`"
-                )));
+        let shapes = match &proj.blank {
+            Some(which) => {
+                let Some(flat) = blank else {
+                    return Err(BrepError::Sketch(format!("projection `{name}`: `blank` is for a sketch on the blank")));
+                };
+                if proj.from.is_some() || proj.id.is_some() || proj.element.is_some() || proj.face.is_some() || proj.section {
+                    return Err(BrepError::Sketch(format!("projection `{name}`: `blank` goes without `from`, `id`, `element`, `face` or `section`")));
+                }
+                blank_shapes(name, which, flat, frame)?
             }
-            (Source::Sketch(_), ..) => return Err(BrepError::Sketch(format!("projection `{name}`: a sketch's element is named by `element`"))),
+            None => match (source(proj.from.as_deref())?, &proj.id, &proj.element, &proj.face, proj.section) {
+                (Source::Body(b), Some(id), None, None, false) => one(body_shape(name, b, id)?),
+                (Source::Body(b), None, None, Some(f), false) => face_shapes(name, b, f)?,
+                (Source::Body(b), None, None, None, true) => section_shapes(name, b, frame)?,
+                (Source::Sketch(p), None, Some(e), None, false) => one(sketch_shape(name, p, e)?),
+                (Source::Body(_), ..) => {
+                    return Err(BrepError::Sketch(format!(
+                        "projection `{name}`: a body's edge or vertex is named by `id`, a face by `face`, or its section is `section`"
+                    )));
+                }
+                (Source::Sketch(_), ..) => {
+                    return Err(BrepError::Sketch(format!("projection `{name}`: a sketch's element is named by `element`")));
+                }
+            },
         };
         if !proj.single() && !proj.at.is_empty() {
-            return Err(BrepError::Sketch(format!("projection `{name}`: a face or a section is drawn where it is, without `at`")));
+            return Err(BrepError::Sketch(format!(
+                "projection `{name}`: a face, a section or the blank's outline or bends is drawn where it is, without `at`"
+            )));
         }
-        let construction = proj.construction.unwrap_or(proj.single());
+        let construction = proj.construction.unwrap_or(proj.single() || proj.blank.is_some());
         let mut points: Vec<Vec2> = Vec::with_capacity(3);
         // The point drawn at its `at`, or where it is; fixed where it is.
         let mut add = |s: &mut Sketch, n: String, (p, of): End| -> Result<String, BrepError> {
@@ -551,6 +585,56 @@ fn edge_shape(name: &str, body: &Body, e: usize) -> Result<Shape, BrepError> {
         Some(Curve::Arc(arc)) => Ok(Shape::Arc((arc.center, None), pa, pb, arc.axis)),
         Some(Curve::Rolled { .. }) => Err(BrepError::Unsupported(format!("projection `{name}`: an edge of a cut in a rolled sheet"))),
     }
+}
+
+/// The blank's pieces for projection `name` (D222): `which` is [`OUTLINE`], [`BENDS`] or the ID
+/// (hex) of a piece or a bend line. Many are curves `<name>.<its ID>` (see [`part_name`]). A
+/// point of the blank is the same point of the sketch wherever curves meet there: exactly the
+/// same two numbers, the same vertex laid once. `frame` is the sketch's, the blank's own.
+fn blank_shapes(name: &str, which: &str, flat: &Flat, frame: &[Vec3; 4]) -> Result<Vec<(String, Shape)>, BrepError> {
+    let [o, x, y, z] = *frame;
+    let end = |p: Vec2| (o + x * p.x + y * p.y, Some(format!("blank:{:x},{:x}", p.x.to_bits(), p.y.to_bits())));
+    let centre = |p: Vec2| (o + x * p.x + y * p.y, None);
+    // Each piece with its ends where the outline has them: the very vertices it meets others at.
+    let mut pieces: Vec<(String, FlatPiece, Option<[Vec2; 2]>)> = Vec::new();
+    let bend_lines = || flat.bends.iter().zip(&flat.bend_ids).map(|(b, id)| (*id, FlatPiece::Line(b[0], b[1])));
+    match which {
+        OUTLINE => {
+            for (i, e) in flat.outer.clone().zip(&flat.ends) {
+                pieces.push((part_name(name, flat.ids[i]), flat.pieces[i].clone(), Some(*e)));
+            }
+        }
+        BENDS => pieces.extend(bend_lines().map(|(id, p)| (part_name(name, id), p, None))),
+        id => {
+            let id = u128::from_str_radix(id, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("projection `{name}`: `{id}` is not an ID")))?;
+            let at = flat.ids.iter().position(|i| *i == id);
+            let piece = at.map(|i| (flat.pieces[i].clone(), flat.outer.contains(&i).then(|| flat.ends[i - flat.outer.start])));
+            let piece = piece.or_else(|| bend_lines().find(|b| b.0 == id).map(|b| (b.1, None)));
+            let (piece, ends) = piece.ok_or_else(|| BrepError::LostReference(format!("projection `{name}`: no line {id:?} on the blank")))?;
+            pieces.push((name.to_string(), piece, ends));
+        }
+    }
+    let mut parts = Vec::with_capacity(pieces.len());
+    for (n, piece, ends) in pieces {
+        match piece {
+            FlatPiece::Line(a, b) => parts.push((n, Shape::Line(end(a), end(b)))),
+            FlatPiece::Arc { center, radius, start, end: stop } => {
+                let at = |t: f64| {
+                    let (s, c) = libm::sincos(t);
+                    Vec2::new(center.x + radius * c, center.y + radius * s)
+                };
+                let [from, to] = ends.unwrap_or_else(|| [at(start), at(stop)]);
+                parts.push((n, Shape::Arc(centre(center), end(from), end(to), z)));
+            }
+            FlatPiece::Circle { center, radius } => parts.push((n, Shape::Circle(centre(center), z, 2.0 * radius))),
+            // A curve that is neither a line nor an arc is not in a profile yet: its ends.
+            FlatPiece::Polyline(pts) => {
+                let (Some(&a), Some(&b)) = (pts.first(), pts.last()) else { continue };
+                parts.extend([(format!("{n}.start"), Shape::Point(end(a))), (format!("{n}.end"), Shape::Point(end(b)))]);
+            }
+        }
+    }
+    named_once(name, parts)
 }
 
 /// The short name of the curve element `id` makes of projection `name`: `<name>.<the ID's first
@@ -764,7 +848,10 @@ fn frame(origin: Vec3, x: Vec3, z: Vec3) -> Result<[Vec3; 4], BrepError> {
 /// `k_factor` of the thickness; on a plane face of sheet metal, `k_factor` lays its bends flat
 /// for a cut across them. With `project`, geometry of the inputs `source` gives by name is
 /// projected into the sketch (see [`projected`]). A face, edge, vertex or element gone after a
-/// rebuild is a lost reference.
+/// rebuild is a lost reference. With `blank`, the flat blank of the sheet (D222), the sketch lies
+/// on it: its frame is the blank's, on the face the blank is laid from, so coordinates are the
+/// blank's, and `k_factor` is the one it was laid with.
+#[allow(clippy::too_many_arguments)]
 pub fn place<'a>(
     sketch: &Sketch,
     plane: Option<&SketchPlane>,
@@ -773,6 +860,7 @@ pub fn place<'a>(
     k_factor: Option<f64>,
     project: &BTreeMap<String, Projection>,
     source: &dyn Fn(Option<&str>) -> Result<Source<'a>, BrepError>,
+    blank: Option<&Flat>,
 ) -> Result<Placed, BrepError> {
     let mut developed = None;
     // The plane's normal as given, for projections.
@@ -782,7 +870,7 @@ pub fn place<'a>(
         (None, Some(_)) => return Err(BrepError::Sketch("a sketch on a face takes the body as its input and the face ID as `face`".into())),
         _ => None,
     };
-    if k_factor.is_some() && face.is_none() {
+    if k_factor.is_some() && face.is_none() && blank.is_none() {
         return Err(BrepError::Sketch("`k_factor` is for a sketch on a face of sheet metal".into()));
     }
     let (frame, on) = match (plane, face) {
@@ -810,7 +898,16 @@ pub fn place<'a>(
                 Surface::Wall(_) => return Err(BrepError::Unsupported("a sketch on the wall of a cut".into())),
             }
         }
-        (None, None) => ([Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)], None),
+        (None, None) => match blank {
+            Some(flat) => {
+                let (Some(frame), Some(home)) = (flat.frame, flat.home) else {
+                    return Err(BrepError::Unsupported("a sketch on the blank of a rolled sheet or a cone comes later".into()));
+                };
+                normal = frame[3];
+                (frame, Some(home))
+            }
+            None => ([Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)], None),
+        },
     };
     if sketch.points.contains_key(ORIGIN) {
         return Err(BrepError::Sketch(format!("`{ORIGIN}` is the model's origin projected into the sketch: name the point otherwise")));
@@ -836,7 +933,7 @@ pub fn place<'a>(
         _ if project.is_empty() => sketch,
         Some(_) => return Err(BrepError::Unsupported("projections into a sketch on a cylinder face".into())),
         None => {
-            (with_projections, now, ellipses) = projected(sketch, &frame, normal, project, source)?;
+            (with_projections, now, ellipses) = projected(sketch, &frame, normal, project, source, blank)?;
             &with_projections
         }
     };

@@ -606,3 +606,36 @@ fn lines_of_a_blank_keep_their_names() {
         assert_eq!(c, want, "the circles, whichever order the side lists them in");
     }
 }
+
+/// Sketched on either face of the second wall of an L, a hole across the bend, one on the first
+/// wall beyond it and a notch in the free end each take their metal and no more: the sheet's two
+/// sides pair wall by wall, not the first wall with the second (an L pairs either way round).
+#[test]
+fn cuts_sketched_on_the_second_wall_take_what_they_cover() {
+    let b = sheet_of(80.0);
+    let hole = std::f64::consts::PI * 25.0 * T;
+    for f in b.faces().iter().filter(|f| matches!(f.surface, Surface::Plane(p) if p.normal.y.abs() > 0.5 && p.origin.y > 30.0)) {
+        let Surface::Plane(p) = f.surface else { unreachable!() };
+        // The sketch's Y runs along +Z on the inner face, along −Z on the outer.
+        let z = if p.normal.y < 0.0 { 20.0 } else { -20.0 };
+        for (along, taken) in [(5.0, None), (-12.0, Some(hole)), (40.0, Some(hole)), (80.0, Some(0.5 * hole))] {
+            let target = Value::Body(b.clone());
+            let sketch = serde_json::json!({"points": {"h": [along, z]}, "circles": {"c": {"center": "h", "diameter": 10.0}}});
+            let placed = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", f.id), "k_factor": K, "sketch": sketch}))
+                .eval(id("hole"), &[&target])
+                .unwrap();
+            let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+            let r = cut.eval(id("cut"), &[&target, &placed]).unwrap_or_else(|e| panic!("{:?} at {along}: {e}", p.normal)).body().unwrap().clone();
+            r.validate().unwrap();
+            let gone = b.volume() - r.volume();
+            // Across the bend, the part on it takes the metal between the bend's radii: its mean
+            // radius over the neutral layer's more than on a wall.
+            let stretch = (T + 0.5 * T) / (T + K * T);
+            match taken {
+                Some(v) => assert!((gone - v).abs() < 1e-6, "{:?} at {along}: {gone} not {v}", p.normal),
+                None => assert!(hole < gone && gone < hole * stretch, "{:?} at {along}: {gone}", p.normal),
+            }
+            unfold_side(&r, false, K).unwrap();
+        }
+    }
+}

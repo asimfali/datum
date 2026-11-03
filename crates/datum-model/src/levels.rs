@@ -328,9 +328,13 @@ impl Doc {
             // The same operation with other numbers: its arity holds.
             let _ = out.set_op(ix as NodeIx, op);
         }
-        // A sketch on a face of a part's body lays its bends flat with the rule's K.
+        // A sketch on a face of a part's body, or on its flat blank, lays its bends flat with the
+        // rule's K.
         for (ix, n) in g.nodes().iter().enumerate() {
-            let Op::Sketch { face: Some(_), .. } = &n.op else { continue };
+            let Op::Sketch { face, flat, .. } = &n.op else { continue };
+            if face.is_none() && flat.is_none() {
+                continue;
+            }
             let Some(&body) = n.inputs.first() else { continue };
             let Some(&k) = body_chain(g, body).last().and_then(|begun| ks.get(&begun)) else { continue };
             let mut op = n.op.clone();
