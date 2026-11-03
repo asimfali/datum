@@ -424,3 +424,24 @@ fn a_tab_drawn_on_the_blank_is_added() {
     assert_eq!(r["body"], "face", "{r}");
     assert!((volume(&mut s, "grow") - whole - 400.0 * 2.0).abs() < 1e-6);
 }
+
+/// A mark at a bend line on the blank only (D226): a half circle in the sheet's edge where the
+/// bend line meets it, for the press brake. The part keeps its metal; its blank and DXF show the
+/// mark, an arc of the edge.
+#[test]
+fn a_mark_on_the_blank_only_leaves_the_part() {
+    let mut s = l_sheet("sheet_mark");
+    let whole = volume(&mut s, "l");
+    let flat = run(&mut s, "flats", json!({}));
+    let before = flat["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "l").unwrap()["pieces"].clone();
+    assert_eq!(before["arcs"], 0, "{before}");
+    let exported = s.flat_of("l").unwrap();
+    let x = exported.bends[0][0].x - 1.0;
+    let mark = json!({"points": {"c": [x, 0]}, "circles": {"m": {"center": "c", "diameter": 4}}});
+    run(&mut s, "add", json!({"name": "mark", "op": "sketch", "inputs": ["l"], "flat": "front", "k_factor": 0.5, "sketch": mark}));
+    let r = run(&mut s, "extrude", json!({"name": "marked", "sketch": "mark", "mode": "cut", "blank_only": true}));
+    assert_cut(&r);
+    assert!((volume(&mut s, "marked") - whole).abs() < 1e-9, "the part keeps its metal");
+    let after = s.flat_of("marked").unwrap();
+    assert_eq!(after.counts()[1], 1, "the mark an arc of the edge: {:?}", after.pieces);
+}

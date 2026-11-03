@@ -163,11 +163,13 @@ const COMMANDS: &[Command] = &[
                       (a skeleton sketch holds many); none: every closed loop, open chains left out. Sheet metal (a part begun by \
                       `sheet` or `plate`) is cut through its thickness alone, as its blank is punched (`mode: cut`), or added to \
                       (`join`): a profile off the blank meeting its edge, the wall going on in its plane; no depth either way. \
-                      The reply names the mode, the body and its rule.",
+                      `blank_only: true` (a cut of sheet metal): on its blank and DXF alone, the part as it was (a mark at a bend \
+                      line for the press brake). The reply names the mode, the body and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
                 "sketch": {"type": "string"},
+                "blank_only": {"type": "boolean"},
                 "mode": {"type": "string", "enum": ["new", "join", "cut", "intersect"]},
                 "body": {"type": "string"},
                 "z0": {"type": ["number", "string"]},
@@ -1149,7 +1151,8 @@ impl Session {
     }
 
     /// The blank of feature `name` of the level worked in: an `unfold` feature's, or a sheet
-    /// or plate body's laid flat as its settings say (D164).
+    /// or plate body's laid flat as its settings say (D164), with the cuts on its blank only
+    /// (D226) made first, in the order of its features.
     pub fn flat_of(&mut self, name: &str) -> Result<Arc<Flat>, String> {
         let ix = self.find(name)?;
         let value = self.last.results[ix as usize].as_ref().map_err(|e| format!("`{name}` failed: {e}"))?.clone();
@@ -1164,15 +1167,38 @@ impl Session {
             Some(k) => k,
             None => settings.k_factor.resolve(&lookup).map_err(|e| format!("k_factor: {e}"))?,
         };
+        // The cuts on the blank only of the body, first to last: each its feature, ID, op and sketch.
+        let mut blank_only: Vec<(&str, datum_brep::TopoId, &Op, &datum_graph::Value)> = Vec::new();
+        for n in crate::levels::body_chain(&self.graph, ix).collect::<Vec<_>>().into_iter().rev() {
+            let node = &self.graph.nodes()[n as usize];
+            if let (Op::Extrude { blank_only: true, .. }, Some(&s)) = (&node.op, node.inputs.get(1)) {
+                let sketch = self.last.results[s as usize].as_ref().map_err(|e| format!("`{}`: its sketch failed: {e}", node.name))?;
+                blank_only.push((&node.name, node.id, &node.op, sketch));
+            }
+        }
         let mut h = blake3::Hasher::new();
         h.update(&value.hash());
         h.update(&[u8::from(settings.back)]);
         h.update(&k.to_bits().to_le_bytes());
+        for (_, id, op, sketch) in &blank_only {
+            h.update(&id.0.to_le_bytes());
+            h.update(&serde_json::to_vec(op).unwrap_or_default());
+            h.update(&sketch.hash());
+        }
         let key = *h.finalize().as_bytes();
         if self.flat_memo.len() > 64 {
             self.flat_memo.clear();
         }
-        let made = self.flat_memo.entry(key).or_insert_with(|| Arc::new(datum_ops::unfold_side(body, settings.back, k).map_err(|e| e.to_string())));
+        let made = self.flat_memo.entry(key).or_insert_with(|| {
+            let mut cut = std::borrow::Cow::Borrowed(body);
+            for (name, id, op, sketch) in &blank_only {
+                match datum_ops::blank_cut(*id, &cut, sketch, op) {
+                    Ok(b) => cut = std::borrow::Cow::Owned(b),
+                    Err(e) => return Arc::new(Err(format!("`{name}` on the blank: {e}"))),
+                }
+            }
+            Arc::new(datum_ops::unfold_side(&cut, settings.back, k).map_err(|e| e.to_string()))
+        });
         match made.as_ref() {
             Ok(f) => Ok(Arc::new(f.clone())),
             Err(e) => Err(e.clone()),

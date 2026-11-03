@@ -123,6 +123,10 @@ pub enum Op {
         wall: bool,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         profiles: Vec<String>,
+        /// A cut of sheet metal on its blank only (D226): the body stays as it is, its blank and
+        /// DXF take the cut (see [`blank_cut`]). With `wall`, `mode: cut`.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        blank_only: bool,
     },
     /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
     /// given), from the input work plane, from plane face `face` of the input body, or through
@@ -494,7 +498,7 @@ impl Op {
                 flat: *flat,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles } => Self::Extrude {
+            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only } => Self::Extrude {
                 z0: r(z0, "z0")?,
                 z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?,
                 symmetric: *symmetric,
@@ -502,6 +506,7 @@ impl Op {
                 through: *through,
                 wall: *wall,
                 profiles: profiles.clone(),
+                blank_only: *blank_only,
             },
             Self::Plane { base, face, points, offset } => {
                 Self::Plane { base: *base, face: face.clone(), points: points.clone(), offset: r(offset, "offset")? }
@@ -801,12 +806,29 @@ pub fn near_bends(feature: TopoId, values: &[&Value], op: &Op) -> Result<Vec<Nea
     bent::near_bends(feature, t, &*chosen(feature, s, profiles)?)
 }
 
+/// Body `body` with the cut `op` makes on the blank only (an extrusion with `blank_only`, D226),
+/// `sketch` its sketch's value: as the sheet cut would make it, for the blank to be laid flat.
+pub fn blank_cut(feature: TopoId, body: &Body, sketch: &Value, op: &Op) -> Result<Body, BrepError> {
+    let Op::Extrude { blank_only: true, profiles, .. } = op else { return Err(BrepError::Invalid("not a cut on the blank only".into())) };
+    let s = sketch.sketch().ok_or_else(|| BrepError::Sketch("a cut on the blank takes a sketch".into()))?;
+    bent::punch(feature, body, &*chosen(feature, s, profiles)?, false)
+}
+
 /// An extrusion (see [`Op::Extrude`]), its numbers evaluated.
 fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepError> {
-    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles } = op else { return Err(BrepError::Invalid("not an extrusion".into())) };
+    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only } = op else {
+        return Err(BrepError::Invalid("not an extrusion".into()));
+    };
     let (z0, z1, symmetric, mode, through) = (num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through);
     if *wall && !through {
         return Err(BrepError::Sketch("`wall` is a cut through one wall: with `through`".into()));
+    }
+    // On the blank only: the body as it was; its blank takes the cut.
+    if *blank_only {
+        return match (values.first().and_then(|v| v.body()), *wall && mode == Mode::Cut) {
+            (Some(t), true) => Ok(t.clone()),
+            _ => Err(BrepError::Sketch("`blank_only` is a cut of sheet metal (`wall`, `mode: cut`) its blank alone takes".into())),
+        };
     }
     // The target body first unless the extrusion makes a new one.
     let k = usize::from(mode != Mode::New);
