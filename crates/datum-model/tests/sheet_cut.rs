@@ -375,3 +375,34 @@ fn a_flange_takes_the_rules_radius() {
     let v = volume(&mut s, "f");
     assert!((v - whole - added).abs() < 1e-9 * added, "{v} − {whole} against {added}");
 }
+
+/// A hole drawn on the blank of a U (D222), across its first bend line, as the window draws it:
+/// a sketch on the blank with its outline and bend lines, the K-factor the part's rule's, then E.
+/// The cut goes to the U, through one wall and the bend, and the blank shows one circle: the
+/// sketch's K (0.5) gave way to the rule's, or the blank would refuse a cut laid at another.
+#[test]
+fn a_hole_drawn_on_the_blank_cuts_its_sheet() {
+    let u = json!({"points": {"a": [0, 60], "b": [0, 0], "c": [80, 0], "d": [80, 60]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}}});
+    let mut s = project("sheet_cut_blank", u);
+    run(&mut s, "sheet", json!({"name": "u", "sketch": "path", "rule": "Лист", "side": "right", "z1": 40}));
+    let whole = volume(&mut s, "u");
+    let flats = run(&mut s, "flats", json!({}));
+    let k = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "u").unwrap()["k_factor"].clone();
+    assert_eq!(k, json!(0.44), "the rule's K: {flats}");
+    // The first wall is 58 long on the blank's outer side: the hole is centred 2 past its bend line.
+    let hole = json!({"points": {"h": [60, 20]}, "circles": {"c": {"center": "h", "diameter": 10}}});
+    let project = json!({"blank": {"blank": "outline"}, "bends": {"blank": "bends"}});
+    run(
+        &mut s,
+        "add",
+        json!({"name": "hole", "op": "sketch", "inputs": ["u"], "flat": "front", "k_factor": 0.5, "project": project, "sketch": hole}),
+    );
+    let r = run(&mut s, "extrude", json!({"name": "cut", "sketch": "hole", "mode": "cut"}));
+    assert_eq!(r["body"], "u", "{r}");
+    let gone = whole - volume(&mut s, "cut");
+    assert!(gone > HOLE * 2.0 && gone < HOLE * 2.0 * 1.1, "a hole through one wall and the bend: {gone}");
+    let flats = run(&mut s, "flats", json!({}));
+    let cut = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "cut").unwrap_or_else(|| panic!("{flats}")).clone();
+    assert_eq!(cut["pieces"]["circles"], 1, "{cut}");
+}
