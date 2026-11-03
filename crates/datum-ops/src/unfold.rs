@@ -75,8 +75,15 @@ pub struct Flat {
     pub pieces: Vec<FlatPiece>,
     /// Width (along X) and height of the blank.
     pub size: Vec2,
+    /// The name of each piece, from where it comes (D222): the face of the body beside it (the
+    /// wall of a cut, an end of the sheet); a curve of a cut across bend lines by a first piece of
+    /// it ([`run_name`]), the same on either side.
+    pub ids: Vec<TopoId>,
     /// The bend lines (both tangent lines of each bend): guides on the blank, not in its DXF.
     pub bends: Vec<[Vec2; 2]>,
+    /// The name of each bend line: from the two strips of the sheet it lies between, on the side
+    /// the blank is seen from (the other side's are other faces).
+    pub bend_ids: Vec<TopoId>,
     /// Of the pieces, what the DXF holds.
     pub hash: [u8; 32],
 }
@@ -345,6 +352,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
     let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
     let smooth = |x: Ix| smooth(body, x);
+    let id = |x: Ix| body.faces()[x as usize].id;
     let skip = branches(body);
     let mut chain = chain_through(body, f, &skip)?;
     if chain.iter().flatten().any(|&x| matches!(body.faces()[x as usize].surface, Surface::Cone(_))) {
@@ -532,7 +540,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     // The outline: the faces' outer edges not shared along the chain, joined at their vertices; a
     // run of lines along one face of the body (a cap, an end) is one line.
     let mut edges: BTreeMap<Ix, (Ix, FlatPiece, Ix)> = BTreeMap::new();
-    let mut holes: Vec<FlatPiece> = Vec::new();
+    let mut holes: Vec<(FlatPiece, TopoId)> = Vec::new();
     for l in &laid {
         let mut loops = body.face_loops(l.face);
         if let Some(outer) = loops.next() {
@@ -544,11 +552,15 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             }
         }
         for lp in loops {
-            let pieces = body.loop_half_edges(lp).map(|h| piece(l, h)).collect::<Result<Vec<_>, _>>()?;
-            holes.extend(circle(&pieces).map_or(pieces, |c| vec![c]));
+            let pieces = body.loop_half_edges(lp).map(|h| Ok((piece(l, h)?, id(face_of(he(h).twin))))).collect::<Result<Vec<_>, BrepError>>()?;
+            let shapes: Vec<FlatPiece> = pieces.iter().map(|p| p.0.clone()).collect();
+            match circle(&shapes) {
+                Some(c) => holes.push((c, run_name(pieces.iter().map(|p| p.1)))),
+                None => holes.extend(pieces),
+            }
         }
     }
-    let mut outline: Vec<FlatPiece> = Vec::new();
+    let mut outline: Vec<(FlatPiece, TopoId)> = Vec::new();
     while let Some((&v0, _)) = edges.iter().next() {
         let mut v = v0;
         let mut cycle: Vec<(FlatPiece, Vec2, Ix)> = Vec::new();
@@ -562,7 +574,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         joined(body, cycle, &mut outline);
     }
     // The corner of the outline at the origin.
-    let corners = outline.iter().flat_map(|p| match p {
+    let corners = outline.iter().flat_map(|(p, _)| match p {
         FlatPiece::Line(a, b) => vec![*a, *b],
         FlatPiece::Arc { center, .. } | FlatPiece::Circle { center, .. } => vec![*center],
         FlatPiece::Polyline(pts) => pts.clone(),
@@ -573,7 +585,9 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let shift = |p: Vec2| Vec2::new(p.x - lo.x, p.y - lo.y);
     // Each seam between two faces of the chain, from its lowest end to its highest: a bend line.
     let by_y = |p: &&Vec2, q: &&Vec2| p.y.total_cmp(&q.y);
-    let bends: Vec<[Vec2; 2]> = chain
+    let first_id = |st: &[Ix]| st.iter().map(|&x| id(x)).min();
+    let bend_id = |a: TopoId, b: TopoId| TopoId::derive("flat.bend").id(a).id(b).finish();
+    let (bends, bend_ids): (Vec<[Vec2; 2]>, Vec<TopoId>) = chain
         .windows(2)
         .filter_map(|w| {
             let seam: Vec<Vec2> = w[1]
@@ -582,7 +596,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 .filter(|&h| w[0].contains(&face_of(he(h).twin)))
                 .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
                 .collect();
-            Some([shift(*seam.iter().min_by(by_y)?), shift(*seam.iter().max_by(by_y)?)])
+            Some(([shift(*seam.iter().min_by(by_y)?), shift(*seam.iter().max_by(by_y)?)], bend_id(first_id(&w[0])?, first_id(&w[1])?)))
         })
         .chain(seams.iter().filter_map(|&(x, z)| {
             // A flange's bend line on the side runs along X.
@@ -592,11 +606,11 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 .filter(|&h| face_of(he(h).twin) == x)
                 .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
                 .collect();
-            Some([shift(*seam.iter().min_by(by_x)?), shift(*seam.iter().max_by(by_x)?)])
+            Some(([shift(*seam.iter().min_by(by_x)?), shift(*seam.iter().max_by(by_x)?)], bend_id(id(x), id(z))))
         }))
-        .collect();
-    let pieces: Vec<FlatPiece> = outline.iter().chain(&holes).map(|p| p.shifted(lo)).collect();
-    Ok(Flat::new(pieces, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends))
+        .unzip();
+    let (pieces, ids) = outline.iter().chain(&holes).map(|(p, i)| (p.shifted(lo), *i)).unzip();
+    Ok(Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids))
 }
 
 /// The flat blank of a rolled cone (D207), face `f` its inner or outer face: an annular sector,
@@ -673,6 +687,7 @@ fn cone_blank(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let o = Vec2::new(0.0, 0.0);
     let n = loop_edges.len();
     let mut pieces = Vec::with_capacity(n);
+    let ids = loop_edges.iter().map(|&h| body.faces()[face_of(he(h).twin) as usize].id).collect();
     for (i, &h) in loop_edges.iter().enumerate() {
         let (a, b) =
             (place(body.point(he(h).origin), theta[i]), place(body.point(he(body.next(h)).origin), theta.get(i + 1).copied().unwrap_or(0.0)));
@@ -700,12 +715,12 @@ fn cone_blank(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         }
     }
     let pieces = pieces.iter().map(|p| p.shifted(lo)).collect();
-    Ok(Flat::new(pieces, Vec2::new(hi.x - lo.x, hi.y - lo.y), Vec::new()))
+    Ok(Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), Vec::new(), Vec::new()))
 }
 
 impl Flat {
-    /// A blank of `pieces`, its `size` and bend lines; hashed by what the DXF holds.
-    fn new(pieces: Vec<FlatPiece>, size: Vec2, bends: Vec<[Vec2; 2]>) -> Self {
+    /// A blank of `pieces` named `ids`, its `size` and bend lines; hashed by what the DXF holds.
+    fn new(pieces: Vec<FlatPiece>, ids: Vec<TopoId>, size: Vec2, bends: Vec<[Vec2; 2]>, bend_ids: Vec<TopoId>) -> Self {
         let mut bytes = Vec::with_capacity(pieces.len() * 41);
         for p in &pieces {
             let (tag, v): (u8, [f64; 5]) = match *p {
@@ -722,15 +737,16 @@ impl Flat {
             bytes.push(tag);
             bytes.extend(v.iter().flat_map(|x| x.to_bits().to_le_bytes()));
         }
-        Self { pieces, size, bends, hash: *blake3::hash(&bytes).as_bytes() }
+        debug_assert!(unique(&ids) && unique(&bend_ids), "two lines of a blank with one name");
+        Self { pieces, ids, size, bends, bend_ids, hash: *blake3::hash(&bytes).as_bytes() }
     }
 }
 
 /// The pieces of a closed run of the outline, each with where it starts and the face beside it,
 /// as the blank has them: a run of lines along one face of the body (a cap, an end) is one line,
 /// and so are the pieces of one curve of a cut across bend lines (see [`next_piece`]); such a
-/// curve's arcs all round are one circle.
-fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<FlatPiece>) {
+/// curve's arcs all round are one circle. Each is named by [`run_name`] of the faces beside it.
+fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<(FlatPiece, TopoId)>) {
     let id = |x: Ix| body.faces()[x as usize].id;
     let n = cycle.len();
     // Either way round: the sketch's side runs its outline against the profile.
@@ -760,15 +776,34 @@ fn joined(body: &Body, mut cycle: Vec<(FlatPiece, Vec2, Ix)>, out: &mut Vec<Flat
             last += 1;
         }
         let to = cycle.get(last + 1).map_or(cycle[0].1, |e| e.1);
-        out.push(match p {
-            _ if last == k => p,
-            FlatPiece::Line(..) => FlatPiece::Line(from, to),
-            FlatPiece::Arc { center, radius, .. } if k == 0 && last == n - 1 => FlatPiece::Circle { center, radius },
-            FlatPiece::Arc { center, start, .. } => arc_piece(center, from, to, libm::atan2(from.y - center.y, from.x - center.x) == start),
-            FlatPiece::Circle { .. } | FlatPiece::Polyline(_) => p,
-        });
+        let name = run_name(cycle[k..=last].iter().map(|e| id(e.2)));
+        out.push((
+            match p {
+                _ if last == k => p,
+                FlatPiece::Line(..) => FlatPiece::Line(from, to),
+                FlatPiece::Arc { center, radius, .. } if k == 0 && last == n - 1 => FlatPiece::Circle { center, radius },
+                FlatPiece::Arc { center, start, .. } => arc_piece(center, from, to, libm::atan2(from.y - center.y, from.x - center.x) == start),
+                FlatPiece::Circle { .. } | FlatPiece::Polyline(_) => p,
+            },
+            name,
+        ));
         k = last + 1;
     }
+}
+
+/// The name of a line of a blank made of pieces beside faces `walls`: a first piece of a curve
+/// (one no other piece goes on from, [`next_piece`]), the least such (both halves of a punched
+/// circle are first), so that either side, walked either way, names it alike.
+fn run_name(walls: impl Iterator<Item = TopoId> + Clone) -> TopoId {
+    let first = walls.clone().filter(|w| !walls.clone().any(|v| next_piece(v) == *w)).min();
+    first.or_else(|| walls.min()).unwrap_or_else(|| TopoId::derive("flat.empty").finish())
+}
+
+/// Whether no name is given twice.
+fn unique(ids: &[TopoId]) -> bool {
+    let mut v = ids.to_vec();
+    v.sort_unstable();
+    v.windows(2).all(|w| w[0] != w[1])
 }
 
 /// An arc around `center` from `from` to `to`, turning counterclockwise if `ccw`.
