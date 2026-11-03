@@ -607,12 +607,22 @@ impl Blank {
                     _ => matches!(surface(ys[0]), Surface::Plane(_)),
                 })
         };
-        if !paired(&back) {
-            back.reverse();
-            if !paired(&back) {
-                return Err(unsupported("the sheet's two sides do not pair face by face"));
-            }
-        }
+        // Either order pairs a wall, a bend and a wall: the walls across from each other face
+        // away from each other, the other order's at the bend's angle. Of two that pair, the one
+        // whose walls face away more.
+        let facing = |back: &[Vec<Ix>]| {
+            front.iter().zip(back).fold(0.0, |sum, (xs, ys)| match (surface(xs[0]), surface(ys[0])) {
+                (Surface::Plane(p), Surface::Plane(q)) => sum + unit(p.normal).dot(unit(q.normal)),
+                _ => sum,
+            })
+        };
+        let reversed: Vec<Vec<Ix>> = back.iter().rev().cloned().collect();
+        back = match (paired(&back), paired(&reversed)) {
+            (true, true) if facing(&reversed) < facing(&back) => reversed,
+            (true, _) => back,
+            (false, true) => reversed,
+            (false, false) => return Err(unsupported("the sheet's two sides do not pair face by face")),
+        };
         let [o, _, _, z] = sketch.frame;
         let a = unit(c0.axis);
         let e = unit(a.cross(z));
