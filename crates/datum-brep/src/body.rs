@@ -460,9 +460,21 @@ impl Body {
                 floats(b, &[a.center.x, a.center.y]);
                 b.push(u8::from(a.ccw));
             }
-            if let Some(v) = w.wave {
-                b.extend_from_slice(b"wave");
-                floats(b, &[v.a, v.b, v.c]);
+            match w.trace {
+                Some(crate::Trace::Wave(v)) => {
+                    b.extend_from_slice(b"wave");
+                    floats(b, &[v.a, v.b, v.c]);
+                }
+                Some(crate::Trace::Meet(m)) => {
+                    b.extend_from_slice(b"meet");
+                    floats(b, &m.origin.to_array());
+                    floats(b, &m.axis.to_array());
+                    floats(b, &[m.radius, m.own]);
+                    if let Some(t) = m.turn {
+                        floats(b, &t);
+                    }
+                }
+                None => {}
             }
         }
         match &face.surface {

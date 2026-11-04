@@ -322,8 +322,9 @@ pub(crate) fn unrolled(body: &Body, f: usize, c: &Cylinder, k: f64) -> Result<De
                 let arc = if edge.half == h { arc } else { arc.reversed() };
                 turn += arc.sweep(u, v) * arc.axis.dot(axis).signum();
             }
-            // A trim's edge (D211) turns about the axis as the development's `u` runs.
-            Some(Curve::Rolled { piece, .. }) if piece.wave.is_some() => {
+            // A trim's edge (D211), or a branch's end cut to fit (D227), turns about the axis as
+            // the development's `u` runs.
+            Some(Curve::Rolled { piece, .. }) if piece.trace.is_some_and(|t| !matches!(t, datum_brep::Trace::Meet(m) if m.turn.is_some())) => {
                 let piece = if edge.half == h { piece } else { piece.reversed() };
                 turn += (piece.to.x - piece.from.x) / piece.dev.neutral * piece.dev.axis.dot(axis).signum();
             }

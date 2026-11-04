@@ -131,7 +131,7 @@ fn the_example_is_a_wave_cut() {
     assert!(close(b.volume(), kept_volume(70.0, 20.0, 50.0), 1e-9), "{} vs {}", b.volume(), kept_volume(70.0, 20.0, 50.0));
     let w = walls(&b);
     assert_eq!(w.len(), 1);
-    assert!(matches!(w[0], Surface::Wall(r) if r.wave.is_some()));
+    assert!(matches!(w[0], Surface::Wall(r) if r.trace.is_some()));
     // The chords of the mesh lose a little of a round section.
     assert!(close(mesh_volume(&b), b.volume(), 3e-3), "{} vs {}", mesh_volume(&b), b.volume());
 }

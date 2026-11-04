@@ -4,6 +4,7 @@
 mod bent;
 mod boolean;
 mod bounds;
+mod branch;
 mod copies;
 mod cut;
 mod flange;
@@ -240,6 +241,21 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         k_factor: Option<Num>,
     },
+    /// The end of a branch pipe cut to sit on a main one (D227): where the branch's neutral layer
+    /// at `k_factor` (its part's rule's, put here when the model is built) meets the main pipe's
+    /// outer cylinder, the end beyond it gone, the wall square to the sheet. Both are rolled
+    /// shells. Inputs: the branch, then the main pipe.
+    Saddle {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
+    },
+    /// The hole in a main pipe for a branch set on it (D227): where the branch's bore meets the
+    /// main pipe's outer cylinder, cut square to the sheet; laid in the blank at the main pipe's
+    /// `k_factor`. Both are rolled shells. Inputs: the main pipe, then the branch.
+    BranchHole {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -449,6 +465,8 @@ impl Op {
             Self::Revolve { .. } => "revolve",
             Self::Rolled { .. } => "rolled",
             Self::Trim { .. } => "trim",
+            Self::Saddle { .. } => "saddle",
+            Self::BranchHole { .. } => "branch_hole",
             Self::Unfold { .. } => "unfold",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
@@ -473,7 +491,7 @@ impl Op {
             | Self::Revolve { .. }
             | Self::Rolled { .. } => 1..=1,
             Self::Boolean { .. } => 2..=usize::MAX,
-            Self::Trim { .. } => 2..=2,
+            Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } => 2..=2,
         }
     }
 
@@ -513,6 +531,8 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
             Self::Trim { flip, k_factor } => Self::Trim { flip: *flip, k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
+            Self::Saddle { k_factor } => Self::Saddle { k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
+            Self::BranchHole { k_factor } => Self::BranchHole { k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
             Self::Revolve { axis, angle, profiles } => Self::Revolve { axis: axis.clone(), angle: r(angle, "angle")?, profiles: profiles.clone() },
             Self::Rolled { axis, path, side, angle, gap, thickness, k_factor } => Self::Rolled {
                 axis: axis.clone(),
@@ -592,7 +612,14 @@ impl Op {
                 h.update(face.as_bytes());
             }
             // `Debug` spells every field exactly, as for a sketch.
-            Self::Sheet { .. } | Self::Plate { .. } | Self::Flange { .. } | Self::Revolve { .. } | Self::Rolled { .. } | Self::Trim { .. } => {
+            Self::Sheet { .. }
+            | Self::Plate { .. }
+            | Self::Flange { .. }
+            | Self::Revolve { .. }
+            | Self::Rolled { .. }
+            | Self::Trim { .. }
+            | Self::Saddle { .. }
+            | Self::BranchHole { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -690,6 +717,14 @@ impl Op {
                 let body = values[0].body().ok_or_else(|| BrepError::Sketch("trim takes a body, then a work plane".into()))?;
                 let plane = values[1].plane().ok_or_else(|| BrepError::Sketch("trim takes a body, then a work plane".into()))?;
                 trim::trim(feature, body, plane, *flip, num(k)?)?
+            }
+            Self::Saddle { k_factor } | Self::BranchHole { k_factor } => {
+                let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
+                let k = num(k)?;
+                match self {
+                    Self::Saddle { .. } => branch::saddle(feature, inputs[0], inputs[1], k)?,
+                    _ => branch::hole(feature, inputs[0], inputs[1], k)?,
+                }
             }
             Self::Rolled { axis, path, side, angle, gap, thickness, k_factor } => {
                 let (Some(thickness), Some(k)) = (thickness, k_factor) else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };

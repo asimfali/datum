@@ -525,14 +525,9 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                     return Err(unsupported("a cut was made with another K-factor"));
                 }
                 match piece.arc {
-                    None if piece.wave.is_some() => {
-                        // Chords within the deviation: a wave in the development bends at most
-                        // its amplitude over the neutral radius squared.
-                        let w = piece.wave.unwrap_or(datum_brep::Wave { a: 0.0, b: 0.0, c: 0.0 });
-                        let (du, amp) = ((piece.to.x - piece.from.x).abs(), libm::hypot(w.b, w.c));
-                        let length = du * libm::sqrt(1.0 + (amp / neutral) * (amp / neutral));
-                        let bend = amp / (neutral * neutral);
-                        let n = (length * libm::sqrt(bend / (8.0 * POLYLINE_DEVIATION))).ceil().max(2.0) as usize;
+                    None if piece.trace.is_some() => {
+                        // Chords within the deviation.
+                        let n = piece.polyline(POLYLINE_DEVIATION);
                         let inner = (1..n).map(|k| {
                             let q = piece.dev.point(piece.at(k as f64 / n as f64).0, *neutral);
                             Vec2::new(l.x(q), y(q))

@@ -177,7 +177,7 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed, grow: bool)
                     from: uv(p.from),
                     to: uv(p.to),
                     arc: p.arc.map(|a| ProfileArc { center: uv(a.center), ccw: a.ccw == (*sign > 0.0) }),
-                    wave: None,
+                    trace: None,
                 };
                 for layer in 0..2 {
                     curves.push(CurveSpec { from: v[layer], to: w[layer], curve: Curve::Rolled { piece, radius: radii[layer] } });

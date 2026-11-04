@@ -293,7 +293,7 @@ impl Doc {
             .enumerate()
             .filter_map(|(ix, n)| match n.op {
                 Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
-                Op::Flange { .. } | Op::Trim { .. } => {
+                Op::Flange { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } => {
                     let begun = body_chain(g, ix as NodeIx).last()?;
                     Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
                 }
@@ -335,7 +335,7 @@ impl Doc {
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
                 Op::Flange { radius, .. } => *radius = Some(Num::Value(r)),
                 // The cut follows the neutral layer: no K, no trim.
-                Op::Trim { k_factor, .. } => *k_factor = Some(k_of(&ks, ix as NodeIx)),
+                Op::Trim { k_factor, .. } | Op::Saddle { k_factor } | Op::BranchHole { k_factor } => *k_factor = Some(k_of(&ks, ix as NodeIx)),
                 // The gap is along the neutral layer: no K, no rolled sheet.
                 Op::Rolled { thickness, k_factor, .. } => (*thickness, *k_factor) = (Some(Num::Value(t)), Some(k_of(&ks, ix as NodeIx))),
                 _ => {}

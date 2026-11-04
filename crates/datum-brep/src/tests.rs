@@ -461,7 +461,7 @@ fn rolled_wave_derivatives_match_finite_differences() {
             from: Vec2::new(u0, wave.at(u0, dev.neutral)[0]),
             to: Vec2::new(u1, wave.at(u1, dev.neutral)[0]),
             arc: None,
-            wave: Some(wave),
+            trace: Some(crate::Trace::Wave(wave)),
         };
         assert_eq!(r.at(0.0).0, r.from);
         assert!((r.at(1.0).0.x - u1).abs() < 1e-12 && (r.at(1.0).0.y - wave.at(u1, dev.neutral)[0]).abs() < 1e-9);
