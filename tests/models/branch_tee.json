@@ -1,0 +1,71 @@
+{
+  "format": "datum/1",
+  "parameters": {
+    "k": 0.44
+  },
+  "features": [
+    {
+      "name": "main_profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {"o": [-1000, 0], "x": [1000, 0], "a": [-100, 50], "b": [100, 50]},
+        "lines": {"axis": {"from": "o", "to": "x", "construction": true}, "wall": {"from": "a", "to": "b"}}
+      }
+    },
+    {
+      "name": "main",
+      "op": "rolled",
+      "inputs": ["main_profile"],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2,
+      "thickness": 2,
+      "k_factor": "k"
+    },
+    {
+      "name": "branch_profile",
+      "op": "sketch",
+      "plane": {"origin": [0, 0, 0], "x_axis": [0, 1, 0], "normal": [1, 0, 0]},
+      "sketch": {
+        "points": {"o": [0, 0], "x": [0, 10], "a": [20, 0], "b": [20, 120]},
+        "lines": {"axis": {"from": "o", "to": "x", "construction": true}, "wall": {"from": "a", "to": "b"}}
+      }
+    },
+    {
+      "name": "branch",
+      "op": "rolled",
+      "inputs": ["branch_profile"],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2,
+      "thickness": 2,
+      "k_factor": "k"
+    },
+    {
+      "name": "main_with_hole",
+      "op": "branch_hole",
+      "inputs": ["main", "branch"],
+      "k_factor": "k"
+    },
+    {
+      "name": "branch_saddle",
+      "op": "saddle",
+      "inputs": ["branch", "main"],
+      "k_factor": "k"
+    },
+    {
+      "name": "main_blank",
+      "op": "unfold",
+      "inputs": ["main_with_hole"],
+      "face": "473f8d7e1c2e6a6b76d439057c2becff",
+      "k_factor": "k"
+    },
+    {
+      "name": "branch_blank",
+      "op": "unfold",
+      "inputs": ["branch_saddle"],
+      "face": "e1558cae206374695d7a943d620ac253",
+      "k_factor": "k"
+    }
+  ]
+}

@@ -97,7 +97,7 @@ pub(crate) fn saddle(feature: TopoId, branch: &Body, main: &Body, k: f64) -> Res
     let [low, high] = shell.band(trace, shell.span[0], shell.span[1]);
     if low <= shell.ends[0] || high >= shell.ends[1] {
         return Err(unsupported(if (up && low <= shell.ends[0]) || (!up && high >= shell.ends[1]) {
-            "the main pipe reaches the branch's other end: make the branch longer"
+            "the branch does not stand out of the main pipe: its other end must lie outside it"
         } else {
             "the branch does not reach the main pipe: make it longer"
         }));

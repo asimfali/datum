@@ -484,3 +484,157 @@ fn rolled_wave_derivatives_match_finite_differences() {
         assert!((d.x + e.x).abs() < 1e-9 && (d.y + e.y).abs() < 1e-9);
     }
 }
+
+// --- Meet (D227): where the generatrices of one pipe meet another cylinder ---
+
+fn len(v: Vec3) -> f64 {
+    v.dot(v).sqrt()
+}
+
+fn near(a: f64, b: f64, rel: f64) -> bool {
+    (a - b).abs() <= rel * b.abs().max(1.0)
+}
+
+fn near3(a: Vec3, b: Vec3, rel: f64) -> bool {
+    let scale = len(b).max(1.0);
+    len(a - b) <= rel * scale
+}
+
+/// Distance of `p` from the line through `o` along the unit `a`.
+fn from_line(p: Vec3, o: Vec3, a: Vec3) -> f64 {
+    let w = p - o;
+    len(w - a * w.dot(a))
+}
+
+const NEUTRAL: f64 = 10.0;
+
+/// A branch of the development's own pipe (radius `NEUTRAL`, along z) meeting a wide cylinder
+/// tilted against it; `own` ±1 chooses which way the generatrices run.
+fn meet_own(own: f64) -> Meet {
+    let tilt = Vec3::new(0.6, 0.0, 0.8);
+    Meet { origin: Vec3::new(1.0, 3.0, 40.0 * own), axis: tilt, radius: 30.0, own, turn: None }
+}
+
+/// A bore of radius 8 tilted and offset, its generatrices towards the cylinder of radius 30
+/// about z (the main pipe of the development).
+fn meet_turn() -> Meet {
+    let a = Vec3::new(-1.0, 0.1, 0.2);
+    Meet { origin: Vec3::new(100.0, 5.0, 20.0), axis: a * (1.0 / len(a)), radius: 8.0, own: 30.0, turn: Some([0.0, TAU_TEST]) }
+}
+
+const TAU_TEST: f64 = std::f64::consts::TAU;
+
+#[test]
+fn meet_point_lies_on_both_cylinders() {
+    for m in [meet_own(1.0), meet_own(-1.0)] {
+        for k in 0..64 {
+            let phi = TAU_TEST * f64::from(k) / 64.0 + 0.01;
+            let p = m.point(phi, NEUTRAL)[0];
+            assert!(near(from_line(p, Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)), NEUTRAL, 1e-9), "{phi}: {p:?}");
+            assert!(near(from_line(p, m.origin, m.axis), m.radius, 1e-9), "{phi}: {p:?}");
+        }
+    }
+    let m = meet_turn();
+    for k in 0..64 {
+        let phi = TAU_TEST * f64::from(k) / 64.0 + 0.01;
+        let p = m.point(phi, NEUTRAL)[0];
+        assert!(near(from_line(p, m.origin, m.axis), m.radius, 1e-9), "{phi}: {p:?}");
+        assert!(near(from_line(p, Vec3::ZERO, Vec3::new(0.0, 0.0, 1.0)), m.own, 1e-9), "{phi}: {p:?}");
+    }
+}
+
+/// The derivatives against central differences: the first of the point, the second of the first.
+/// `h = 1e-5`: truncation `h²/6 · f‴ ≈ 1e-11`, rounding `1e-16 · |f| / h ≈ 1e-9` at worst.
+#[test]
+fn meet_point_derivatives_match_finite_differences() {
+    let h = 1e-5;
+    for m in [meet_own(1.0), meet_own(-1.0), meet_turn()] {
+        for k in 0..32 {
+            let phi = TAU_TEST * (f64::from(k) + 0.37) / 32.0;
+            let [_, d1, d2] = m.point(phi, NEUTRAL);
+            let (a, b) = (m.point(phi - h, NEUTRAL), m.point(phi + h, NEUTRAL));
+            assert!(near3(d1, (b[0] - a[0]) * (0.5 / h), 1e-6), "d1 at {phi}: {d1:?}");
+            assert!(near3(d2, (b[1] - a[1]) * (0.5 / h), 1e-6), "d2 at {phi}: {d2:?}");
+        }
+    }
+}
+
+fn dev() -> Development {
+    Development { origin: Vec3::ZERO, axis: Vec3::new(0.0, 0.0, 1.0), start: Vec3::new(1.0, 0.0, 0.0), neutral: NEUTRAL }
+}
+
+/// The pieces of a Meet as the operations build them: one piece over `u` for a branch's end, four
+/// quarter turns chained for a hole.
+fn meet_pieces() -> Vec<Rolled> {
+    let mut out = Vec::new();
+    for m in [meet_own(1.0), meet_own(-1.0)] {
+        let (u0, u1) = (0.3 * NEUTRAL, 5.5 * NEUTRAL);
+        out.push(Rolled { dev: dev(), from: Vec2::new(u0, 0.0), to: Vec2::new(u1, 0.0), arc: None, trace: Some(Trace::Meet(m)) });
+    }
+    let quarter = std::f64::consts::FRAC_PI_2;
+    let mut near_u = 0.0;
+    for k in 0..4 {
+        let trace = Trace::Meet(Meet { turn: Some([quarter * f64::from(k), quarter * f64::from(k + 1)]), ..meet_turn() });
+        let mut p = Rolled { dev: dev(), from: Vec2::new(near_u, 0.0), to: Vec2::new(near_u, 0.0), arc: None, trace: Some(trace) };
+        p.from = p.at(0.0).0;
+        p.to = p.at(1.0).0;
+        near_u = p.to.x;
+        out.push(p);
+    }
+    out
+}
+
+#[test]
+fn rolled_meet_at_and_second_match_finite_differences() {
+    let h = 1e-5;
+    for p in meet_pieces() {
+        // The ends are at the stated `u`; `v` is the curve's own.
+        let (s, e) = (p.at(0.0).0, p.at(1.0).0);
+        assert!(near(s.x, p.from.x, 1e-12) && near(e.x, p.to.x, 1e-12));
+        for k in 1..20 {
+            let t = f64::from(k) / 20.0;
+            let ((q, d), s2) = (p.at(t), p.second(t));
+            let (a, b) = (p.at(t - h), p.at(t + h));
+            let fd1 = Vec2::new((b.0.x - a.0.x) / (2.0 * h), (b.0.y - a.0.y) / (2.0 * h));
+            let fd2 = Vec2::new((b.1.x - a.1.x) / (2.0 * h), (b.1.y - a.1.y) / (2.0 * h));
+            let scale = d.x.abs().max(d.y.abs()).max(1.0);
+            assert!((d.x - fd1.x).abs() <= 1e-6 * scale && (d.y - fd1.y).abs() <= 1e-6 * scale, "d at {t}: {d:?} vs {fd1:?} ({q:?})");
+            let scale = s2.x.abs().max(s2.y.abs()).max(1.0);
+            assert!((s2.x - fd2.x).abs() <= 1e-6 * scale && (s2.y - fd2.y).abs() <= 1e-6 * scale, "second at {t}: {s2:?} vs {fd2:?}");
+        }
+    }
+}
+
+/// The box holds 1000 samples, and each of its four bounds is reached: by the best sample
+/// refined by a ternary search around it (samples a thousandth apart miss a turning point by
+/// `h² · f″ ≈ 1e-6`; the search gets within rounding of it).
+#[test]
+fn rolled_meet_uv_box_holds_and_is_attained() {
+    for p in meet_pieces() {
+        let [bu, bv] = p.uv_box();
+        let coord = |t: f64, axis: usize| {
+            let q = p.at(t).0;
+            if axis == 0 { q.x } else { q.y }
+        };
+        for axis in 0..2 {
+            let b = if axis == 0 { bu } else { bv };
+            let samples: Vec<f64> = (0..=1000).map(|k| coord(f64::from(k) / 1000.0, axis)).collect();
+            for (k, &x) in samples.iter().enumerate() {
+                assert!(x >= b[0] - 1e-9 && x <= b[1] + 1e-9, "axis {axis} sample {k}: {x} outside {b:?}");
+            }
+            for (bound, sign) in [(b[0], -1.0), (b[1], 1.0)] {
+                let best = (0..=1000).max_by(|&i, &j| (sign * samples[i]).total_cmp(&(sign * samples[j]))).unwrap();
+                let (mut lo, mut hi) = ((best.max(1) - 1) as f64 / 1000.0, ((best + 1).min(1000)) as f64 / 1000.0);
+                if best == 0 {
+                    lo = 0.0;
+                }
+                for _ in 0..200 {
+                    let (m1, m2) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+                    if sign * coord(m1, axis) < sign * coord(m2, axis) { lo = m1 } else { hi = m2 }
+                }
+                let reached = coord(0.5 * (lo + hi), axis);
+                assert!((reached - bound).abs() <= 1e-9, "axis {axis}: bound {bound} reached only {reached}");
+            }
+        }
+    }
+}
