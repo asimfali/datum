@@ -5,6 +5,16 @@
     "right": "b5eeeb8fd901818ba9ce13d63c7240e647116ef1e2c02fb39c8011241884d243",
     "tilted": "eb6dd9be660450d599cb7c076b762b958cb438da6d7e356fe4a2941e324932bf"
   },
+  "branch_tee.json": {
+    "branch": "36f0cc4b1c091f6f03dbf620a3552cc0783136458e0235dcd25b36476c0306c6",
+    "branch_blank": "8d35825a5ab4de18086dba2659512d726b964af05a3f2621d8a8c20b5b7cf709",
+    "branch_profile": "c2d35c030d4eb9f70cb307a7a5ac39380e9b932d144cbc4ebbe693d88b48e467",
+    "branch_saddle": "4d076b725d9c27c9be5a26c6c24560b2a44c7caacc8e186aae8849f62cc00180",
+    "main": "3d2b47beeebc3fa6e63a57ba163c95c95dd8efddb2087e8e44b728c218c9e7e3",
+    "main_blank": "f7c03266d2e3b2d90e4806789eacb207c1479cd3b060452909532e3188f5d3e8",
+    "main_profile": "afabaa8cb316e5ab20e5280080dbd1b1ce2254c328cae4b58e4f23f367d6131f",
+    "main_with_hole": "cf17306fb2515c9da8b051569f61b7b0854cf2f82443624445f23c69485c28ef"
+  },
   "cluster_panel.json": {
     "panel": "fca3648444f0be3a9f9fc77134e177ebb0ce401e22128104ad2084462215f36e",
     "sheet": "a45b8d92d01107e25e4cc8a0f79791906e7814b31d5b259f61ecd77492e761c7"

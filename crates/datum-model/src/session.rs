@@ -94,7 +94,7 @@ const COMMANDS: &[Command] = &[
         name: "export_dxf",
         description: "Write the flat blank of feature `name` as DXF (R2000: lines, arcs, circles on layer 0, mm; no bend lines) to `path`: \
                       an `unfold` feature's, or a sheet or plate body's, seen from the side `set_flat` chose (front by default). \
-                      Curves DXF has no exact entity for (a trim's cut through a rolled sheet) are refused; with `approximate: true` \
+                      Curves DXF has no exact entity for (a trim's cut through a rolled sheet, a branch's hole or end) are refused; with `approximate: true` \
                       they are written as polylines within 0.001 mm and told of in `<path>.txt`. That is the engineer's decision: \
                       ask before passing it.",
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}, "approximate": {"type": "boolean"}}, "required": ["name", "path"]}),

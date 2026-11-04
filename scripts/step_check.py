@@ -16,6 +16,9 @@ from OCP.TopExp import TopExp_Explorer
 
 # Relative agreement asked of OCCT's integrals: they converge far below it on exact geometry.
 AGREE = 1e-6
+# OCCT integrates adaptively to this relative error: its default fixed Gauss rule took a face
+# bounded by a long spline (the end of a branch cut to fit, D227) 5.5e-5 short of its volume.
+PRECISION = 1e-9
 
 
 def written(text, pattern):
@@ -40,8 +43,8 @@ for path in sys.argv[1:]:
         solids, _ = solids + 1, ex.Next()
     valid = BRepCheck_Analyzer(shape).IsValid()
     vp, sp = GProp_GProps(), GProp_GProps()
-    BRepGProp.VolumeProperties_s(shape, vp)
-    BRepGProp.SurfaceProperties_s(shape, sp)
+    BRepGProp.VolumeProperties_s(shape, vp, PRECISION)
+    BRepGProp.SurfaceProperties_s(shape, sp, PRECISION)
     c = vp.CentreOfMass()
     dv, da = abs(vp.Mass() - volume) / volume, abs(sp.Mass() - area) / area
     dc = max(abs(a - b) for a, b in zip((c.X(), c.Y(), c.Z()), centroid)) / max(1.0, volume ** (1 / 3))
