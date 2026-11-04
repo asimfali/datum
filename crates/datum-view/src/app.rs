@@ -530,7 +530,10 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
 /// draws it) in place of itself shows its input, the body it lies on.
 fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<datum_graph::NodeIx> {
     let edited = editing.and_then(|n| graph.find(n));
-    let mut v: Vec<datum_graph::NodeIx> = evaluation.finals(graph).into_iter().filter(|i| Some(*i) != edited).collect();
+    // A sketch on a blank lies in the blank's coordinates: it is drawn in the flat pattern pane,
+    // never in 3D (D222).
+    let on_blank = |i: &datum_graph::NodeIx| matches!(graph.nodes()[*i as usize].op, datum_graph::Op::Sketch { flat: Some(_), .. });
+    let mut v: Vec<datum_graph::NodeIx> = evaluation.finals(graph).into_iter().filter(|i| Some(*i) != edited && !on_blank(i)).collect();
     if let Some(e) = edited {
         v.extend(&graph.nodes()[e as usize].inputs);
         v.sort_unstable();
@@ -8486,5 +8489,23 @@ mod tests {
         h.run();
         assert_eq!(h.state().flat.chosen.as_deref(), Some("branch_saddle"));
         assert_eq!(h.state().part.as_deref(), Some("branch"));
+    }
+
+    /// A sketch on the blank, not used yet, is not drawn in 3D: it lies in the blank's
+    /// coordinates (D222). A sketch on a plane is.
+    #[test]
+    fn a_sketch_on_the_blank_stays_out_of_3d() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/sheet_panel.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let body = session.flats().into_iter().find(|(_, f)| f.is_ok()).map(|(n, _)| n).unwrap();
+        let circle = json!({"points": {"h": [20, 20]}, "circles": {"c": {"center": "h", "diameter": 8}}});
+        session
+            .execute("add", &json!({"name": "on_blank", "op": "sketch", "inputs": [body], "flat": "front", "k_factor": 0.5, "sketch": circle}))
+            .unwrap();
+        let mut meshes = crate::scene::MeshCache::default();
+        assert!(picture(&session, None, &mut meshes).scene.sketch_lines.is_empty());
+        session.execute("add", &json!({"name": "on_plane", "op": "sketch", "sketch": circle})).unwrap();
+        assert!(!picture(&session, None, &mut meshes).scene.sketch_lines.is_empty());
     }
 }
