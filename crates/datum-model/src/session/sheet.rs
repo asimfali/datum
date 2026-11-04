@@ -73,6 +73,33 @@ impl Session {
         self.sheet_part(p, fields)
     }
 
+    /// A branch pipe set on a main one (D227), both rolled shells: features `hole` (the hole in
+    /// `main` for the branch's bore) and `saddle` (the end of `branch` cut to fit), both or
+    /// neither: a refusal of either leaves the model as it was.
+    pub(super) fn branch(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
+        let (main, branch, hole, saddle) = (text(p, "main")?, text(p, "branch")?, text(p, "hole")?, text(p, "saddle")?);
+        let before = self.graph.clone();
+        let added = add_feature(
+            &mut self.graph,
+            json!({"name": hole, "op": "branch_hole", "inputs": [main, branch]}).as_object().cloned().unwrap_or_default(),
+        )
+        .and_then(|_| {
+            add_feature(&mut self.graph, json!({"name": saddle, "op": "saddle", "inputs": [branch, main]}).as_object().cloned().unwrap_or_default())
+        });
+        if let Err(e) = added {
+            self.graph = before;
+            return Err(e);
+        }
+        let reply = self.rebuild();
+        let failed = self.failures().find(|f| f["feature"] == hole || f["feature"] == saddle);
+        if let Some(f) = failed {
+            self.graph = before;
+            self.rebuild();
+            return Err(format!("{}: {}", f["feature"].as_str().unwrap_or_default(), f["error"].as_str().unwrap_or_default()));
+        }
+        Ok(reply)
+    }
+
     /// Feature `fields` of `p`'s `name` on `p`'s `sketch`, a sheet metal part by `p`'s `rule`.
     fn sheet_part(&mut self, p: &Map<String, Value>, mut fields: Map<String, Value>) -> Result<Value, String> {
         let name = text(p, "name")?;

@@ -468,6 +468,10 @@ pub struct Solved {
     pub free: BTreeMap<String, Option<Vec2>>,
     /// The values of the reference dimensions, by name.
     pub measures: BTreeMap<String, f64>,
+    /// How far the points may be off what their constraints say, in the sketch's units: the
+    /// solver's convergence (D55). Closer than this, two lines are parallel as far as the
+    /// sketch can tell (D228).
+    pub tolerance: f64,
 }
 
 /// Places the points so that every constraint holds, moving them as little as possible from the
@@ -500,6 +504,7 @@ pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
         dof,
         free: free.into_iter().map(|(p, d)| (eq.names[p].clone(), d)).collect(),
         measures,
+        tolerance: eq.tolerance(),
     })
 }
 

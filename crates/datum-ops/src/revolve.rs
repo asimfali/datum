@@ -37,11 +37,12 @@ impl Turn {
 
     /// `points` (a closed loop if `closed`, else a chain) in the axis's coordinates: along it from
     /// its start, and the distance from it; and whether they lie on its right. What their edges
-    /// turn into is decided exactly in the sketch's coordinates: an edge parallel to the axis
-    /// keeps its distance, one square to it its place along it, a point on the axis lies on it.
-    /// The shared coordinates are then made equal, so rounding cannot turn a cylinder into a cone
-    /// of no slope.
-    fn flat(&self, points: &[Vec2], closed: bool) -> Result<(Vec<Vec2>, bool), BrepError> {
+    /// turn into is decided in the sketch's coordinates: an edge parallel to the axis keeps its
+    /// distance, one square to it its place along it, a point on the axis lies on it. Parallel or
+    /// square exactly, or as far as the sketch's solver can tell (`tolerance`, D228): its ends
+    /// off by no more than that across or along the axis. The shared coordinates are then made
+    /// equal, so rounding cannot turn a cylinder into a cone of no slope.
+    fn flat(&self, points: &[Vec2], closed: bool, tolerance: f64) -> Result<(Vec<Vec2>, bool), BrepError> {
         let (o, x) = (self.o, self.x);
         let sides: Vec<Sign> = points.iter().map(|&p| orient2d(o, x, p)).collect();
         let right = sides.contains(&Sign::Negative);
@@ -64,9 +65,10 @@ impl Turn {
         let n = points.len();
         for k in 0..if closed { n } else { n - 1 } {
             let (a, b) = (points[k], points[(k + 1) % n]);
-            if parallel2d(a, b, o, x) {
+            let (p, q) = (flat[k], flat[(k + 1) % n]);
+            if parallel2d(a, b, o, x) || (p.y - q.y).abs() <= tolerance {
                 flat[(k + 1) % n].y = flat[k].y;
-            } else if parallel2d(a, b, normal.0, normal.1) {
+            } else if parallel2d(a, b, normal.0, normal.1) || (p.x - q.x).abs() <= tolerance {
                 flat[(k + 1) % n].x = flat[k].x;
             }
         }
@@ -88,7 +90,7 @@ pub(crate) fn revolve_sketch(feature: TopoId, s: &Placed, axis: &str, angle: f64
         return Err(BrepError::Unsupported(format!("a revolution turns one closed profile, the sketch has {}: choose it", regions.len())));
     }
     let Region { outer: mut ring, holes, .. } = regions.remove(0);
-    let (flat, on_right) = turn.flat(&ring.points, true)?;
+    let (flat, on_right) = turn.flat(&ring.points, true, s.solved.tolerance)?;
     ring.points = flat;
     let at = Axis { start: if on_right { right } else { left }, ..turn.at };
     let caps = ["revolve.cap_start", "revolve.cap_end"].map(|t| TopoId::derive(t).id(feature).finish());
@@ -158,7 +160,7 @@ pub(crate) fn rolled(feature: TopoId, s: &Placed, axis: &str, path: Option<&str>
     let line = s.lines.get(&name).ok_or_else(|| BrepError::LostReference(format!("no line `{name}` in the sketch to roll")))?;
     let point = |n: &str| s.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
     let (turn, [left, right]) = Turn::of(s, axis)?;
-    let (ends, on_right) = turn.flat(&[point(&line.from)?, point(&line.to)?], false)?;
+    let (ends, on_right) = turn.flat(&[point(&line.from)?, point(&line.to)?], false, s.solved.tolerance)?;
     let (a, b) = (ends[0], ends[1]);
     if a.x == b.x {
         return Err(BrepError::Unsupported(format!("the line `{name}` is square to the axis: it turns into a flat ring, a face of sheet metal")));
