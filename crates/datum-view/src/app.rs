@@ -3380,9 +3380,9 @@ impl Viewer {
             // A body is named by its last feature, its part by the first.
             let part = hit.and_then(|f| m.begun.get(f.body)).cloned();
             self.part = part.filter(|n| m.inspect["parts"].as_array().into_iter().flatten().any(|p| p["part"] == *n));
-            if crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
-                && let Some(n) = named.filter(|n| m.flats.iter().any(|(f, _)| f == n))
-            {
+            // Whether the pane is open is not known here: the dock is out of `self` while the
+            // panes are drawn. A pane opened later shows the body clicked last.
+            if let Some(n) = named.filter(|n| m.flats.iter().any(|(f, _)| f == n)) {
                 self.flat.chosen = Some(n);
             }
         }
@@ -8437,5 +8437,54 @@ mod tests {
         h.key_press(egui::Key::R);
         h.run();
         assert!(h.state().revolve.is_none() && h.state().contour_hint.is_some());
+    }
+
+    /// A click in 3D on a body brings its blank forward (D164), as the window runs it: inside the
+    /// dock, which is out of the viewer while the panes are drawn.
+    #[test]
+    fn a_click_on_a_body_shows_its_blank() {
+        let (mut v, _inbox) = viewer("branch_tee.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/branch_tee.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let mut meshes = crate::scene::MeshCache::default();
+        let pic = picture(&session, None, &mut meshes);
+        {
+            let m = v.model.as_mut().unwrap();
+            m.scene = pic.scene;
+            m.bodies = pic.bodies;
+            m.begun = pic.begun;
+            m.inspect = pic.inspect;
+            m.flats = session.flats();
+        }
+        v.dock = egui_dock::DockState::new(Vec::new());
+        let b = v.model.as_ref().unwrap().scene.bounds;
+        v.camera.fit(Some(crate::origin::held(b)), 1.5);
+        // A point on the branch's side, on screen.
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let m = v.model.as_ref().unwrap();
+        let (anchor, radius) = sphere(&m.scene);
+        let (vp, _) = v.camera.matrices(anchor, 1.5, radius);
+        let target = datum_math::Vec3::new(0.0, -19.0, 100.0);
+        let at = on_screen(&vp, target - anchor, rect).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.view_input(ui, rect, &r);
+                v.pick_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        h.run();
+        h.hover_at(at);
+        h.run();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.step();
+        h.run();
+        assert_eq!(h.state().flat.chosen.as_deref(), Some("branch_saddle"));
+        assert_eq!(h.state().part.as_deref(), Some("branch"));
     }
 }
