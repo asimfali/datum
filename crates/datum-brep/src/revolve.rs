@@ -149,7 +149,10 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
         // The region lies left of the edge: an edge running against the axis has it inside.
         let convex = b.x < a.x;
         let surface = if a.y == b.y {
-            Surface::Cylinder(Cylinder { origin, axis: at.axis, radius: a.y, convex })
+            // The axis's own point, the same for every cylinder: their origins differ by a
+            // multiple of the axis only up to rounding when it is oblique, and the two sides of
+            // a rolled sheet would not be known as coaxial (D227).
+            Surface::Cylinder(Cylinder { origin: at.origin, axis: at.axis, radius: a.y, convex })
         } else {
             Surface::Cone(Cone { origin, axis: at.axis, radius: a.y, slope: (b.y - a.y) / (b.x - a.x), convex })
         };

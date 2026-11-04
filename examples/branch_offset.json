@@ -1,0 +1,136 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "main_profile",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [
+            -1000,
+            0
+          ],
+          "x": [
+            1000,
+            0
+          ],
+          "a": [
+            -200,
+            50
+          ],
+          "b": [
+            200,
+            50
+          ]
+        },
+        "lines": {
+          "axis": {
+            "from": "o",
+            "to": "x",
+            "construction": true
+          },
+          "wall": {
+            "from": "a",
+            "to": "b"
+          }
+        }
+      }
+    },
+    {
+      "name": "main",
+      "op": "rolled",
+      "inputs": [
+        "main_profile"
+      ],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2
+    },
+    {
+      "name": "branch_profile",
+      "op": "sketch",
+      "plane": {
+        "origin": [
+          0,
+          0,
+          0
+        ],
+        "x_axis": [
+          0,
+          1,
+          0
+        ],
+        "normal": [
+          1,
+          0,
+          0
+        ]
+      },
+      "sketch": {
+        "points": {
+          "o": [
+            16,
+            0
+          ],
+          "x": [
+            16,
+            10
+          ],
+          "a": [
+            48,
+            0
+          ],
+          "b": [
+            48,
+            140
+          ]
+        },
+        "lines": {
+          "axis": {
+            "from": "o",
+            "to": "x",
+            "construction": true
+          },
+          "wall": {
+            "from": "a",
+            "to": "b"
+          }
+        }
+      }
+    },
+    {
+      "name": "branch",
+      "op": "rolled",
+      "inputs": [
+        "branch_profile"
+      ],
+      "axis": "axis",
+      "side": "left",
+      "gap": 2
+    },
+    {
+      "name": "main_with_hole",
+      "op": "branch_hole",
+      "inputs": [
+        "main",
+        "branch"
+      ]
+    },
+    {
+      "name": "branch_saddle",
+      "op": "saddle",
+      "inputs": [
+        "branch",
+        "main"
+      ]
+    }
+  ],
+  "parts": {
+    "main": {
+      "rule": "Лист 2 мм"
+    },
+    "branch": {
+      "rule": "Лист 2 мм"
+    }
+  }
+}

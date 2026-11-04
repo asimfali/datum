@@ -532,6 +532,11 @@ impl Equations {
         [(q.x - self.centre[0]) / self.size, (q.y - self.centre[1]) / self.size]
     }
 
+    /// The solver's convergence in the sketch's units (D55).
+    pub fn tolerance(&self) -> f64 {
+        TOLERANCE * self.size
+    }
+
     /// Solves group `g` with the constraints `use_`: normalised coordinates of its points, or
     /// `None` when they cannot all hold.
     pub fn fit(&self, g: &Group, use_: &[usize]) -> Option<Vec<f64>> {

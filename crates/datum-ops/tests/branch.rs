@@ -346,3 +346,27 @@ fn the_tee_blanks_and_step() {
         step(&[&b], "x", true).unwrap();
     }
 }
+
+/// A branch drawn at 60° as an engineer draws it: the axis at an angle to a horizontal line,
+/// the wall parallel to it 42 off, all by constraints. The solver holds them parallel only to
+/// rounding; as far as the sketch can tell they are (D228), so the branch is a shell, not a cone
+/// of no slope, and both cuts take it.
+#[test]
+fn a_branch_parallel_by_the_solver_is_a_shell() {
+    let sketch = json!({
+        "points": {"o": [0, 0], "x": [5, 9], "h": [-1, 0], "a": [-35, 20], "b": [45, 160]},
+        "lines": {"axis": {"from": "o", "to": "x", "construction": true}, "hz": {"from": "o", "to": "h", "construction": true},
+                  "wall": {"from": "a", "to": "b"}},
+        "constraints": [{"type": "fix", "point": "o"}, {"type": "horizontal", "line": "hz"},
+                        {"type": "angle", "lines": ["hz", "axis"], "degrees": 60}, {"type": "parallel", "lines": ["axis", "wall"]},
+                        {"type": "point_line", "point": "a", "line": "axis", "value": 42}]
+    });
+    let plane = json!({"origin": [0, 0, 0], "x_axis": [1, 0, 0], "normal": [0, -1, 0]});
+    let s = op(json!({"op": "sketch", "sketch": sketch, "plane": plane})).eval(id("tilted.sketch"), &[]).unwrap();
+    let roll = json!({"op": "rolled", "axis": "axis", "path": "wall", "side": "left", "gap": 2.0, "thickness": T, "k_factor": K});
+    let branch = op(roll).eval(id("tilted"), &[&s]).unwrap().body().unwrap().clone();
+    assert!(branch.faces().iter().all(|f| !matches!(f.surface, datum_brep::Surface::Cone(_))), "a cone of no slope");
+    let main = rolled("XY", [-200.0, 50.0], [200.0, 50.0], "main");
+    run("saddle", &branch, &main).unwrap();
+    run("branch_hole", &main, &branch).unwrap();
+}
