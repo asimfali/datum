@@ -251,6 +251,23 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.rolled(p),
     },
     Command {
+        name: "branch",
+        description: "A branch pipe set on a main pipe (D227), both rolled shells (`rolled`, not parallel, the branch within the main \
+                      pipe's width), as they are cut before rolling: feature `hole` cuts the main pipe (`main`: the feature of its \
+                      body, its last) where the branch's bore meets the main pipe's outside; feature `saddle` cuts the end of the \
+                      branch (`branch`, likewise) along its middle diameter to sit on the main pipe's outside, a gap left inside for \
+                      the weld. Both walls square to the sheet. Both are added, or, if either is refused, neither.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "main": {"type": "string"},
+                "branch": {"type": "string"},
+                "hole": {"type": "string"},
+                "saddle": {"type": "string"}
+            }, "required": ["main", "branch", "hole", "saddle"], "additionalProperties": false})
+        },
+        run: |s, p| s.branch(p),
+    },
+    Command {
         name: "set_parameter",
         description: "Set a model parameter to a number or an expression of other parameters (e.g. {name: \"t\", value: \"w / 5\"}). \
                       Numbers of features and sketch dimensions may be expressions of parameters: `+ - * /`, parentheses, `pi`, \

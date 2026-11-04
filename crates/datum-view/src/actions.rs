@@ -42,6 +42,7 @@ pub enum Act {
     WorkPlane,
     Flange,
     Trim,
+    Branch,
     SideBar,
     SideBarRight,
     FlatPane,
@@ -101,7 +102,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 50] = [
+pub const ACTIONS: [Action; 51] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -240,6 +241,14 @@ pub const ACTIONS: [Action; 50] = [
         "sheet.trim",
         "Trim by plane",
         "Rolled sheet metal cut by a work plane: click the plane; the part on the side of its arrow goes, Other side keeps it instead",
+        None,
+        Model,
+    ),
+    action(
+        Act::Branch,
+        "sheet.branch",
+        "Pipe branch",
+        "A branch pipe set on a main one, both rolled shells: click the main pipe, then the branch; the main gets a hole for the branch's bore, the branch's end is cut to sit on it",
         None,
         Model,
     ),

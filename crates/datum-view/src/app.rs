@@ -145,6 +145,8 @@ enum Purpose {
     Flange,
     /// A work plane a rolled sheet is trimmed by.
     Trim,
+    /// The main pipe, then the branch pipe set on it.
+    Branch,
 }
 
 /// What is under the cursor while picking.
@@ -736,6 +738,8 @@ struct Viewer {
     revolve: Option<RevolveForm>,
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
+    /// The main pipe of a branch being asked for: its body's feature, once clicked.
+    branch_main: Option<String>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
     extrusion: Option<Extrusion>,
     /// "Select a contour or a chain, then E": where it shows, and since when (until a click or a few seconds).
@@ -770,6 +774,11 @@ struct FlangeForm {
 /// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
 fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool) -> Json {
     json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip})
+}
+
+/// Whether the part of body `k` starts with a rolled shell (a pipe).
+fn rolled_part(m: &Model, k: usize) -> bool {
+    m.begun.get(k).is_some_and(|b| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"))
 }
 
 /// The form of a trim: the sheet body, the work plane and the side as it is now, the preview sent last.
@@ -1247,6 +1256,7 @@ impl Viewer {
             flange: None,
             revolve: None,
             trim: None,
+            branch_main: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -3217,11 +3227,19 @@ impl Viewer {
                     painter.circle_stroke(at, 7.0, egui::Stroke::new(2.0, orange));
                 }
             }
+            let branch_hint;
             let hint = match purpose {
                 Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
                 Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
                 Purpose::Flange => "Click edges of the sheet for flanges · Shift or Ctrl adds · Enter: the flange · Esc: cancel",
                 Purpose::Trim => "Click the work plane to trim the sheet by · Esc: cancel",
+                Purpose::Branch => {
+                    branch_hint = match &self.branch_main {
+                        None => "Click the main pipe · Esc: cancel".to_string(),
+                        Some(main) => format!("Click the branch pipe (main: {main}) · Esc: cancel"),
+                    };
+                    &branch_hint
+                }
                 Purpose::Plane => {
                     "Click an origin plane, a work plane or a plane face to offset the new plane from, or three points (corners, sketch points, the origin) for a plane through them · Esc: cancel"
                 }
@@ -3343,6 +3361,7 @@ impl Viewer {
                 self.picking = None;
                 self.plane_points.clear();
                 self.flange_edges.clear();
+                self.branch_main = None;
             } else if self.picking == Some(Purpose::Flange) && !self.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.open_flange();
             }
@@ -3411,6 +3430,8 @@ impl Viewer {
             Some((Purpose::Flange, _)) => {}
             Some((Purpose::Trim, Under::Work(k))) => self.open_trim(work[k].0.clone()),
             Some((Purpose::Trim, _)) => {}
+            Some((Purpose::Branch, Under::Face(f))) => self.branch_click(f.body),
+            Some((Purpose::Branch, _)) => {}
             Some((Purpose::Plane, under)) => {
                 let from = match under {
                     Under::Origin(k) => json!({"base": datum_ops::OriginPlane::ALL[k]}),
@@ -3915,6 +3936,28 @@ impl Viewer {
     fn feature_name(&self, command: &str) -> String {
         let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
         (1..).map(|k| format!("{command}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
+    }
+
+    /// A body clicked while a branch pipe is asked for: the first rolled one is the main pipe, the
+    /// second another rolled one makes the branch command.
+    fn branch_click(&mut self, clicked: usize) {
+        let Some(m) = &self.model else { return };
+        if !rolled_part(m, clicked) {
+            return;
+        }
+        let feature = m.bodies[clicked].clone();
+        match self.branch_main.clone() {
+            None => self.branch_main = Some(feature),
+            Some(main) if main == feature => {}
+            Some(main) => {
+                let params =
+                    json!({"main": main, "branch": feature, "hole": self.feature_name("branch_hole"), "saddle": self.feature_name("saddle")});
+                self.send(Request::Command("branch", params));
+                self.picking = None;
+                self.under = None;
+                self.branch_main = None;
+            }
+        }
     }
 
     /// The feature of the rolled sheet a trim goes to: the only one, else the part clicked last.
@@ -5356,6 +5399,7 @@ impl Viewer {
                         .iter()
                         .any(|b| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"))
             }),
+            Act::Branch => self.model.as_ref().is_some_and(|m| (0..m.bodies.len()).filter(|&k| rolled_part(m, k)).count() >= 2),
             Act::FlatPane => self.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::Rename => self.tree.selected.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
@@ -5381,6 +5425,7 @@ impl Viewer {
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Flange => self.picking == Some(Purpose::Flange),
             Act::Trim => self.picking == Some(Purpose::Trim) || self.trim.is_some(),
+            Act::Branch => self.picking == Some(Purpose::Branch),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             Act::Construction => draft.is_some_and(|d| d.construction),
             Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
@@ -5454,6 +5499,11 @@ impl Viewer {
                     let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
                     self.contour_hint = Some((at, std::time::Instant::now(), Act::Trim));
                 }
+            }
+            Act::Branch => {
+                self.leave();
+                self.pick(Purpose::Branch);
+                self.branch_main = None;
             }
             Act::Rectangle => {
                 if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
@@ -5650,6 +5700,7 @@ impl Viewer {
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
             self.item(ui, Act::Trim, true);
+            self.item(ui, Act::Branch, true);
             ui.separator();
             for act in TOOLS.into_iter().chain([Act::ProjectSection, Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Construction]) {
                 self.item(ui, act, true);
@@ -6077,6 +6128,7 @@ mod tests {
             flange: None,
             revolve: None,
             trim: None,
+            branch_main: None,
             extrusion: None,
             contour_hint: None,
             part: None,
@@ -8163,6 +8215,31 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(&sent[..], [Request::Command("set_part", p)] if *p == json!({"body": "plate", "rule": "body"})), "{sent:?}");
         assert_eq!(h.state().next_rule, None);
+    }
+
+    /// The branch tool: available with two rolled shells; the first click takes the main pipe, a
+    /// click on it again or on something else is nothing, the second makes one `branch` command.
+    #[test]
+    fn two_pipes_clicked_make_a_branch() {
+        let (mut v, inbox) = viewer("rolled.json");
+        assert!(!v.available(Act::Branch.action()));
+        let m = v.model.as_mut().unwrap();
+        m.inspect["features"].as_array_mut().unwrap().push(json!({"name": "pipe", "op": "rolled"}));
+        m.bodies = vec!["shell".into(), "pipe".into(), "cut".into()];
+        m.begun = vec!["shell".into(), "pipe".into(), "cut".into()];
+        assert!(v.available(Act::Branch.action()));
+        v.pick(Purpose::Branch);
+        v.branch_click(2);
+        assert!(v.branch_main.is_none());
+        v.branch_click(0);
+        v.branch_click(0);
+        assert_eq!(v.branch_main.as_deref(), Some("shell"));
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command(..))));
+        v.branch_click(1);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let [Request::Command("branch", p)] = &sent[..] else { panic!("{sent:?}") };
+        assert_eq!((&p["main"], &p["branch"]), (&json!("shell"), &json!("pipe")));
+        assert!(v.picking.is_none() && v.branch_main.is_none());
     }
 
     /// A harness for the trim form over the rolled sheet `shell` (its body and part) and a work plane `cut`.
