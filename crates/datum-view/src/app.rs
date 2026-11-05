@@ -465,11 +465,11 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
         })
         .map(|(_, last)| last)
         .collect();
+    let name = |i: datum_graph::NodeIx| graph.nodes()[i as usize].name.as_str();
     let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing)
         .into_iter()
-        .map(|i| (graph.nodes()[i as usize].name.as_str(), i))
-        .filter(|(n, _)| !skip.iter().any(|s| s == n))
-        .filter_map(|(n, i)| Some((n, evaluation.results[i as usize].as_deref().ok()?)))
+        .filter(|&(_, f)| !skip.iter().any(|s| s == name(f)))
+        .filter_map(|(i, _)| Some((name(i), evaluation.results[i as usize].as_deref().ok()?)))
         .collect();
     let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
     let bodies: Vec<String> = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
@@ -528,16 +528,17 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
 /// draws it) in place of itself shows its input, the body it lies on.
-fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<datum_graph::NodeIx> {
+fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<(datum_graph::NodeIx, datum_graph::NodeIx)> {
     let edited = editing.and_then(|n| graph.find(n));
     // A sketch on a blank lies in the blank's coordinates: it is drawn in the flat pattern pane,
     // never in 3D (D222).
-    let on_blank = |i: &datum_graph::NodeIx| matches!(graph.nodes()[*i as usize].op, datum_graph::Op::Sketch { flat: Some(_), .. });
-    let mut v: Vec<datum_graph::NodeIx> = evaluation.finals(graph).into_iter().filter(|i| Some(*i) != edited && !on_blank(i)).collect();
+    let on_blank = |i: datum_graph::NodeIx| matches!(graph.nodes()[i as usize].op, datum_graph::Op::Sketch { flat: Some(_), .. });
+    // A failed feature: the last good state before it, as Inventor shows.
+    let mut v: Vec<_> = evaluation.last_good(graph).into_iter().filter(|&(i, f)| Some(f) != edited && !on_blank(i)).collect();
     if let Some(e) = edited {
-        v.extend(&graph.nodes()[e as usize].inputs);
+        v.extend(graph.nodes()[e as usize].inputs.iter().map(|&i| (i, i)));
         v.sort_unstable();
-        v.dedup();
+        v.dedup_by_key(|p| p.0);
     }
     v
 }
@@ -7519,11 +7520,26 @@ mod tests {
         let names = |editing: Option<&str>| {
             shown(session.graph(), session.evaluation(), editing)
                 .into_iter()
-                .map(|i| session.graph().nodes()[i as usize].name.clone())
+                .map(|(i, _)| session.graph().nodes()[i as usize].name.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(None), ["plate", "sketch1"]);
         assert_eq!(names(Some("sketch1")), ["plate"]);
+    }
+
+    /// A failed feature leaves the last good state in view, as Inventor does: the body it was to
+    /// change, not an empty picture.
+    #[test]
+    fn a_failed_feature_leaves_the_body_before_it_in_view() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let moved = json!({"name": "moved", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 0], "axis": [0, 0, 1], "angle_deg": "1 / 0"});
+        session.execute("add", &moved).unwrap();
+        assert!(session.evaluation().results[session.graph().find("moved").unwrap() as usize].is_err());
+        let names: Vec<String> =
+            shown(session.graph(), session.evaluation(), None).into_iter().map(|(i, _)| session.graph().nodes()[i as usize].name.clone()).collect();
+        assert_eq!(names, ["plate"]);
     }
 
     /// A sheet's pencil opens its form (D217): its width and side as the file has them, a change.
