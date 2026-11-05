@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use datum_brep::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Ix, Plane, Surface, TopoId, Vertex, build_with_curves};
-use datum_math::Vec3;
+use datum_math::{Sign, Vec3, orient3d_coords};
 
 use crate::sketch::parallel;
 
@@ -26,7 +26,7 @@ pub struct FlangeDims {
 /// Flanges on edges `edges` of sheet metal `target`, one after another (D205): a long edge of an
 /// end of the sheet puts it on that end, an edge of a wall on the sheet's side face puts it along
 /// the wall (outward, no relief: it ends at the wall's bend lines). Two edges of one end or of
-/// one wall's side make one flange; flanges meeting at a corner are refused.
+/// one wall's side make one flange; flanges on two ends meeting at a convex corner leave it open.
 pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDims) -> Result<Body, BrepError> {
     if edges.is_empty() {
         return Err(BrepError::Sketch("a flange takes the edges of the sheet it stands on: `edges`".into()));
@@ -41,27 +41,58 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         .iter()
         .map(|e| u128::from_str_radix(e, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{e}` is not an edge ID"))))
         .collect::<Result<_, _>>()?;
-    // Each flange once, by the corners of what it stands on; none sharing a corner.
-    let mut sites: Vec<(TopoId, [TopoId; 4])> = Vec::new();
+    // Each flange once, by the corners of what it stands on.
+    let mut sites: Vec<(TopoId, [TopoId; 4], Base)> = Vec::new();
     for &e in &ids {
-        let base = base(target, e, dims.flip)?;
+        let base = base(target, e, dims.flip, &BTreeSet::new())?;
         let corners = [base.inner[0], base.inner[1], base.outer[0], base.outer[1]].map(|v| target.vertices()[v as usize].id);
         let mut sorted = corners;
         sorted.sort();
-        if sites.iter().any(|(_, c)| *c == sorted) {
-            continue;
+        if sites.iter().all(|(_, c, _)| *c != sorted) {
+            sites.push((e, sorted, base));
         }
-        if sites.iter().any(|(_, c)| c.iter().any(|v| sorted.contains(v))) {
-            return Err(BrepError::Unsupported("flanges that meet at a corner (relieving the corner) come later".into()));
-        }
-        sites.push((e, sorted));
     }
+    // Flanges on two ends meeting at a corner leave it open (the corner's relief): neither's side
+    // goes into the other's end.
+    for (k, (_, c, a)) in sites.iter().enumerate() {
+        for (_, d, b) in &sites[k + 1..] {
+            if c.iter().any(|v| d.contains(v)) {
+                open_corner(target, a, b, dims.angle)?;
+            }
+        }
+    }
+    let taken: BTreeSet<TopoId> = sites.iter().flat_map(|(.., b)| b.gone.iter().map(|&x| target.faces()[x as usize].id)).collect();
     let mut body = target.clone();
-    for (e, _) in sites {
-        let base = base(&body, e, dims.flip)?;
+    for (e, ..) in sites {
+        let base = base(&body, e, dims.flip, &taken)?;
         body = grow(feature, &body, base, dims)?;
     }
     Ok(body)
+}
+
+/// Whether flanges `a` and `b` of `target` may meet at a corner, left
+/// open: both on ends, the corner convex, neither leaning in over the sheet past a right angle
+/// (each then stays off the other's way, beyond its own edge).
+fn open_corner(target: &Body, a: &Base, b: &Base, angle: f64) -> Result<(), BrepError> {
+    let later = |m: &str| Err(BrepError::Unsupported(format!("flanges meeting at a corner: {m} come later")));
+    if !(a.end && b.end) {
+        return later("a flange along a wall and one on an end");
+    }
+    if angle > 90.0 {
+        return later("flanges turning past a right angle");
+    }
+    // Convex: `b`'s far corner lies on the sheet's side of `a`'s end, the side away from where `a`
+    // leaves the sheet.
+    let p = |v: Ix| target.point(v);
+    let plane = (p(a.inner[0]), p(a.inner[1]), p(a.outer[0]));
+    let side = |q: Vec3| orient3d_coords(plane.0, plane.1, plane.2, q);
+    let shared = |v: Ix| [a.inner, a.outer].iter().flatten().any(|&w| w == v);
+    let far = [b.inner, b.outer].into_iter().flatten().find(|&v| !shared(v));
+    let inside = far.map(|v| side(p(v)));
+    if inside.is_none_or(|s| s == Sign::Zero || s == side(plane.0 + a.out)) {
+        return later("flanges at an inner corner");
+    }
+    Ok(())
 }
 
 /// What a flange stands on: the edge of the sheet's side it turns toward (`inner`, at the start
@@ -77,10 +108,13 @@ struct Base {
     gone: Vec<Ix>,
     kept: Vec<FaceSpec>,
     joins: [Option<Ix>; 2],
+    /// On an end of the sheet (not along a wall).
+    end: bool,
 }
 
-/// The flange edge `e` of `body` asks for (see [`flanges`]).
-fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
+/// The flange edge `e` of `body` asks for (see [`flanges`]); its sides go into no face of `taken`
+/// (other flanges' ends).
+fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<Base, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("flange: {m}"));
     let he = |h: Ix| body.half_edges()[h as usize];
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
@@ -107,7 +141,7 @@ fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
             && let Some((long, short)) = end_of(body, f)
             && long.contains(&g)
         {
-            return end_base(body, f, long, short, flip);
+            return end_base(body, f, long, short, flip, taken);
         }
     }
     // A wall's edge on the sheet's side face: the strip of that face over the wall.
@@ -185,7 +219,7 @@ fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
             if let Some(g) = g {
                 let end = face_of(he(g).twin);
                 let s = usize::from(x == id(inner[1]) || y == id(inner[1]));
-                joins[s] = plane(end).filter(|p| parallel(p.normal, d)).map(|_| end);
+                joins[s] = plane(end).filter(|p| parallel(p.normal, d) && !taken.contains(&body.faces()[end as usize].id)).map(|_| end);
             }
             continue;
         }
@@ -199,7 +233,7 @@ fn base(body: &Body, e: TopoId, flip: bool) -> Result<Base, BrepError> {
     let mut corners = strip;
     corners.sort();
     let key = TopoId::derive("flange.side").id(corners[0]).id(corners[3]).finish();
-    Ok(Base { key, inner, outer, out: unit(pc.normal), up, gone: vec![cap], kept, joins })
+    Ok(Base { key, inner, outer, out: unit(pc.normal), up, gone: vec![cap], kept, joins, end: false })
 }
 
 /// Whether face `y` is a side face of the sheet: across its thickness, along its bends too (a cut's
@@ -230,7 +264,7 @@ fn smooth_convex(body: &Body, x: Ix) -> bool {
 
 /// A flange on end face `f`, its long half-edges `long` and short ones `short`: toward the
 /// sheet's front side, or the other.
-fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool) -> Result<Base, BrepError> {
+fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool, taken: &BTreeSet<TopoId>) -> Result<Base, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("flange: {m}"));
     let he = |h: Ix| body.half_edges()[h as usize];
     let beside = |h: Ix| body.loops()[he(he(h).twin).loop_ix as usize].face;
@@ -251,8 +285,19 @@ fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool) -> Re
     let w = body.point(i1) - body.point(i0);
     let starts = |h: Ix| he(h).origin == i0 || he(body.next(h)).origin == i0;
     let short = if starts(short[0]) { short } else { [short[1], short[0]] };
-    let joins = short.map(|h| Some(beside(h)).filter(|&x| plane(x).is_some_and(|p| parallel(p.normal, w))));
-    Ok(Base { key: body.faces()[f as usize].id, inner: [i0, i1], outer: [o0, o1], out: unit(end.normal), up, gone: vec![f], kept: Vec::new(), joins })
+    let joins =
+        short.map(|h| Some(beside(h)).filter(|&x| plane(x).is_some_and(|p| parallel(p.normal, w)) && !taken.contains(&body.faces()[x as usize].id)));
+    Ok(Base {
+        key: body.faces()[f as usize].id,
+        inner: [i0, i1],
+        outer: [o0, o1],
+        out: unit(end.normal),
+        up,
+        gone: vec![f],
+        kept: Vec::new(),
+        joins,
+        end: true,
+    })
 }
 
 /// The faces of sheet metal `body` a flange may stand on: across the thickness (not on the
@@ -329,7 +374,7 @@ fn turned(v: Vec3, axis: Vec3, (sn, cs): (f64, f64)) -> Vec3 {
 
 /// The flange `base` asks for on `target`: a bend and a wall sewn to its edges.
 fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<Body, BrepError> {
-    let Base { key, inner: [i0, i1], outer: [o0, o1], out: n, up, gone, kept, joins } = base;
+    let Base { key, inner: [i0, i1], outer: [o0, o1], out: n, up, gone, kept, joins, .. } = base;
     let w = unit(target.point(i1) - target.point(i0));
     let t = (target.point(i0) - target.point(o0)).dot(up);
     if t.is_nan() || t <= 0.0 {

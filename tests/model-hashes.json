@@ -267,6 +267,11 @@
     "slot_sketch": "99bb82f11f1447335705df1541997524eed930362a0ab651c8aea74da5c6ceac",
     "slotted": "e07e6ada828f4f29811c2fbade047a8362a4457a0c46711b943597d584e9f78c"
   },
+  "sheet_tray.json": {
+    "outline": "0e986b46551fcef99375e88081ef00a597bf89b847fbef54e18815d047d2e166",
+    "plate": "3130c303223acfd8fbd140d8affdfb9238ff3f9cfe3b6e43a45f5d77929345bd",
+    "tray": "2c0746f1296cc6c80b6f9beb6985044a307bcc26f7e7eb5cdfa764de318f58de"
+  },
   "sketch_plate.json": {
     "base": "bc0240d91308ec8390b59d730aacd5db534e6e28dcf31bd5d246b470cb1b7fd9",
     "cut": "6393b23bc0ea945b444ac861177815e275823ef3a15b11318ef0b7e9bc7400da",
