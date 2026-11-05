@@ -627,8 +627,11 @@ pub const MATERIALS: Records =
     Records { level: "material", keys: &["name", "designation", "density", "description"], widths: &[30.0, 90.0, 35.0, 50.0] };
 
 /// The rules of one material: the `material` key is not a column.
-pub const RULES: Records =
-    Records { level: "rule", keys: &["name", "kind", "thickness", "radius", "description"], widths: &[35.0, 25.0, 25.0, 45.0, 50.0] };
+pub const RULES: Records = Records {
+    level: "rule",
+    keys: &["name", "kind", "thickness", "radius", "k_factor", "corner_gap", "relief_diameter", "description"],
+    widths: &[35.0, 25.0, 25.0, 45.0, 20.0, 40.0, 40.0, 50.0],
+};
 
 impl Records {
     fn is_rule(&self) -> bool {
@@ -645,6 +648,9 @@ fn header<'a>(key: &str, i18n: &'a I18n) -> &'a str {
         "description" => i18n.t("table-description", "Description"),
         "kind" => i18n.t("table-kind", "Kind"),
         "thickness" => i18n.t("table-thickness", "Thickness (mm)"),
+        "k_factor" => i18n.t("table-k-factor", "K-factor"),
+        "corner_gap" => i18n.t("table-corner-gap", "Corner gap (mm or of t)"),
+        "relief_diameter" => i18n.t("table-relief", "Relief Ø (mm or of t)"),
         _ => i18n.t("table-radius", "Bend radius (mm or of t)"),
     }
 }
@@ -684,7 +690,8 @@ pub fn editable_records(r: usize, _: usize) -> bool {
 
 /// Field `key` of a record as typed: its value, none for an emptied one (the key is dropped), or
 /// why not. The name is needed; the density and the thickness are numbers above zero (a comma
-/// will do), the radius a number or a formula of `t`, the kind Sheet or Part.
+/// will do), the radius, corner gap and relief's Ø a number or a formula of `t`, the K-factor
+/// 0 to 1, the kind Sheet or Part.
 fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Option<Json>, String> {
     let text = text.trim();
     match key {
@@ -695,15 +702,25 @@ fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Opti
             _ if key == "density" => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
             _ => Err(i18n.t("table-rule-thickness", "The thickness is a number above zero, in mm").to_string()),
         },
-        "radius" if !text.is_empty() => {
+        "radius" | "corner_gap" | "relief_diameter" if !text.is_empty() => {
             let v = value_of(text);
-            match datum_model::library::bend_radius(&v, 1.0) {
-                Ok(r) if r >= 0.0 => Ok(Some(v)),
+            match datum_model::library::of_thickness(&v, 1.0) {
+                Ok(r) if r > 0.0 || (r == 0.0 && key != "relief_diameter") => Ok(Some(v)),
+                _ if key == "corner_gap" => Err(i18n
+                    .t("table-rule-corner-gap", "The corner gap is a number in mm, not below zero, or a formula of the thickness t")
+                    .to_string()),
+                _ if key == "relief_diameter" => {
+                    Err(i18n.t("table-rule-relief", "The relief's Ø is a number in mm above zero, or a formula of the thickness t").to_string())
+                }
                 _ => {
                     Err(i18n.t("table-rule-radius", "The bend radius is a number in mm, not below zero, or a formula of the thickness t").to_string())
                 }
             }
         }
+        "k_factor" if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
+            Ok(k) if (0.0..=1.0).contains(&k) => Ok(Some(json!(k))),
+            _ => Err(i18n.t("table-rule-k-factor", "The K-factor is a number from 0 to 1").to_string()),
+        },
         "kind" if !text.is_empty() => {
             let lower = text.to_lowercase();
             match kinds(i18n).iter().find(|(k, label)| lower == *k || lower == label.to_lowercase()) {
@@ -715,14 +732,14 @@ fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Opti
     }
 }
 
-/// The record `e` as a whole: a rule has a kind and a part's has no thickness or bend radius;
+/// The record `e` as a whole: a rule has a kind and a part's has no sheet fields;
 /// the library's own check has the last word.
 fn check_record(rec: &Records, e: &Json, i18n: &I18n) -> Result<(), String> {
     if rec.is_rule() {
         match e["kind"].as_str() {
             None => return Err(i18n.t("table-rule-kind", "The kind is Sheet or Part").to_string()),
-            Some("part") if !e["thickness"].is_null() || !e["radius"].is_null() => {
-                return Err(i18n.t("table-rule-part", "A part's rule has no thickness or bend radius").to_string());
+            Some("part") if datum_model::library::SHEET_FIELDS.iter().any(|k| !e[*k].is_null()) => {
+                return Err(i18n.t("table-rule-part", "A part's rule has no thickness, bend radius or other sheet fields").to_string());
             }
             _ => {}
         }
@@ -1231,7 +1248,8 @@ mod tests {
 
     fn rules() -> Vec<Json> {
         vec![
-            json!({"name": "Лист 2", "material": "Сталь 3", "kind": "sheet", "thickness": 2.0, "radius": "1.5 * t"}),
+            json!({"name": "Лист 2", "material": "Сталь 3", "kind": "sheet", "thickness": 2.0, "radius": "1.5 * t", "k_factor": 0.44,
+                "corner_gap": "t", "relief_diameter": "2 * t"}),
             json!({"name": "Деталь", "material": "Сталь 3", "kind": "part"}),
         ]
     }
@@ -1246,16 +1264,21 @@ mod tests {
         let pending = vec!["Н".to_string(), "Part".to_string()];
         let t = records(&RULES, &rules(), &pending, &I18n::default());
         assert_eq!(t.rows().len(), 4, "header, two rules, a new one");
-        assert_eq!(t.copy((0, 0), (0, 4)), "Name\tKind\tThickness (mm)\tBend radius (mm or of t)\tDescription");
-        assert_eq!(t.copy((1, 0), (2, 4)), "Лист 2\tSheet\t2\t1.5 * t\t\nДеталь\tPart\t\t\t");
-        assert_eq!(t.copy((3, 0), (3, 4)), "Н\tPart\t\t\t");
+        assert_eq!(
+            t.copy((0, 0), (0, 7)),
+            "Name\tKind\tThickness (mm)\tBend radius (mm or of t)\tK-factor\tCorner gap (mm or of t)\tRelief Ø (mm or of t)\tDescription"
+        );
+        assert_eq!(t.copy((1, 0), (2, 7)), "Лист 2\tSheet\t2\t1.5 * t\t0.44\tt\t2 * t\t\nДеталь\tPart\t\t\t\t\t\t");
+        assert_eq!(t.copy((3, 0), (3, 7)), "Н\tPart\t\t\t\t\t\t");
     }
 
     #[test]
     fn a_new_rule_takes_the_material_and_parses_its_kind() {
         let mut pending = Default::default();
-        let (sent, error) = rule_edits(&[(3, 0, "Лист 3"), (3, 1, "sheet"), (3, 2, "3,5"), (3, 3, "2 * t")], &mut pending);
-        let want = json!({"material": "Сталь 3", "name": "Лист 3", "kind": "sheet", "thickness": 3.5, "radius": "2 * t"});
+        let (sent, error) =
+            rule_edits(&[(3, 0, "Лист 3"), (3, 1, "sheet"), (3, 2, "3,5"), (3, 3, "2 * t"), (3, 4, "0,4"), (3, 5, "0"), (3, 6, "8")], &mut pending);
+        let want = json!({"material": "Сталь 3", "name": "Лист 3", "kind": "sheet", "thickness": 3.5, "radius": "2 * t", "k_factor": 0.4,
+            "corner_gap": 0.0, "relief_diameter": 8.0});
         same(&sent, &[put_library("rule", want, None)]);
         assert_eq!(error, None);
         assert!(pending.is_empty());
@@ -1267,7 +1290,11 @@ mod tests {
     fn a_rule_the_library_would_refuse_is_not_sent() {
         let mut pending = Default::default();
         for (edits, why) in [
-            (vec![(3, 0, "Д"), (3, 1, "part"), (3, 2, "2")], "A part's rule has no thickness or bend radius"),
+            (vec![(3, 0, "Д"), (3, 1, "part"), (3, 2, "2")], "A part's rule has no thickness, bend radius or other sheet fields"),
+            (vec![(3, 0, "Д"), (3, 1, "part"), (3, 4, "0.4")], "A part's rule has no thickness, bend radius or other sheet fields"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 4, "1,5")], "The K-factor is a number from 0 to 1"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 5, "-t")], "The corner gap is a number in mm, not below zero, or a formula of the thickness t"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 6, "0")], "The relief's Ø is a number in mm above zero, or a formula of the thickness t"),
             (vec![(3, 0, "Д"), (3, 2, "2")], "The kind is Sheet or Part"),
             (vec![(3, 0, "Д"), (3, 1, "tube")], "The kind is Sheet or Part"),
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "-1")], "The bend radius is a number in mm, not below zero, or a formula of the thickness t"),
@@ -1278,7 +1305,7 @@ mod tests {
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 2, "0")], "The thickness is a number above zero, in mm"),
             (vec![(3, 0, "Деталь")], "`Деталь` is a rule already"),
             (vec![(1, 0, " ")], "A rule needs a name"),
-            (vec![(2, 2, "1")], "A part's rule has no thickness or bend radius"),
+            (vec![(2, 2, "1")], "A part's rule has no thickness, bend radius or other sheet fields"),
         ] {
             let (sent, error) = rule_edits(&edits, &mut pending);
             assert!(sent.is_empty(), "{edits:?}");

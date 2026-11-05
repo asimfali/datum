@@ -321,7 +321,7 @@ fn materials_are_written_renamed_and_removed() {
 
 /// A rule is of a material (D179): one of no material in the library is refused; a material
 /// renamed takes its rules along, one with rules is not removed; a sheet rule's bend radius may
-/// be a formula of the thickness, a part's rule has neither.
+/// be a formula of the thickness, so may its corner gap and relief's Ø; a part's rule has none.
 #[test]
 fn rules_are_of_a_material() {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_rule");
@@ -335,6 +335,7 @@ fn rules_are_of_a_material() {
     assert!(put(&mut s, "rule", sheet.clone()).unwrap_err().contains("no material `08пс`"));
     put(&mut s, "material", json!({"name": "08пс"})).unwrap();
     put(&mut s, "rule", sheet).unwrap();
+    put(&mut s, "rule", json!({"name": "08пс 3", "kind": "sheet", "material": "08пс", "thickness": 3, "radius": "t", "k_factor": 0.4, "corner_gap": 0, "relief_diameter": "2 * t"})).unwrap();
     put(&mut s, "rule", json!({"name": "08пс", "kind": "part", "material": "08пс"})).unwrap();
     for (rule, why) in [
         (json!({"name": "x", "kind": "sheet"}), "needs the `material`"),
@@ -342,6 +343,9 @@ fn rules_are_of_a_material() {
         (json!({"name": "x", "kind": "part", "material": "08пс", "thickness": 2}), "has no `thickness`"),
         (json!({"name": "x", "kind": "sheet", "material": "08пс", "thickness": 2, "radius": "2 * s"}), "`radius`"),
         (json!({"name": "x", "kind": "sheet", "material": "08пс", "thickness": 0}), "`thickness`"),
+        (json!({"name": "x", "kind": "part", "material": "08пс", "corner_gap": 1}), "has no `corner_gap`"),
+        (json!({"name": "x", "kind": "sheet", "material": "08пс", "thickness": 2, "radius": "t", "corner_gap": "-t"}), "`corner_gap`"),
+        (json!({"name": "x", "kind": "sheet", "material": "08пс", "thickness": 2, "radius": "t", "relief_diameter": 0}), "`relief_diameter`"),
     ] {
         assert!(put(&mut s, "rule", rule.clone()).unwrap_err().contains(why), "{rule}");
     }
@@ -350,8 +354,8 @@ fn rules_are_of_a_material() {
     run(&mut s, "put_library", json!({"level": "material", "element": {"name": "08пс ГОСТ"}, "was": "08пс"}));
     let rules = run(&mut s, "library", json!({"level": "rule"}));
     let of: Vec<&Value> = rules["elements"].as_array().unwrap().iter().map(|r| &r["material"]).collect();
-    assert_eq!(of, [&json!("08пс ГОСТ"), &json!("08пс ГОСТ")], "{rules}");
-    assert_eq!(datum_model::library::bend_radius(&json!("1.5 * t"), 2.0), Ok(3.0));
+    assert_eq!(of, [&json!("08пс ГОСТ"); 3], "{rules}");
+    assert_eq!(datum_model::library::of_thickness(&json!("1.5 * t"), 2.0), Ok(3.0));
 }
 
 /// A piece of sketch kept in the project's library and placed again: the model's parameters its

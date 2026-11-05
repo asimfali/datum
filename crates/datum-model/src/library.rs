@@ -192,19 +192,26 @@ fn check_material(e: &Value) -> Result<(), String> {
     Ok(())
 }
 
+/// The fields only a sheet rule has: its `thickness` in mm (the part's: its only place, D193),
+/// inner bend `radius`, the `k_factor` of its bends (0 to 1, D197), the `corner_gap` between
+/// flanges meeting at a corner and the `relief_diameter` of a round corner relief (D229).
+pub const SHEET_FIELDS: [&str; 5] = ["thickness", "radius", "k_factor", "corner_gap", "relief_diameter"];
+
 /// A rule (D179, D180): its `name`, `kind` (`sheet` or `part`), the `material` it is of (by
-/// name; a rule is never without one) and a `description`; a sheet rule's `thickness` in mm
-/// (the part's: its only place, D193) and inner bend `radius`: mm, or a formula of the
-/// thickness `t` (`t`, `1.5 * t`), and optionally the `k_factor` of its bends, 0 to 1 (D197).
+/// name; a rule is never without one) and a `description`; a sheet rule's [`SHEET_FIELDS`]: the
+/// thickness, the radius (mm, or a formula of the thickness `t`: `t`, `1.5 * t`) and optionally
+/// the K-factor, the corner gap (mm not below zero, or of `t`) and the relief's Ø (mm above
+/// zero, or of `t`).
 fn check_rule(e: &Value) -> Result<(), String> {
-    let o = fields("rule", e, &["name", "kind", "material", "thickness", "radius", "k_factor", "description"], &["kind", "material", "description"])?;
+    let keys: Vec<&str> = ["name", "kind", "material", "description"].into_iter().chain(SHEET_FIELDS).collect();
+    let o = fields("rule", e, &keys, &["kind", "material", "description"])?;
     if !o.get("material").and_then(Value::as_str).is_some_and(|m| !m.trim().is_empty()) {
         return Err("a rule needs the `material` it is of".into());
     }
     match o.get("kind").and_then(Value::as_str) {
         Some("sheet") => {}
         Some("part") => {
-            if let Some(k) = ["thickness", "radius", "k_factor"].into_iter().find(|k| o.contains_key(*k)) {
+            if let Some(k) = SHEET_FIELDS.into_iter().find(|k| o.contains_key(*k)) {
                 return Err(format!("a part's rule has no `{k}`: that of a `sheet` rule"));
             }
             return Ok(());
@@ -217,15 +224,22 @@ fn check_rule(e: &Value) -> Result<(), String> {
     if o.get("k_factor").is_some_and(|k| !k.as_f64().is_some_and(|k| (0.0..=1.0).contains(&k))) {
         return Err("a sheet rule's `k_factor`: a number from 0 to 1".into());
     }
-    match o.get("radius").map(|r| bend_radius(r, t)) {
+    if o.get("corner_gap").is_some_and(|g| !of_thickness(g, t).is_ok_and(|g| g >= 0.0)) {
+        return Err("a sheet rule's `corner_gap`: mm not below zero, or a formula of the thickness `t`".into());
+    }
+    if o.get("relief_diameter").is_some_and(|d| !of_thickness(d, t).is_ok_and(|d| d > 0.0)) {
+        return Err("a sheet rule's `relief_diameter`: mm above zero, or a formula of the thickness `t`".into());
+    }
+    match o.get("radius").map(|r| of_thickness(r, t)) {
         Some(Ok(r)) if r > 0.0 => Ok(()),
         _ => Err("a sheet rule's bend `radius`: mm above zero, or a formula of the thickness `t`".into()),
     }
 }
 
-/// A sheet rule's bend radius (mm, or a formula of `t`) for thickness `t`.
-pub fn bend_radius(radius: &Value, t: f64) -> Result<f64, String> {
-    match radius {
+/// A length of a sheet rule (mm, or a formula of `t`: the bend radius, the corner gap, the
+/// relief's Ø) for thickness `t`.
+pub fn of_thickness(length: &Value, t: f64) -> Result<f64, String> {
+    match length {
         Value::String(f) => eval(f, &|n| if n == "t" { Ok(t) } else { Err(ExprError::Unknown(n.into())) }).map_err(|e| e.to_string()),
         r => r.as_f64().ok_or_else(|| "a number or a formula".into()),
     }

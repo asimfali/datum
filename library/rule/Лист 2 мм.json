@@ -5,5 +5,7 @@
   "thickness": 2,
   "radius": "t",
   "k_factor": 0.44,
+  "corner_gap": "t",
+  "relief_diameter": "2 * t",
   "description": "Лист 2 мм, внутренний радиус гиба равен толщине"
 }
