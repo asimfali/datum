@@ -26,6 +26,33 @@ pub struct FlangeDims {
     pub radius: f64,
     pub flip: bool,
     pub round: Option<(f64, f64)>,
+    /// How walls meeting at a corner close it, and the gap between them there.
+    pub corner: Closing,
+    pub gap: Option<f64>,
+}
+
+/// How the walls of flanges meeting at a corner close it (D229).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Closing {
+    /// Each wall ends at its edge: the corner stays open.
+    #[default]
+    Open,
+    /// Both walls go to the plane halfway between them, the gap apart.
+    Miter,
+    /// The walls along the first edge picked go to the other's outer face, the others to their
+    /// inner face, the gap short of it.
+    #[serde(rename = "overlap_1")]
+    Overlap1,
+    /// The other way round.
+    #[serde(rename = "overlap_2")]
+    Overlap2,
+}
+
+impl Closing {
+    pub fn is_open(&self) -> bool {
+        *self == Self::Open
+    }
 }
 
 /// The relief at a corner where flanges meet (D229).
@@ -87,11 +114,17 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
             }
         }
     }
+    let bounds = closed(target, &sites, dims)?;
     let taken: BTreeSet<TopoId> = sites.iter().flat_map(|(.., b)| b.gone.iter().map(|&x| target.faces()[x as usize].id)).collect();
     let mut body = target.clone();
-    for (e, ..) in sites {
-        let base = base(&body, e, dims.flip, &taken)?;
-        body = grow(feature, &body, base, dims)?;
+    for ((e, _, first), bounds) in sites.into_iter().zip(bounds) {
+        // The side each turns to as the sheet picked had it: flanges made before it may tip
+        // which side of the sheet is its front.
+        let mut base = base(&body, e, dims.flip, &taken)?;
+        if base.up.dot(first.up) < 0.0 {
+            base = self::base(&body, e, !dims.flip, &taken)?;
+        }
+        body = grow(feature, &body, base, dims, bounds)?;
     }
     match dims.round {
         Some((d, k)) if !corners.is_empty() => relieve_corners(feature, &body, &corners, 0.5 * d, k),
@@ -135,6 +168,120 @@ fn relieve_corners(feature: TopoId, body: &Body, corners: &[([TopoId; 2], Vec3)]
     Ok(body)
 }
 
+/// Where the walls of flanges `sites` of `target` meeting at corners go, closing them as `dims`
+/// says (D229): for each flange, at the start and end of its width, the plane its wall's side
+/// goes to; none at an open corner.
+fn closed(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], dims: FlangeDims) -> Result<Vec<[Option<Bound>; 2]>, BrepError> {
+    let mut bounds = vec![[None, None]; sites.len()];
+    if dims.corner.is_open() {
+        return Ok(bounds);
+    }
+    let g = dims.gap.ok_or_else(|| BrepError::Invalid("a closed corner takes its gap from the part's sheet rule: it has none".into()))?;
+    if !(g >= 0.0 && g.is_finite()) {
+        return Err(BrepError::Degenerate(format!("a corner's gap is not below zero, got {g}")));
+    }
+    let shapes: Vec<Shape> = sites.iter().map(|(.., b)| Shape::of(target, b, dims)).collect::<Result<_, _>>()?;
+    let first = shapes.first().map_or(Vec3::ZERO, |s| s.w);
+    for a in 0..sites.len() {
+        for b in a + 1..sites.len() {
+            let (ca, cb) = (&sites[a].1, &sites[b].1);
+            let Some(&shared) = ca.iter().find(|v| cb.contains(v)) else { continue };
+            let corner = target.vertices().binary_search_by_key(&shared, |v| v.id).map(|v| target.point(v as Ix)).unwrap_or(Vec3::ZERO);
+            // The end of each width at the corner.
+            let end = |k: usize| {
+                let base = &sites[k].2;
+                usize::from(![base.inner[0], base.outer[0]].iter().any(|&v| target.vertices()[v as usize].id == shared))
+            };
+            let (ia, oa, ma) = shapes[a].faces(target, &sites[a].2);
+            let (ib, ob, mb) = shapes[b].faces(target, &sites[b].2);
+            let [ba, bb] = match dims.corner {
+                Closing::Open => continue,
+                Closing::Miter => {
+                    // The plane through where the outer faces meet and where the inner faces do.
+                    let l = unit(ma.cross(mb));
+                    let meet = |p: Vec3, q: Vec3| solve([ma, mb, l], [p.dot(ma), q.dot(mb), corner.dot(l)]);
+                    let (Some(out), Some(inn)) = (meet(oa, ob), meet(ia, ib)) else {
+                        return Err(BrepError::Degenerate("flange: walls meeting at a corner are parallel".into()));
+                    };
+                    let mut mu = unit(l.cross(out - inn));
+                    // `a`'s own edge lies on its side of the plane.
+                    let middle = (target.point(sites[a].2.inner[0]) + target.point(sites[a].2.inner[1])) * 0.5;
+                    if (middle - out).dot(mu) > 0.0 {
+                        mu = mu * -1.0;
+                    }
+                    [Bound { at: out - mu * (0.5 * g), normal: mu }, Bound { at: out + mu * (0.5 * g), normal: mu * -1.0 }]
+                }
+                Closing::Overlap1 | Closing::Overlap2 => {
+                    // The covering wall: the one along the first edge picked, more nearly.
+                    let a_along = shapes[a].w.dot(first).abs() >= shapes[b].w.dot(first).abs();
+                    let covers = a_along == (dims.corner == Closing::Overlap1);
+                    let over = |o: Vec3, m: Vec3| Bound { at: o, normal: m };
+                    let under = |i: Vec3, m: Vec3| Bound { at: i - m * g, normal: m };
+                    if covers { [over(ob, mb), under(ia, ma)] } else { [under(ib, mb), over(oa, ma)] }
+                }
+            };
+            bounds[a][end(a)] = Some(ba);
+            bounds[b][end(b)] = Some(bb);
+        }
+    }
+    // A wall of a flange made before beside an end's corner (D229): the new wall goes to its inner
+    // face, the gap short of it; that wall stays as it is.
+    for ((.., base), ends) in sites.iter().zip(&mut bounds) {
+        for (s, bound) in ends.iter_mut().enumerate() {
+            if bound.is_some() || base.joins[s].is_some() {
+                continue;
+            }
+            if let Some(x) = base.beside[s]
+                && let Some((at, n)) = wall_beside(target, x, base, s)
+            {
+                *bound = Some(Bound { at: at + n * g, normal: n * -1.0 });
+            }
+        }
+    }
+    Ok(bounds)
+}
+
+/// The inner face of the wall of a flange whose side is face `x`, beyond the end `s` of the
+/// width of what `base` stands on: a point of it and its outward normal, back toward that end.
+/// Of the planes beside `x`, a wall's two faces face away from each other; the nearest such inner
+/// face; none when there is none.
+fn wall_beside(target: &Body, x: Ix, base: &Base, s: usize) -> Option<(Vec3, Vec3)> {
+    let he = |h: Ix| target.half_edges()[h as usize];
+    let Surface::Plane(side) = target.faces()[x as usize].surface else { return None };
+    let planes: Vec<Plane> = target
+        .face_loops(x)
+        .flat_map(|l| target.loop_half_edges(l))
+        .filter_map(|h| match target.faces()[target.loops()[he(he(h).twin).loop_ix as usize].face as usize].surface {
+            Surface::Plane(p) if !parallel(p.normal, side.normal) => Some(p),
+            _ => None,
+        })
+        .collect();
+    // From the corner on, past the end: the inner face faces back toward it.
+    let corner = target.point(base.inner[s]);
+    let w = unit(target.point(base.inner[1]) - target.point(base.inner[0]));
+    let past = if s == 0 { w * -1.0 } else { w };
+    planes
+        .iter()
+        .filter(|p| planes.iter().any(|q| parallel(q.normal, p.normal) && q.normal.dot(p.normal) < 0.0))
+        .filter_map(|p| {
+            let n = unit(p.normal);
+            let gap = (corner - p.origin).dot(n);
+            (n.dot(past) < 0.0 && gap > 0.0).then_some((gap, p.origin, n))
+        })
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, at, n)| (at, n))
+}
+
+/// The point on the planes `x · rows[k] = rhs[k]`; none when they share no single point.
+fn solve(rows: [Vec3; 3], rhs: [f64; 3]) -> Option<Vec3> {
+    let [a, b, c] = rows;
+    let det = a.dot(b.cross(c));
+    if det == 0.0 || !det.is_finite() {
+        return None;
+    }
+    Some((b.cross(c) * rhs[0] + c.cross(a) * rhs[1] + a.cross(b) * rhs[2]) * (1.0 / det))
+}
+
 /// Whether flanges `a` and `b` of `target` may meet at a corner, left
 /// open: both on ends, the corner convex, neither leaning in over the sheet past a right angle
 /// (each then stays off the other's way, beyond its own edge).
@@ -175,6 +322,9 @@ struct Base {
     joins: [Option<Ix>; 2],
     /// On an end of the sheet (not along a wall).
     end: bool,
+    /// The faces beside its width's start and end where a wall of a flange made before may stand:
+    /// an end's across its short edges, a side face's strip's the side face itself.
+    beside: [Option<Ix>; 2],
 }
 
 /// The flange edge `e` of `body` asks for (see [`flanges`]); its sides go into no face of `taken`
@@ -298,7 +448,7 @@ fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<
     let mut corners = strip;
     corners.sort();
     let key = TopoId::derive("flange.side").id(corners[0]).id(corners[3]).finish();
-    Ok(Base { key, inner, outer, out: unit(pc.normal), up, gone: vec![cap], kept, joins, end: false })
+    Ok(Base { key, inner, outer, out: unit(pc.normal), up, gone: vec![cap], kept, joins, end: false, beside: [Some(cap); 2] })
 }
 
 /// Whether face `y` is a side face of the sheet: across its thickness, along its bends too (a cut's
@@ -362,6 +512,7 @@ fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool, taken
         kept: Vec::new(),
         joins,
         end: true,
+        beside: short.map(|h| Some(beside(h))),
     })
 }
 
@@ -437,50 +588,121 @@ fn turned(v: Vec3, axis: Vec3, (sn, cs): (f64, f64)) -> Vec3 {
     v * cs + axis.cross(v) * sn + axis * (axis.dot(v) * (1.0 - cs))
 }
 
-/// The flange `base` asks for on `target`: a bend and a wall sewn to its edges.
-fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<Body, BrepError> {
-    let Base { key, inner: [i0, i1], outer: [o0, o1], out: n, up, gone, kept, joins, .. } = base;
-    let w = unit(target.point(i1) - target.point(i0));
-    let t = (target.point(i0) - target.point(o0)).dot(up);
-    if t.is_nan() || t <= 0.0 {
-        return Err(BrepError::Invalid("flange: the inner edge is not inside the sheet's thickness".into()));
+/// Where a flange's bend and wall go (see [`grow`]): the unit edge `w`, the axis it turns about,
+/// the turn, the bend's axis point `c_in`, the wall's way up `along` and its height above the
+/// bend, the sheet's thickness, and the inner face's outward normal.
+struct Shape {
+    w: Vec3,
+    axis: Vec3,
+    turn: (f64, f64),
+    c_in: Vec3,
+    along: Vec3,
+    wall: f64,
+    t: f64,
+    inner_normal: Vec3,
+}
+
+impl Shape {
+    fn of(target: &Body, base: &Base, dims: FlangeDims) -> Result<Self, BrepError> {
+        let ([i0, i1], o0, n, up) = (base.inner, base.outer[0], base.out, base.up);
+        let w = unit(target.point(i1) - target.point(i0));
+        let t = (target.point(i0) - target.point(o0)).dot(up);
+        if t.is_nan() || t <= 0.0 {
+            return Err(BrepError::Invalid("flange: the inner edge is not inside the sheet's thickness".into()));
+        }
+        let (r, a) = (dims.radius, dims.angle.to_radians());
+        let turn = libm::sincos(a);
+        // Turning `n` toward `up`: about `w` or `-w`.
+        let axis = if w.cross(n).dot(up) > 0.0 { w } else { w * -1.0 };
+        let along = turned(n, axis, turn);
+        // At a right angle exactly `r + t`: tan 45° in floating point is not quite 1, and a flange
+        // as high as its bend would come out a sliver instead of refused.
+        let set_back = (r + t) * if dims.angle == 90.0 { 1.0 } else { libm::tan(0.5 * a) };
+        let wall = dims.height - set_back;
+        if wall.is_nan() || wall <= 0.0 {
+            return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({set_back:.3})", dims.height)));
+        }
+        // One axis for the bend's both sides, through the inner edge's start `r` up: both sides
+        // turn about it, so the two cylinders are coaxial exactly (made apart, they part in the
+        // last bits, and the bend has no face across it).
+        let c_in = target.point(i0) + up * r;
+        Ok(Self { w, axis, turn, c_in, along, wall, t, inner_normal: turned(up, axis, turn) })
     }
+
+    /// Where point `p` of the end goes as the bend turns it: where the bend ends, at the wall.
+    fn turned(&self, p: Vec3) -> Vec3 {
+        self.c_in + turned(p - self.c_in, self.axis, self.turn)
+    }
+
+    /// The wall's inner and outer faces: a point of each, and the outer face's outward normal.
+    fn faces(&self, target: &Body, base: &Base) -> (Vec3, Vec3, Vec3) {
+        (self.turned(target.point(base.inner[0])), self.turned(target.point(base.outer[0])), self.inner_normal * -1.0)
+    }
+}
+
+/// A plane a side of a flange's wall goes to (D229): the wall keeps what lies where
+/// `(x − at) · normal ≤ 0`.
+#[derive(Clone, Copy, Debug)]
+struct Bound {
+    at: Vec3,
+    normal: Vec3,
+}
+
+/// The flange `base` asks for on `target`: a bend and a wall sewn to its edges; the wall's side at
+/// each end of the width square to it, or gone to `bounds` there (D229): the wall grows or is cut
+/// along the edge to the plane, the bend not, a step across the thickness between them.
+fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [Option<Bound>; 2]) -> Result<Body, BrepError> {
+    let shape = Shape::of(target, &base, dims)?;
+    let Shape { w, axis, c_in, along, wall, t, inner_normal, .. } = shape;
+    let Base { key, inner: [i0, i1], outer: [o0, o1], gone, kept, joins, .. } = base;
     let (r, a) = (dims.radius, dims.angle.to_radians());
-    let turn = libm::sincos(a);
-    // Turning `n` toward `up`: about `w` or `-w`.
-    let axis = if w.cross(n).dot(up) > 0.0 { w } else { w * -1.0 };
-    let along = turned(n, axis, turn);
-    // At a right angle exactly `r + t`: tan 45° in floating point is not quite 1, and a flange as
-    // high as its bend would come out a sliver instead of refused.
-    let set_back = (r + t) * if dims.angle == 90.0 { 1.0 } else { libm::tan(0.5 * a) };
-    let wall = dims.height - set_back;
-    if wall.is_nan() || wall <= 0.0 {
-        return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({set_back:.3})", dims.height)));
-    }
     let id = |tag: &str, k: u64| TopoId::derive(tag).id(feature).id(key).index(k).finish();
-    // From each corner of the end, about the bend's axis `up · radius` away: where the bend ends,
-    // and the wall's end beyond it.
     let mut vertices: Vec<Vertex> = target.vertices().to_vec();
-    // One axis for the bend's both sides, through the inner edge's start `r` up: both sides
-    // turn about it, so the two cylinders are coaxial exactly (made apart, they part in the last
-    // bits, and the bend has no face across it).
-    let c_in = target.point(i0) + up * r;
-    let mut corner = |base: Ix, k: u64| -> [TopoId; 3] {
-        let p = target.point(base);
-        let q = c_in + turned(p - c_in, axis, turn);
-        let (vq, ve) = (id("flange.v", k), id("flange.v", k + 1));
+    // Along the edge from `p` to the plane of `b`.
+    let reach = |b: &Bound, p: Vec3| -> Result<f64, BrepError> {
+        let d = w.dot(b.normal);
+        if d == 0.0 {
+            return Err(BrepError::Unsupported("flange: a wall's side to a plane along its edge".into()));
+        }
+        Ok((b.at - p).dot(b.normal) / d)
+    };
+    // From each corner of the end, about the bend's axis: where the bend ends, and the wall's top;
+    // with a bound at that end, also where the wall's foot meets it. The vertex at the bend's end,
+    // at the wall's foot on the bound (itself when it is there), at the top.
+    let mut corner = |end: usize, v: Ix, k: u64| -> Result<[TopoId; 4], BrepError> {
+        let q = shape.turned(target.point(v));
+        let (vq, ve, vs) = (id("flange.v", k), id("flange.v", k + 1), id("flange.v", 8 + k));
         vertices.push(Vertex { id: vq, point: q });
-        vertices.push(Vertex { id: ve, point: q + along * wall });
-        [target.vertices()[base as usize].id, vq, ve]
+        let (foot, top) = match &bounds[end] {
+            None => (vq, q + along * wall),
+            Some(b) => {
+                let out = if end == 0 { -1.0 } else { 1.0 };
+                let (f, h) = (reach(b, q)?, reach(b, q + along * wall)?);
+                // The bend stays as it is: a plane into it would cut it.
+                if f * out < 0.0 {
+                    return Err(BrepError::Unsupported("flange: the corner's plane cuts into the bend: comes later".into()));
+                }
+                if f != 0.0 {
+                    vertices.push(Vertex { id: vs, point: q + w * f });
+                }
+                (if f == 0.0 { vq } else { vs }, q + along * wall + w * h)
+            }
+        };
+        vertices.push(Vertex { id: ve, point: top });
+        Ok([target.vertices()[v as usize].id, vq, foot, ve])
     };
     // Inner and outer, at the start and end of the width.
-    let [ii0, ji0, ki0] = corner(i0, 0);
-    let [ii1, ji1, ki1] = corner(i1, 2);
-    let [oo0, po0, qo0] = corner(o0, 4);
-    let [oo1, po1, qo1] = corner(o1, 6);
+    let [ii0, ji0, fi0, ki0] = corner(0, i0, 0)?;
+    let [ii1, ji1, fi1, ki1] = corner(1, i1, 2)?;
+    let [oo0, po0, fo0, qo0] = corner(0, o0, 4)?;
+    let [oo1, po1, fo1, qo1] = corner(1, o1, 6)?;
     let point = |v: TopoId| vertices.iter().find(|x| x.id == v).map_or(Vec3::ZERO, |x| x.point);
-    // A loop of `ids` turning about `outward` by the right hand.
+    // A loop of `ids` turning about `outward` by the right hand; a vertex twice in a row once.
     let oriented = |mut ids: Vec<TopoId>, outward: Vec3| -> Vec<TopoId> {
+        ids.dedup();
+        if ids.len() > 1 && ids.first() == ids.last() {
+            ids.pop();
+        }
         let p: Vec<Vec3> = ids.iter().map(|&v| point(v)).collect();
         let normal = (0..p.len()).fold(Vec3::ZERO, |s, k| s + p[k].cross(p[(k + 1) % p.len()]));
         if normal.dot(outward) < 0.0 {
@@ -488,32 +710,34 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<
         }
         ids
     };
-    let c_out = c_in;
     let in_mid = c_in + turned(target.point(i0) - c_in, axis, libm::sincos(0.5 * a)) - c_in;
-    let inner_normal = turned(up, axis, turn);
     let mut faces: Vec<FaceSpec> = Vec::new();
-    let face = |tag: &str, surface: Surface, loop_: Vec<TopoId>| FaceSpec { id: id(tag, 0), surface, loops: vec![loop_] };
+    let face = |tag: &str, k: u64, surface: Surface, loop_: Vec<TopoId>| FaceSpec { id: id(tag, k), surface, loops: vec![loop_] };
     faces.push(face(
         "flange.bend_in",
+        0,
         Surface::Cylinder(Cylinder { origin: c_in, axis: w, radius: r, convex: false }),
         oriented(vec![ii0, ii1, ji1, ji0], in_mid * -1.0),
     ));
     faces.push(face(
         "flange.bend_out",
-        Surface::Cylinder(Cylinder { origin: c_out, axis: w, radius: r + t, convex: true }),
+        0,
+        Surface::Cylinder(Cylinder { origin: c_in, axis: w, radius: r + t, convex: true }),
         oriented(vec![oo0, oo1, po1, po0], in_mid),
     ));
     faces.push(face(
         "flange.wall_in",
+        0,
         Surface::Plane(Plane { origin: point(ji0), normal: inner_normal }),
-        oriented(vec![ji0, ji1, ki1, ki0], inner_normal),
+        oriented(vec![ji0, ji1, fi1, ki1, ki0, fi0], inner_normal),
     ));
     faces.push(face(
         "flange.wall_out",
+        0,
         Surface::Plane(Plane { origin: point(po0), normal: inner_normal * -1.0 }),
-        oriented(vec![po0, po1, qo1, qo0], inner_normal * -1.0),
+        oriented(vec![po0, po1, fo1, qo1, qo0, fo0], inner_normal * -1.0),
     ));
-    faces.push(face("flange.end", Surface::Plane(Plane { origin: point(ki0), normal: along }), oriented(vec![ki0, ki1, qo1, qo0], along)));
+    faces.push(face("flange.end", 0, Surface::Plane(Plane { origin: point(ki0), normal: along }), oriented(vec![ki0, ki1, qo1, qo0], along)));
     // The arcs of the bend at both sides, inner and outer, from the end face on.
     let arc = |c: Vec3, r: f64, from: TopoId, to: TopoId| {
         // Counterclockwise about `axis` from the end face.
@@ -529,18 +753,34 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims) -> Result<
         arc(on_axis(o1), r + t, oo1, po1),
     ]);
     // The sides: into the face at that end of the width where it is square to the width, else
-    // faces of their own.
+    // faces of their own; at a bound the bend's side, the step and the wall's side on the plane.
     let mut gone: BTreeSet<Ix> = gone.into_iter().collect();
     faces.extend(kept);
-    for (s, (join, chain)) in joins.iter().zip([[ii0, ji0, ki0, qo0, po0, oo0], [ii1, ji1, ki1, qo1, po1, oo1]]).enumerate() {
+    let ends = [[ii0, ji0, fi0, ki0, qo0, fo0, po0, oo0], [ii1, ji1, fi1, ki1, qo1, fo1, po1, oo1]];
+    for (s, (join, [ii, ji, fi, ki, qo, fo, po, oo])) in joins.iter().zip(ends).enumerate() {
         let outward = if s == 0 { w * -1.0 } else { w };
-        let chain = chain.to_vec();
+        let k = s as u64;
+        if let Some(b) = &bounds[s] {
+            faces.push(face("flange.side", k, Surface::Plane(Plane { origin: point(ii), normal: outward }), oriented(vec![ii, ji, po, oo], outward)));
+            if (fi, fo) != (ji, po) {
+                faces.push(face(
+                    "flange.step",
+                    k,
+                    Surface::Plane(Plane { origin: point(ji), normal: along * -1.0 }),
+                    oriented(vec![ji, fi, fo, po], along * -1.0),
+                ));
+            }
+            faces.push(face(
+                "flange.bound",
+                k,
+                Surface::Plane(Plane { origin: point(fi), normal: b.normal }),
+                oriented(vec![fi, ki, qo, fo], b.normal),
+            ));
+            continue;
+        }
+        let chain = vec![ii, ji, ki, qo, po, oo];
         let Some(x) = *join else {
-            faces.push(FaceSpec {
-                id: id("flange.side", s as u64),
-                surface: Surface::Plane(Plane { origin: point(chain[0]), normal: outward }),
-                loops: vec![oriented(chain, outward)],
-            });
+            faces.push(face("flange.side", k, Surface::Plane(Plane { origin: point(chain[0]), normal: outward }), oriented(chain, outward)));
             continue;
         };
         // That face's edge across the thickness runs from one of the flange's corners to the

@@ -26,7 +26,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
-pub use flange::{FlangeDims, Relief, flange_edges, flange_ends, flanges};
+pub use flange::{Closing, FlangeDims, Relief, flange_edges, flange_ends, flanges};
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
 use schemars::JsonSchema;
@@ -168,6 +168,12 @@ pub enum Op {
         relief_diameter: Option<Num>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         k_factor: Option<Num>,
+        /// How walls of flanges meeting at a corner close it (D229), `corner_gap` apart (the
+        /// part's sheet rule's).
+        #[serde(default, skip_serializing_if = "Closing::is_open")]
+        corner: Closing,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        corner_gap: Option<Num>,
     },
     /// Sheet metal from the input sketch's path: its lines and arcs (an open chain, from point
     /// `start` or else from its end named first) given `thickness` on `side` of the path (looking
@@ -567,7 +573,7 @@ impl Op {
                 path: path.clone(),
                 start: start.clone(),
             },
-            Self::Flange { edges, height, angle, radius, flip, relief, relief_diameter, k_factor } => Self::Flange {
+            Self::Flange { edges, height, angle, radius, flip, relief, relief_diameter, k_factor, corner, corner_gap } => Self::Flange {
                 edges: edges.clone(),
                 height: r(height, "height")?,
                 angle: r(angle, "angle")?,
@@ -576,6 +582,8 @@ impl Op {
                 relief: *relief,
                 relief_diameter: relief_diameter.as_ref().map(|n| r(n, "relief_diameter")).transpose()?,
                 k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
+                corner: *corner,
+                corner_gap: corner_gap.as_ref().map(|n| r(n, "corner_gap")).transpose()?,
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
@@ -771,7 +779,7 @@ impl Op {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
-            Self::Flange { edges, height, angle, radius, flip, relief, relief_diameter, k_factor } => {
+            Self::Flange { edges, height, angle, radius, flip, relief, relief_diameter, k_factor, corner, corner_gap } => {
                 let Some(radius) = radius else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let round = match relief {
                     Relief::Square => None,
@@ -784,7 +792,8 @@ impl Op {
                         Some((num(d)?, num(k)?))
                     }
                 };
-                let dims = FlangeDims { height: num(height)?, angle: num(angle)?, radius: num(radius)?, flip: *flip, round };
+                let gap = corner_gap.as_ref().map(num).transpose()?;
+                let dims = FlangeDims { height: num(height)?, angle: num(angle)?, radius: num(radius)?, flip: *flip, round, corner: *corner, gap };
                 flanges(feature, inputs[0], edges, dims)?
             }
             // Made above, before inputs are taken as bodies.

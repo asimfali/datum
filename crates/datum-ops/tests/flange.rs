@@ -304,6 +304,62 @@ fn a_round_relief_at_each_corner_of_a_tray() {
     assert!(flange(&p, &edges, serde_json::json!({"relief": "round"})).is_err());
 }
 
+/// The corners of a tray closed (D229): at a right angle overlapping, the covering wall grows to
+/// the other's outer face (`r + t`), the other to its inner face less the gap (`r − g`); mitred,
+/// both to the plane halfway, each `r + t/2` on average less the gap's share. The bends stay.
+#[test]
+fn a_trays_corners_closed() {
+    let p = plate();
+    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
+    let edges = ends_edges(&p, &[long, short].concat());
+    let open = flange(&p, &edges, serde_json::json!({})).unwrap();
+    let wall = 20.0 - (R + T);
+    for g in [0.0, 1.0] {
+        let per_corner = |grow: f64| 4.0 * T * wall * grow;
+        for (corner, grow) in
+            [("overlap_1", (R + T) + (R - g)), ("overlap_2", (R + T) + (R - g)), ("miter", 2.0 * (R + 0.5 * T - g / std::f64::consts::SQRT_2))]
+        {
+            let b = flange(&p, &edges, serde_json::json!({"corner": corner, "corner_gap": g})).unwrap();
+            let added = b.volume() - open.volume();
+            assert!((added - per_corner(grow)).abs() < 1e-9 * b.volume(), "{corner} {g}: {added} vs {}", per_corner(grow));
+            let f = unfold_side(&b, false, K).unwrap();
+            assert!(f.size.x > 0.0 && f.size.y > 0.0);
+        }
+    }
+    // A closed corner takes the rule's gap.
+    assert!(flange(&p, &edges, serde_json::json!({"corner": "miter"})).is_err());
+}
+
+/// The author's tray (D229): the long sides flanged first, square; then the ends at another angle,
+/// their walls going to the long walls' inner faces, the gap short; the long walls stay.
+#[test]
+fn ends_flanged_after_the_sides_go_to_their_walls() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    let sides = flange(&p, &ends_edges(&p, &long), serde_json::json!({})).unwrap();
+    // The ends' edges on the top: at x = 0 and x = 100.
+    let edges = vec![wall_edge(&sides, 0, 0.0, T), wall_edge(&sides, 0, 100.0, T)];
+    for angle in [90.0, 45.0] {
+        let open = flange(&sides, &edges, serde_json::json!({"angle": angle})).unwrap();
+        let closed = flange(&sides, &edges, serde_json::json!({"angle": angle, "corner": "overlap_1", "corner_gap": 1})).unwrap();
+        assert!(closed.volume() > open.volume(), "{angle}");
+        if angle == 90.0 {
+            // Each end's wall grows by `r − g` at each corner: to the long walls' inner faces.
+            let wall = 20.0 - (R + T);
+            assert!(close(closed.volume() - open.volume(), 4.0 * T * wall * (R - 1.0)), "{}", closed.volume() - open.volume());
+        }
+        let f = unfold_side(&closed, false, K).unwrap();
+        assert!(f.size.x > 0.0);
+        // The long walls as they were: their faces' areas.
+        let walls = |b: &Body| faces_of_area(b, 100.0 * wall_height()).len();
+        assert_eq!(walls(&closed), walls(&sides));
+    }
+}
+
+fn wall_height() -> f64 {
+    20.0 - (R + T)
+}
+
 /// At an inner corner of an L-shaped plate the flanges would run into each other: refused.
 #[test]
 fn flanges_at_an_inner_corner_are_refused() {

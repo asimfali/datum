@@ -268,10 +268,13 @@
     "slotted": "e07e6ada828f4f29811c2fbade047a8362a4457a0c46711b943597d584e9f78c"
   },
   "sheet_tray.json": {
+    "ends": "6a75a27beedc1fa9e7e3f21b3e76f1bdc565908e4db981a6aec5079613b5ba39",
+    "mitred": "e884c778582aa13f983031040b11098bab7b205256890e55f9387fa1b92d8339",
     "outline": "0e986b46551fcef99375e88081ef00a597bf89b847fbef54e18815d047d2e166",
     "plate": "3130c303223acfd8fbd140d8affdfb9238ff3f9cfe3b6e43a45f5d77929345bd",
     "relieved": "1a412778c8808b0b09d7e30d0de5a7993076ac50931ca43c8038a0512f198738",
     "relieved_blank": "5a95a6676b916c478e8f598fbee1b4c8e03ee320d69d35a23c2ccd2a068475a8",
+    "sides": "570c65692d675cee34edb9e5edbef8e2679708b291ef38d61bc9dd49bab42ed3",
     "tray": "2c0746f1296cc6c80b6f9beb6985044a307bcc26f7e7eb5cdfa764de318f58de"
   },
   "sketch_plate.json": {

@@ -185,6 +185,8 @@ impl Laid {
 /// The faces that go on smoothly from `x` across an edge of its outline, each once with the first
 /// half-edge it is across (a cut across the bend line breaks it into several): outward normals
 /// agree along the edge (a bend line), where an end or a cap of the sheet turns by a right angle.
+/// Two planes never meet at a bend line (a bend is a cylinder): walls of a mitred corner (D229)
+/// meet at 45°, no less apart than a bend line's sides by the normals alone.
 pub(crate) fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
     let mut seen = BTreeSet::new();
     let he = |h: Ix| body.half_edges()[h as usize];
@@ -194,7 +196,8 @@ pub(crate) fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
         .filter_map(|h| {
             let y = face_of(he(h).twin);
             let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
-            (y != x && normal(x, m).dot(normal(y, m)) > 0.5).then_some((y, h))
+            let planes = [x, y].iter().all(|&f| matches!(body.faces()[f as usize].surface, Surface::Plane(_)));
+            (y != x && !planes && normal(x, m).dot(normal(y, m)) > 0.5).then_some((y, h))
         })
         .filter(|&(y, _)| seen.insert(y))
         .collect()

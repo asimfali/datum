@@ -841,13 +841,14 @@ struct Viewer {
 }
 
 /// The form of a flange: its name, height and angle as typed, the side, whether corners where
-/// flanges meet get round reliefs (D229), the preview sent last.
+/// flanges meet get round reliefs and how their walls close them (D229), the preview sent last.
 struct FlangeForm {
     name: String,
     height: String,
     angle: String,
     flip: bool,
     round: bool,
+    corner: &'static str,
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -855,15 +856,34 @@ struct FlangeForm {
     editing: bool,
 }
 
-/// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
-fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool, round: bool) -> Json {
-    json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip,
-        "relief": relief(round)})
+impl FlangeForm {
+    /// What the form says of the flange: the fields an edit of it changes.
+    fn fields(&self) -> Json {
+        json!({"name": self.name, "height": value_of(&self.height), "angle": value_of(&self.angle), "flip": self.flip,
+            "relief": if self.round { "round" } else { "square" }, "corner": self.corner})
+    }
+
+    /// The `flange` feature the form makes on edges `edges` of body `body`.
+    fn params(&self, body: &str, edges: &[String]) -> Json {
+        let mut j = self.fields();
+        j["op"] = json!("flange");
+        j["inputs"] = json!([body]);
+        j["edges"] = json!(edges);
+        j
+    }
 }
 
-/// A flange's relief at corners as the feature names it.
-fn relief(round: bool) -> &'static str {
-    if round { "round" } else { "square" }
+/// How walls of flanges meeting at a corner close it (D229), as the feature says it.
+const CORNERS: [&str; 4] = ["open", "miter", "overlap_1", "overlap_2"];
+
+/// The form's label of corner joint `c`.
+fn corner_label<'a>(i18n: &'a crate::i18n::I18n, c: &str) -> &'a str {
+    match c {
+        "miter" => i18n.t("flange-corner-miter", "Miter"),
+        "overlap_1" => i18n.t("flange-corner-overlap-1", "Overlap 1"),
+        "overlap_2" => i18n.t("flange-corner-overlap-2", "Overlap 2"),
+        _ => i18n.t("flange-corner-open", "Open"),
+    }
 }
 
 /// Whether the part of body `k` starts with a rolled shell (a pipe).
@@ -4207,6 +4227,7 @@ impl Viewer {
                     angle: if f["angle"].is_null() { "90".into() } else { definition(&f["angle"]) },
                     flip: f["flip"] == true,
                     round: f["relief"] == "round",
+                    corner: CORNERS.into_iter().find(|c| f["corner"] == *c).unwrap_or("open"),
                     fresh: true,
                     sent: None,
                     editing: true,
@@ -4500,6 +4521,7 @@ impl Viewer {
             angle: "90".into(),
             flip: false,
             round: false,
+            corner: "open",
             fresh: true,
             sent: None,
             editing: false,
@@ -4513,11 +4535,8 @@ impl Viewer {
         let Some(f) = &mut self.flange else { return };
         let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
         let (command, params) = match self.flange_edges.first() {
-            _ if f.editing => (
-                "edit",
-                json!({"name": f.name, "height": value_of(&f.height), "angle": value_of(&f.angle), "flip": f.flip, "relief": relief(f.round)}),
-            ),
-            Some((body, _)) => ("add", flange_params(&f.name, body, &edges, &f.height, &f.angle, f.flip, f.round)),
+            _ if f.editing => ("edit", f.fields()),
+            Some((body, _)) => ("add", f.params(body, &edges)),
             None => {
                 self.flange = None;
                 return;
@@ -4561,6 +4580,15 @@ impl Viewer {
                     ui.label(self.i18n.t("flange-relief", "Corner relief"));
                     ui.radio_value(&mut f.round, false, self.i18n.t("flange-relief-square", "Square"));
                     ui.radio_value(&mut f.round, true, self.i18n.t("flange-relief-round", "Round"));
+                });
+                // How the walls close a corner where flanges meet: 1 is along the first edge picked.
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("flange-corner", "Corner joint"));
+                    egui::ComboBox::from_id_salt("flange-corner").selected_text(corner_label(&self.i18n, f.corner)).show_ui(ui, |ui| {
+                        for c in CORNERS {
+                            ui.selectable_value(&mut f.corner, c, corner_label(&self.i18n, c));
+                        }
+                    });
                 });
                 if let Some(Err(why)) = preview {
                     ui.colored_label(ui.visuals().error_fg_color, why);
@@ -8703,10 +8731,21 @@ mod tests {
     #[test]
     fn flange_params_are_the_features_fields() {
         let faces = ["ab".to_string(), "cd".to_string()];
+        let form = FlangeForm {
+            name: "flange1".into(),
+            height: "20".into(),
+            angle: "h + 5".into(),
+            flip: true,
+            round: true,
+            corner: "miter",
+            fresh: false,
+            sent: None,
+            editing: false,
+        };
         assert_eq!(
-            flange_params("flange1", "sheet1", &faces, "20", "h + 5", true, true),
+            form.params("sheet1", &faces),
             json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true,
-                "relief": "round"})
+                "relief": "round", "corner": "miter"})
         );
     }
 
@@ -8720,7 +8759,7 @@ mod tests {
         h.state_mut().open_flange();
         h.run();
         h.get_by_label("Height");
-        let params = flange_params("flange1", "sheet1", &[format!("{face:?}")], "20", "90", false, false);
+        let params = h.state().flange.as_ref().unwrap().params("sheet1", &[format!("{face:?}")]);
         let previews: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect();
         assert_eq!(previews.last(), Some(&params));
         h.state_mut().model.as_mut().unwrap().preview = Some((params.clone(), Ok(json!({"body": "flange1"}))));
