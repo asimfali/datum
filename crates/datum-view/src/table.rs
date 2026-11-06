@@ -699,9 +699,7 @@ fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Opti
             let v = value_of(text);
             match datum_model::library::bend_radius(&v, 1.0) {
                 Ok(r) if r >= 0.0 => Ok(Some(v)),
-                _ => {
-                    Err(i18n.t("table-rule-radius", "The bend radius is a number in mm, not below zero, or a formula of the thickness t").to_string())
-                }
+                _ => Err(radius_wanted(i18n)),
             }
         }
         "kind" if !text.is_empty() => {
@@ -715,6 +713,11 @@ fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Opti
     }
 }
 
+/// What a sheet rule's bend radius must be.
+fn radius_wanted(i18n: &I18n) -> String {
+    i18n.t("table-rule-radius", "The bend radius is a number in mm above zero, or a formula of the thickness t").to_string()
+}
+
 /// The record `e` as a whole: a rule has a kind and a part's has no thickness or bend radius;
 /// the library's own check has the last word.
 fn check_record(rec: &Records, e: &Json, i18n: &I18n) -> Result<(), String> {
@@ -723,6 +726,12 @@ fn check_record(rec: &Records, e: &Json, i18n: &I18n) -> Result<(), String> {
             None => return Err(i18n.t("table-rule-kind", "The kind is Sheet or Part").to_string()),
             Some("part") if !e["thickness"].is_null() || !e["radius"].is_null() => {
                 return Err(i18n.t("table-rule-part", "A part's rule has no thickness or bend radius").to_string());
+            }
+            Some("sheet") if e["thickness"].is_null() => {
+                return Err(i18n.t("table-rule-thickness", "The thickness is a number above zero, in mm").to_string());
+            }
+            Some("sheet") if !datum_model::library::bend_radius(&e["radius"], e["thickness"].as_f64().unwrap_or_default()).is_ok_and(|r| r > 0.0) => {
+                return Err(radius_wanted(i18n));
             }
             _ => {}
         }
@@ -1270,12 +1279,15 @@ mod tests {
             (vec![(3, 0, "Д"), (3, 1, "part"), (3, 2, "2")], "A part's rule has no thickness or bend radius"),
             (vec![(3, 0, "Д"), (3, 2, "2")], "The kind is Sheet or Part"),
             (vec![(3, 0, "Д"), (3, 1, "tube")], "The kind is Sheet or Part"),
-            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "-1")], "The bend radius is a number in mm, not below zero, or a formula of the thickness t"),
-            (
-                vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "2 * q")],
-                "The bend radius is a number in mm, not below zero, or a formula of the thickness t",
-            ),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "-1")], "The bend radius is a number in mm above zero, or a formula of the thickness t"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "2 * q")], "The bend radius is a number in mm above zero, or a formula of the thickness t"),
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 2, "0")], "The thickness is a number above zero, in mm"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet")], "The thickness is a number above zero, in mm"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 2, "2")], "The bend radius is a number in mm above zero, or a formula of the thickness t"),
+            (
+                vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 2, "2"), (3, 3, "0")],
+                "The bend radius is a number in mm above zero, or a formula of the thickness t",
+            ),
             (vec![(3, 0, "Деталь")], "`Деталь` is a rule already"),
             (vec![(1, 0, " ")], "A rule needs a name"),
             (vec![(2, 2, "1")], "A part's rule has no thickness or bend radius"),
@@ -1284,6 +1296,21 @@ mod tests {
             assert!(sent.is_empty(), "{edits:?}");
             assert_eq!(error.as_deref(), Some(why), "{edits:?}");
             pending.clear();
+        }
+    }
+
+    /// A sheet rule filled in cell by cell is told what is still needed in the window's language,
+    /// not in the library's English.
+    #[test]
+    fn a_rule_half_filled_says_so_in_russian() {
+        let ru = I18n::of("ru");
+        for row in [["Д", "Лист", "", ""], ["Д", "Лист", "2", ""], ["Д", "Лист", "2", "0"], ["Д", "Лист", "0.4", "t - 0.5"]] {
+            let mut e = json!({"name": row[0], "material": "Сталь"});
+            for (key, text) in RULES.keys.iter().zip(row).skip(1) {
+                set_field(&mut e, key, field_value(&RULES, key, text, &ru).unwrap());
+            }
+            let why = check_record(&RULES, &e, &ru).unwrap_err();
+            assert!(!why.is_ascii() && !why.contains('`'), "{row:?}: {why}");
         }
     }
 
