@@ -422,16 +422,26 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
             Surface::Cylinder(c) => {
                 let sigma = if c.convex { 1.0 } else { -1.0 };
                 let turn = a * sigma;
-                // The face's angle: the turn of an arc of its outline (a cap's edge), from the
-                // end where turning about `turn` starts.
+                // The face's angle: the turn of an arc of its outline (a cap's edge) from bend
+                // line to bend line, from the end where turning about `turn` starts.
+                let on_line = |v: Ix, k: Option<usize>| {
+                    k.and_then(|k| chain.get(k))
+                        .is_some_and(|t| t.iter().any(|&y| body.face_loops(y).flat_map(|l| body.loop_half_edges(l)).any(|g| he(g).origin == v)))
+                };
                 let arc = st.iter().flat_map(|&x| body.loop_half_edges(outline(x))).find_map(|h| {
                     let e = &body.edges()[he(h).edge as usize];
                     let arc = body.edge_arc(e)?;
                     let arc = if e.half == h { arc } else { arc.reversed() };
-                    Some((arc, body.point(he(h).origin), body.point(he(body.next(h)).origin)))
+                    let (v, w) = (he(h).origin, he(body.next(h)).origin);
+                    // Each bend line there is (a rolled sheet alone has none) holds an end of it.
+                    let ends = [i.checked_sub(1), Some(i + 1)];
+                    let lines = ends.iter().filter(|k| k.and_then(|k| chain.get(k)).is_some()).count();
+                    let whole = [v, w].iter().filter(|&&x| ends.iter().any(|&k| on_line(x, k))).count() >= lines;
+                    whole.then(|| (arc, body.point(v), body.point(w)))
                 });
-                // A bend cut across at both its sides (D202) has no such edge left: its angle is
-                // then the turn between its two bend lines.
+                // A bend cut across at both its sides (D202), or relieved at both its corners
+                // (D229), has no such edge left: its angle is then the turn between its two bend
+                // lines.
                 let (span, from) = match arc {
                     Some((arc, p, q)) => (arc.sweep(p, q), entry.unwrap_or(if arc.axis.dot(turn) > 0.0 { p } else { q })),
                     None => {

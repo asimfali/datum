@@ -26,7 +26,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
-pub use flange::{FlangeDims, flange_edges, flange_ends, flanges};
+pub use flange::{FlangeDims, Relief, flange_edges, flange_ends, flanges};
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
 use schemars::JsonSchema;
@@ -159,6 +159,15 @@ pub enum Op {
         radius: Option<Num>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         flip: bool,
+        /// The relief where flanges meet at a corner (D229): square, or round, a circle of
+        /// `relief_diameter` about where their bend lines meet, cut through the blank laid at
+        /// `k_factor`. Both the part's sheet rule's, put here when the model is built.
+        #[serde(default, skip_serializing_if = "Relief::is_square")]
+        relief: Relief,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        relief_diameter: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
     },
     /// Sheet metal from the input sketch's path: its lines and arcs (an open chain, from point
     /// `start` or else from its end named first) given `thickness` on `side` of the path (looking
@@ -558,12 +567,15 @@ impl Op {
                 path: path.clone(),
                 start: start.clone(),
             },
-            Self::Flange { edges, height, angle, radius, flip } => Self::Flange {
+            Self::Flange { edges, height, angle, radius, flip, relief, relief_diameter, k_factor } => Self::Flange {
                 edges: edges.clone(),
                 height: r(height, "height")?,
                 angle: r(angle, "angle")?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
                 flip: *flip,
+                relief: *relief,
+                relief_diameter: relief_diameter.as_ref().map(|n| r(n, "relief_diameter")).transpose()?,
+                k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
@@ -759,9 +771,20 @@ impl Op {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
-            Self::Flange { edges, height, angle, radius, flip } => {
+            Self::Flange { edges, height, angle, radius, flip, relief, relief_diameter, k_factor } => {
                 let Some(radius) = radius else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
-                let dims = FlangeDims { height: num(height)?, angle: num(angle)?, radius: num(radius)?, flip: *flip };
+                let round = match relief {
+                    Relief::Square => None,
+                    Relief::Round => {
+                        let (Some(d), Some(k)) = (relief_diameter, k_factor) else {
+                            return Err(BrepError::Invalid(
+                                "a round relief takes its diameter and the K-factor from the part's sheet rule: it has none".into(),
+                            ));
+                        };
+                        Some((num(d)?, num(k)?))
+                    }
+                };
+                let dims = FlangeDims { height: num(height)?, angle: num(angle)?, radius: num(radius)?, flip: *flip, round };
                 flanges(feature, inputs[0], edges, dims)?
             }
             // Made above, before inputs are taken as bodies.

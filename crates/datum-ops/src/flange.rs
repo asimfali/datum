@@ -9,18 +9,40 @@ use std::collections::BTreeSet;
 
 use datum_brep::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Ix, Plane, Surface, TopoId, Vertex, build_with_curves};
 use datum_math::{Sign, Vec3, orient3d_coords};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 
+use crate::bent::Corner;
 use crate::sketch::parallel;
 
 /// What a flange is: its height from the outer surface of the sheet (for a right angle; else
 /// along the flange from where its outer surface meets the sheet's), the angle it turns by in
-/// degrees, its bend's inner radius, and the side it turns to (`flip`: the other).
+/// degrees, its bend's inner radius, the side it turns to (`flip`: the other), and at corners
+/// where flanges meet a round relief's diameter and the K-factor the blank is laid at (D229).
 #[derive(Clone, Copy, Debug)]
 pub struct FlangeDims {
     pub height: f64,
     pub angle: f64,
     pub radius: f64,
     pub flip: bool,
+    pub round: Option<(f64, f64)>,
+}
+
+/// The relief at a corner where flanges meet (D229).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Relief {
+    /// The square between the two bends' strips, which the open corner leaves.
+    #[default]
+    Square,
+    /// That square and a circle about the corner where the bend lines meet.
+    Round,
+}
+
+impl Relief {
+    pub fn is_square(&self) -> bool {
+        *self == Self::Square
+    }
 }
 
 /// Flanges on edges `edges` of sheet metal `target`, one after another (D205): a long edge of an
@@ -53,11 +75,15 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         }
     }
     // Flanges on two ends meeting at a corner leave it open (the corner's relief): neither's side
-    // goes into the other's end.
+    // goes into the other's end. Each corner: its two vertices, the way away from the sheet there.
+    let mut corners: Vec<([TopoId; 2], Vec3)> = Vec::new();
     for (k, (_, c, a)) in sites.iter().enumerate() {
         for (_, d, b) in &sites[k + 1..] {
             if c.iter().any(|v| d.contains(v)) {
                 open_corner(target, a, b, dims.angle)?;
+                let shared: Vec<TopoId> = c.iter().copied().filter(|v| d.contains(v)).collect();
+                let [v, w] = shared[..] else { return Err(BrepError::Invalid("flange: a corner of more than one edge".into())) };
+                corners.push(([v, w], a.out + b.out));
             }
         }
     }
@@ -66,6 +92,45 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
     for (e, ..) in sites {
         let base = base(&body, e, dims.flip, &taken)?;
         body = grow(feature, &body, base, dims)?;
+    }
+    match dims.round {
+        Some((d, k)) if !corners.is_empty() => relieve_corners(feature, &body, &corners, 0.5 * d, k),
+        _ => Ok(body),
+    }
+}
+
+/// Round reliefs at `corners` of `body` (D229): about the vertex of each on the sheet's front
+/// side, cut through the blank from the face of the front side it is a corner of.
+fn relieve_corners(feature: TopoId, body: &Body, corners: &[([TopoId; 2], Vec3)], radius: f64, k: f64) -> Result<Body, BrepError> {
+    if !(radius > 0.0 && radius.is_finite()) {
+        return Err(BrepError::Degenerate(format!("a relief's diameter is above zero, got {}", 2.0 * radius)));
+    }
+    let sides = crate::unfold::sheet_sides(body)?;
+    let skip = crate::unfold::branches(body);
+    let front: BTreeSet<Ix> = crate::unfold::chain_through(body, sides[0], &skip)?.into_iter().flatten().collect();
+    let vertex = |id: TopoId| body.vertices().binary_search_by_key(&id, |v| v.id).map(|v| v as Ix).ok();
+    // Each corner by the flat face of the front side it lies on (by its ID: faces are numbered
+    // anew after a cut), the faces each in turn.
+    let mut by_face: Vec<(TopoId, Vec<Corner>)> = Vec::new();
+    for &(ids, away) in corners {
+        let found = ids.iter().filter_map(|&id| vertex(id).map(|v| (id, v))).find_map(|(id, v)| {
+            let x = front.iter().copied().find(|&x| {
+                matches!(body.faces()[x as usize].surface, Surface::Plane(_))
+                    && body.face_loops(x).flat_map(|l| body.loop_half_edges(l)).any(|h| body.half_edges()[h as usize].origin == v)
+            })?;
+            Some((body.faces()[x as usize].id, Corner { key: id, at: body.point(v), away }))
+        });
+        let (x, corner) =
+            found.ok_or_else(|| BrepError::Unsupported("flange: a relief at a corner off the sheet's flat front comes later".into()))?;
+        match by_face.iter_mut().find(|(y, _)| *y == x) {
+            Some((_, cs)) => cs.push(corner),
+            None => by_face.push((x, vec![corner])),
+        }
+    }
+    let mut body = body.clone();
+    for (x, cs) in by_face {
+        let home = body.faces().binary_search_by_key(&x, |f| f.id).map_err(|_| BrepError::Invalid("relief: a face lost".into()))? as Ix;
+        body = crate::bent::relieve(feature, &body, home, &cs, radius, k)?;
     }
     Ok(body)
 }

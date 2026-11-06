@@ -281,6 +281,29 @@ fn flanges_round_a_plate_leave_the_corners_open() {
     assert!(flange(&p, &corner, serde_json::json!({"angle": 60})).is_ok());
 }
 
+/// A round relief at each corner of a tray (D229): a circle about the plate's corner, where the
+/// bend lines meet, cut through the plate and both bends; on the blank one circle each.
+#[test]
+fn a_round_relief_at_each_corner_of_a_tray() {
+    let p = plate();
+    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
+    let edges = ends_edges(&p, &[long, short].concat());
+    let open = flange(&p, &edges, serde_json::json!({})).unwrap();
+    for d in [4.0, 6.0] {
+        let round = flange(&p, &edges, serde_json::json!({"relief": "round", "relief_diameter": d, "k_factor": K})).unwrap();
+        assert!(round.volume() < open.volume(), "{d}");
+        let f = unfold_side(&round, false, K).unwrap();
+        // The cross's outline goes round each circle's three quarters on the metal.
+        let arcs: Vec<_> =
+            f.pieces.iter().filter(|p| matches!(p, datum_ops::FlatPiece::Arc { radius, .. } if (radius - 0.5 * d).abs() < 1e-9)).collect();
+        assert!(!arcs.is_empty(), "{:?}", f.pieces);
+        let (size, ..) = blank(&round);
+        assert!(close(size.0, 60.0 + 2.0 * longer(20.0, 90.0)) && close(size.1, 100.0 + 2.0 * longer(20.0, 90.0)), "{size:?}");
+    }
+    // Without the rule's diameter and K: refused.
+    assert!(flange(&p, &edges, serde_json::json!({"relief": "round"})).is_err());
+}
+
 /// At an inner corner of an L-shaped plate the flanges would run into each other: refused.
 #[test]
 fn flanges_at_an_inner_corner_are_refused() {

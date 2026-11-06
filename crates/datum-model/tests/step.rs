@@ -27,12 +27,14 @@ fn reference_models_export_or_say_why_not() {
             let name = level.map_or_else(|| name.clone(), |l| format!("{name} [{l}]"));
             let step = out.join(format!("{name}.step"));
             let note = out.join(format!("{name}.step.txt"));
-            // Round holes and slots in a rolled sheet, or across a bend: circles of the development,
+            // Round holes and slots in a rolled sheet, or across a bend (a round relief too, D229):
+            // circles of the development,
             // not circles in 3D.
             let inexact: &[&str] = match name.as_str() {
                 "rolled_perforation" => &["perforated", "slotted"],
                 "rolled_holes" => &["perforated"],
                 "sheet_bend_cut" => &["punched"],
+                "sheet_tray" => &["relieved"],
                 "rolled_trim" => &["trimmed", "trimmed_other"],
                 "branch_tee" => &["main_with_hole", "branch_saddle"],
                 _ => &[],

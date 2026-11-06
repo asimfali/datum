@@ -39,10 +39,69 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed, grow: bool)
     // On the wall of a flange on the sheet's side (D205), laid off the sheet's own blank: a blank of
     // that wall alone, as a plate's.
     let flanges = crate::unfold::branches(target);
-    let blank =
-        if flanges.contains(&(f as Ix)) { Blank::flange_wall(target, f as Ix, &flanges, sketch) } else { Blank::new(target, f as Ix, sketch)? };
+    let blank = if flanges.contains(&(f as Ix)) {
+        Blank::flange_wall(target, f as Ix, &flanges, sketch.frame)
+    } else {
+        Blank::new(target, f as Ix, sketch.frame, sketch.k_factor)?
+    };
     let Some(blank) = blank else { return within() };
     let profiles = blank.laid(feature, sketch)?;
+    cut(feature, target, &blank, profiles, grow, &within)
+}
+
+/// A corner of sheet metal to relieve: the vertex's ID (the relief's IDs come from it), where it
+/// is, and the way away from the sheet there.
+pub(crate) struct Corner {
+    pub key: TopoId,
+    pub at: Vec3,
+    pub away: Vec3,
+}
+
+/// Round reliefs at corners of sheet metal `target` where flanges meet (D229): a circle of
+/// `radius` about each corner (a vertex of plane face `home` of the sheet's front side, with the
+/// way `away` from the sheet there), cut through the blank laid at K-factor `k`: the sheet's
+/// corner and both bends.
+pub(crate) fn relieve(feature: TopoId, target: &Body, home: Ix, corners: &[Corner], radius: f64, k: f64) -> Result<Body, BrepError> {
+    let Surface::Plane(p) = target.faces()[home as usize].surface else { return Err(BrepError::Invalid("relief: a corner off a flat face".into())) };
+    let z = unit(p.normal);
+    let x = unit(if z.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) }.cross(z));
+    let frame = [p.origin, x, z.cross(x), z];
+    let blank = Blank::new(target, home, frame, Some(k))?.ok_or_else(|| BrepError::Invalid("relief: a corner of a sheet without bends".into()))?;
+    let profiles = corners
+        .iter()
+        .map(|&Corner { key, at: corner, away }| {
+            let c = blank.flat(blank.home, corner);
+            let d = blank.flat(blank.home, corner + away);
+            let a0 = libm::atan2(d.y - c.y, d.x - c.x);
+            // Two arcs about the corner, from either side of the way away from the sheet: the short
+            // one off the metal, the long one through it.
+            let at = |a: f64| {
+                let (sn, cs) = libm::sincos(a);
+                Vec2::new(c.x + radius * cs, c.y + radius * sn)
+            };
+            let id = |tag: &str, k: u64, layer: u64| TopoId::derive(tag).id(feature).id(key).index(k).index(layer).finish();
+            ProfileLoop {
+                points: vec![at(a0 - 0.3), at(a0 + 0.3)],
+                vertices: (0..2).map(|k| [id("relief.v", k, 0), id("relief.v", k, 1)]).collect(),
+                sides: (0..2).map(|k| id("relief.side", k, 0)).collect(),
+                arcs: vec![Some(ProfileArc { center: c, ccw: true }); 2],
+            }
+        })
+        .collect();
+    cut(feature, target, &blank, profiles, false, &|| Err(BrepError::Invalid("relief: the circle stays within a face".into())))
+}
+
+/// `profiles`, on `blank` of `target`, cut through it (`grow`: added): see [`punch`]; a cut within
+/// the blank's own face `within` makes.
+fn cut(
+    feature: TopoId,
+    target: &Body,
+    blank: &Blank,
+    profiles: Vec<ProfileLoop>,
+    grow: bool,
+    within: &dyn Fn() -> Result<Body, BrepError>,
+) -> Result<Body, BrepError> {
+    let later = |m: &str| BrepError::Unsupported(format!("adding to sheet metal: {m} comes later"));
     let loops = blank.outline(target)?;
     // The blank's outline: the loop round the others (the cuts in it).
     let outer = (0..loops.len())
@@ -256,7 +315,7 @@ pub struct NearBend {
 pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Result<Vec<NearBend>, BrepError> {
     let (Some(id), None) = (sketch.face, &sketch.developed) else { return Ok(Vec::new()) };
     let Ok(f) = target.faces().binary_search_by_key(&id, |f| f.id) else { return Ok(Vec::new()) };
-    let Some(blank) = Blank::new(target, f as Ix, sketch)? else { return Ok(Vec::new()) };
+    let Some(blank) = Blank::new(target, f as Ix, sketch.frame, sketch.k_factor)? else { return Ok(Vec::new()) };
     let mut near = Vec::new();
     for l in blank.laid(feature, sketch)? {
         // The edges that distort: arcs, and lines not square to the bend lines (along the
@@ -740,12 +799,12 @@ struct Blank {
 impl Blank {
     /// The blank of the sheet `target` whose face `f` the sketch lies on; none for a sheet
     /// without bends.
-    fn new(target: &Body, f: Ix, sketch: &Placed) -> Result<Option<Self>, BrepError> {
+    fn new(target: &Body, f: Ix, frame: [Vec3; 4], k: Option<f64>) -> Result<Option<Self>, BrepError> {
         let unsupported = |m: &str| BrepError::Unsupported(format!("cut across a bend: {m}"));
         let surface = |x: Ix| target.faces()[x as usize].surface;
         let skip = crate::unfold::branches(target);
         let mut front = chain_through(target, f, &skip)?;
-        let Some(bend) = front.iter().position(|s| matches!(surface(s[0]), Surface::Cylinder(_))) else { return Self::plate(target, &front, sketch) };
+        let Some(bend) = front.iter().position(|s| matches!(surface(s[0]), Surface::Cylinder(_))) else { return Self::plate(target, &front, frame) };
         let Surface::Cylinder(c0) = surface(front[bend][0]) else { return Ok(None) };
         let (across, _) =
             opposite_cylinder(target, front[bend][0] as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
@@ -774,7 +833,7 @@ impl Blank {
             (false, true) => reversed,
             (false, false) => return Err(unsupported("the sheet's two sides do not pair face by face")),
         };
-        let [o, _, _, z] = sketch.frame;
+        let [o, _, _, z] = frame;
         let a = unit(c0.axis);
         let e = unit(a.cross(z));
         let s_of = |p: Vec3| (p - o).dot(e);
@@ -807,7 +866,7 @@ impl Blank {
             back.reverse();
             home = front.len() - 1 - home;
         }
-        let k = sketch.k_factor;
+
         let n = front.len();
         let mut strips: Vec<Option<Strip>> = (0..n).map(|_| None).collect();
         let lo = if home > 0 { s_of(seam(&front[home], &front[home - 1])?) } else { f64::NEG_INFINITY };
@@ -909,13 +968,13 @@ impl Blank {
 
     /// The blank of a sheet without bends (a face of sheet metal, D195; D202): one strip, laid in
     /// the sketch's own axes; the other side the sheet's other side. None for anything else.
-    fn plate(target: &Body, front: &[Vec<Ix>], sketch: &Placed) -> Result<Option<Self>, BrepError> {
+    fn plate(target: &Body, front: &[Vec<Ix>], frame: [Vec3; 4]) -> Result<Option<Self>, BrepError> {
         let [home] = front else { return Ok(None) };
         let Surface::Plane(p) = target.faces()[home[0] as usize].surface else { return Ok(None) };
         let Ok(sides) = crate::unfold::sheet_sides(target) else { return Ok(None) };
         let Some(&other) = sides.iter().find(|x| !home.contains(x)) else { return Ok(None) };
         let Surface::Plane(q) = target.faces()[other as usize].surface else { return Ok(None) };
-        let [o, x, y, z] = sketch.frame;
+        let [o, x, y, z] = frame;
         let n = unit(p.normal);
         let back = chain_through(target, other, &crate::unfold::branches(target))?.concat();
         let strip = Strip {
@@ -930,7 +989,7 @@ impl Blank {
     /// The blank of wall `f` of a flange on the sheet's side (D205): one strip, laid in the
     /// sketch's own axes; its other side the flange's face parallel to it, nearest. None for a
     /// face that is no flange's flat wall.
-    fn flange_wall(target: &Body, f: Ix, flanges: &BTreeSet<Ix>, sketch: &Placed) -> Option<Self> {
+    fn flange_wall(target: &Body, f: Ix, flanges: &BTreeSet<Ix>, frame: [Vec3; 4]) -> Option<Self> {
         let plane = |x: Ix| match target.faces()[x as usize].surface {
             Surface::Plane(p) => Some(p),
             _ => None,
@@ -943,7 +1002,7 @@ impl Blank {
             .filter_map(|&x| plane(x).filter(|q| crate::sketch::parallel(q.normal, p.normal)).map(|q| (x, (p.origin - q.origin).dot(n))))
             .filter(|(_, t)| *t > 0.0)
             .min_by(|a, b| a.1.total_cmp(&b.1))?;
-        let [o, x, y, z] = sketch.frame;
+        let [o, x, y, z] = frame;
         let strip = Strip {
             faces: [vec![f], vec![other]],
             span: Some((f64::NEG_INFINITY, f64::INFINITY)),
@@ -1284,6 +1343,12 @@ impl Blank {
                     return Err(BrepError::Invalid("cut across a bend: a face's outline does not close".into()));
                 }
                 if cycle.iter().any(|v| first.contains(v)) { outers.push((cycle, ring)) } else { holes.push((cycle, ring)) }
+            }
+            // Every corner of the outline cut away (reliefs at all its corners): the largest is it.
+            if outers.is_empty()
+                && let Some(k) = (0..holes.len()).max_by(|&a, &b| holes[a].1.area().abs().total_cmp(&holes[b].1.area().abs()))
+            {
+                outers.push(holes.remove(k));
             }
             if let [(outer, _)] = &outers[..] {
                 let loops = std::iter::once(outer.clone()).chain(kept).chain(holes.into_iter().map(|h| h.0)).collect();

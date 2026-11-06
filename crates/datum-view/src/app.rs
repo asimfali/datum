@@ -840,12 +840,14 @@ struct Viewer {
     blank_fitted: bool,
 }
 
-/// The form of a flange: its name, height and angle as typed, the side, the preview sent last.
+/// The form of a flange: its name, height and angle as typed, the side, whether corners where
+/// flanges meet get round reliefs (D229), the preview sent last.
 struct FlangeForm {
     name: String,
     height: String,
     angle: String,
     flip: bool,
+    round: bool,
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -854,8 +856,14 @@ struct FlangeForm {
 }
 
 /// The fields of the `flange` feature `name` on the ends `faces` of the body `body`.
-fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool) -> Json {
-    json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip})
+fn flange_params(name: &str, body: &str, edges: &[String], height: &str, angle: &str, flip: bool, round: bool) -> Json {
+    json!({"name": name, "op": "flange", "inputs": [body], "edges": edges, "height": value_of(height), "angle": value_of(angle), "flip": flip,
+        "relief": relief(round)})
+}
+
+/// A flange's relief at corners as the feature names it.
+fn relief(round: bool) -> &'static str {
+    if round { "round" } else { "square" }
 }
 
 /// Whether the part of body `k` starts with a rolled shell (a pipe).
@@ -4198,6 +4206,7 @@ impl Viewer {
                     height: definition(&f["height"]),
                     angle: if f["angle"].is_null() { "90".into() } else { definition(&f["angle"]) },
                     flip: f["flip"] == true,
+                    round: f["relief"] == "round",
                     fresh: true,
                     sent: None,
                     editing: true,
@@ -4490,6 +4499,7 @@ impl Viewer {
             height: "20".into(),
             angle: "90".into(),
             flip: false,
+            round: false,
             fresh: true,
             sent: None,
             editing: false,
@@ -4503,8 +4513,11 @@ impl Viewer {
         let Some(f) = &mut self.flange else { return };
         let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
         let (command, params) = match self.flange_edges.first() {
-            _ if f.editing => ("edit", json!({"name": f.name, "height": value_of(&f.height), "angle": value_of(&f.angle), "flip": f.flip})),
-            Some((body, _)) => ("add", flange_params(&f.name, body, &edges, &f.height, &f.angle, f.flip)),
+            _ if f.editing => (
+                "edit",
+                json!({"name": f.name, "height": value_of(&f.height), "angle": value_of(&f.angle), "flip": f.flip, "relief": relief(f.round)}),
+            ),
+            Some((body, _)) => ("add", flange_params(&f.name, body, &edges, &f.height, &f.angle, f.flip, f.round)),
             None => {
                 self.flange = None;
                 return;
@@ -4542,6 +4555,13 @@ impl Viewer {
                 if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
                     f.flip = !f.flip;
                 }
+                // Where flanges meet at a corner (D229): the square the bends leave, or a circle of
+                // the rule's diameter too.
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("flange-relief", "Corner relief"));
+                    ui.radio_value(&mut f.round, false, self.i18n.t("flange-relief-square", "Square"));
+                    ui.radio_value(&mut f.round, true, self.i18n.t("flange-relief-round", "Round"));
+                });
                 if let Some(Err(why)) = preview {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
@@ -8684,8 +8704,9 @@ mod tests {
     fn flange_params_are_the_features_fields() {
         let faces = ["ab".to_string(), "cd".to_string()];
         assert_eq!(
-            flange_params("flange1", "sheet1", &faces, "20", "h + 5", true),
-            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true})
+            flange_params("flange1", "sheet1", &faces, "20", "h + 5", true, true),
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true,
+                "relief": "round"})
         );
     }
 
@@ -8699,7 +8720,7 @@ mod tests {
         h.state_mut().open_flange();
         h.run();
         h.get_by_label("Height");
-        let params = flange_params("flange1", "sheet1", &[format!("{face:?}")], "20", "90", false);
+        let params = flange_params("flange1", "sheet1", &[format!("{face:?}")], "20", "90", false, false);
         let previews: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect();
         assert_eq!(previews.last(), Some(&params));
         h.state_mut().model.as_mut().unwrap().preview = Some((params.clone(), Ok(json!({"body": "flange1"}))));
