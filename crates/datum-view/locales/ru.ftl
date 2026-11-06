@@ -124,6 +124,13 @@ pane-flat = Развёртка
 pane-library = Библиотека
 opening = Открывается…
 no-model = Модель не открыта.
+no-model-start = Начните с «Файл → Создать» ({ $new }) или «Открыть» ({ $open }); затем S начинает эскиз.
+menu-lessons = Уроки
+lessons-none = Нет уроков в { $path }
+lesson-step = Шаг { $n } из { $m }
+lesson-key = Клавиша: { $key }
+lesson-stuck = Не получается?
+lesson-finished = Урок пройден: модель ваша.
 search = Поиск
 library-hint = Двойной щелчок — поставить · перетащите на эскиз
 
