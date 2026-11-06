@@ -6,6 +6,7 @@ mod common;
 use common::{chain, ngon, prism, turn, wide};
 use datum_brep::BrepError;
 use datum_graph::{EvalError, Evaluator, Graph, GraphError, Op};
+use datum_math::expr::Num;
 use datum_math::{Vec2, Vec3};
 
 fn hashes(g: &Graph, ev: &Evaluator) -> Vec<[u8; 32]> {
@@ -59,6 +60,24 @@ fn failures_name_their_cause() {
     let e = Evaluator::default().evaluate(&g);
     assert!(matches!(e.results[0], Err(EvalError::Op(BrepError::Degenerate(_)))));
     assert_eq!(e.results[1], Err(EvalError::Input("flat".into())));
+}
+
+/// A failed feature shows the last good state before it: the bodies it took, unless a feature
+/// that did not fail uses them.
+#[test]
+fn a_failure_shows_the_last_good_state() {
+    let bad = Op::Transform { translate: [0.0.into(), 0.0.into(), 0.0.into()], axis: Vec3::new(0.0, 0.0, 1.0), angle_deg: Num::Expr("nope".into()) };
+    let mut g = Graph::default();
+    let p = g.add("p", prism(ngon(4, 1.0)), &[]).unwrap();
+    let a = g.add("a", bad.clone(), &[p]).unwrap();
+    let b = g.add("b", turn(10.0, Vec3::ZERO), &[a]).unwrap();
+    let q = g.add("q", prism(ngon(5, 1.0)), &[]).unwrap();
+    let c = g.add("c", turn(10.0, Vec3::ZERO), &[q]).unwrap();
+    let d = g.add("d", bad, &[q]).unwrap();
+    let e = Evaluator::default().evaluate(&g);
+    assert!(e.results[b as usize].is_err() && e.results[d as usize].is_err());
+    // `b` failed through `a`: `p` stands for it; `q` goes on in `c`, so `d` shows nothing.
+    assert_eq!(e.last_good(&g), [(p, b), (c, c)]);
 }
 
 #[test]

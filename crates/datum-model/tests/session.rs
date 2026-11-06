@@ -552,3 +552,207 @@ fn a_title_is_no_name_for_commands() {
     assert!(e.contains("`plate`"), "{e}");
     assert_eq!(s.execute("mass_properties", &json!({"name": "nothing"})).unwrap_err(), "no feature named `nothing`");
 }
+
+/// A project folder under the test directory, empty and marked with `datum-project.json`.
+fn project_folder(name: &str) -> std::path::PathBuf {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    root
+}
+
+fn put_rule(s: &mut Session, material: &str, rule: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let m = run(s, "put_library", json!({"level": "material", "element": {"name": material, "density": 7850}}));
+    let r = run(
+        s,
+        "put_library",
+        json!({"level": "rule", "element": {"name": rule, "kind": "sheet", "material": material, "thickness": 2, "radius": "t"}}),
+    );
+    (m["saved"].as_str().unwrap().into(), r["saved"].as_str().unwrap().into())
+}
+
+/// Builds a plate by `rule` from a rectangle; the error of the build, if any.
+fn build_plate(s: &mut Session, rule: &str) -> Result<Value, String> {
+    let points = json!({"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]});
+    let line = |a: &str, b: &str| json!({"from": a, "to": b});
+    s.execute(
+        "add",
+        &json!({"name": "skel", "op": "sketch", "sketch": {"points": points,
+        "lines": {"ab": line("a", "b"), "bc": line("b", "c"), "cd": line("c", "d"), "da": line("d", "a")}}}),
+    )?;
+    s.execute("plate", &json!({"name": "face", "sketch": "skel", "rule": rule}))?;
+    let inspect = s.execute("inspect", &json!({}))?;
+    Ok(inspect)
+}
+
+fn has_feature(inspect: &Value, name: &str) -> bool {
+    inspect.to_string().contains(&format!("\"{name}\""))
+}
+
+/// An unsaved model works in the project it was created in (`new` with `project`): the library
+/// is written there, not beside the program, and its rules are seen before the first save.
+#[test]
+fn an_unsaved_model_works_in_its_project() {
+    let root = project_folder("session_project_new");
+    let mut s = Session::default();
+    run(&mut s, "new", json!({"project": root.display().to_string()}));
+    let (m, r) = put_rule(&mut s, "ProjMat", "ProjRule");
+    assert_eq!(m, root.join("library/material/ProjMat.json"));
+    assert_eq!(r, root.join("library/rule/ProjRule.json"));
+    assert!(m.is_file() && r.is_file());
+    let program = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+    assert!(!program.join("library/material/ProjMat.json").exists() && !program.join("library/rule/ProjRule.json").exists());
+    let built = build_plate(&mut s, "ProjRule").unwrap_or_else(|e| panic!("plate by a project rule before the first save: {e}"));
+    assert!(has_feature(&built, "face"), "{built}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `set_project` on an unsaved model brings its rules; with none they are gone again.
+#[test]
+fn set_project_changes_what_an_unsaved_model_sees() {
+    let root = project_folder("session_project_set");
+    let mut writer = Session::default();
+    run(&mut writer, "new", json!({"project": root.display().to_string()}));
+    put_rule(&mut writer, "SetMat", "SetRule");
+    let rules = |s: &mut Session| run(s, "library", json!({"level": "rule"}))["elements"].to_string();
+    let mut s = Session::default();
+    run(&mut s, "new", json!({}));
+    assert!(!rules(&mut s).contains("SetRule"));
+    assert!(build_plate(&mut s, "SetRule").is_err(), "no project, no rule");
+    let mut s = Session::default();
+    run(&mut s, "new", json!({}));
+    run(&mut s, "set_project", json!({"project": root.display().to_string()}));
+    assert!(rules(&mut s).contains("SetRule"));
+    let built = build_plate(&mut s, "SetRule").unwrap_or_else(|e| panic!("{e}"));
+    assert!(has_feature(&built, "face"), "{built}");
+    run(&mut s, "set_project", json!({}));
+    assert!(!rules(&mut s).contains("SetRule"), "no project again");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A model with a file keeps the project of its file, whatever `set_project` says.
+#[test]
+fn the_project_of_the_file_wins() {
+    let (a, b) = (project_folder("session_project_a"), project_folder("session_project_b"));
+    let mut s = Session::default();
+    run(&mut s, "new", json!({"project": a.display().to_string()}));
+    put_rule(&mut s, "AMat", "ARule");
+    run(&mut s, "save", json!({"path": a.join("part/plate.json").display().to_string()}));
+    run(&mut s, "set_project", json!({"project": b.display().to_string()}));
+    let rules = run(&mut s, "library", json!({"level": "rule"}))["elements"].to_string();
+    assert!(rules.contains("ARule"), "{rules}");
+    let built = build_plate(&mut s, "ARule").unwrap_or_else(|e| panic!("{e}"));
+    assert!(has_feature(&built, "face"), "{built}");
+    let put = run(&mut s, "put_library", json!({"level": "material", "element": {"name": "More", "density": 1}}));
+    assert_eq!(std::path::PathBuf::from(put["saved"].as_str().unwrap()), a.join("library/material/More.json"));
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// `new` without `project` forgets the project of the one before.
+#[test]
+fn new_without_a_project_has_none() {
+    let root = project_folder("session_project_forgot");
+    let mut s = Session::default();
+    run(&mut s, "new", json!({"project": root.display().to_string()}));
+    put_rule(&mut s, "FMat", "FRule");
+    run(&mut s, "new", json!({}));
+    let rules = run(&mut s, "library", json!({"level": "rule"}))["elements"].to_string();
+    assert!(!rules.contains("FRule"), "{rules}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn feature_names(s: &mut Session) -> Vec<String> {
+    run(s, "inspect", json!({}))["features"].as_array().unwrap().iter().map(|f| f["name"].as_str().unwrap().to_string()).collect()
+}
+
+fn is_modified(s: &mut Session) -> bool {
+    run(s, "inspect", json!({}))["modified"].as_bool().unwrap()
+}
+
+/// A checkpoint brings back the features, what is modified, and what can be undone; later
+/// changes are gone with their undo steps.
+#[test]
+fn restore_brings_back_features_modified_and_undo() {
+    let mut s = Session::default();
+    plate(&mut s);
+    assert!(is_modified(&mut s));
+    let c = s.checkpoint();
+    run(&mut s, "add", json!({"name": "later", "op": "transform", "inputs": ["moved"], "translate": [1, 0, 0]}));
+    run(&mut s, "add", json!({"name": "later2", "op": "transform", "inputs": ["moved"], "translate": [2, 0, 0]}));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(feature_names(&mut s), ["plate", "moved", "later"]);
+    s.restore(c);
+    assert_eq!(feature_names(&mut s), ["plate", "moved"]);
+    assert!(is_modified(&mut s));
+    // Undo goes through what could be undone at the checkpoint, not the later changes.
+    run(&mut s, "undo", json!({}));
+    assert_eq!(feature_names(&mut s), ["plate"]);
+    run(&mut s, "undo", json!({}));
+    assert!(feature_names(&mut s).is_empty());
+    let _ = s.execute("undo", &json!({}));
+    assert!(feature_names(&mut s).is_empty(), "nothing before the checkpoint's history");
+    // And redo is what was undone since, not the later changes.
+    run(&mut s, "redo", json!({}));
+    run(&mut s, "redo", json!({}));
+    assert_eq!(feature_names(&mut s), ["plate", "moved"]);
+    let _ = s.execute("redo", &json!({}));
+    assert_eq!(feature_names(&mut s), ["plate", "moved"]);
+}
+
+#[test]
+fn restore_keeps_the_path_and_the_saved_state() {
+    let path = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("checkpoint.json");
+    let mut s = Session::default();
+    plate(&mut s);
+    run(&mut s, "save", json!({"path": path}));
+    assert!(!is_modified(&mut s));
+    let c = s.checkpoint();
+    assert!(!is_modified(&mut s));
+    run(&mut s, "edit", json!({"name": "moved", "angle_deg": 30}));
+    run(&mut s, "new", json!({}));
+    assert!(run(&mut s, "inspect", json!({}))["file"].is_null());
+    s.restore(c);
+    let i = run(&mut s, "inspect", json!({}));
+    assert_eq!(i["modified"], json!(false), "a model with a file reports not modified");
+    assert_eq!(i["file"].as_str().map(std::path::PathBuf::from), Some(path.clone()));
+    // Saved state is the checkpoint's: an edit then an undo is back to saved.
+    run(&mut s, "edit", json!({"name": "moved", "angle_deg": 45}));
+    assert!(is_modified(&mut s));
+    run(&mut s, "undo", json!({}));
+    assert!(!is_modified(&mut s));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn restore_activates_the_level_again() {
+    let mut s = Session::default();
+    plate(&mut s);
+    run(&mut s, "add_level", json!({"name": "variant", "part": "plate"}));
+    assert_eq!(s.active(), Some("variant"));
+    let c = s.checkpoint();
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "add", json!({"name": "later", "op": "transform", "inputs": ["moved"], "translate": [1, 0, 0]}));
+    assert_eq!(s.active(), None);
+    s.restore(c);
+    assert_eq!(s.active(), Some("variant"));
+    assert_eq!(run(&mut s, "inspect", json!({}))["level"], json!("variant"));
+    assert!(!feature_names(&mut s).contains(&"later".to_string()));
+}
+
+#[test]
+fn restore_leaves_library_writes() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_checkpoint");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let mut s = Session::default();
+    run(&mut s, "save", json!({"path": root.join("part/plate.json")}));
+    let c = s.checkpoint();
+    run(&mut s, "put_library", json!({"level": "material", "element": {"name": "Ст3", "density": 7850}}));
+    s.restore(c);
+    let lib = run(&mut s, "library", json!({"level": "material"}));
+    assert_eq!(lib["elements"][0]["name"], json!("Ст3"), "{lib}");
+    assert!(root.join("library/material/Ст3.json").exists());
+}

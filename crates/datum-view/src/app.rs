@@ -17,6 +17,7 @@ use crate::actions::{ACTIONS, Act, Action, Keys};
 use crate::camera::Camera;
 use crate::dims::{Axis, Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
+use crate::icons::Icon;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
@@ -132,6 +133,67 @@ pub(crate) enum Request {
     /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
     /// model until `None`.
     Preview(Option<(&'static str, Json)>),
+    /// Remember the model as it is, to come back to by `Back` (a lesson's step shown, D230).
+    Mark,
+    Back,
+}
+
+/// The window's hand: a cursor at `at`, with the key it last pressed beside it.
+fn paint_hand(ctx: &egui::Context, at: egui::Pos2, pressed: Option<&str>) {
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("datum_lesson_hand")));
+    let visuals = ctx.global_style().visuals.clone();
+    let colour = visuals.warn_fg_color;
+    let point = |x: f32, y: f32| at + egui::vec2(x, y) * 1.4;
+    let arrow = vec![point(0.0, 0.0), point(0.0, 16.0), point(4.0, 12.0), point(7.0, 19.0), point(10.0, 18.0), point(7.0, 11.0), point(12.0, 11.0)];
+    painter.add(egui::Shape::convex_polygon(arrow, colour, egui::Stroke::new(1.0, visuals.extreme_bg_color)));
+    if let Some(key) = pressed {
+        let galley = painter.layout_no_wrap(key.to_string(), egui::FontId::proportional(18.0), visuals.extreme_bg_color);
+        let spot = at + egui::vec2(24.0, 24.0);
+        painter.rect_filled(egui::Rect::from_min_size(spot, galley.size()).expand(6.0), 4.0, colour);
+        painter.galley(spot, galley, visuals.extreme_bg_color);
+    }
+}
+
+/// Whether `folder` lies in the program's: a new version replaces that folder, and what is in it
+/// is easily lost with it.
+fn beside_program(folder: &std::path::Path) -> bool {
+    let inside = |exe: PathBuf| exe.parent().is_some_and(|d| std::path::absolute(folder).is_ok_and(|f| f.starts_with(d)));
+    std::env::current_exe().ok().is_some_and(inside)
+}
+
+/// A lesson under way: its place in `lessons`, the step reached.
+struct Playing {
+    lesson: usize,
+    step: usize,
+    /// The window's hand at work on the step.
+    showing: Option<Showing>,
+    /// The place the hand did not find, for the card to say.
+    lost: Option<String>,
+}
+
+/// The hand at work; `back`: to take it all back at the end, as it was then.
+struct Showing {
+    hand: crate::lessons::Hand,
+    back: Option<Mark>,
+}
+
+struct SketchMark {
+    feature: String,
+    selected: Vec<Pick>,
+    draft: crate::draw::Draft,
+    camera: crate::camera::SketchCamera,
+}
+
+/// The window before a step was shown.
+struct Mark {
+    model: bool,
+    /// The sketch edited, as the engineer left it: the step may go on from what is selected.
+    sketch: Option<SketchMark>,
+    menu: Option<Menu>,
+    picking: Option<Purpose>,
+    table: Option<crate::table::Source>,
+    next_rule: Option<String>,
+    material: Option<(Option<String>, String)>,
 }
 
 /// What a plane or a face is picked for.
@@ -278,6 +340,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut meshes = MeshCache::default();
     let mut editing: Option<String> = None;
     let mut previewing: Option<(&'static str, Json)> = None;
+    let mut mark = None;
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
         pending.extend(requests.try_iter());
@@ -323,6 +386,12 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 },
                 Request::Editing(name) => editing = name,
                 Request::Preview(p) => previewing = p,
+                Request::Mark => mark = Some(session.checkpoint()),
+                Request::Back => {
+                    if let Some(c) = mark.take() {
+                        session.restore(c);
+                    }
+                }
             }
         }
         for (name, value) in latest {
@@ -465,11 +534,11 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
         })
         .map(|(_, last)| last)
         .collect();
+    let name = |i: datum_graph::NodeIx| graph.nodes()[i as usize].name.as_str();
     let shown: Vec<(&str, &datum_graph::Value)> = shown(graph, evaluation, editing)
         .into_iter()
-        .map(|i| (graph.nodes()[i as usize].name.as_str(), i))
-        .filter(|(n, _)| !skip.iter().any(|s| s == n))
-        .filter_map(|(n, i)| Some((n, evaluation.results[i as usize].as_deref().ok()?)))
+        .filter(|&(_, f)| !skip.iter().any(|s| s == name(f)))
+        .filter_map(|(i, _)| Some((name(i), evaluation.results[i as usize].as_deref().ok()?)))
         .collect();
     let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
     let bodies: Vec<String> = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
@@ -528,16 +597,17 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
 /// draws it) in place of itself shows its input, the body it lies on.
-fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<datum_graph::NodeIx> {
+fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editing: Option<&str>) -> Vec<(datum_graph::NodeIx, datum_graph::NodeIx)> {
     let edited = editing.and_then(|n| graph.find(n));
     // A sketch on a blank lies in the blank's coordinates: it is drawn in the flat pattern pane,
     // never in 3D (D222).
-    let on_blank = |i: &datum_graph::NodeIx| matches!(graph.nodes()[*i as usize].op, datum_graph::Op::Sketch { flat: Some(_), .. });
-    let mut v: Vec<datum_graph::NodeIx> = evaluation.finals(graph).into_iter().filter(|i| Some(*i) != edited && !on_blank(i)).collect();
+    let on_blank = |i: datum_graph::NodeIx| matches!(graph.nodes()[i as usize].op, datum_graph::Op::Sketch { flat: Some(_), .. });
+    // A failed feature: the last good state before it, as Inventor shows.
+    let mut v: Vec<_> = evaluation.last_good(graph).into_iter().filter(|&(i, f)| Some(f) != edited && !on_blank(i)).collect();
     if let Some(e) = edited {
-        v.extend(&graph.nodes()[e as usize].inputs);
+        v.extend(graph.nodes()[e as usize].inputs.iter().map(|&i| (i, i)));
         v.sort_unstable();
-        v.dedup();
+        v.dedup_by_key(|p| p.0);
     }
     v
 }
@@ -566,12 +636,12 @@ impl TreeRows {
     /// A feature's row label: its title, or its key without one (then the title's tooltip names
     /// the key), and `tail`; a text field while it is renamed. Enter takes the text, Esc or
     /// leaving the field drops it.
-    fn label(&mut self, ui: &mut egui::Ui, i18n: &crate::i18n::I18n, f: &Json, mark: &str, tail: &str) {
+    fn label(&mut self, ui: &mut egui::Ui, i18n: &crate::i18n::I18n, f: &Json, mark: Icon, tail: &str) {
         let key = f["name"].as_str().unwrap_or_default();
         let title = f["title"].as_str();
         if let Some(r) = self.renaming.as_mut().filter(|r| r.key == key) {
             let id = ui.id().with(("rename", key));
-            ui.label(mark);
+            crate::icons::mark(ui, mark, ui.visuals().text_color());
             let mut edit = egui::TextEdit::singleline(&mut r.text).id(id).desired_width(140.0).show(ui);
             if std::mem::take(&mut r.fresh) {
                 edit.response.request_focus();
@@ -592,13 +662,14 @@ impl TreeRows {
         }
         // Built, but with something to know (D198): the mark says so, the hint what.
         let warnings: Vec<String> = f["warnings"].as_array().into_iter().flatten().map(|w| warning_text(i18n, w)).collect();
-        let mark = if mark == "✔" && !warnings.is_empty() { "⚠" } else { mark };
-        let text = egui::RichText::new(format!("{mark} {}  ·  {tail}", title.unwrap_or(key)));
-        let text = match mark {
-            "✖" => text.color(ui.visuals().error_fg_color),
-            "⚠" => text.color(ui.visuals().warn_fg_color),
-            _ => text,
+        let mark = if mark == Icon::Done && !warnings.is_empty() { Icon::Warning } else { mark };
+        let text = egui::RichText::new(format!("{}  ·  {tail}", title.unwrap_or(key)));
+        let (text, colour) = match mark {
+            Icon::Failed => (text.color(ui.visuals().error_fg_color), ui.visuals().error_fg_color),
+            Icon::Warning => (text.color(ui.visuals().warn_fg_color), ui.visuals().warn_fg_color),
+            _ => (text, ui.visuals().text_color()),
         };
+        crate::icons::mark(ui, mark, colour);
         let mut r = ui.selectable_label(self.selected.as_deref() == Some(key), text);
         if !warnings.is_empty() {
             r = r.on_hover_text(warnings.join("\n"));
@@ -755,6 +826,14 @@ struct Viewer {
     material: Option<(Option<String>, String)>,
     /// The viewport's rectangle at the last frame: where the sketch's pixels are.
     viewport: egui::Rect,
+    /// The lessons in the folder, read at the start (D230).
+    lessons: Vec<crate::lessons::Read>,
+    /// The lesson being played.
+    playing: Option<Playing>,
+    /// The materials and the rules of the project itself, not of the program beside it.
+    own_records: (Vec<Json>, Vec<Json>),
+    /// This frame's places a lesson can point at, by action or place name.
+    spots: BTreeMap<&'static str, egui::Rect>,
     /// The rectangle of the pane showing the sketch edited (the 3D view's, or the flat pattern's
     /// for a sketch on the blank) at the last frame, and whether such a sketch was framed yet.
     sketch_rect: egui::Rect,
@@ -1266,6 +1345,10 @@ impl Viewer {
             next_rule: None,
             material: None,
             viewport: egui::Rect::ZERO,
+            lessons: crate::lessons::folder().map_or_else(Vec::new, |d| crate::lessons::read(&d)),
+            playing: None,
+            own_records: Default::default(),
+            spots: BTreeMap::new(),
             sketch_rect: egui::Rect::ZERO,
             blank_fitted: false,
         };
@@ -1303,6 +1386,12 @@ impl Viewer {
         self.worked_in = None;
         self.project = folder;
         self.reload_library();
+        self.reload_library_records();
+        // A model without a file works in the project open: its library, its rules.
+        if self.model.is_some() {
+            let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
+            self.send(Request::Command("set_project", params));
+        }
     }
 
     /// The project the window works in: the model file's own (a model keeps its project's
@@ -1316,9 +1405,13 @@ impl Viewer {
 
     fn reload_library_records(&mut self) {
         let project = self.current_project();
-        let read = |level| datum_model::library::load(level, project.as_deref()).entries.into_iter().map(|e| e.element).collect();
-        self.materials = read("material");
-        self.rules = read("rule");
+        let (materials, rules) = (datum_model::library::load("material", project.as_deref()), datum_model::library::load("rule", project.as_deref()));
+        let own = |lib: &datum_model::library::Library| {
+            lib.entries.iter().filter(|e| e.source == datum_model::library::Source::Project).map(|e| e.element.clone()).collect()
+        };
+        self.own_records = (own(&materials), own(&rules));
+        self.materials = materials.entries.into_iter().map(|e| e.element).collect();
+        self.rules = rules.entries.into_iter().map(|e| e.element).collect();
     }
 
     /// Opens the table window on `source`, or closes it if that is what it shows.
@@ -1550,18 +1643,335 @@ impl Viewer {
         }
         self.leave();
         self.set_path(None);
-        self.send(Request::Command("new", json!({})));
+        let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
+        self.send(Request::Command("new", params));
     }
 
-    /// Closes the model (Close, Ctrl+W): the window shows none.
-    fn close(&mut self) {
-        if self.model.is_none() || !self.may_leave() {
-            return;
+    /// Closes the model (Close, Ctrl+W): the window shows none. Whether it is gone: the engineer
+    /// may keep it.
+    fn close(&mut self) -> bool {
+        if self.model.is_none() {
+            return true;
+        }
+        if !self.may_leave() {
+            return false;
         }
         self.leave();
         self.set_path(None);
         self.send(Request::Close);
         crate::dock::close(&mut self.dock, crate::dock::Pane::Flat);
+        true
+    }
+
+    /// The lessons in the folder to start one from; what is wrong with those that cannot be read.
+    fn lesson_list(&mut self, ui: &mut egui::Ui) {
+        let mut chosen = None;
+        for (k, (file, lesson)) in self.lessons.iter().enumerate() {
+            match lesson {
+                Ok(l) => {
+                    if ui.button(&l.title).on_hover_text(&l.about).clicked() {
+                        chosen = Some(k);
+                    }
+                }
+                Err(why) => {
+                    let name = file.file_name().map_or_else(String::new, |f| f.to_string_lossy().to_string());
+                    ui.colored_label(ui.visuals().warn_fg_color, format!("{name}: {why}"));
+                }
+            }
+        }
+        if self.lessons.is_empty() {
+            let folder = crate::lessons::folder().map_or_else(String::new, |f| f.display().to_string());
+            ui.weak(self.i18n.f("lessons-none", "No lessons in { $path }", &[("path", &folder)]));
+        }
+        if let Some(lesson) = chosen {
+            self.start_lesson(lesson);
+        }
+    }
+
+    /// Lesson `lesson` from its beginning: no model, no rule chosen.
+    fn start_lesson(&mut self, lesson: usize) {
+        if self.close() {
+            self.next_rule = None;
+            self.material = None;
+            self.playing = Some(Playing { lesson, step: 0, showing: None, lost: None });
+        }
+    }
+
+    /// What of the window a lesson's step may ask about (`WINDOW` in `lessons`).
+    fn lesson_window(&self) -> Json {
+        json!({
+            "model": self.model.is_some(),
+            "sketch": self.sketch.is_some(),
+            "tool": self.sketch.as_ref().map(|sk| format!("{:?}", sk.draft.tool).to_lowercase()),
+            "picking": self.picking.map(|p| format!("{p:?}").to_lowercase()),
+            "form": self.extrusion.is_some(),
+            "sheet_rule": self.sheet_rule().is_some(),
+            "table": self.table.as_ref().map(|t| format!("{:?}", t.0).to_lowercase()),
+            "project": self.project.is_some(),
+            "project_safe": self.project.as_ref().is_some_and(|p| !beside_program(p)),
+            "own_materials": self.own_records.0,
+            "own_rules": self.own_records.1,
+            "selected": self.sketch.as_ref().map_or_else(Vec::new, |sk| sk.selected.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>()),
+            "pattern_menu": matches!(self.menu, Some(Menu::Pattern { .. })),
+            "pattern_picked": matches!(&self.menu, Some(Menu::Pattern { form, .. }) if !form.cell.is_empty()),
+            "saved": self.path.is_some() && !self.modified(),
+        })
+    }
+
+    fn step_done(&self, step: &crate::lessons::Step) -> bool {
+        // A step to read is done by its button.
+        (step.done.window.is_some() || step.done.model.is_some())
+            && step.done.window.as_ref().is_none_or(|w| crate::lessons::matches(w, &self.lesson_window()))
+            // A form's preview shows in `inspect` what is not made yet.
+            && step.done.model.as_ref().is_none_or(|p| self.model.as_ref().is_some_and(|m| m.preview.is_none() && crate::lessons::matches(p, &m.inspect)))
+    }
+
+    /// What move `m` of the hand comes to now; none while its place is not on screen.
+    fn aim(&self, ctx: &egui::Context, m: &crate::lessons::Move) -> Option<crate::lessons::Aim> {
+        use crate::lessons::{Aim, Move};
+        match m {
+            Move::Point(name) | Move::Click(name) => self.spots.get(name.as_str()).map(|r| Aim::Spot(r.center())),
+            Move::Key(name) if name == "enter" => Some(Aim::Keys(egui::Key::Enter, egui::Modifiers::NONE, "Enter".into())),
+            Move::Key(name) if name == "escape" => Some(Aim::Keys(egui::Key::Escape, egui::Modifiers::NONE, "Esc".into())),
+            Move::Key(name) if name == "select_all" => {
+                let k = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::A);
+                Some(Aim::Keys(k.logical_key, k.modifiers | egui::Modifiers::CTRL, ctx.format_shortcut(&k)))
+            }
+            Move::Type(text) => Some(Aim::Text(text.clone())),
+            Move::Key(name) => {
+                let k = self.keys.get(ACTIONS.iter().find(|a| a.name == name)?.act)?;
+                // As a keyboard gives it: Command is Ctrl here.
+                let modifiers = if k.modifiers.command { k.modifiers | egui::Modifiers::CTRL } else { k.modifiers };
+                Some(Aim::Keys(k.logical_key, modifiers, ctx.format_shortcut(k)))
+            }
+            Move::Sketch([x, y]) => {
+                self.sketch.as_ref()?;
+                let half = self.sketch_rect.size() * 0.5;
+                Some(Aim::Spot(self.sketch_rect.center() + egui::vec2(x * half.x, -y * half.y)))
+            }
+            Move::Curve(kind) => {
+                let sk = self.sketch.as_ref()?;
+                let p = sk.placed.as_ref().ok()?;
+                let point = |n: &String| p.solved.points.get(n).copied();
+                let at = if kind == "line" {
+                    // Toward its start: a menu opened here should leave the lesson's card in sight.
+                    let l = p.lines.values().find(|l| !l.construction)?;
+                    let (a, b) = (point(&l.from)?, point(&l.to)?);
+                    [a.x + (b.x - a.x) * 0.3, a.y + (b.y - a.y) * 0.3]
+                } else {
+                    let c = p.circles.values().find(|c| !c.construction)?;
+                    let o = point(&c.center)?;
+                    [o.x + 0.5 * c.diameter.value()?, o.y]
+                };
+                let (dx, dy) = sk.camera.offset(at, f64::from(self.sketch_rect.height()));
+                let spot = self.sketch_rect.center() + egui::vec2(dx as f32, dy as f32);
+                self.sketch_rect.contains(spot).then_some(Aim::Spot(spot))
+            }
+            Move::Put { level, element } => Some(Aim::Put(level.clone(), element.clone())),
+        }
+    }
+
+    /// Sets the window's hand to the step reached; `back`: only to show it, taking it back after.
+    fn start_hand(&mut self, ctx: &egui::Context, back: bool) {
+        let Some(p) = &self.playing else { return };
+        let Some((_, Ok(lesson))) = self.lessons.get(p.lesson) else { return };
+        let Some(s) = lesson.steps.get(p.step) else { return };
+        let moves = s.show.clone();
+        let mark = back.then(|| Mark {
+            model: self.model.is_some(),
+            sketch: self.sketch.as_ref().map(|sk| SketchMark {
+                feature: sk.feature.clone(),
+                selected: sk.selected.clone(),
+                draft: sk.draft.clone(),
+                camera: sk.camera,
+            }),
+            menu: self.menu.clone(),
+            picking: self.picking,
+            table: self.table.as_ref().map(|t| t.0),
+            next_rule: self.next_rule.clone(),
+            material: self.material.clone(),
+        });
+        if mark.as_ref().is_some_and(|m| m.model) {
+            self.send(Request::Mark);
+        }
+        let cursor = ctx.pointer_latest_pos().unwrap_or_else(|| ctx.content_rect().center());
+        if let Some(p) = &mut self.playing {
+            p.lost = None;
+            p.showing = Some(Showing { hand: crate::lessons::Hand::new(moves, cursor), back: mark });
+        }
+    }
+
+    /// The hand's frame (`raw_input_hook`): its moves take the place of the engineer's input;
+    /// Esc stops it.
+    fn hand_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        use crate::lessons::Tick;
+        use egui::Event;
+        let Some(mut showing) = self.playing.as_mut().and_then(|p| p.showing.take()) else { return };
+        let stop = raw.events.iter().any(|e| matches!(e, Event::Key { key: egui::Key::Escape, pressed: true, .. }));
+        raw.events.retain(|e| {
+            !matches!(
+                e,
+                Event::PointerMoved(_)
+                    | Event::MouseMoved(_)
+                    | Event::PointerButton { .. }
+                    | Event::PointerGone
+                    | Event::MouseWheel { .. }
+                    | Event::Zoom(_)
+                    | Event::Key { .. }
+                    | Event::Text(_)
+            )
+        });
+        let tick = if stop { Tick::Finished } else { showing.hand.tick(raw.predicted_dt, self.busy, |m| self.aim(ctx, m), &mut raw.events) };
+        match tick {
+            Tick::Going => {}
+            Tick::Put(level, element) => {
+                self.library_due = true;
+                self.send(Request::Command("put_library", json!({"level": level, "element": element})));
+            }
+            Tick::Finished => return self.end_hand(ctx, showing, None),
+            Tick::Lost(what) => {
+                crate::log::write(&format!("a lesson's hand found no place for {what}"));
+                return self.end_hand(ctx, showing, Some(what));
+            }
+        }
+        ctx.request_repaint();
+        if let Some(p) = &mut self.playing {
+            p.showing = Some(showing);
+        }
+    }
+
+    /// The hand's work over: shown only, the window comes back to where it was.
+    fn end_hand(&mut self, ctx: &egui::Context, showing: Showing, lost: Option<String>) {
+        egui::Popup::close_all(ctx);
+        if let Some(p) = &mut self.playing {
+            p.lost = lost;
+        }
+        let Some(mark) = showing.back else { return };
+        // Still in the same sketch: it stays open, as the engineer left it.
+        let kept = mark.sketch.as_ref().is_some_and(|m| self.sketch.as_ref().is_some_and(|sk| sk.feature == m.feature));
+        if kept {
+            self.close_extrusion();
+            self.close_revolve();
+            self.close_trim();
+        } else {
+            self.leave();
+        }
+        self.picking = mark.picking;
+        if self.table.as_ref().map(|t| t.0) != mark.table {
+            self.table = None;
+            if let Some(source) = mark.table {
+                self.toggle_table(source);
+            }
+        }
+        self.next_rule = mark.next_rule;
+        self.material = mark.material;
+        if mark.model {
+            self.send(Request::Back);
+            if let Some(m) = mark.sketch {
+                match &mut self.sketch {
+                    Some(sk) if kept => {
+                        (sk.selected, sk.draft, sk.camera) = (m.selected, m.draft, m.camera);
+                        sk.field = None;
+                        self.menu = mark.menu;
+                    }
+                    _ => self.enter(m.feature),
+                }
+            }
+        } else {
+            self.send(Request::Close);
+            crate::dock::close(&mut self.dock, crate::dock::Pane::Flat);
+        }
+    }
+
+    /// The step reached: past those done, unless a command is on its way and what shows is old,
+    /// or the hand is at work.
+    fn lesson_step(&self, playing: &Playing, lesson: &crate::lessons::Lesson) -> usize {
+        if self.busy || playing.showing.is_some() {
+            return playing.step;
+        }
+        playing.step + lesson.steps[playing.step.min(lesson.steps.len())..].iter().take_while(|s| self.step_done(s)).count()
+    }
+
+    /// The card of the lesson being played, and the mark on where its step is.
+    fn lesson_card(&mut self, ctx: &egui::Context) {
+        let Some(playing) = &self.playing else { return };
+        let Some((_, Ok(lesson))) = self.lessons.get(playing.lesson) else { return };
+        let (step, total) = (self.lesson_step(playing, lesson), lesson.steps.len());
+        let now = lesson.steps.get(step);
+        self.spots.insert("view", self.viewport);
+        let hand = playing.showing.as_ref().map(|s| (s.hand.cursor, s.hand.pressed.clone()));
+        let lost = playing.lost.clone();
+        if let Some((at, pressed)) = &hand {
+            paint_hand(ctx, *at, pressed.as_deref());
+        } else if let Some(rect) = now.and_then(|s| s.at.iter().find_map(|name| self.spots.get(name.as_str()))) {
+            let beat = (libm::sin(ctx.input(|i| i.time) * 4.0) * 0.5 + 0.5) as f32;
+            let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("datum_lesson_mark")));
+            let stroke = egui::Stroke::new(2.0 + beat, ctx.global_style().visuals.warn_fg_color);
+            painter.rect_stroke(rect.expand(2.0 + beat * 2.0), 4.0, stroke, egui::StrokeKind::Outside);
+            ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        let mut open = true;
+        let (mut finished, mut read, mut show, mut perform) = (false, false, false, false);
+        let window = egui::Window::new(&lesson.title).id(egui::Id::new("datum_lesson")).open(&mut open).collapsible(false).resizable(false);
+        window.anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0]).default_width(340.0).show(ctx, |ui| match now {
+            Some(s) => {
+                let (n, m) = ((step + 1).to_string(), total.to_string());
+                ui.weak(self.i18n.f("lesson-step", "Step { $n } of { $m }", &[("n", &n), ("m", &m)]));
+                ui.strong(&s.what);
+                // The key in force, not one written in the lesson: keys can be changed (D132).
+                let act = s.at.iter().find_map(|name| ACTIONS.iter().find(|a| a.name == name));
+                if let Some(k) = act.and_then(|a| self.keys.get(a.act)) {
+                    let key = ui.ctx().format_shortcut(k);
+                    ui.label(self.i18n.f("lesson-key", "Key: { $key }", &[("key", &key)]));
+                }
+                if !s.why.is_empty() {
+                    ui.separator();
+                    ui.weak(&s.why);
+                }
+                if !s.hint.is_empty() {
+                    ui.collapsing(self.i18n.t("lesson-stuck", "Stuck?"), |ui| ui.label(&s.hint));
+                }
+                if hand.is_some() {
+                    ui.strong(self.i18n.t("lesson-showing", "Showing… Esc stops it"));
+                } else {
+                    if s.own {
+                        ui.weak(self.i18n.t("lesson-own", "This choice is yours: the window only shows where."));
+                    }
+                    if lost.is_some() {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            self.i18n.t("lesson-lost", "The place to show is not on screen: something this step needs may be missing."),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if s.can_show() {
+                            show = ui.button(self.i18n.t("lesson-show", "Show me")).clicked();
+                        }
+                        if s.can_do() {
+                            perform = ui.button(self.i18n.t("lesson-do", "Do it for me")).clicked();
+                        }
+                        if s.done.window.is_none() && s.done.model.is_none() {
+                            read = ui.button(self.i18n.t("lesson-next", "Next")).clicked();
+                        }
+                    });
+                }
+            }
+            None => {
+                ui.strong(self.i18n.t("lesson-finished", "Lesson finished: the model is yours."));
+                finished = ui.button(self.i18n.t("ok", "OK")).clicked();
+            }
+        });
+        if !open || finished {
+            self.playing = None;
+        } else if let Some(p) = &mut self.playing {
+            p.step = step + usize::from(read);
+            if read {
+                p.lost = None;
+            }
+        }
+        if show || perform {
+            self.start_hand(ctx, show);
+        }
     }
 
     /// The library palette (D117): every sketch element with its outline, name and where it comes
@@ -1937,12 +2347,7 @@ impl Viewer {
     /// S, as in Inventor: a sketch on an origin plane or a plane face, to be clicked; XY is
     /// picked from the start, Enter or a right click takes it.
     fn start_sketch(&mut self) {
-        if self.model.is_none() {
-            // No view to pick in yet: XY at once.
-            self.new_sketch(json!({}));
-        } else {
-            self.pick(Purpose::Sketch);
-        }
+        self.pick(Purpose::Sketch);
     }
 
     /// Starts picking a plane or a face for `purpose`, or stops if already picking for it.
@@ -2018,11 +2423,11 @@ impl Viewer {
                 self.newer = Some(n);
             }
             if let Some((version, url)) = &self.newer {
-                ui.hyperlink_to(self.i18n.f("update-out", "⬆ Datum { $version } is out", &[("version", version)]), url)
+                ui.hyperlink_to(self.i18n.f("update-out", "Datum { $version } is out", &[("version", version)]), url)
                     .on_hover_text(self.i18n.t("update-hint", "Its page: what is new, and the download"));
                 ui.separator();
             }
-            use crate::icons::{Icon, button};
+            use crate::icons::button;
             for (act, icon) in [(Act::Undo, Icon::Undo), (Act::Redo, Icon::Redo)] {
                 let a = act.action();
                 if button(ui, icon, self.i18n.label(act), &self.keys.hint(ui.ctx(), &self.i18n, act), self.available(a)).clicked() {
@@ -2045,8 +2450,9 @@ impl Viewer {
                 }
                 let hint = format!("{}\n{}", self.i18n.label(act), self.keys.hint(ui.ctx(), &self.i18n, act));
                 let (on, enabled) = (self.checked(act), self.available(act.action()));
-                if crate::icons::tile(ui, self.i18n.label(act), &hint, on, enabled, |p, c, colour| crate::icons::paint(p, c, icon, colour)).clicked()
-                {
+                let r = crate::icons::tile(ui, self.i18n.label(act), &hint, on, enabled, |p, c, colour| crate::icons::paint(p, c, icon, colour));
+                self.spots.insert(act.action().name, r.rect);
+                if r.clicked() {
                     self.run(ui, act);
                 }
             }
@@ -2111,36 +2517,49 @@ impl Viewer {
         let mut pick_material: Option<Option<String>> = None;
         ui.add_enabled_ui(enabled, |ui| {
             ui.label(self.i18n.t("toolbar-material", "Material"));
-            egui::ComboBox::from_id_salt("datum_toolbar_material")
+            let material_box = egui::ComboBox::from_id_salt("datum_toolbar_material")
                 .selected_text(material.as_deref().unwrap_or("—"))
                 .show_ui(ui, |ui| {
                     if ui.selectable_label(material.is_none(), "—").clicked() {
                         pick_material = Some(None);
                     }
+                    let mut sheet_material = false;
                     for name in self.materials.iter().filter_map(|e| e["name"].as_str()) {
                         let mut r = ui.selectable_label(material.as_deref() == Some(name), name);
+                        if !sheet_material && !rules_of(&self.rules, Some(name), Some("sheet")).is_empty() {
+                            sheet_material = true;
+                            self.spots.insert("toolbar.material.sheet", r.rect);
+                        }
                         if rules_of(&self.rules, Some(name), kind).is_empty() {
-                            r = r.on_hover_text(self.i18n.t("toolbar-no-rules", "No rules of this material: add one in View → Rules"));
+                            r = r.on_hover_text(self.i18n.t("toolbar-no-rules", "No rules of this material: add one in the View menu, Rules"));
                         }
                         if r.clicked() {
                             pick_material = Some(Some(name.to_string()));
                         }
                     }
                 })
-                .response
-                .on_hover_text(self.i18n.t("toolbar-material-hint", "The active part's material; with no part, for the next new one"));
+                .response;
+            self.spots.insert("toolbar.material", material_box.rect);
+            material_box.on_hover_text(self.i18n.t("toolbar-material-hint", "The active part's material; with no part, for the next new one"));
             ui.label(self.i18n.t("toolbar-rule", "Rule"));
             let rules = material.as_deref().map_or_else(Vec::new, |m| rules_of(&self.rules, Some(m), kind));
             let r = egui::ComboBox::from_id_salt("datum_toolbar_rule").selected_text(rule.as_deref().unwrap_or("—")).show_ui(ui, |ui| {
                 if ui.selectable_label(rule.is_none(), "—").clicked() {
                     apply = Some(None);
                 }
+                let mut sheet_rule = false;
                 for name in &rules {
-                    if ui.selectable_label(rule.as_deref() == Some(name), *name).clicked() {
+                    let r = ui.selectable_label(rule.as_deref() == Some(name), *name);
+                    if !sheet_rule && self.rules.iter().any(|e| e["name"] == *name && e["kind"] == "sheet") {
+                        sheet_rule = true;
+                        self.spots.insert("toolbar.rule.sheet", r.rect);
+                    }
+                    if r.clicked() {
                         apply = Some(Some(name.to_string()));
                     }
                 }
             });
+            self.spots.insert("toolbar.rule", r.response.rect);
             r.response.on_hover_text(self.i18n.t(
                 "toolbar-rule-hint",
                 "The active part's rule: material, and for a sheet its thickness and bend radius; with no part, for the next new one (E)",
@@ -2305,7 +2724,7 @@ impl Viewer {
                     for (n, _, d, _, err) in &family {
                         let r = ui.selectable_label(chosen.as_ref() == Some(n), format!("{}{n}", "   ".repeat(*d + 1)));
                         let r = match err {
-                            Some(e) => r.on_hover_text(format!("✖ {e}")),
+                            Some(e) => r.on_hover_text(e),
                             None => r,
                         };
                         if r.clicked() {
@@ -2339,7 +2758,7 @@ impl Viewer {
             });
             for (n, _, _, _, err) in &family {
                 if let Some(e) = err {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {n}: {e}"));
+                    crate::icons::marked(ui, Icon::Failed, ui.visuals().error_fg_color, &format!("{n}: {e}"));
                 }
             }
         }
@@ -2491,6 +2910,16 @@ impl Viewer {
     fn status(&mut self, ui: &mut egui::Ui) {
         let Some(m) = &self.model else {
             ui.label(if self.busy { self.i18n.t("opening", "Opening…") } else { self.i18n.t("no-model", "No model open.") });
+            if !self.busy {
+                let key = |act| self.keys.get(act).map_or_else(String::new, |k| ui.ctx().format_shortcut(k));
+                ui.weak(self.i18n.f(
+                    "no-model-start",
+                    "Start in the File menu: New ({ $new }) or Open ({ $open }); then S begins a sketch.",
+                    &[("new", &key(Act::New)), ("open", &key(Act::Open))],
+                ));
+                ui.separator();
+                self.lesson_list(ui);
+            }
             return;
         };
         ui.weak(self.i18n.f(
@@ -2513,7 +2942,7 @@ impl Viewer {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
         for n in &m.notes {
-            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {n}"));
+            crate::icons::marked(ui, Icon::Warning, ui.visuals().warn_fg_color, n);
         }
     }
 
@@ -2538,7 +2967,7 @@ impl Viewer {
             // What the sketch breaks downstream: why the model behind did not change.
             for f in m.inspect["features"].as_array().into_iter().flatten().filter(|f| f["name"] != sk.feature.as_str()) {
                 if let (Some(name), Some(e)) = (f["name"].as_str(), f["error"].as_str()) {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {name}: {e}"));
+                    crate::icons::marked(ui, Icon::Failed, ui.visuals().error_fg_color, &format!("{name}: {e}"));
                 }
             }
             // One under another (D166): what to draw, what to constrain, what to do with the
@@ -2559,6 +2988,7 @@ impl Viewer {
                     let r = crate::icons::tile(ui, self.i18n.label(act), &hint, sk.draft.tool == tool, true, |p, c, colour| {
                         crate::icons::paint(p, c, icon, colour)
                     });
+                    self.spots.insert(act.action().name, r.rect);
                     if r.clicked() {
                         sk.draft.press(tool);
                     }
@@ -2701,7 +3131,9 @@ impl Viewer {
                 ),
             };
             ui.horizontal(|ui| {
-                done = ui.button(self.i18n.t("done", "Done")).clicked();
+                let r = ui.button(self.i18n.t("done", "Done"));
+                self.spots.insert("sketch.done", r.rect);
+                done = r.clicked();
                 ui.weak(self.i18n.t("how", "How?")).on_hover_text(how);
             });
             ui.separator();
@@ -2748,7 +3180,8 @@ impl Viewer {
                 };
                 // In a level: one it sets otherwise goes back to the parent's; one it inherits stays.
                 if set.contains(name) {
-                    if ui.button("↺").on_hover_text(self.i18n.t("param-reset-hint", "Set in this variant: back to the parent's value")).clicked() {
+                    let hint = self.i18n.t("param-reset-hint", "Set in this variant: back to the parent's value");
+                    if crate::icons::button(ui, Icon::Undo, self.i18n.t("revert-name", "Back to the parent's"), hint, true).clicked() {
                         revert = Some(json!({"parameter": name}));
                     }
                 } else if (level.is_none() || own_parameters.contains(name))
@@ -2836,7 +3269,7 @@ impl Viewer {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let bare = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
-                // In a level: what it changes of its parent's (a dot, ↺ back), what is its own (+).
+                // In a level: what it changes of its parent's (a dot, the undo arrow back), what is its own (+).
                 let (is_changed, is_own) = (changed.iter().any(|c| c == bare), own.iter().any(|c| c == bare));
                 let mut row = |ui: &mut egui::Ui| match f["error"].as_str() {
                     // A flat blank: its size, and its DXF for the turret press.
@@ -2844,7 +3277,7 @@ impl Viewer {
                         let flat = &f["status"]["flat"];
                         ui.horizontal(|ui| {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
-                            tree.label(ui, &self.i18n, f, "✔", &format!("{op}  ·  {w:.1} × {h:.1}"));
+                            tree.label(ui, &self.i18n, f, Icon::Done, &format!("{op}  ·  {w:.1} × {h:.1}"));
                             if ui
                                 .button(self.i18n.t("feature-show", "Show"))
                                 .on_hover_text(self.i18n.t("feature-show-hint", "In the flat pattern pane"))
@@ -2867,7 +3300,7 @@ impl Viewer {
                                 (Some(plane), false) => plane.to_string(),
                                 (None, _) => f["base"].as_str().unwrap_or("xy").to_uppercase(),
                             };
-                            tree.label(ui, &self.i18n, f, "✔", &format!("{from} +"));
+                            tree.label(ui, &self.i18n, f, Icon::Done, &format!("{from} +"));
                             let text = offsets.entry(bare.to_string()).or_default();
                             let r = ui
                                 .add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text(self.i18n.t("offset", "offset")))
@@ -2881,7 +3314,7 @@ impl Viewer {
                     // Changed in the form it was made in, its values in it.
                     None if matches!(op, "revolve" | "rolled" | "trim" | "extrude" | "sheet" | "plate" | "flange") => {
                         ui.horizontal(|ui| {
-                            tree.label(ui, &self.i18n, f, "✔", op);
+                            tree.label(ui, &self.i18n, f, Icon::Done, op);
                             let hint = self.i18n.t("edit-feature", "Change it");
                             if crate::icons::button(ui, crate::icons::Icon::Edit, hint, hint, true).clicked() {
                                 reedit = Some(bare.to_string());
@@ -2895,7 +3328,7 @@ impl Viewer {
                                 crate::icons::paint(ui.painter(), rect.center(), crate::icons::Icon::Flat, ui.visuals().text_color());
                                 r.on_hover_text(self.i18n.t("feature-flat-sketch", "Drawn on the blank"));
                             }
-                            tree.label(ui, &self.i18n, f, "✔", op);
+                            tree.label(ui, &self.i18n, f, Icon::Done, op);
                             if crate::icons::button(
                                 ui,
                                 crate::icons::Icon::Edit,
@@ -2910,19 +3343,23 @@ impl Viewer {
                         });
                     }
                     None => {
-                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, "✔", op));
+                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, Icon::Done, op));
                     }
                     Some(e) => {
-                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, "✖", op));
+                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, Icon::Failed, op));
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
                 ui.horizontal(|ui| {
                     if is_changed
-                        && ui
-                            .button("↺")
-                            .on_hover_text(self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"))
-                            .clicked()
+                        && crate::icons::button(
+                            ui,
+                            Icon::Undo,
+                            self.i18n.t("revert-name", "Back to the parent's"),
+                            self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"),
+                            true,
+                        )
+                        .clicked()
                     {
                         revert = Some(json!({"feature": bare}));
                     }
@@ -3056,7 +3493,7 @@ impl Viewer {
         }
     }
 
-    fn viewport(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
+    fn viewport(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.viewport = rect;
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
@@ -3104,7 +3541,10 @@ impl Viewer {
         let moving = self.drawn.is_some_and(|d| (d.1, d.2) != (view_projection, eye));
         let smooth_now = self.smooth && !moving;
         let drawn = (self.version, view_projection, eye, [w, h, u32::from(smooth_now)]);
-        if self.drawn != Some(drawn) {
+        // No GPU (the lessons' test on a machine without one): all but the picture works.
+        if self.drawn != Some(drawn)
+            && let Some(rs) = rs
+        {
             let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&rs.device));
             let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
             let encoder = renderer.draw(&rs.device, &rs.queue, &frame, w, h, smooth_now);
@@ -3527,7 +3967,7 @@ impl Viewer {
             egui::CentralPanel::default().show(ui, |ui| {
                 if source == Source::Rules {
                     if materials.is_empty() {
-                        ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in View → Materials"));
+                        ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in the View menu, Materials"));
                         return;
                     }
                     let rows = 6.0 * ui.spacing().interact_size.y;
@@ -4182,6 +4622,7 @@ impl Viewer {
         // depth must not let Enter make this one).
         let (shown, params) = x.params(&sketch, on_face, next_rule.as_deref());
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let (mut add, mut cancel) = (false, false);
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 let through = x.through && shown == "cut";
@@ -4294,21 +4735,28 @@ impl Viewer {
                         let (mode, body) = (reply["mode"].as_str().unwrap_or_default(), reply["body"].as_str().unwrap_or_default());
                         ui.label(self.i18n.f("extrude-preview", "{ $mode } · { $body }", &[("mode", mode_name(&self.i18n, mode)), ("body", body)]));
                         for w in reply["warnings"].as_array().into_iter().flatten().filter(|w| w["feature"] == params["name"]) {
-                            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {}", warning_text(&self.i18n, w)));
+                            crate::icons::marked(ui, Icon::Warning, ui.visuals().warn_fg_color, &warning_text(&self.i18n, w));
                         }
                     }
                     Some(Err(why)) => {
                         ui.colored_label(ui.visuals().error_fg_color, why);
                     }
                 }
+                ui.horizontal(|ui| {
+                    let ok = !refused && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params);
+                    let r = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK")));
+                    self.spots.insert("form.ok", r.rect);
+                    add = r.clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
+                });
             });
         });
         let params = x.params(&sketch, on_face, next_rule.as_deref()).1;
         let command = x.command();
-        if esc {
+        if esc || cancel {
             self.close_extrusion();
         } else if !refused {
-            if enter && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params) {
+            if (enter || add) && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params) {
                 self.close_extrusion();
                 self.send(Request::Command(command, params));
             } else if x.sent.as_ref() != Some(&params) {
@@ -4340,7 +4788,9 @@ impl Viewer {
                     }
                 });
                 ui.horizontal(|ui| {
-                    add |= ui.button(self.i18n.t("ok", "OK")).clicked();
+                    let r = ui.button(self.i18n.t("ok", "OK"));
+                    self.spots.insert("form.ok", r.rect);
+                    add |= r.clicked();
                     cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape));
                 });
             });
@@ -4492,7 +4942,10 @@ impl Viewer {
                             for k in keys {
                                 ui.label(crate::pattern::PatternForm::label(&self.i18n, k));
                                 if let Some(t) = form.fields.get_mut(k) {
-                                    ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(t).hint_text("—"));
+                                    let r = ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(t).hint_text("—"));
+                                    if matches!(k, "n1" | "n") {
+                                        self.spots.insert("pattern.count", r.rect);
+                                    }
                                 }
                                 ui.end_row();
                             }
@@ -4505,6 +4958,7 @@ impl Viewer {
                         let hint =
                             self.i18n.t("pattern-select-hint", "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away");
                         let select = ui.selectable_label(form.picking, self.i18n.t("pattern-select", "Select elements"));
+                        self.spots.insert("pattern.select", select.rect);
                         if select.on_hover_text(hint).clicked() && !form.picking {
                             form.picking = true;
                             sk.selected.clear();
@@ -4523,7 +4977,9 @@ impl Viewer {
                     }
                     let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
                     ui.horizontal(|ui| {
-                        if (ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done"))).clicked() || (enter && ready))
+                        let r = ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done")));
+                        self.spots.insert("pattern.done", r.rect);
+                        if (r.clicked() || (enter && ready))
                             && let Ok(Some(p)) = form.patch()
                         {
                             end = End::Send(p);
@@ -5185,7 +5641,7 @@ pub(crate) fn marks(inspect: &Json) -> (Vec<String>, Vec<String>, Vec<String>, V
 /// What parts and variants are, for the hint over them (D152).
 const LEVELS: &str = "A part is a body of the base; a variant takes its part and changes only what differs (a length, a few \
                       holes): a change to the base reaches every variant. A dot: changed here, \
-                      ↺ back as the parent has it, + its own";
+                      the undo arrow takes it back as the parent has it, + its own";
 
 /// `prefix k`, the first not a level's name yet.
 /// A variant as the panel lists it: name, parent, depth, part, error.
@@ -5200,6 +5656,7 @@ const HOLD: f64 = 0.5;
 
 /// The menu a held right click opens on the sketch: by what is selected, a pattern (its kind
 /// by the selection), or what to do with copies selected (D155).
+#[derive(Clone)]
 enum Menu {
     Pattern {
         at: egui::Pos2,
@@ -5384,6 +5841,7 @@ impl Viewer {
             Act::Save
             | Act::SaveAs
             | Act::Close
+            | Act::NewSketch
             | Act::ExportStep
             | Act::Home
             | Act::LookAt
@@ -5457,7 +5915,9 @@ impl Viewer {
             Act::SaveAs => {
                 self.save(true);
             }
-            Act::Close => self.close(),
+            Act::Close => {
+                self.close();
+            }
             Act::ExportStep => self.export_step(),
             Act::Exit => ui.send_viewport_cmd(egui::ViewportCommand::Close),
             Act::NewProject => self.project_by_dialog(true),
@@ -5602,7 +6062,9 @@ impl Viewer {
         if menu && let Some(k) = self.keys.get(act) {
             button = button.shortcut_text(ui.ctx().format_shortcut(k));
         }
-        if ui.add_enabled(self.available(a), button).on_hover_text(self.keys.hint(ui.ctx(), &self.i18n, act)).clicked() {
+        let r = ui.add_enabled(self.available(a), button);
+        self.spots.insert(a.name, r.rect);
+        if r.on_hover_text(self.keys.hint(ui.ctx(), &self.i18n, act)).clicked() {
             self.run(ui, act);
         }
     }
@@ -5625,7 +6087,7 @@ impl Viewer {
 
     /// The menu (D131): every action, grouped as in other programs.
     fn menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button(self.i18n.t("menu-file", "File").to_string(), |ui| {
+        let r = ui.menu_button(self.i18n.t("menu-file", "File").to_string(), |ui| {
             self.item(ui, Act::New, true);
             self.item(ui, Act::Open, true);
             ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
@@ -5655,12 +6117,14 @@ impl Viewer {
             ui.separator();
             self.item(ui, Act::Exit, true);
         });
-        ui.menu_button(self.i18n.t("menu-edit", "Edit").to_string(), |ui| {
+        self.spots.insert("menu.file", r.response.rect);
+        let r = ui.menu_button(self.i18n.t("menu-edit", "Edit").to_string(), |ui| {
             self.item(ui, Act::Undo, true);
             self.item(ui, Act::Redo, true);
             self.item(ui, Act::Rename, true);
         });
-        ui.menu_button(self.i18n.t("menu-view", "View").to_string(), |ui| {
+        self.spots.insert("menu.edit", r.response.rect);
+        let r = ui.menu_button(self.i18n.t("menu-view", "View").to_string(), |ui| {
             self.item(ui, Act::Home, true);
             self.item(ui, Act::LookAt, true);
             self.item(ui, Act::Measure, true);
@@ -5696,7 +6160,8 @@ impl Viewer {
                 }
             });
         });
-        ui.menu_button(self.i18n.t("menu-sketch", "Sketch").to_string(), |ui| {
+        self.spots.insert("menu.view", r.response.rect);
+        let r = ui.menu_button(self.i18n.t("menu-sketch", "Sketch").to_string(), |ui| {
             self.item(ui, Act::NewSketch, true);
             self.item(ui, Act::WorkPlane, true);
             self.item(ui, Act::Extrude, true);
@@ -5713,13 +6178,16 @@ impl Viewer {
                 self.item(ui, act, true);
             }
         });
-        ui.menu_button(self.i18n.t("menu-help", "Help").to_string(), |ui| {
+        self.spots.insert("menu.sketch", r.response.rect);
+        let r = ui.menu_button(self.i18n.t("menu-help", "Help").to_string(), |ui| {
+            ui.menu_button(self.i18n.t("menu-lessons", "Lessons").to_string(), |ui| self.lesson_list(ui));
             ui.hyperlink_to(format!("Datum {}", env!("CARGO_PKG_VERSION")), env!("CARGO_PKG_REPOSITORY"));
             ui.weak(self.i18n.f("help-log", "Problems are logged to { $path }", &[("path", &crate::log::path().display().to_string())]));
             if let Some(p) = &self.settings {
                 ui.weak(self.i18n.f("help-settings", "Keys and other settings: { $path }", &[("path", &p.display().to_string())]));
             }
         });
+        self.spots.insert("menu.help", r.response.rect);
     }
 
     /// What in the settings file could not be applied, until dismissed.
@@ -5788,9 +6256,7 @@ impl egui_dock::TabViewer for Tabs<'_> {
             Pane::Model => {
                 let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
                 ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(r, g, b));
-                if let Some(rs) = self.rs {
-                    self.v.viewport(ui, rs);
-                }
+                self.v.viewport(ui, self.rs);
             }
             Pane::Flat => self.v.flat_pane(ui),
             Pane::Library if self.v.sketch.is_some() => {
@@ -5940,6 +6406,36 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.window(ui, frame.wgpu_render_state());
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.hand_input(ctx, raw);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(MAXIMIZED, self.maximized.to_string());
+        storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
+        storage.set_string(SIDE_BAR, self.side_bar.to_text());
+        storage.set_string(TOUCHPAD, self.touchpad.to_string());
+        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
+        if self.language_chosen {
+            storage.set_string(LANGUAGE, self.language.clone());
+        }
+        if self.theme_chosen
+            && let Some((word, _)) = crate::settings::THEMES.iter().find(|(_, pref)| *pref == self.theme)
+        {
+            storage.set_string(THEME, word.to_string());
+        }
+        storage.set_string(RECENT, json!(self.recent).to_string());
+        storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
+        storage.set_string(PROJECT, json!(self.project).to_string());
+    }
+}
+
+impl Viewer {
+    /// One frame of the whole window; no render state: all but the 3D picture.
+    fn window(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let start = std::time::Instant::now();
         if self.shown < 2 {
             self.shown += 1;
@@ -5952,6 +6448,7 @@ impl eframe::App for Viewer {
             self.maximized = ui.input(|i| i.viewport().maximized.unwrap_or(self.maximized));
         }
         self.receive();
+        self.spots.clear();
         let t = title(self.project.as_deref(), self.path.as_deref());
         if t != self.titled {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(t.clone()));
@@ -5992,36 +6489,15 @@ impl eframe::App for Viewer {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
             let style = egui_dock::Style::from_egui(ui.style());
-            egui_dock::DockArea::new(&mut dock)
-                .style(style)
-                .show_add_buttons(false)
-                .show_inside(ui, &mut Tabs { v: self, rs: frame.wgpu_render_state() });
+            egui_dock::DockArea::new(&mut dock).style(style).show_add_buttons(false).show_inside(ui, &mut Tabs { v: self, rs });
             self.dock = dock;
         });
         // The flat pattern pane closed on a sketch on the blank finishes the sketch, as Done does.
         if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) && !crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
             self.leave();
         }
+        self.lesson_card(ui.ctx());
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(MAXIMIZED, self.maximized.to_string());
-        storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
-        storage.set_string(SIDE_BAR, self.side_bar.to_text());
-        storage.set_string(TOUCHPAD, self.touchpad.to_string());
-        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
-        if self.language_chosen {
-            storage.set_string(LANGUAGE, self.language.clone());
-        }
-        if self.theme_chosen
-            && let Some((word, _)) = crate::settings::THEMES.iter().find(|(_, pref)| *pref == self.theme)
-        {
-            storage.set_string(THEME, word.to_string());
-        }
-        storage.set_string(RECENT, json!(self.recent).to_string());
-        storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
-        storage.set_string(PROJECT, json!(self.project).to_string());
     }
 }
 
@@ -6138,6 +6614,10 @@ mod tests {
             next_rule: None,
             material: None,
             viewport: egui::Rect::ZERO,
+            lessons: Vec::new(),
+            playing: None,
+            own_records: Default::default(),
+            spots: BTreeMap::new(),
             sketch_rect: egui::Rect::ZERO,
             blank_fitted: false,
         };
@@ -6154,6 +6634,488 @@ mod tests {
         h.ctx.data_mut(|d| d.insert_persisted(id, wide));
         h.step();
         assert!(egui::containers::panel::PanelState::load(&h.ctx, id).is_none());
+    }
+
+    /// Without a model there is no sketch to start: S sends nothing and picks nothing; with one it
+    /// is available and picks a plane.
+    /// While the hand works the engineer's input does not reach the window, and Esc stops it,
+    /// taking back what it did.
+    #[test]
+    fn the_hand_takes_the_input_and_esc_stops_it() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let text = r#"{"format": "datum-lesson/1", "title": "t", "steps": [
+            {"what": "w", "show": [{"key": "enter"}], "done": {"window": {"form": true}}}]}"#;
+        v.lessons = vec![("a.json".into(), crate::lessons::Lesson::parse(text))];
+        v.playing = Some(Playing { lesson: 0, step: 0, showing: None, lost: None });
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Mark)), "a model to come back to");
+        v.busy = true;
+        let click = egui::Event::PointerButton {
+            pos: egui::pos2(5.0, 5.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut raw = egui::RawInput { events: vec![click, egui::Event::Text("x".into())], ..Default::default() };
+        v.hand_input(&ctx, &mut raw);
+        assert!(raw.events.is_empty(), "{:?}", raw.events);
+        assert!(v.playing.as_ref().unwrap().showing.is_some());
+        let esc = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut raw = egui::RawInput { events: vec![esc], ..Default::default() };
+        v.hand_input(&ctx, &mut raw);
+        assert!(raw.events.is_empty() && v.playing.as_ref().unwrap().showing.is_none());
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Back)), "taken back");
+    }
+
+    /// A viewer with the plate's outline sketch open, the origin selected, the tool Line.
+    fn viewer_in_sketch() -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.draft.take_up(Tool::Line);
+        sk.selected = vec![Pick::Point("o".into())];
+        (v, inbox)
+    }
+
+    fn lesson_with_escape(v: &mut Viewer) {
+        let text = r#"{"format": "datum-lesson/1", "title": "t", "steps": [{"what": "w", "show": [{"point": "view"}]}]}"#;
+        v.lessons = vec![("a.json".into(), crate::lessons::Lesson::parse(text))];
+        v.playing = Some(Playing { lesson: 0, step: 0, showing: None, lost: None });
+    }
+
+    fn press_esc(v: &mut Viewer, ctx: &egui::Context) {
+        let esc = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut raw = egui::RawInput { events: vec![esc], ..Default::default() };
+        v.hand_input(ctx, &mut raw);
+    }
+
+    /// Show me leaves an open sketch as it was: selection, tool and the pattern menu.
+    #[test]
+    fn show_me_keeps_an_open_sketch_as_it_was() {
+        let (mut v, inbox) = viewer_in_sketch();
+        lesson_with_escape(&mut v);
+        let at = egui::pos2(30.0, 30.0);
+        v.menu = Some(Menu::open(v.sketch.as_ref().unwrap(), at));
+        assert!(matches!(v.menu, Some(Menu::Pattern { .. })));
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        // The hand changes things meanwhile.
+        let sk = v.sketch.as_mut().unwrap();
+        sk.selected = vec![Pick::Curve("right_hole".into())];
+        sk.draft.escape();
+        v.menu = None;
+        press_esc(&mut v, &ctx);
+        let sk = v.sketch.as_ref().expect("the sketch stays open");
+        assert_eq!(sk.feature, "outline");
+        assert_eq!(sk.selected, vec![Pick::Point("o".into())]);
+        assert_eq!(sk.draft.tool, Tool::Line);
+        assert!(matches!(v.menu, Some(Menu::Pattern { .. })), "the menu is back");
+        let requests: Vec<Request> = inbox.try_iter().collect();
+        assert!(requests.iter().any(|r| matches!(r, Request::Back)));
+        assert!(!requests.iter().any(|r| matches!(r, Request::Editing(None))), "the sketch was not left");
+    }
+
+    /// With no sketch open at the mark, the one the hand opened is left.
+    #[test]
+    fn show_me_leaves_a_sketch_the_hand_opened() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        lesson_with_escape(&mut v);
+        assert!(v.sketch.is_none());
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        let (opened, _) = viewer_in_sketch();
+        v.sketch = opened.sketch;
+        assert!(v.sketch.is_some());
+        press_esc(&mut v, &ctx);
+        assert!(v.sketch.is_none());
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Back)));
+    }
+
+    #[test]
+    fn the_window_tells_selection_and_the_pattern_menu() {
+        let (mut v, _inbox) = viewer_in_sketch();
+        let w = v.lesson_window();
+        assert_eq!(w["selected"], json!(["Point(\"o\")"]));
+        assert_eq!(w["pattern_menu"], json!(false));
+        assert_eq!(w["pattern_picked"], json!(false));
+        let mut menu = Menu::open(v.sketch.as_ref().unwrap(), egui::pos2(10.0, 10.0));
+        v.menu = Some(menu.clone());
+        let w = v.lesson_window();
+        assert_eq!((&w["pattern_menu"], &w["pattern_picked"]), (&json!(true), &json!(false)));
+        if let Menu::Pattern { form, .. } = &mut menu {
+            form.cell = vec!["right_hole".into()];
+        }
+        v.menu = Some(menu);
+        assert_eq!(v.lesson_window()["pattern_picked"], json!(true));
+        v.sketch.as_mut().unwrap().selected.clear();
+        assert_eq!(v.lesson_window()["selected"], json!([]));
+    }
+
+    /// A place that never appears ends the hand and says so plainly: no technical text on the card.
+    #[test]
+    fn a_lost_place_ends_the_hand_with_a_plain_message() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        lesson_with_escape(&mut v);
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        v.busy = false;
+        let mut raw = egui::RawInput { predicted_dt: 6.0, ..Default::default() };
+        v.hand_input(&ctx, &mut raw);
+        let p = v.playing.as_ref().unwrap();
+        assert!(p.lost.is_some() && p.showing.is_none());
+        let ru = crate::i18n::I18n::of("ru");
+        let text = ru.t("lesson-lost", "");
+        assert!(!text.is_empty() && !text.contains("{ $") && !text.contains("Click("), "{text}");
+    }
+
+    /// The hand finds a curve where the engineer drew it, not where the lesson's author did;
+    /// off the view it is not there to click.
+    #[test]
+    fn the_hand_clicks_a_curve_where_it_is() {
+        let (mut v, _inbox) = viewer_in_sketch();
+        v.sketch_rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(600.0, 400.0));
+        let ctx = egui::Context::default();
+        let line = crate::lessons::Move::Curve("line".into());
+        let (center, h) = (v.sketch_rect.center(), f64::from(v.sketch_rect.height()));
+        let lines = &v.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines;
+        let first = lines.iter().find(|(_, l)| !l.construction).unwrap().0.clone();
+        let spots: Vec<egui::Pos2> = [[0.0, 0.0], [20.0, -10.0]]
+            .into_iter()
+            .map(|shift: [f64; 2]| {
+                let sk = v.sketch.as_mut().unwrap();
+                sk.camera.center = [shift[0], shift[1]];
+                let Some(crate::lessons::Aim::Spot(at)) = v.aim(&ctx, &line) else { panic!("a line in view") };
+                let sk = v.sketch.as_ref().unwrap();
+                let (x, y) = (f64::from(at.x - center.x), f64::from(at.y - center.y));
+                assert_eq!(sk.curve_at(x, y, h).as_deref(), Some(first.as_str()), "the click takes the line");
+                at
+            })
+            .collect();
+        assert_ne!(spots[0], spots[1], "it follows the line on the screen");
+        v.sketch.as_mut().unwrap().camera.center = [1e9, 1e9];
+        assert!(v.aim(&ctx, &line).is_none(), "off the view");
+    }
+
+    /// One frame of the whole window: the hand's input, as `raw_input_hook` takes it.
+    fn window_frame(h: &mut egui_kittest::Harness<'_, Viewer>) {
+        let ctx = h.ctx.clone();
+        let mut raw = std::mem::take(h.input_mut());
+        h.state_mut().hand_input(&ctx, &mut raw);
+        *h.input_mut() = raw;
+        h.step();
+    }
+
+    /// Frames until `done`; a worker's rebuild takes what it takes, a lesson does not get stuck.
+    fn window_until(h: &mut egui_kittest::Harness<'_, Viewer>, what: &str, done: impl Fn(&Viewer) -> bool) {
+        let start = std::time::Instant::now();
+        while !done(h.state()) {
+            assert!(start.elapsed().as_secs() < 60, "{what}: never happened");
+            window_frame(h);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The window as the engineer has it, with the worker: the repo's lessons in `project`.
+    fn lesson_window_harness(project: &std::path::Path) -> egui_kittest::Harness<'static, Viewer> {
+        let project = project.to_path_buf();
+        let mut v = Viewer::new(None, egui::Context::default(), "test".into());
+        v.i18n = crate::i18n::I18n::of("ru");
+        v.lessons = crate::lessons::read(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")));
+        v.set_project(Some(project));
+        egui_kittest::Harness::builder().with_size([1280.0, 800.0]).build_ui_state(|ui, v: &mut Viewer| v.window(ui, None), v)
+    }
+
+    fn features_of(v: &Viewer) -> usize {
+        v.model.as_ref().map_or(0, |m| m.inspect["features"].as_array().map_or(0, Vec::len))
+    }
+
+    /// Every lesson of the repo, played in the real window from its first step to its last: each
+    /// step that can be shown is shown and taken back, then done by the hand. The moves go the
+    /// way the engineer's do; a menu, key or form that changes breaks this test, not a learner.
+    #[test]
+    fn the_lessons_play_through_the_window() {
+        let project = std::env::temp_dir().join(format!("datum-lessons-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join("part")).unwrap();
+        std::fs::write(project.join(datum_model::workspace::PROJECT_FILE), "{}").unwrap();
+        let mut h = lesson_window_harness(&project);
+        let lessons = h.state().lessons.len();
+        assert!(lessons >= 2);
+        let ctx = h.ctx.clone();
+        for lesson in 0..lessons {
+            let title = h.state().lessons[lesson].1.as_ref().unwrap().title.clone();
+            h.state_mut().start_lesson(lesson);
+            window_until(&mut h, "a lesson starts", |v| !v.busy && v.model.is_none());
+            for _ in 0..3 {
+                window_frame(&mut h);
+            }
+            loop {
+                window_until(&mut h, "the model comes", |v| !v.busy);
+                // Here a table's window lies in the frame, over the menu; in the program it is a
+                // window of its own.
+                h.state_mut().table = None;
+                window_frame(&mut h);
+                let at = h.state().playing.as_ref().unwrap().step;
+                let steps = &h.state().lessons[lesson].1.as_ref().unwrap().steps;
+                let Some(step) = steps.get(at) else { break };
+                let (show, perform, own, what) = (step.can_show(), step.can_do(), step.own, step.what.clone());
+                let reading = step.done.window.is_none() && step.done.model.is_none();
+                let said = format!("{title}, step {}: {what}", at + 1);
+                if show {
+                    let (model, features, sketch) =
+                        (h.state().model.is_some(), features_of(h.state()), h.state().sketch.as_ref().map(|s| s.feature.clone()));
+                    h.state_mut().start_hand(&ctx, true);
+                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.busy);
+                    for _ in 0..5 {
+                        window_frame(&mut h);
+                    }
+                    window_until(&mut h, &said, |v| !v.busy);
+                    let v = h.state();
+                    assert_eq!(v.playing.as_ref().unwrap().lost, None, "{said}");
+                    assert_eq!(v.playing.as_ref().unwrap().step, at, "shown, not done: {said}");
+                    assert_eq!(
+                        (v.model.is_some(), features_of(v), v.sketch.as_ref().map(|s| s.feature.clone())),
+                        (model, features, sketch),
+                        "taken back: {said}"
+                    );
+                }
+                if perform {
+                    h.state_mut().start_hand(&ctx, false);
+                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.busy);
+                    assert_eq!(h.state().playing.as_ref().unwrap().lost, None, "{said}");
+                } else if reading {
+                    h.state_mut().playing.as_mut().unwrap().step += 1;
+                } else if own {
+                    // The engineer's to choose in a system dialog: the file's place. The project
+                    // was chosen before the lesson.
+                    let v = h.state_mut();
+                    let path = project.join("part").join(format!("lesson{lesson}.json"));
+                    v.send(Request::Command("save", json!({"path": path.display().to_string()})));
+                    v.set_path(Some(path));
+                }
+                window_until(&mut h, &format!("done: {said}"), |v| v.playing.as_ref().unwrap().step > at);
+            }
+            // What each lesson leaves: the learner gets the real thing.
+            let features = h.state().model.as_ref().unwrap().inspect["features"].clone();
+            let sketch = features.as_array().unwrap().iter().find(|f| f["op"] == "sketch").cloned().unwrap_or_default();
+            match lesson {
+                0 => assert!(project.join("library/material/08пс.json").is_file() && project.join("library/rule/08пс 2 мм.json").is_file()),
+                1 => assert!(features.as_array().unwrap().iter().any(|f| f["op"] == "plate"), "the part was made: {features}"),
+                2 => {
+                    assert_eq!(sketch["sketch"]["patterns"].as_object().unwrap().values().next().unwrap()["count"][0].as_f64(), Some(5.0), "{sketch}")
+                }
+                _ => {}
+            }
+            h.state_mut().playing = None;
+        }
+        drop(h);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    #[test]
+    fn a_sketch_needs_a_model() {
+        let press_s = |v: &mut Viewer| {
+            let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+            h.event(egui::Event::Key { key: egui::Key::S, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+        };
+        let new_sketch = ACTIONS.iter().find(|a| a.act == Act::NewSketch).unwrap();
+        let (mut v, inbox) = viewer("parametric.json");
+        v.model = None;
+        let _ = inbox.try_iter().count();
+        assert!(!v.available(new_sketch));
+        press_s(&mut v);
+        assert!(v.picking.is_none() && inbox.try_iter().next().is_none());
+        let (mut v, _inbox) = viewer("parametric.json");
+        assert!(v.available(new_sketch));
+        press_s(&mut v);
+        assert_eq!(v.picking, Some(Purpose::Sketch));
+    }
+
+    /// A lesson starts with no model, no rule, at its first step; a step shows done only once the
+    /// last command is answered, and the steps done together are passed together.
+    #[test]
+    fn a_lesson_starts_clean_and_steps_wait_for_the_model() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        v.model = None;
+        v.next_rule = Some("Лист".into());
+        v.material = Some((None, "Сталь".into()));
+        let step = |model: bool| format!(r#"{{"what": "w", "done": {{"window": {{"model": {model}}}}}}}"#);
+        let text = format!(r#"{{"format": "datum-lesson/1", "title": "t", "steps": [{}, {}, {}]}}"#, step(false), step(false), step(true));
+        v.lessons = vec![("t.json".into(), crate::lessons::Lesson::parse(&text))];
+        v.start_lesson(0);
+        assert!(v.next_rule.is_none() && v.material.is_none());
+        let playing = v.playing.take().expect("playing");
+        assert_eq!((playing.lesson, playing.step), (0, 0));
+        let lesson = v.lessons[0].1.as_ref().unwrap();
+        v.busy = true;
+        assert_eq!(v.lesson_step(&playing, lesson), 0, "busy: what shows is old");
+        v.busy = false;
+        assert_eq!(v.lesson_step(&playing, lesson), 2, "two done steps pass together, the third waits");
+    }
+
+    /// The first lesson leads somewhere: its model patterns match what a real session says once the
+    /// engineer has drawn four lines and built the plate, and not before.
+    #[test]
+    fn the_first_lesson_is_true_to_the_model() {
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons/02-new-part.json")).unwrap();
+        let lesson = crate::lessons::Lesson::parse(&text).unwrap();
+        let (sketch_done, plate_done) = (lesson.steps[4].done.model.as_ref().unwrap(), lesson.steps[5].done.model.as_ref().unwrap());
+        let root = std::env::temp_dir().join(format!("datum-lesson-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("part")).unwrap();
+        std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+        let mut s = Session::default();
+        let mut run = |cmd: &str, p: Json| s.execute(cmd, &p).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        run("new", json!({}));
+        run("save", json!({"path": root.join("part/plate.json").display().to_string()}));
+        run("put_library", json!({"level": "material", "element": {"name": "Сталь", "density": 7850}}));
+        run(
+            "put_library",
+            json!({"level": "rule", "element": {"name": "Лист", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t"}}),
+        );
+        let before = run("inspect", json!({}));
+        assert!(!crate::lessons::matches(sketch_done, &before) && !crate::lessons::matches(plate_done, &before));
+        let points = json!({"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]});
+        let line = |a: &str, b: &str| json!({"from": a, "to": b});
+        run(
+            "add",
+            json!({"name": "three", "op": "sketch", "sketch": {"points": points,
+            "lines": {"ab": line("a", "b"), "bc": line("b", "c"), "cd": line("c", "d")}}}),
+        );
+        let three = run("inspect", json!({}));
+        assert!(!crate::lessons::matches(sketch_done, &three), "three lines are not a rectangle: {three}");
+        run(
+            "add",
+            json!({"name": "skel", "op": "sketch", "sketch": {"points": points,
+            "lines": {"ab": line("a", "b"), "bc": line("b", "c"), "cd": line("c", "d"), "da": line("d", "a")}}}),
+        );
+        let drawn = run("inspect", json!({}));
+        assert!(crate::lessons::matches(sketch_done, &drawn), "four lines: {drawn}");
+        assert!(!crate::lessons::matches(plate_done, &drawn), "no plate yet: {drawn}");
+        run("plate", json!({"name": "face", "sketch": "skel", "rule": "Лист"}));
+        let built = run("inspect", json!({}));
+        assert!(crate::lessons::matches(plate_done, &built), "plate: {built}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn sent(inbox: &std::sync::mpsc::Receiver<Request>) -> Vec<(&'static str, Json)> {
+        inbox
+            .try_iter()
+            .filter_map(|r| match r {
+                Request::Command(c, p) => Some((c, p)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A fresh project folder in the temp directory, marked with `datum-project.json`.
+    fn project_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("datum-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("part")).unwrap();
+        std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+        root
+    }
+
+    /// New model and `set_project` tell the session the project open, if any.
+    #[test]
+    fn the_session_is_told_the_project() {
+        let (mut v, inbox) = viewer("parametric.json");
+        v.new_model();
+        let cmds = sent(&inbox);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(cmds[0].0, "new");
+        assert!(cmds[0].1.get("project").is_none(), "{:?}", cmds[0].1);
+        let root = project_root("viewer_told_project");
+        v.project = Some(root.clone());
+        v.new_model();
+        let cmds = sent(&inbox);
+        assert_eq!((cmds[0].0, &cmds[0].1["project"]), ("new", &json!(root)));
+        v.set_project(Some(root.clone()));
+        let cmds = sent(&inbox);
+        assert_eq!((cmds[0].0, &cmds[0].1["project"]), ("set_project", &json!(root)));
+        v.set_project(None);
+        let cmds = sent(&inbox);
+        assert_eq!(cmds[0].0, "set_project");
+        assert!(cmds[0].1.get("project").is_none());
+        v.model = None;
+        v.set_project(Some(root.clone()));
+        assert!(sent(&inbox).is_empty(), "no model, nothing to tell");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A project beside the program is not safe from a new version; one elsewhere is.
+    #[test]
+    fn beside_the_program_is_told_from_elsewhere() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(beside_program(&exe.parent().unwrap().join("some-project")));
+        let temp = std::env::temp_dir();
+        if !temp.starts_with(exe.parent().unwrap()) {
+            assert!(!beside_program(&temp.join("some-project")));
+        }
+    }
+
+    /// A step to read is not done by the model, only by its button: the lesson stays on it.
+    #[test]
+    fn a_step_to_read_waits_for_its_button() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        let text = r#"{"format": "datum-lesson/1", "title": "t", "steps": [{"what": "read this"}]}"#;
+        v.lessons = vec![("t.json".into(), crate::lessons::Lesson::parse(text))];
+        let lesson = v.lessons[0].1.as_ref().unwrap();
+        assert!(!v.step_done(&lesson.steps[0]));
+        v.busy = false;
+        let playing = Playing { lesson: 0, step: 0, showing: None, lost: None };
+        assert_eq!(v.lesson_step(&playing, lesson), 0);
+    }
+
+    /// The project lesson is true to real files: what the engineer writes in the project's library
+    /// through a real session is what its patterns look for.
+    #[test]
+    fn the_project_lesson_is_true_to_the_files() {
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons/01-project.json")).unwrap();
+        let lesson = crate::lessons::Lesson::parse(&text).unwrap();
+        let (materials_step, rules_step) = (&lesson.steps[3], &lesson.steps[5]);
+        let root = project_root("viewer_project_lesson");
+        let (mut v, _inbox) = viewer("parametric.json");
+        v.project = Some(root.clone());
+        v.path = None;
+        v.model = None;
+        v.reload_library_records();
+        assert!(v.own_records.0.is_empty() && v.own_records.1.is_empty(), "{:?}", v.own_records);
+        assert!(!v.step_done(materials_step) && !v.step_done(rules_step));
+        let mut s = Session::default();
+        let mut run = |cmd: &str, p: Json| s.execute(cmd, &p).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        run("new", json!({"project": root.display().to_string()}));
+        v.reload_library_records();
+        assert!(!v.step_done(materials_step), "no material yet");
+        run("put_library", json!({"level": "material", "element": {"name": "Сталь"}}));
+        v.reload_library_records();
+        assert!(!v.step_done(materials_step), "a name only is not a material of the lesson: {:?}", v.own_records);
+        run("put_library", json!({"level": "material", "element": {"name": "Сталь", "density": 7850}, "was": "Сталь"}));
+        v.reload_library_records();
+        assert!(v.step_done(materials_step), "{:?}", v.own_records);
+        assert!(!v.step_done(rules_step));
+        run("put_library", json!({"level": "rule", "element": {"name": "Деталь", "kind": "part", "material": "Сталь"}}));
+        v.reload_library_records();
+        assert!(!v.step_done(rules_step), "a part rule is not a sheet rule: {:?}", v.own_records);
+        run(
+            "put_library",
+            json!({"level": "rule", "element": {"name": "Лист", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t"}}),
+        );
+        v.reload_library_records();
+        assert!(v.step_done(rules_step), "{:?}", v.own_records);
+        // The records are the project's own only.
+        assert!(v.own_records.0.iter().all(|m| m["name"] == "Сталь") && v.own_records.1.len() == 2);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// The side panel of a real model: every parameter's definition shows whole in its field.
@@ -7065,7 +8027,7 @@ mod tests {
     fn a_row_shows_its_title() {
         let (mut h, _inbox) = titled_tree();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").hover();
+        h.get_by_label("Plate  ·  sketch").hover();
         h.run();
         h.get_by_label("Key: outline — commands and the agent use it");
     }
@@ -7076,7 +8038,7 @@ mod tests {
     fn a_title_typed_in_the_row() {
         let (mut h, inbox) = titled_tree();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.get_by_label("Plate  ·  sketch").click();
         h.run();
         assert_eq!(h.state().tree.selected.as_deref(), Some("outline"));
         press(&mut h, egui::Key::F2);
@@ -7101,9 +8063,9 @@ mod tests {
     fn a_second_click_renames_and_esc_cancels() {
         let (mut h, inbox) = titled_tree();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.get_by_label("Plate  ·  sketch").click();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.get_by_label("Plate  ·  sketch").click();
         h.run();
         h.run();
         assert!(h.state().tree.renaming.is_some());
@@ -7273,7 +8235,7 @@ mod tests {
     }
 
     /// A new parameter from the panel (issue #57): Add sends it, a formula as typed; a name
-    /// taken already is refused in the window; ✖ removes one.
+    /// taken already is refused in the window; the remove button drops one.
     #[test]
     fn parameters_are_added_and_removed() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
@@ -7320,7 +8282,7 @@ mod tests {
 
     /// The base and its parts in the panel (D152, D169): a click on a part works in it, in the
     /// variant the product has of it (D160); the base works in the root; a new variant is made of
-    /// its part below the one chosen; in a variant, the sketch it changes has ↺, which takes it back.
+    /// its part below the one chosen; in a variant, the sketch it changes has the undo arrow, which takes it back.
     #[test]
     fn parts_and_variants_in_the_panel() {
         let (mut v, inbox) = viewer("wall_variants.json");
@@ -7348,7 +8310,7 @@ mod tests {
         click(&mut v, "Save");
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("save_set", p) if p["name"] == "Шкаф 2 м")));
         assert_eq!(v.new_set, None);
-        // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
+        // In the variant of 2.5 m: its sketch changed (a dot), its length set (the undo arrow by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
@@ -7356,8 +8318,8 @@ mod tests {
         v.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
         h.run();
-        assert!(h.query_by_label("✔ outline  ·  sketch").is_some());
-        let reverts: Vec<_> = h.get_all_by_label("↺").collect();
+        assert!(h.query_by_label("outline  ·  sketch").is_some());
+        let reverts: Vec<_> = h.get_all_by_label("Back to the parent's").collect();
         assert_eq!(reverts.len(), 3, "the length, the sketch and the notch turned off");
         reverts[1].click();
         h.run();
@@ -7519,11 +8481,26 @@ mod tests {
         let names = |editing: Option<&str>| {
             shown(session.graph(), session.evaluation(), editing)
                 .into_iter()
-                .map(|i| session.graph().nodes()[i as usize].name.clone())
+                .map(|(i, _)| session.graph().nodes()[i as usize].name.clone())
                 .collect::<Vec<_>>()
         };
         assert_eq!(names(None), ["plate", "sketch1"]);
         assert_eq!(names(Some("sketch1")), ["plate"]);
+    }
+
+    /// A failed feature leaves the last good state in view, as Inventor does: the body it was to
+    /// change, not an empty picture.
+    #[test]
+    fn a_failed_feature_leaves_the_body_before_it_in_view() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let moved = json!({"name": "moved", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 0], "axis": [0, 0, 1], "angle_deg": "1 / 0"});
+        session.execute("add", &moved).unwrap();
+        assert!(session.evaluation().results[session.graph().find("moved").unwrap() as usize].is_err());
+        let names: Vec<String> =
+            shown(session.graph(), session.evaluation(), None).into_iter().map(|(i, _)| session.graph().nodes()[i as usize].name.clone()).collect();
+        assert_eq!(names, ["plate"]);
     }
 
     /// A sheet's pencil opens its form (D217): its width and side as the file has them, a change.
@@ -7555,7 +8532,7 @@ mod tests {
             egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
         });
         h.run();
-        for row in ["✔ front  ·  XZ +", "✔ back  ·  front +", "✔ on_top  ·  a face of block +"] {
+        for row in ["front  ·  XZ +", "back  ·  front +", "on_top  ·  a face of block +"] {
             h.get_by_label(row);
         }
         h.get_all_by_value("-gap").next().unwrap().click();
@@ -7940,7 +8917,7 @@ mod tests {
         h.run();
         h.get_by_label("Click a sketch in the tree, or an edge of the sheet for a flange");
         assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
-        h.get_by_label("✔ other  ·  sketch").click();
+        h.get_by_label("other  ·  sketch").click();
         h.run();
         assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
     }

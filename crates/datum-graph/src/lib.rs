@@ -137,13 +137,20 @@ impl Graph {
 
     /// The features nothing else uses: what the model ends in (see [`Evaluation::final_values`]).
     pub fn finals(&self) -> Vec<NodeIx> {
-        let mut used = vec![false; self.nodes.len()];
-        for n in self.nodes.iter().filter(|n| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. })) {
+        let users = self.users();
+        (0..self.nodes.len() as NodeIx).filter(|&i| users[i as usize].is_empty()).collect()
+    }
+
+    /// The features that use each node up, in node order (see [`Evaluation::final_values`]: an
+    /// unfold, a sketch or a work plane uses nothing up).
+    fn users(&self) -> Vec<Vec<NodeIx>> {
+        let mut users = vec![Vec::new(); self.nodes.len()];
+        for (k, n) in self.nodes.iter().enumerate().filter(|(_, n)| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. })) {
             for &i in &n.inputs {
-                used[i as usize] = true;
+                users[i as usize].push(k as NodeIx);
             }
         }
-        (0..self.nodes.len() as NodeIx).filter(|&i| !used[i as usize]).collect()
+        users
     }
 
     /// Replaces a node's inputs: earlier nodes, as many as its operation takes (a sketch's
@@ -217,6 +224,35 @@ impl Evaluation {
     /// The features [`Self::final_values`] are of, failed ones too.
     pub fn finals(&self, graph: &Graph) -> Vec<NodeIx> {
         graph.finals()
+    }
+
+    /// What the model shows: each of [`Self::finals`] with the feature it stands for. A failed
+    /// one stands for the last good state before it, as Inventor shows: the bodies it takes
+    /// (through failed features it takes, too) that only failed features use. Sorted.
+    pub fn last_good(&self, graph: &Graph) -> Vec<(NodeIx, NodeIx)> {
+        let users = graph.users();
+        let failed = |i: NodeIx| self.results[i as usize].is_err();
+        let mut out = Vec::new();
+        for f in graph.finals() {
+            if !failed(f) {
+                out.push((f, f));
+                continue;
+            }
+            let mut todo = vec![f];
+            let mut seen = std::collections::BTreeSet::new();
+            while let Some(i) = todo.pop() {
+                for &j in graph.nodes[i as usize].inputs.iter().filter(|&&j| seen.insert(j)) {
+                    match &self.results[j as usize] {
+                        Err(_) => todo.push(j),
+                        Ok(v) if v.body().is_some() && users[j as usize].iter().all(|&u| failed(u)) => out.push((j, f)),
+                        Ok(_) => {}
+                    }
+                }
+            }
+        }
+        out.sort_unstable();
+        out.dedup_by_key(|p| p.0);
+        out
     }
 }
 

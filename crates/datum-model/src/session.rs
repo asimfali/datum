@@ -31,6 +31,8 @@ pub struct Session {
     evaluator: Evaluator,
     last: Evaluation,
     path: Option<PathBuf>,
+    /// The project a model without a file works in.
+    project: Option<PathBuf>,
     /// The model as last opened or saved: what differs from it is not saved yet.
     saved: Doc,
     /// Models before each change (and the level then worked in), the latest last; and those
@@ -40,6 +42,16 @@ pub struct Session {
     /// Bodies laid flat (D164), by the body's hash and the settings: a perforated sheet is not
     /// unfolded again for an edit that leaves it as it was.
     flat_memo: BTreeMap<[u8; 32], Arc<Result<Flat, String>>>,
+}
+
+/// A moment of a session to come back to.
+pub struct Checkpoint {
+    doc: Doc,
+    active: Option<String>,
+    path: Option<PathBuf>,
+    saved: Doc,
+    undo: Vec<(Doc, Option<String>)>,
+    redo: Vec<(Doc, Option<String>)>,
 }
 
 /// A part of the product: its name, the variant chosen, and the bodies it makes by feature, or
@@ -62,6 +74,7 @@ impl Default for Session {
             evaluator,
             last,
             path: None,
+            project: None,
             saved: Doc::default(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -78,7 +91,25 @@ struct Command {
 }
 
 const COMMANDS: &[Command] = &[
-    Command { name: "new", description: "Start an empty model.", params: no_params, run: |s, _| Ok(s.replace(Doc::default(), None)) },
+    Command {
+        name: "new",
+        description: "Start an empty model; `project`: the folder of the project it works in until it is saved (its library, its rules).",
+        params: || json!({"type": "object", "properties": {"project": {"type": "string"}}}),
+        run: |s, p| {
+            s.project = p.get("project").and_then(Value::as_str).map(PathBuf::from);
+            Ok(s.replace(Doc::default(), None))
+        },
+    },
+    Command {
+        name: "set_project",
+        description: "The project a model without a file works in (`project`: its folder; none: no project): its library, its rules. \
+                      A model with a file works in the project of its file.",
+        params: || json!({"type": "object", "properties": {"project": {"type": "string"}}}),
+        run: |s, p| {
+            s.project = p.get("project").and_then(Value::as_str).map(PathBuf::from);
+            Ok(s.rebuild())
+        },
+    },
     Command {
         name: "open",
         description: "Open a model file (.json).",
@@ -478,7 +509,7 @@ const COMMANDS: &[Command] = &[
         },
         run: |s, p| {
             let level = text(p, "level")?;
-            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.path.as_deref(), s.project().as_deref())?;
+            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.project().as_deref())?;
             // A rule edited: the sheets made by it take its thickness (D193).
             if level == "rule" {
                 s.rebuild();
@@ -1007,9 +1038,37 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
 }
 
 impl Session {
-    /// The project of the model's file (its root), if it has one.
+    /// All that says which model this is and what can be undone, to come back to with
+    /// [`Self::restore`]. What was written to a library stays.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            doc: self.doc.clone(),
+            active: self.active.clone(),
+            path: self.path.clone(),
+            saved: self.saved.clone(),
+            undo: self.undo.clone(),
+            redo: self.redo.clone(),
+        }
+    }
+
+    /// Back to `c`, the model rebuilt.
+    pub fn restore(&mut self, c: Checkpoint) {
+        self.doc = c.doc;
+        self.path = c.path;
+        self.saved = c.saved;
+        self.undo = c.undo;
+        self.redo = c.redo;
+        // The level was there when the checkpoint was taken, in this same `doc`.
+        let _ = self.activate(c.active);
+    }
+
+    /// The project worked in: that of the model's file (its root), if it has one; without a file,
+    /// the one given.
     fn project(&self) -> Option<PathBuf> {
-        self.path.as_deref().and_then(crate::workspace::project_root)
+        match &self.path {
+            Some(path) => crate::workspace::project_root(path),
+            None => self.project.clone(),
+        }
     }
 
     /// Applies `edit_sketch` patch `p` to sketch feature `name`.

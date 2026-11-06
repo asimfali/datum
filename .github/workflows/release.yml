@@ -49,6 +49,7 @@ jobs:
           # rule at once; an enterprise replaces them with its own.
           mkdir -p "$dir"/library
           cp -r library/material library/rule "$dir"/library/
+          cp -r lessons "$dir"/
           cp README.md README.ru.md TESTERS.md LICENSE-MIT LICENSE-APACHE "$dir"/
           if [ "${{ runner.os }}" = Windows ]; then
             cp target/release/datum.exe "$dir"/

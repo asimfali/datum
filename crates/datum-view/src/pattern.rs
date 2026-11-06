@@ -27,6 +27,7 @@ pub enum Base {
 /// The fields of each kind, by key: a number or a formula, empty when not given.
 const FIELDS: [&str; 11] = ["n1", "s1", "g1", "n2", "s2", "g2", "angle", "step", "clearance", "n", "g"];
 
+#[derive(Clone)]
 pub struct PatternForm {
     pub base: Base,
     /// Along a closed group: fill it rather than go round it.
@@ -448,6 +449,7 @@ impl PatternForm {
 }
 
 /// The menu on copies selected: shift them, leave them out, edit or remove their pattern.
+#[derive(Clone)]
 pub struct CopiesForm {
     pub copies: Vec<(String, [i64; 2])>,
     pub shift: [String; 2],
