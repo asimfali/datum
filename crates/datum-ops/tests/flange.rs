@@ -504,7 +504,7 @@ fn a_side_flange_on_the_top() {
 }
 
 #[test]
-fn a_side_flange_on_a_leg_goes_outward() {
+fn a_side_flange_on_a_leg_goes_inward() {
     let u = u_of(MID);
     let e = wall_edge(&u, 0, -2.0, 0.0);
     let b = side_of(&u, std::slice::from_ref(&e), serde_json::json!({}));
@@ -512,14 +512,15 @@ fn a_side_flange_on_a_leg_goes_outward() {
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
     assert_eq!((counts, bends), ([6, 0, 0], 6));
-    // Outward: the leg's outer face is at x = −2, the flange reaches x = −20 (2 + 16 + 2 out of the wall).
+    // Inward, the way the top stands from the leg (D229): the sheet's bounds stay.
     let (lo, _) = b.bounds();
-    assert!(close(lo.x.abs(), 20.0), "{lo:?}");
-    // Flipped: inward, the sheet's bounds stay.
+    assert!(close(lo.x.abs(), 2.0), "{lo:?}");
+    // Flipped: outward, the leg's outer face is at x = −2, the flange reaches x = −20 (2 + 16 + 2
+    // out of the wall).
     let f = side_of(&u, &[e], serde_json::json!({"flip": true}));
     assert!(close(f.volume() - u.volume(), added(1.0, LEG, 20.0, 90.0)));
     let (lo, _) = f.bounds();
-    assert!(close(lo.x.abs(), 2.0), "{lo:?}");
+    assert!(close(lo.x.abs(), 20.0), "{lo:?}");
     assert_eq!(blank(&f), blank(&b));
 }
 
@@ -546,7 +547,8 @@ fn several_side_flanges_in_one_operation() {
     assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
     assert_eq!((counts, bends), ([12, 0, 0], 10));
     let (lo, hi) = b.bounds();
-    assert!(close(lo.x.abs(), 20.0) && close(hi.x, MID + 20.0) && close(hi.y, 80.0), "{lo:?} {hi:?}");
+    // Inward, all within the sheet's bounds.
+    assert!(close(lo.x.abs(), 2.0) && close(hi.x, MID + 2.0) && close(hi.y, 62.0), "{lo:?} {hi:?}");
 }
 
 /// A wall flanged on both sides of the sheet's width (z = 0 and z = 40): the blank grows twice.

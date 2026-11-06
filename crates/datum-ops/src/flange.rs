@@ -390,15 +390,12 @@ fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<
     // The other side's ends, matched to this one's by nearness along the edge.
     let d = body.point(a1) - body.point(a0);
     let (b0, b1) = if (body.point(b0) - body.point(a0)).dot(d) < (body.point(b1) - body.point(a0)).dot(d) { (b0, b1) } else { (b1, b0) };
-    // Outward: toward the side of the wall its bends turn away from (the outer, convex one);
-    // a wall with no bend, toward the sheet's front.
+    // Inward, the way the walls beside it stand (D229, was outward in D205): toward the side of
+    // the wall its bends turn to (the inner, concave one); a wall with no bend, toward the side
+    // picked.
     let convex = |x: Ix| crate::unfold::chain_through(body, x, &skip).is_ok() && smooth_convex(body, x);
-    let wall_out = match (convex(wall), convex(face_of(he(across).twin))) {
-        (true, _) => true,
-        (false, true) => false,
-        _ => true,
-    };
-    let toward_wall = wall_out != flip;
+    let inward = !matches!((convex(wall), convex(face_of(he(across).twin))), (true, _));
+    let toward_wall = inward != flip;
     let (inner, outer) = if toward_wall { ([a1, a0], [b1, b0]) } else { ([b1, b0], [a1, a0]) };
     // The same whichever edge of the wall is picked: its ends in the order of their IDs.
     let id_of = |v: Ix| body.vertices()[v as usize].id;
