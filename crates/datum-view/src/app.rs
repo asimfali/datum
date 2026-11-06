@@ -1873,6 +1873,9 @@ impl Viewer {
                 if hand.is_some() {
                     ui.strong(self.i18n.t("lesson-showing", "Showing… Esc stops it"));
                 } else {
+                    if s.own {
+                        ui.weak(self.i18n.t("lesson-own", "This choice is yours: the window only shows where."));
+                    }
                     if let Some(what) = &lost {
                         ui.colored_label(
                             ui.visuals().error_fg_color,
@@ -2459,8 +2462,13 @@ impl Viewer {
                     if ui.selectable_label(material.is_none(), "—").clicked() {
                         pick_material = Some(None);
                     }
+                    let mut sheet_material = false;
                     for name in self.materials.iter().filter_map(|e| e["name"].as_str()) {
                         let mut r = ui.selectable_label(material.as_deref() == Some(name), name);
+                        if !sheet_material && !rules_of(&self.rules, Some(name), Some("sheet")).is_empty() {
+                            sheet_material = true;
+                            self.spots.insert("toolbar.material.sheet", r.rect);
+                        }
                         if rules_of(&self.rules, Some(name), kind).is_empty() {
                             r = r.on_hover_text(self.i18n.t("toolbar-no-rules", "No rules of this material: add one in the View menu, Rules"));
                         }
@@ -2478,8 +2486,14 @@ impl Viewer {
                 if ui.selectable_label(rule.is_none(), "—").clicked() {
                     apply = Some(None);
                 }
+                let mut sheet_rule = false;
                 for name in &rules {
-                    if ui.selectable_label(rule.as_deref() == Some(name), *name).clicked() {
+                    let r = ui.selectable_label(rule.as_deref() == Some(name), *name);
+                    if !sheet_rule && self.rules.iter().any(|e| e["name"] == *name && e["kind"] == "sheet") {
+                        sheet_rule = true;
+                        self.spots.insert("toolbar.rule.sheet", r.rect);
+                    }
+                    if r.clicked() {
                         apply = Some(Some(name.to_string()));
                     }
                 }
@@ -6665,17 +6679,12 @@ mod tests {
                 } else if reading {
                     h.state_mut().playing.as_mut().unwrap().step += 1;
                 } else if own {
-                    // What is the engineer's to choose: the lesson's rule, the file's place. The
-                    // project was chosen before the lesson.
-                    let rule = h.state().rules.iter().find(|r| r["kind"] == "sheet").and_then(|r| r["name"].as_str()).map(String::from);
+                    // The engineer's to choose in a system dialog: the file's place. The project
+                    // was chosen before the lesson.
                     let v = h.state_mut();
-                    if v.path.is_none() && at + 1 == steps_of(v, lesson) {
-                        let path = project.join("part").join(format!("lesson{lesson}.json"));
-                        v.send(Request::Command("save", json!({"path": path.display().to_string()})));
-                        v.set_path(Some(path));
-                    } else {
-                        v.next_rule = rule;
-                    }
+                    let path = project.join("part").join(format!("lesson{lesson}.json"));
+                    v.send(Request::Command("save", json!({"path": path.display().to_string()})));
+                    v.set_path(Some(path));
                 }
                 window_until(&mut h, &format!("done: {said}"), |v| v.playing.as_ref().unwrap().step > at);
             }
@@ -6686,10 +6695,6 @@ mod tests {
         assert!(project.join("library/material").join("08пс.json").is_file() && project.join("library/rule").is_dir());
         drop(h);
         let _ = std::fs::remove_dir_all(&project);
-    }
-
-    fn steps_of(v: &Viewer, lesson: usize) -> usize {
-        v.lessons[lesson].1.as_ref().unwrap().steps.len()
     }
 
     #[test]

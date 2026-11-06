@@ -131,6 +131,7 @@ lesson-step = Шаг { $n } из { $m }
 lesson-key = Клавиша: { $key }
 lesson-stuck = Не получается?
 lesson-next = Дальше
+lesson-own = Здесь выбираете вы: окно только покажет, где.
 lesson-show = Показать
 lesson-do = Сделать за меня
 lesson-showing = Показываю… Esc — остановить

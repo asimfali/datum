@@ -13,8 +13,20 @@ use crate::actions::ACTIONS;
 const FORMAT: &str = "datum-lesson/1";
 
 /// What a lesson may point at besides an action: the menus and the window's own places.
-const PLACES: [&str; 10] =
-    ["menu.file", "menu.edit", "menu.view", "menu.sketch", "menu.help", "toolbar.material", "toolbar.rule", "view", "sketch.done", "form.ok"];
+const PLACES: [&str; 12] = [
+    "menu.file",
+    "menu.edit",
+    "menu.view",
+    "menu.sketch",
+    "menu.help",
+    "toolbar.material",
+    "toolbar.material.sheet",
+    "toolbar.rule",
+    "toolbar.rule.sheet",
+    "view",
+    "sketch.done",
+    "form.ok",
+];
 
 /// What of the window a step's `done` may ask about; [`matches`] compares with these.
 const WINDOW: [&str; 12] =
@@ -51,8 +63,8 @@ pub struct Step {
     /// What the window does to show the step, or to do it for the engineer.
     #[serde(default)]
     pub show: Vec<Move>,
-    /// The choice is the engineer's (a folder, a file, a material): the window shows where, and
-    /// does not do it for them.
+    /// The choice is the engineer's and made in a system dialog (a folder, a file): the window
+    /// shows where, and cannot do it for them.
     #[serde(default)]
     pub own: bool,
     /// What the window (`window`) and the model's `inspect` (`model`) must look like, by

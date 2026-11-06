@@ -34,9 +34,17 @@
       "show": [
         {
           "click": "toolbar.material"
+        },
+        {
+          "click": "toolbar.material.sheet"
+        },
+        {
+          "click": "toolbar.rule"
+        },
+        {
+          "click": "toolbar.rule.sheet"
         }
       ],
-      "own": true,
       "done": {
         "window": {
           "sheet_rule": true
