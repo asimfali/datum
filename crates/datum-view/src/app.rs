@@ -1747,6 +1747,24 @@ impl Viewer {
                 let half = self.sketch_rect.size() * 0.5;
                 Some(Aim::Spot(self.sketch_rect.center() + egui::vec2(x * half.x, -y * half.y)))
             }
+            Move::Curve(kind) => {
+                let sk = self.sketch.as_ref()?;
+                let p = sk.placed.as_ref().ok()?;
+                let point = |n: &String| p.solved.points.get(n).copied();
+                let at = if kind == "line" {
+                    // Toward its start: a menu opened here should leave the lesson's card in sight.
+                    let l = p.lines.values().find(|l| !l.construction)?;
+                    let (a, b) = (point(&l.from)?, point(&l.to)?);
+                    [a.x + (b.x - a.x) * 0.3, a.y + (b.y - a.y) * 0.3]
+                } else {
+                    let c = p.circles.values().find(|c| !c.construction)?;
+                    let o = point(&c.center)?;
+                    [o.x + 0.5 * c.diameter.value()?, o.y]
+                };
+                let (dx, dy) = sk.camera.offset(at, f64::from(self.sketch_rect.height()));
+                let spot = self.sketch_rect.center() + egui::vec2(dx as f32, dy as f32);
+                self.sketch_rect.contains(spot).then_some(Aim::Spot(spot))
+            }
             Move::Put { level, element } => Some(Aim::Put(level.clone(), element.clone())),
         }
     }
@@ -6749,6 +6767,34 @@ mod tests {
         let ru = crate::i18n::I18n::of("ru");
         let text = ru.t("lesson-lost", "");
         assert!(!text.is_empty() && !text.contains("{ $") && !text.contains("Click("), "{text}");
+    }
+
+    /// The hand finds a curve where the engineer drew it, not where the lesson's author did;
+    /// off the view it is not there to click.
+    #[test]
+    fn the_hand_clicks_a_curve_where_it_is() {
+        let (mut v, _inbox) = viewer_in_sketch();
+        v.sketch_rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(600.0, 400.0));
+        let ctx = egui::Context::default();
+        let line = crate::lessons::Move::Curve("line".into());
+        let (center, h) = (v.sketch_rect.center(), f64::from(v.sketch_rect.height()));
+        let lines = &v.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines;
+        let first = lines.iter().find(|(_, l)| !l.construction).unwrap().0.clone();
+        let spots: Vec<egui::Pos2> = [[0.0, 0.0], [20.0, -10.0]]
+            .into_iter()
+            .map(|shift: [f64; 2]| {
+                let sk = v.sketch.as_mut().unwrap();
+                sk.camera.center = [shift[0], shift[1]];
+                let Some(crate::lessons::Aim::Spot(at)) = v.aim(&ctx, &line) else { panic!("a line in view") };
+                let sk = v.sketch.as_ref().unwrap();
+                let (x, y) = (f64::from(at.x - center.x), f64::from(at.y - center.y));
+                assert_eq!(sk.curve_at(x, y, h).as_deref(), Some(first.as_str()), "the click takes the line");
+                at
+            })
+            .collect();
+        assert_ne!(spots[0], spots[1], "it follows the line on the screen");
+        v.sketch.as_mut().unwrap().camera.center = [1e9, 1e9];
+        assert!(v.aim(&ctx, &line).is_none(), "off the view");
     }
 
     /// One frame of the whole window: the hand's input, as `raw_input_hook` takes it.

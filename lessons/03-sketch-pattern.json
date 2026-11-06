@@ -143,10 +143,7 @@
       ],
       "show": [
         {
-          "sketch": [
-            -0.3,
-            -0.2
-          ]
+          "curve": "line"
         }
       ],
       "done": {
@@ -189,10 +186,7 @@
           "click": "pattern.select"
         },
         {
-          "sketch": [
-            -0.52,
-            0.3
-          ]
+          "curve": "circle"
         }
       ],
       "done": {

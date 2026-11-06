@@ -107,6 +107,9 @@ pub enum Move {
     /// its half width and half height, up positive. The zoom depends on the window: millimetres
     /// might be off screen, and an empty sketch has nothing to place by.
     Sketch([f32; 2]),
+    /// The cursor goes to the sketch's first curve of this kind (`line`, `circle`) and clicks,
+    /// wherever the engineer drew it.
+    Curve(String),
     /// Writes a library element: what is typed in a table window, which the hand cannot reach.
     Put { level: String, element: Json },
 }
@@ -165,6 +168,9 @@ impl Lesson {
                     Move::Point(name) | Move::Click(name) if !known_place(name) => return Err(format!("step {n}: no action or place {name:?}")),
                     Move::Key(name) if !KEYS.contains(&name.as_str()) && !ACTIONS.iter().any(|a| a.name == name) => {
                         return Err(format!("step {n}: no action or key {name:?}"));
+                    }
+                    Move::Curve(kind) if !matches!(kind.as_str(), "line" | "circle") => {
+                        return Err(format!("step {n}: `curve` is a line or a circle, not {kind:?}"));
                     }
                     Move::Put { level, .. } if !matches!(level.as_str(), "material" | "rule") => {
                         return Err(format!("step {n}: `put` writes a material or a rule, not {level:?}"));
