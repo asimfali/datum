@@ -261,6 +261,47 @@ fn a_flange_on_a_plate() {
     assert_eq!(bends, 4);
 }
 
+/// Flanges on all four ends of a plate: a tray with its corners open (D229), the blank a cross.
+#[test]
+fn flanges_round_a_plate_leave_the_corners_open() {
+    let p = plate();
+    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
+    let corner = [long_edges(&p, &long[0]), long_edges(&p, &short[0])].concat();
+    let two = flange(&p, &corner, serde_json::json!({})).unwrap();
+    assert!(close(two.volume() - p.volume(), added(1.0, 100.0, 20.0, 90.0) + added(1.0, 60.0, 20.0, 90.0)));
+    let all = flange(&p, &ends_edges(&p, &[long.clone(), short.clone()].concat()), serde_json::json!({})).unwrap();
+    assert!(close(all.volume() - p.volume(), added(2.0, 100.0, 20.0, 90.0) + added(2.0, 60.0, 20.0, 90.0)));
+    // A cross: the plate and a flange off each end, the corners notched to the plate's corner.
+    let (size, counts, bends) = blank(&all);
+    assert!(close(size.0, 60.0 + 2.0 * longer(20.0, 90.0)) && close(size.1, 100.0 + 2.0 * longer(20.0, 90.0)), "{size:?}");
+    assert_eq!((counts, bends), ([12, 0, 0], 8));
+    // Leaning in over the plate, the walls would meet above its corner.
+    let err = flange(&p, &corner, serde_json::json!({"angle": 120})).unwrap_err();
+    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("corner")), "{err}");
+    assert!(flange(&p, &corner, serde_json::json!({"angle": 60})).is_ok());
+}
+
+/// At an inner corner of an L-shaped plate the flanges would run into each other: refused.
+#[test]
+fn flanges_at_an_inner_corner_are_refused() {
+    let l = serde_json::json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 40], "d": [40, 40], "e": [40, 100], "f": [0, 100]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"},
+                  "de": {"from": "d", "to": "e"}, "ef": {"from": "e", "to": "f"}, "fa": {"from": "f", "to": "a"}}});
+    let s = op(serde_json::json!({"op": "sketch", "sketch": l})).eval(id("l.sketch"), &[]).unwrap();
+    let p = op(serde_json::json!({"op": "extrude", "z0": 0, "z1": T})).eval(id("l"), &[&s]).unwrap().body().unwrap().clone();
+    // The ends along cd (y = 40, x 40..100) and de (x = 40, y 40..100): both 60 long.
+    let ends: Vec<String> = faces_of_area(&p, 60.0 * T)
+        .into_iter()
+        .filter(|f| {
+            let c = centroid(&p, (0..p.faces().len()).find(|&x| hex(&p, x) == *f).unwrap());
+            c.x > 39.0 && c.y > 39.0
+        })
+        .collect();
+    assert_eq!(ends.len(), 2);
+    let err = flange(&p, &ends_edges(&p, &ends), serde_json::json!({})).unwrap_err();
+    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("inner corner")), "{err}");
+}
+
 #[test]
 fn refusals() {
     let u = u_sheet();
@@ -281,13 +322,9 @@ fn refusals() {
         .find(|i| !e.contains(i))
         .unwrap();
     assert!(flange(&u, &[short], serde_json::json!({})).is_err());
-    // Ends meeting at a corner, or one end twice.
-    let p = plate();
-    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
-    let corner = [long_edges(&p, &long[0]), long_edges(&p, &short[0])].concat();
-    let err = flange(&p, &corner, serde_json::json!({})).unwrap_err();
-    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("corner")), "{err}");
     // One end by its two edges, or by one edge twice, is one flange.
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
     let one = flange(&p, &long_edges(&p, &long[0]), serde_json::json!({})).unwrap();
     let twice = flange(&p, &vec![long_edges(&p, &long[0])[0].clone(); 2], serde_json::json!({})).unwrap();
     assert!(close(twice.volume(), one.volume()));
