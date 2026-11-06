@@ -3427,7 +3427,7 @@ impl Viewer {
         }
     }
 
-    fn viewport(&mut self, ui: &mut egui::Ui, rs: &egui_wgpu::RenderState) {
+    fn viewport(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.viewport = rect;
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
@@ -3475,7 +3475,10 @@ impl Viewer {
         let moving = self.drawn.is_some_and(|d| (d.1, d.2) != (view_projection, eye));
         let smooth_now = self.smooth && !moving;
         let drawn = (self.version, view_projection, eye, [w, h, u32::from(smooth_now)]);
-        if self.drawn != Some(drawn) {
+        // No GPU (the lessons' test on a machine without one): all but the picture works.
+        if self.drawn != Some(drawn)
+            && let Some(rs) = rs
+        {
             let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&rs.device));
             let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
             let encoder = renderer.draw(&rs.device, &rs.queue, &frame, w, h, smooth_now);
@@ -6180,9 +6183,7 @@ impl egui_dock::TabViewer for Tabs<'_> {
             Pane::Model => {
                 let [r, g, b] = BACKGROUND.map(|c| (c * 255.0).round() as u8);
                 ui.painter().rect_filled(ui.max_rect(), 0.0, egui::Color32::from_rgb(r, g, b));
-                if let Some(rs) = self.rs {
-                    self.v.viewport(ui, rs);
-                }
+                self.v.viewport(ui, self.rs);
             }
             Pane::Flat => self.v.flat_pane(ui),
             Pane::Library if self.v.sketch.is_some() => {
@@ -6612,7 +6613,7 @@ mod tests {
     /// The window as the engineer has it, with the worker: the repo's lessons in `project`.
     fn lesson_window_harness(project: &std::path::Path) -> egui_kittest::Harness<'static, Viewer> {
         let project = project.to_path_buf();
-        egui_kittest::Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+        egui_kittest::Harness::builder().with_size([1280.0, 800.0]).build_eframe(move |cc| {
             let mut v = Viewer::new(None, cc.egui_ctx.clone(), "test".into());
             v.i18n = crate::i18n::I18n::of("ru");
             v.lessons = crate::lessons::read(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")));
