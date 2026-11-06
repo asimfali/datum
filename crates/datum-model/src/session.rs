@@ -44,6 +44,16 @@ pub struct Session {
     flat_memo: BTreeMap<[u8; 32], Arc<Result<Flat, String>>>,
 }
 
+/// A moment of a session to come back to.
+pub struct Checkpoint {
+    doc: Doc,
+    active: Option<String>,
+    path: Option<PathBuf>,
+    saved: Doc,
+    undo: Vec<(Doc, Option<String>)>,
+    redo: Vec<(Doc, Option<String>)>,
+}
+
 /// A part of the product: its name, the variant chosen, and the bodies it makes by feature, or
 /// why it makes none.
 /// A part of the product: the feature that began its body, the variant chosen (none: the root's
@@ -1028,6 +1038,30 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
 }
 
 impl Session {
+    /// All that says which model this is and what can be undone, to come back to with
+    /// [`Self::restore`]. What was written to a library stays.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            doc: self.doc.clone(),
+            active: self.active.clone(),
+            path: self.path.clone(),
+            saved: self.saved.clone(),
+            undo: self.undo.clone(),
+            redo: self.redo.clone(),
+        }
+    }
+
+    /// Back to `c`, the model rebuilt.
+    pub fn restore(&mut self, c: Checkpoint) {
+        self.doc = c.doc;
+        self.path = c.path;
+        self.saved = c.saved;
+        self.undo = c.undo;
+        self.redo = c.redo;
+        // The level was there when the checkpoint was taken, in this same `doc`.
+        let _ = self.activate(c.active);
+    }
+
     /// The project worked in: that of the model's file (its root), if it has one; without a file,
     /// the one given.
     fn project(&self) -> Option<PathBuf> {
