@@ -176,10 +176,19 @@ struct Showing {
     back: Option<Mark>,
 }
 
+struct SketchMark {
+    feature: String,
+    selected: Vec<Pick>,
+    draft: crate::draw::Draft,
+    camera: crate::camera::SketchCamera,
+}
+
 /// The window before a step was shown.
 struct Mark {
     model: bool,
-    sketch: Option<String>,
+    /// The sketch edited, as the engineer left it: the step may go on from what is selected.
+    sketch: Option<SketchMark>,
+    menu: Option<Menu>,
     picking: Option<Purpose>,
     table: Option<crate::table::Source>,
     next_rule: Option<String>,
@@ -1700,6 +1709,9 @@ impl Viewer {
             "project_safe": self.project.as_ref().is_some_and(|p| !beside_program(p)),
             "own_materials": self.own_records.0,
             "own_rules": self.own_records.1,
+            "selected": self.sketch.as_ref().map_or_else(Vec::new, |sk| sk.selected.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>()),
+            "pattern_menu": matches!(self.menu, Some(Menu::Pattern { .. })),
+            "pattern_picked": matches!(&self.menu, Some(Menu::Pattern { form, .. }) if !form.cell.is_empty()),
             "saved": self.path.is_some() && !self.modified(),
         })
     }
@@ -1719,6 +1731,11 @@ impl Viewer {
             Move::Point(name) | Move::Click(name) => self.spots.get(name.as_str()).map(|r| Aim::Spot(r.center())),
             Move::Key(name) if name == "enter" => Some(Aim::Keys(egui::Key::Enter, egui::Modifiers::NONE, "Enter".into())),
             Move::Key(name) if name == "escape" => Some(Aim::Keys(egui::Key::Escape, egui::Modifiers::NONE, "Esc".into())),
+            Move::Key(name) if name == "select_all" => {
+                let k = egui::KeyboardShortcut::new(egui::Modifiers::COMMAND, egui::Key::A);
+                Some(Aim::Keys(k.logical_key, k.modifiers | egui::Modifiers::CTRL, ctx.format_shortcut(&k)))
+            }
+            Move::Type(text) => Some(Aim::Text(text.clone())),
             Move::Key(name) => {
                 let k = self.keys.get(ACTIONS.iter().find(|a| a.name == name)?.act)?;
                 // As a keyboard gives it: Command is Ctrl here.
@@ -1742,7 +1759,13 @@ impl Viewer {
         let moves = s.show.clone();
         let mark = back.then(|| Mark {
             model: self.model.is_some(),
-            sketch: self.sketch.as_ref().map(|sk| sk.feature.clone()),
+            sketch: self.sketch.as_ref().map(|sk| SketchMark {
+                feature: sk.feature.clone(),
+                selected: sk.selected.clone(),
+                draft: sk.draft.clone(),
+                camera: sk.camera,
+            }),
+            menu: self.menu.clone(),
             picking: self.picking,
             table: self.table.as_ref().map(|t| t.0),
             next_rule: self.next_rule.clone(),
@@ -1786,7 +1809,10 @@ impl Viewer {
                 self.send(Request::Command("put_library", json!({"level": level, "element": element})));
             }
             Tick::Finished => return self.end_hand(ctx, showing, None),
-            Tick::Lost(what) => return self.end_hand(ctx, showing, Some(what)),
+            Tick::Lost(what) => {
+                crate::log::write(&format!("a lesson's hand found no place for {what}"));
+                return self.end_hand(ctx, showing, Some(what));
+            }
         }
         ctx.request_repaint();
         if let Some(p) = &mut self.playing {
@@ -1801,7 +1827,15 @@ impl Viewer {
             p.lost = lost;
         }
         let Some(mark) = showing.back else { return };
-        self.leave();
+        // Still in the same sketch: it stays open, as the engineer left it.
+        let kept = mark.sketch.as_ref().is_some_and(|m| self.sketch.as_ref().is_some_and(|sk| sk.feature == m.feature));
+        if kept {
+            self.close_extrusion();
+            self.close_revolve();
+            self.close_trim();
+        } else {
+            self.leave();
+        }
         self.picking = mark.picking;
         if self.table.as_ref().map(|t| t.0) != mark.table {
             self.table = None;
@@ -1813,8 +1847,15 @@ impl Viewer {
         self.material = mark.material;
         if mark.model {
             self.send(Request::Back);
-            if let Some(sketch) = mark.sketch {
-                self.enter(sketch);
+            if let Some(m) = mark.sketch {
+                match &mut self.sketch {
+                    Some(sk) if kept => {
+                        (sk.selected, sk.draft, sk.camera) = (m.selected, m.draft, m.camera);
+                        sk.field = None;
+                        self.menu = mark.menu;
+                    }
+                    _ => self.enter(m.feature),
+                }
             }
         } else {
             self.send(Request::Close);
@@ -1876,10 +1917,10 @@ impl Viewer {
                     if s.own {
                         ui.weak(self.i18n.t("lesson-own", "This choice is yours: the window only shows where."));
                     }
-                    if let Some(what) = &lost {
+                    if lost.is_some() {
                         ui.colored_label(
                             ui.visuals().error_fg_color,
-                            self.i18n.f("lesson-lost", "Could not show this: { $what }", &[("what", what)]),
+                            self.i18n.t("lesson-lost", "The place to show is not on screen: something this step needs may be missing."),
                         );
                     }
                     ui.horizontal(|ui| {
@@ -4876,7 +4917,10 @@ impl Viewer {
                             for k in keys {
                                 ui.label(crate::pattern::PatternForm::label(&self.i18n, k));
                                 if let Some(t) = form.fields.get_mut(k) {
-                                    ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(t).hint_text("—"));
+                                    let r = ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(t).hint_text("—"));
+                                    if matches!(k, "n1" | "n") {
+                                        self.spots.insert("pattern.count", r.rect);
+                                    }
                                 }
                                 ui.end_row();
                             }
@@ -4889,6 +4933,7 @@ impl Viewer {
                         let hint =
                             self.i18n.t("pattern-select-hint", "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away");
                         let select = ui.selectable_label(form.picking, self.i18n.t("pattern-select", "Select elements"));
+                        self.spots.insert("pattern.select", select.rect);
                         if select.on_hover_text(hint).clicked() && !form.picking {
                             form.picking = true;
                             sk.selected.clear();
@@ -4907,7 +4952,9 @@ impl Viewer {
                     }
                     let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
                     ui.horizontal(|ui| {
-                        if (ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done"))).clicked() || (enter && ready))
+                        let r = ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done")));
+                        self.spots.insert("pattern.done", r.rect);
+                        if (r.clicked() || (enter && ready))
                             && let Ok(Some(p)) = form.patch()
                         {
                             end = End::Send(p);
@@ -5584,6 +5631,7 @@ const HOLD: f64 = 0.5;
 
 /// The menu a held right click opens on the sketch: by what is selected, a pattern (its kind
 /// by the selection), or what to do with copies selected (D155).
+#[derive(Clone)]
 enum Menu {
     Pattern {
         at: egui::Pos2,
@@ -6595,6 +6643,114 @@ mod tests {
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Back)), "taken back");
     }
 
+    /// A viewer with the plate's outline sketch open, the origin selected, the tool Line.
+    fn viewer_in_sketch() -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.draft.take_up(Tool::Line);
+        sk.selected = vec![Pick::Point("o".into())];
+        (v, inbox)
+    }
+
+    fn lesson_with_escape(v: &mut Viewer) {
+        let text = r#"{"format": "datum-lesson/1", "title": "t", "steps": [{"what": "w", "show": [{"point": "view"}]}]}"#;
+        v.lessons = vec![("a.json".into(), crate::lessons::Lesson::parse(text))];
+        v.playing = Some(Playing { lesson: 0, step: 0, showing: None, lost: None });
+    }
+
+    fn press_esc(v: &mut Viewer, ctx: &egui::Context) {
+        let esc = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut raw = egui::RawInput { events: vec![esc], ..Default::default() };
+        v.hand_input(ctx, &mut raw);
+    }
+
+    /// Show me leaves an open sketch as it was: selection, tool and the pattern menu.
+    #[test]
+    fn show_me_keeps_an_open_sketch_as_it_was() {
+        let (mut v, inbox) = viewer_in_sketch();
+        lesson_with_escape(&mut v);
+        let at = egui::pos2(30.0, 30.0);
+        v.menu = Some(Menu::open(v.sketch.as_ref().unwrap(), at));
+        assert!(matches!(v.menu, Some(Menu::Pattern { .. })));
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        // The hand changes things meanwhile.
+        let sk = v.sketch.as_mut().unwrap();
+        sk.selected = vec![Pick::Curve("right_hole".into())];
+        sk.draft.escape();
+        v.menu = None;
+        press_esc(&mut v, &ctx);
+        let sk = v.sketch.as_ref().expect("the sketch stays open");
+        assert_eq!(sk.feature, "outline");
+        assert_eq!(sk.selected, vec![Pick::Point("o".into())]);
+        assert_eq!(sk.draft.tool, Tool::Line);
+        assert!(matches!(v.menu, Some(Menu::Pattern { .. })), "the menu is back");
+        let requests: Vec<Request> = inbox.try_iter().collect();
+        assert!(requests.iter().any(|r| matches!(r, Request::Back)));
+        assert!(!requests.iter().any(|r| matches!(r, Request::Editing(None))), "the sketch was not left");
+    }
+
+    /// With no sketch open at the mark, the one the hand opened is left.
+    #[test]
+    fn show_me_leaves_a_sketch_the_hand_opened() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        lesson_with_escape(&mut v);
+        assert!(v.sketch.is_none());
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        let (opened, _) = viewer_in_sketch();
+        v.sketch = opened.sketch;
+        assert!(v.sketch.is_some());
+        press_esc(&mut v, &ctx);
+        assert!(v.sketch.is_none());
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Back)));
+    }
+
+    #[test]
+    fn the_window_tells_selection_and_the_pattern_menu() {
+        let (mut v, _inbox) = viewer_in_sketch();
+        let w = v.lesson_window();
+        assert_eq!(w["selected"], json!(["Point(\"o\")"]));
+        assert_eq!(w["pattern_menu"], json!(false));
+        assert_eq!(w["pattern_picked"], json!(false));
+        let mut menu = Menu::open(v.sketch.as_ref().unwrap(), egui::pos2(10.0, 10.0));
+        v.menu = Some(menu.clone());
+        let w = v.lesson_window();
+        assert_eq!((&w["pattern_menu"], &w["pattern_picked"]), (&json!(true), &json!(false)));
+        if let Menu::Pattern { form, .. } = &mut menu {
+            form.cell = vec!["right_hole".into()];
+        }
+        v.menu = Some(menu);
+        assert_eq!(v.lesson_window()["pattern_picked"], json!(true));
+        v.sketch.as_mut().unwrap().selected.clear();
+        assert_eq!(v.lesson_window()["selected"], json!([]));
+    }
+
+    /// A place that never appears ends the hand and says so plainly: no technical text on the card.
+    #[test]
+    fn a_lost_place_ends_the_hand_with_a_plain_message() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        lesson_with_escape(&mut v);
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        v.busy = false;
+        let mut raw = egui::RawInput { predicted_dt: 6.0, ..Default::default() };
+        v.hand_input(&ctx, &mut raw);
+        let p = v.playing.as_ref().unwrap();
+        assert!(p.lost.is_some() && p.showing.is_none());
+        let ru = crate::i18n::I18n::of("ru");
+        let text = ru.t("lesson-lost", "");
+        assert!(!text.is_empty() && !text.contains("{ $") && !text.contains("Click("), "{text}");
+    }
+
     /// One frame of the whole window: the hand's input, as `raw_input_hook` takes it.
     fn window_frame(h: &mut egui_kittest::Harness<'_, Viewer>) {
         let ctx = h.ctx.clone();
@@ -6694,11 +6850,19 @@ mod tests {
                 }
                 window_until(&mut h, &format!("done: {said}"), |v| v.playing.as_ref().unwrap().step > at);
             }
+            // What each lesson leaves: the learner gets the real thing.
+            let features = h.state().model.as_ref().unwrap().inspect["features"].clone();
+            let sketch = features.as_array().unwrap().iter().find(|f| f["op"] == "sketch").cloned().unwrap_or_default();
+            match lesson {
+                0 => assert!(project.join("library/material/08пс.json").is_file() && project.join("library/rule/08пс 2 мм.json").is_file()),
+                1 => assert!(features.as_array().unwrap().iter().any(|f| f["op"] == "plate"), "the part was made: {features}"),
+                2 => {
+                    assert_eq!(sketch["sketch"]["patterns"].as_object().unwrap().values().next().unwrap()["count"][0].as_f64(), Some(5.0), "{sketch}")
+                }
+                _ => {}
+            }
             h.state_mut().playing = None;
         }
-        let m = h.state().model.as_ref().unwrap();
-        assert!(m.inspect["features"].as_array().unwrap().iter().any(|f| f["op"] == "plate"), "the part was made: {}", m.inspect);
-        assert!(project.join("library/material").join("08пс.json").is_file() && project.join("library/rule").is_dir());
         drop(h);
         let _ = std::fs::remove_dir_all(&project);
     }
