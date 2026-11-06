@@ -2173,7 +2173,7 @@ impl Viewer {
                 self.newer = Some(n);
             }
             if let Some((version, url)) = &self.newer {
-                ui.hyperlink_to(self.i18n.f("update-out", "⬆ Datum { $version } is out", &[("version", version)]), url)
+                ui.hyperlink_to(self.i18n.f("update-out", "Datum { $version } is out", &[("version", version)]), url)
                     .on_hover_text(self.i18n.t("update-hint", "Its page: what is new, and the download"));
                 ui.separator();
             }
@@ -2276,7 +2276,7 @@ impl Viewer {
                     for name in self.materials.iter().filter_map(|e| e["name"].as_str()) {
                         let mut r = ui.selectable_label(material.as_deref() == Some(name), name);
                         if rules_of(&self.rules, Some(name), kind).is_empty() {
-                            r = r.on_hover_text(self.i18n.t("toolbar-no-rules", "No rules of this material: add one in View → Rules"));
+                            r = r.on_hover_text(self.i18n.t("toolbar-no-rules", "No rules of this material: add one in the View menu, Rules"));
                         }
                         if r.clicked() {
                             pick_material = Some(Some(name.to_string()));
@@ -2653,7 +2653,7 @@ impl Viewer {
                 let key = |act| self.keys.get(act).map_or_else(String::new, |k| ui.ctx().format_shortcut(k));
                 ui.weak(self.i18n.f(
                     "no-model-start",
-                    "Start with File → New ({ $new }) or Open ({ $open }); then S begins a sketch.",
+                    "Start in the File menu: New ({ $new }) or Open ({ $open }); then S begins a sketch.",
                     &[("new", &key(Act::New)), ("open", &key(Act::Open))],
                 ));
                 ui.separator();
@@ -3698,7 +3698,7 @@ impl Viewer {
             egui::CentralPanel::default().show(ui, |ui| {
                 if source == Source::Rules {
                     if materials.is_empty() {
-                        ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in View → Materials"));
+                        ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in the View menu, Materials"));
                         return;
                     }
                     let rows = 6.0 * ui.spacing().interact_size.y;

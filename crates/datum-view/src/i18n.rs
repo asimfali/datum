@@ -101,6 +101,28 @@ mod tests {
         assert_eq!(I18n::default().f("help-log", "Logged to { $path }", &[("path", "p")]), "Logged to p");
     }
 
+    /// Every text of the catalogs and the lessons is in the window's font: what it lacks shows as
+    /// a square (D119).
+    #[test]
+    fn every_text_can_be_drawn() {
+        let lessons = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")).unwrap();
+        let mut texts: Vec<(String, String)> = CATALOGS.iter().map(|(code, _, text)| ((*code).to_string(), (*text).to_string())).collect();
+        texts.extend(lessons.map(|f| {
+            let path = f.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            (path.display().to_string(), text)
+        }));
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        let font = egui::FontId::proportional(14.0);
+        ctx.fonts_mut(|fonts| {
+            for (name, text) in &texts {
+                let missing: Vec<char> = text.chars().filter(|c| !c.is_control() && !fonts.has_glyph(&font, *c)).collect();
+                assert!(missing.is_empty(), "{name}: no glyph for {missing:?}");
+            }
+        });
+    }
+
     /// Every action says its label, and what it does, in every language.
     #[test]
     fn every_action_has_a_russian_text() {
