@@ -760,3 +760,15 @@ fn restore_leaves_library_writes() {
     assert_eq!(lib["elements"][0]["name"], json!("Ст3"), "{lib}");
     assert!(root.join("library/material/Ст3.json").exists());
 }
+
+/// A part without a rule and with no K saved for its blank lays it flat at the K its features
+/// were made with: a flange's round relief cut at 0.44 unfolds, not refused as made at another K.
+#[test]
+fn a_blank_without_a_rule_takes_the_k_its_cuts_were_made_with() {
+    let mut s = Session::default();
+    let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/sheet_tray.json");
+    s.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+    for body in ["relieved", "mitred"] {
+        assert!(s.flat_of(body).is_ok(), "{body}: {:?}", s.flat_of(body).err());
+    }
+}

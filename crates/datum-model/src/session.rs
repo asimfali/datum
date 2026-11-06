@@ -1226,6 +1226,29 @@ impl Session {
         crate::library::load("rule", self.project().as_deref()).get(&rule)?.element["k_factor"].as_f64()
     }
 
+    /// The K-factor feature `ix`'s body is laid flat at: its rule's (D197); without one, its saved
+    /// setting (D164); with neither, the K its own features were made with (a flange's relief, a
+    /// trim: their cuts lie on the blank as they were made, never apart), else the setting's
+    /// default.
+    fn flat_k(&self, ix: NodeIx, name: &str, lookup: &impl Fn(&str) -> Result<f64, ExprError>) -> Result<f64, String> {
+        if let Some(k) = self.rule_k(ix) {
+            return Ok(k);
+        }
+        let made = || {
+            crate::levels::body_chain(&self.graph, ix).find_map(|n| match &self.graph.nodes()[n as usize].op {
+                Op::Flange { k_factor: Some(k), .. }
+                | Op::Trim { k_factor: Some(k), .. }
+                | Op::Saddle { k_factor: Some(k) }
+                | Op::BranchHole { k_factor: Some(k) } => k.resolve(lookup).ok(),
+                _ => None,
+            })
+        };
+        match (self.doc.flats.get(name), made()) {
+            (None, Some(k)) => Ok(k),
+            (set, _) => set.cloned().unwrap_or_default().k_factor.resolve(lookup).map_err(|e| format!("k_factor: {e}")),
+        }
+    }
+
     /// The blank of feature `name` of the level worked in: an `unfold` feature's, or a sheet
     /// or plate body's laid flat as its settings say (D164), with the cuts on its blank only
     /// (D226) made first, in the order of its features.
@@ -1239,10 +1262,7 @@ impl Session {
         let settings = self.doc.flats.get(name).cloned().unwrap_or_default();
         let values = parameter_values(self.graph.parameters());
         let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
-        let k = match self.rule_k(ix) {
-            Some(k) => k,
-            None => settings.k_factor.resolve(&lookup).map_err(|e| format!("k_factor: {e}"))?,
-        };
+        let k = self.flat_k(ix, name, &lookup)?;
         // The cuts on the blank only of the body, first to last: each its feature, ID, op and sketch.
         let mut blank_only: Vec<(&str, datum_brep::TopoId, &Op, &datum_graph::Value)> = Vec::new();
         for n in crate::levels::body_chain(&self.graph, ix).collect::<Vec<_>>().into_iter().rev() {
@@ -1295,7 +1315,9 @@ impl Session {
             .into_iter()
             .map(|(name, flat)| {
                 let set = self.doc.flats.get(&name).cloned().unwrap_or_default();
-                let k = self.find(&name).ok().and_then(|ix| self.rule_k(ix)).map_or_else(|| json!(set.k_factor), |k| json!(k));
+                let values = parameter_values(self.graph.parameters());
+                let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
+                let k = self.find(&name).ok().and_then(|ix| self.flat_k(ix, &name, &lookup).ok()).map_or_else(|| json!(set.k_factor), |k| json!(k));
                 let mut v = json!({"feature": name, "side": if set.back { "back" } else { "front" }, "k_factor": k});
                 match flat {
                     Ok(f) => {
