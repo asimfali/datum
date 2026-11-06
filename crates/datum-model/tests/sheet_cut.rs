@@ -461,3 +461,39 @@ fn a_sheet_cut_is_edited_onto_the_blank_only() {
     run(&mut s, "edit", json!({"name": "cut", "mode": "cut", "blank_only": false}));
     assert!(volume(&mut s, "cut") < whole, "in the part again");
 }
+
+/// A flange's wall to a work plane (D229): the plane is an input of the flange; edited, its inputs
+/// follow the planes named, and a plane made after it or unknown is refused.
+#[test]
+fn a_flange_goes_to_a_work_plane() {
+    let mut s = l_sheet("sheet_flange_to_plane");
+    let faces = run(&mut s, "query_faces", json!({"name": "l", "normal": [0, -1, 0]}));
+    let end = faces["faces"].as_array().unwrap().iter().find(|f| f["area"] == 80.0).unwrap()["id"].as_str().unwrap().to_string();
+    let edges = run(&mut s, "query_edges", json!({"name": "l", "face": end}));
+    let long = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| (e["to"]["point"][2].as_f64().unwrap() - e["from"]["point"][2].as_f64().unwrap()).abs() == 40.0)
+        .unwrap();
+    let edge = long["id"].as_str().unwrap().to_string();
+    run(&mut s, "add", json!({"name": "joint", "op": "plane", "base": "xy", "offset": 30}));
+    run(&mut s, "add", json!({"name": "f", "op": "flange", "inputs": ["l"], "edges": [edge], "height": 20}));
+    let whole = volume(&mut s, "f");
+    let inputs = |s: &mut Session| -> Value {
+        run(s, "inspect", json!({}))["features"].as_array().unwrap().iter().find(|f| f["name"] == "f").unwrap()["inputs"].clone()
+    };
+    assert_eq!(inputs(&mut s), json!(["l"]));
+    // The plane in: a wall cut 1 short of it, on either side, the plane an input now.
+    run(&mut s, "edit", json!({"name": "f", "to": {"start": {"plane": "joint", "gap": 1}}}));
+    assert_eq!(inputs(&mut s), json!(["l", "joint"]));
+    let cut = volume(&mut s, "f");
+    assert!(cut < whole, "{cut} {whole}");
+    // Used by the flange, the plane stays; the plane out, the sheet alone again.
+    assert!(s.execute("remove", &json!({"name": "joint"})).is_err());
+    run(&mut s, "edit", json!({"name": "f", "to": {}}));
+    assert_eq!(inputs(&mut s), json!(["l"]));
+    assert_eq!(volume(&mut s, "f"), whole);
+    // A plane there is not.
+    assert!(s.execute("edit", &json!({"name": "f", "to": {"top": {"plane": "nowhere"}}})).is_err());
+}

@@ -855,3 +855,264 @@ fn hole_of(flat: &datum_ops::Flat, r: f64) -> datum_math::Vec2 {
     assert!((turn - std::f64::consts::TAU).abs() < 1e-9, "{turn} {:?}", flat.pieces);
     centre.unwrap()
 }
+
+/// A work plane through `origin`, its normal `normal`.
+fn work_plane(origin: [f64; 3], normal: [f64; 3]) -> Value {
+    let x_axis = if normal[2] == 0.0 { Vec3::new(0.0, 0.0, 1.0) } else { Vec3::new(1.0, 0.0, 0.0) };
+    Value::Plane(datum_ops::SketchPlane {
+        origin: Vec3::new(origin[0], origin[1], origin[2]),
+        x_axis,
+        normal: Vec3::new(normal[0], normal[1], normal[2]),
+    })
+}
+
+/// A flange of height 20 whose wall's edges go to work planes `planes` by `to` (D229).
+fn flange_to(b: &Body, edges: &[String], planes: &[(&str, Value)], to: serde_json::Value, extra: serde_json::Value) -> Result<Body, BrepError> {
+    let mut j = serde_json::json!({"op": "flange", "edges": edges, "height": 20, "radius": R, "to": to});
+    for (k, v) in extra.as_object().unwrap() {
+        j[k] = v.clone();
+    }
+    let sheet = Value::Body(b.clone());
+    let mut values = vec![&sheet];
+    let mut names = vec!["sheet"];
+    for (n, v) in planes {
+        values.push(v);
+        names.push(n);
+    }
+    let r = op(j).eval_named(id("flange"), &values, &names)?.body().unwrap().clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    Ok(r)
+}
+
+/// The least and most X of the vertices of `b` at height `z`.
+fn x_span(b: &Body, z: f64) -> (f64, f64) {
+    let xs = || b.vertices().iter().filter(|v| close(v.point.z, z)).map(|v| v.point.x);
+    (xs().fold(f64::INFINITY, f64::min), xs().fold(f64::NEG_INFINITY, f64::max))
+}
+
+const WALL: f64 = 20.0 - (R + T);
+
+/// The sides of a wall go to planes (D229): beyond its edge it grows, the bend stays, a gap short;
+/// inside it is cut, the bend bare beyond; the blank has a wall as wide, its bends as they were.
+#[test]
+fn a_walls_sides_go_to_planes() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    let edge = long_edges(&p, &long[0]);
+    let plain = flange(&p, &edge, serde_json::json!({})).unwrap();
+    let x = |at: f64| work_plane([at, 0.0, 0.0], [1.0, 0.0, 0.0]);
+    let to = |plane: &str, gap: f64| serde_json::json!({"plane": plane, "gap": gap});
+    // Which side is which: one way round the planes are beyond each other, and leave no width.
+    for (start, end) in [(-5.0, 110.0), (20.0, 90.0), (-5.0, 90.0)] {
+        let mut made = 0;
+        for (first, second) in [("start", "end"), ("end", "start")] {
+            let tos = serde_json::json!({first: to("a", 1.0), second: to("b", 1.0)});
+            let planes = [("a", x(start)), ("b", x(end))];
+            match flange_to(&p, &edge, &planes, tos, serde_json::json!({})) {
+                Ok(b) => {
+                    let (lo, hi) = x_span(&b, 20.0);
+                    assert!(close(lo, start + 1.0) && close(hi, end - 1.0), "{start} {end}: {lo} {hi}");
+                    let wide = hi - lo;
+                    assert!((b.volume() - plain.volume() - T * WALL * (wide - 100.0)).abs() < 1e-9 * b.volume(), "{start} {end}: {}", b.volume());
+                    assert!(close(x_span(&b, T).1 - x_span(&b, T).0, 100.0), "the bend stays");
+                    let (_, _, bends) = blank(&b);
+                    assert_eq!(bends, 2);
+                    made += 1;
+                }
+                Err(BrepError::Degenerate(_)) => {}
+                Err(e) => panic!("{start} {end}: {e}"),
+            }
+        }
+        assert_eq!(made, 1, "{start} {end}");
+    }
+}
+
+/// `start` is the end a width is measured from: the same end for an offset and for a plane.
+#[test]
+fn a_walls_start_is_the_start_of_its_width() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    for face in &long {
+        for e in long_edges(&p, face) {
+            let edge = [e];
+            let offset = flange(&p, &edge, serde_json::json!({"extent": {"kind": "offset", "offset": 10, "width": 30}})).unwrap();
+            let low_start = x_span(&offset, 20.0).0 < 50.0;
+            let at = if low_start { -7.0 } else { 107.0 };
+            let planes = [("a", work_plane([at, 0.0, 0.0], [1.0, 0.0, 0.0]))];
+            let b = flange_to(&p, &edge, &planes, serde_json::json!({"start": {"plane": "a"}}), serde_json::json!({})).unwrap();
+            let (lo, hi) = x_span(&b, 20.0);
+            assert!(close(if low_start { lo } else { hi }, at), "{lo} {hi}");
+            // A plane's normal may face either way.
+            let planes = [("a", work_plane([at, 0.0, 0.0], [-1.0, 0.0, 0.0]))];
+            let same = flange_to(&p, &edge, &planes, serde_json::json!({"start": {"plane": "a"}}), serde_json::json!({})).unwrap();
+            assert!(close(same.volume(), b.volume()));
+        }
+    }
+}
+
+/// A slanted plane: the wall's side slants, square to the wall all the same, and its blank is a
+/// trapezoid.
+#[test]
+fn a_walls_side_to_a_slanted_plane() {
+    let p = plate();
+    let edge = long_edges(&p, &faces_of_area(&p, 100.0 * T)[0]);
+    let plain = flange(&p, &edge, serde_json::json!({})).unwrap();
+    // Through (100, y, R + T), the wall's foot, going out 1 along X for each 1 up: at the top `WALL`
+    // further out.
+    let planes = [("a", work_plane([100.0, 0.0, R + T], [1.0, 0.0, -1.0]))];
+    let up = flange_to(&p, &edge, &planes, serde_json::json!({"start": {"plane": "a"}}), serde_json::json!({}));
+    let down = flange_to(&p, &edge, &planes, serde_json::json!({"end": {"plane": "a"}}), serde_json::json!({}));
+    let b = [up, down].into_iter().flatten().max_by(|a, b| a.volume().total_cmp(&b.volume())).unwrap();
+    assert!(close(b.volume() - plain.volume(), T * WALL * WALL * 0.5), "{}", b.volume() - plain.volume());
+    assert!(close(x_span(&b, 20.0).1, 100.0 + WALL));
+    let (_, _, bends) = blank(&b);
+    assert_eq!(bends, 2);
+}
+
+/// The free edge goes to a plane: the height is that alone, level or slanted, with the sides too.
+#[test]
+fn a_walls_top_goes_to_a_plane() {
+    let p = plate();
+    let edge = long_edges(&p, &faces_of_area(&p, 100.0 * T)[0]);
+    let top = |gap: f64| serde_json::json!({"top": {"plane": "a", "gap": gap}});
+    // Level at 16, a gap of 1: as high as a flange of 15; the height given says nothing, even one
+    // no higher than the bend.
+    let level = [("a", work_plane([0.0, 0.0, 16.0], [0.0, 0.0, 1.0]))];
+    let same = flange(&p, &edge, serde_json::json!({"height": 15})).unwrap();
+    for height in [20.0, 1.0] {
+        let b = flange_to(&p, &edge, &level, top(1.0), serde_json::json!({"height": height})).unwrap();
+        assert!(close(b.volume(), same.volume()), "{}", b.volume());
+        assert_eq!(blank(&b).0, blank(&same).0);
+    }
+    // Slanted: 16 at x = 0, 6 higher at x = 100.
+    let slant = [("a", work_plane([0.0, 0.0, 16.0], [-6.0, 0.0, 100.0]))];
+    let b = flange_to(&p, &edge, &slant, top(0.0), serde_json::json!({})).unwrap();
+    let wall = |z: f64| z - (R + T);
+    assert!(
+        close(b.volume() - p.volume(), same.volume() - p.volume() - T * 100.0 * wall(15.0) + T * 100.0 * 0.5 * (wall(16.0) + wall(22.0))),
+        "{}",
+        b.volume()
+    );
+    let tops: Vec<f64> = b.vertices().iter().map(|v| v.point.z).collect();
+    assert!(close(tops.iter().copied().fold(f64::NEG_INFINITY, f64::max), 22.0));
+    assert_eq!(blank(&b).2, 2);
+    // And sides to planes with it: the corner where both planes meet.
+    let planes = [
+        ("a", work_plane([0.0, 0.0, 16.0], [0.0, 0.0, 1.0])),
+        ("s", work_plane([-9.0, 0.0, 0.0], [1.0, 0.0, 0.0])),
+        ("e", work_plane([109.0, 0.0, 0.0], [1.0, 0.0, 0.0])),
+    ];
+    let (sa, sb) = (
+        serde_json::json!({"start": {"plane": "s"}, "end": {"plane": "e"}, "top": {"plane": "a"}}),
+        serde_json::json!({"start": {"plane": "e"}, "end": {"plane": "s"}, "top": {"plane": "a"}}),
+    );
+    let b = [flange_to(&p, &edge, &planes, sa, serde_json::json!({})), flange_to(&p, &edge, &planes, sb, serde_json::json!({}))]
+        .into_iter()
+        .flatten()
+        .next()
+        .unwrap();
+    assert_eq!(x_span(&b, 16.0), (-9.0, 109.0));
+}
+
+/// Two parts meet at one plane (D229): each goes to it by its own gap, knowing nothing of the other.
+#[test]
+fn two_parts_meet_at_a_joint_plane() {
+    let p = plate();
+    let edge = long_edges(&p, &faces_of_area(&p, 100.0 * T)[0]);
+    let joint = [("joint", work_plane([130.0, 0.0, 0.0], [1.0, 0.0, 0.0]))];
+    // The side toward the plane: the other, it leaves no width.
+    let go = |plate: &Body, edge: &[String]| {
+        let to = |key: &str| serde_json::json!({key: {"plane": "joint", "gap": 0.5}});
+        let (s, e) = (to("start"), to("end"));
+        [s, e].into_iter().find_map(|to| flange_to(plate, edge, &joint, to, serde_json::json!({})).ok()).unwrap()
+    };
+    let near = go(&p, &edge);
+    assert!(close(x_span(&near, 20.0).1, 129.5));
+    // Any flange at all, the plane the only thing shared: a second plate past the joint.
+    let moved = op(serde_json::json!({"op": "transform", "translate": [160, 0, 0]}))
+        .eval(id("moved"), &[&Value::Body(p.clone())])
+        .unwrap()
+        .body()
+        .unwrap()
+        .clone();
+    let edge = long_edges(&moved, &faces_of_area(&moved, 100.0 * T)[0]);
+    let far = go(&moved, &edge);
+    assert!(close(x_span(&far, 20.0).0, 130.5));
+}
+
+/// With the other choices of a flange: a width of part of the edge, a flush bend; along a wall.
+#[test]
+fn a_plane_with_a_width_and_along_a_wall() {
+    let p = plate();
+    let edge = long_edges(&p, &faces_of_area(&p, 100.0 * T)[0]);
+    let extent = serde_json::json!({"extent": {"kind": "center", "width": 30}});
+    let plain = flange(&p, &edge, extent.clone()).unwrap();
+    let planes = [("a", work_plane([0.0, 0.0, 16.0], [0.0, 0.0, 1.0]))];
+    let b = flange_to(&p, &edge, &planes, serde_json::json!({"top": {"plane": "a"}}), extent.clone()).unwrap();
+    assert!(close(plain.volume() - b.volume(), T * 30.0 * 4.0), "{}", b.volume());
+    // The narrow wall grown from its own side: to x = 10, it spans from 35 or 65 on to there.
+    let planes = [("a", work_plane([10.0, 0.0, 0.0], [1.0, 0.0, 0.0]))];
+    let grown = ["start", "end"].iter().filter_map(|k| flange_to(&p, &edge, &planes, serde_json::json!({*k: {"plane": "a"}}), extent.clone()).ok());
+    assert!(grown.into_iter().any(|b| x_span(&b, 20.0).0 == 10.0));
+    // A side flange on a U's top wall: it turns along Y, its height from the outer face at 62.
+    let u = u_of(MID);
+    let side = wall_edge(&u, 1, 62.0, 0.0);
+    let planes = [("a", work_plane([0.0, 50.0, 0.0], [0.0, 1.0, 0.0]))];
+    let same = side_of(&u, std::slice::from_ref(&side), serde_json::json!({"height": 12}));
+    let b = flange_to(&u, &[side], &planes, serde_json::json!({"top": {"plane": "a"}}), serde_json::json!({})).unwrap();
+    assert!(close(b.volume(), same.volume()), "{} {}", b.volume(), same.volume());
+    assert_eq!(blank(&b).2, blank(&same).2);
+}
+
+#[test]
+fn a_plane_a_wall_cannot_go_to_is_refused() {
+    let p = plate();
+    let edge = long_edges(&p, &faces_of_area(&p, 100.0 * T)[0]);
+    let start = serde_json::json!({"start": {"plane": "a"}});
+    let top = serde_json::json!({"top": {"plane": "a"}});
+    let none = serde_json::json!({});
+    // Along the edge, and along the wall.
+    let along = [("a", work_plane([0.0, 70.0, 0.0], [0.0, 1.0, 0.0]))];
+    assert!(matches!(flange_to(&p, &edge, &along, start.clone(), none.clone()), Err(BrepError::Unsupported(_))));
+    assert!(matches!(flange_to(&p, &edge, &along, top.clone(), none.clone()), Err(BrepError::Unsupported(_))));
+    // Below the bend's end: no height. Beyond the other side: no width.
+    let low = [("a", work_plane([0.0, 0.0, 1.0], [0.0, 0.0, 1.0]))];
+    assert!(matches!(flange_to(&p, &edge, &low, top, none.clone()), Err(BrepError::Degenerate(_))));
+    let cuts: Vec<_> = [-20.0, 120.0]
+        .iter()
+        .map(|&x| flange_to(&p, &edge, &[("a", work_plane([x, 0.0, 0.0], [1.0, 0.0, 0.0]))], start.clone(), none.clone()))
+        .collect();
+    assert!(cuts.iter().any(|r| matches!(r, Err(BrepError::Degenerate(_)))));
+    // Not among the inputs, no work plane, a gap below zero.
+    assert!(matches!(flange_to(&p, &edge, &[], start.clone(), none.clone()), Err(BrepError::Sketch(_))));
+    let body = [("a", Value::Body(p.clone()))];
+    assert!(matches!(flange_to(&p, &edge, &body, start, none.clone()), Err(BrepError::Sketch(_))));
+    let x = [("a", work_plane([120.0, 0.0, 0.0], [1.0, 0.0, 0.0]))];
+    assert!(matches!(flange_to(&p, &edge, &x, serde_json::json!({"end": {"plane": "a", "gap": -1}}), none), Err(BrepError::Degenerate(_))));
+}
+
+/// A plane through the wall's own end, level or slanted, on any edge: no step of rounding's width.
+#[test]
+fn a_plane_through_a_walls_end_leaves_no_step() {
+    let p = plate();
+    for face in faces_of_area(&p, 100.0 * T) {
+        let edge = long_edges(&p, &face);
+        let plain = flange(&p, &edge, serde_json::json!({})).unwrap();
+        for (normal, grown) in [([1.0, 0.0, 0.0], 0.0), ([1.0, 0.0, -1.0], T * WALL * WALL * 0.5), ([1.0, 0.0, -0.1], T * WALL * WALL * 0.05)] {
+            let planes = [("a", work_plane([100.0, 0.0, R + T], normal))];
+            let made: Vec<Body> = ["start", "end"]
+                .iter()
+                .filter_map(|k| flange_to(&p, &edge, &planes, serde_json::json!({*k: {"plane": "a"}}), serde_json::json!({})).ok())
+                .collect();
+            assert_eq!(made.len(), 1, "{normal:?}");
+            assert!(
+                close(made[0].volume() - plain.volume(), grown) || (grown == 0.0 && close(made[0].volume(), plain.volume())),
+                "{normal:?}: {}",
+                made[0].volume() - plain.volume()
+            );
+            let steps = made[0].faces().len() - plain.faces().len();
+            assert!(steps <= 1, "{normal:?}: {steps} new faces");
+        }
+    }
+}

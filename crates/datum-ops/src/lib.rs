@@ -26,7 +26,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
-pub use flange::{BendPosition, BendRelief, Closing, Extent, FlangeDims, Notch, Relief, Width, flange_edges, flange_ends, flanges};
+pub use flange::{BendPosition, BendRelief, Closing, Extent, FlangeDims, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flanges};
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
 use schemars::JsonSchema;
@@ -150,7 +150,7 @@ pub enum Op {
     /// toward the sheet's front side; a wall: outward; `flip`: the other way), and a wall beyond
     /// it, `height` from the outer surface of the sheet square to it, up to the flange's highest
     /// point (D229; `height_along`: along the flange from where its outer surface meets the
-    /// sheet's, D205). One input: the sheet.
+    /// sheet's, D205). The input: the sheet, then the work planes named in `to`.
     Flange {
         edges: Vec<String>,
         height: Num,
@@ -192,6 +192,12 @@ pub enum Op {
         /// Where the bend lies against the edge (D229): beyond it (default) or flush.
         #[serde(default, skip_serializing_if = "BendPosition::is_outside")]
         bend_position: BendPosition,
+        /// The work planes the wall's sides and free edge go to (D229), a gap short of them: the
+        /// wall grows or is cut square to itself, the bend stays. The free edge's plane takes the
+        /// place of `height`. Each plane an input of the flange, so that two parts may meet at one
+        /// joint plane, not knowing of each other.
+        #[serde(default, skip_serializing_if = "WallTo::is_empty")]
+        to: WallTo<PlaneTo>,
     },
     /// Sheet metal from the input sketch's path: its lines and arcs (an open chain, from point
     /// `start` or else from its end named first) given `thickness` on `side` of the path (looking
@@ -339,6 +345,15 @@ fn right_angle() -> Num {
 
 fn zero3() -> [Num; 3] {
     [zero(), zero(), zero()]
+}
+
+/// A work plane an edge of a flange's wall goes to (D229), `gap` short of it: its name among the
+/// flange's inputs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PlaneTo {
+    pub plane: String,
+    #[serde(default = "zero")]
+    pub gap: Num,
 }
 
 /// A number of a resolved operation (see [`Op::resolve`]).
@@ -520,9 +535,9 @@ impl Op {
             | Self::Unfold { .. }
             | Self::Sheet { .. }
             | Self::Plate { .. }
-            | Self::Flange { .. }
             | Self::Revolve { .. }
             | Self::Rolled { .. } => 1..=1,
+            Self::Flange { .. } => 1..=4,
             Self::Boolean { .. } => 2..=usize::MAX,
             Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } => 2..=2,
         }
@@ -608,6 +623,7 @@ impl Op {
                 bend_relief_width,
                 bend_relief_depth,
                 bend_position,
+                to,
             } => Self::Flange {
                 edges: edges.clone(),
                 height: r(height, "height")?,
@@ -625,6 +641,7 @@ impl Op {
                 bend_relief_width: bend_relief_width.as_ref().map(|n| r(n, "bend_relief_width")).transpose()?,
                 bend_relief_depth: bend_relief_depth.as_ref().map(|n| r(n, "bend_relief_depth")).transpose()?,
                 bend_position: *bend_position,
+                to: to.map(|p| Ok::<_, String>(PlaneTo { plane: p.plane.clone(), gap: r(&p.gap, "to: gap")? }))?,
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
@@ -732,6 +749,10 @@ impl Op {
             | Self::Revolve { .. }
             | Self::Rolled { .. }
             | Self::Trim { .. } => Vec::new(),
+            // The sheet; its work planes are read by name.
+            Self::Flange { .. } => {
+                vec![values[0].body().ok_or_else(|| BrepError::Sketch("flange takes bodies, input 1 is a sketch".into()))?]
+            }
             _ => values
                 .iter()
                 .enumerate()
@@ -837,6 +858,7 @@ impl Op {
                 bend_relief_width,
                 bend_relief_depth,
                 bend_position,
+                to,
             } => {
                 let Some(radius) = radius else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let round = match relief {
@@ -851,6 +873,16 @@ impl Op {
                     }
                 };
                 let gap = corner_gap.as_ref().map(num).transpose()?;
+                let to = to.map(|p| {
+                    let plane = names.iter().position(|n| *n == p.plane).and_then(|k| values.get(k)?.plane());
+                    let plane =
+                        plane.ok_or_else(|| BrepError::Sketch(format!("a flange goes to `{}`, not a work plane among its inputs", p.plane)))?;
+                    let gap = num(&p.gap)?;
+                    if !(gap >= 0.0 && gap.is_finite()) {
+                        return Err(BrepError::Degenerate(format!("a flange's gap to a plane is not below zero, got {gap}")));
+                    }
+                    Ok(Limit { at: plane.origin, normal: plane.normal, gap })
+                })?;
                 let dims = FlangeDims {
                     height: num(height)?,
                     along: *height_along,
@@ -862,6 +894,7 @@ impl Op {
                     gap,
                     width: extent.map(|n, _| num(n))?,
                     flush: *bend_position == BendPosition::Flush,
+                    to,
                     notch: match (bend_relief, bend_relief_width, bend_relief_depth) {
                         (BendRelief::None, ..) => None,
                         (shape, Some(w), Some(d)) => Some(Notch { round: *shape == BendRelief::Round, width: num(w)?, depth: num(d)? }),

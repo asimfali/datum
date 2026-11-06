@@ -327,7 +327,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "edit",
         description: "Change a feature's parameters: give `name` and only the fields to change (e.g. {name: \"moved\", angle_deg: 45}); \
-                      `op` changes its kind. Inputs stay. `enabled` (true, false, a number, 0: off, or a formula) turns it off or on: \
+                      `op` changes its kind. Inputs stay (a flange's follow the planes in its `to`). `enabled` (true, false, a number, 0: off, or a formula) turns it off or on: \
                       off, it passes its first input on unchanged — in a variant, the way to do without a parent's feature.",
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": true}),
         run: |s, p| {
@@ -341,7 +341,28 @@ const COMMANDS: &[Command] = &[
             }
             fields.extend(p.iter().filter(|(k, _)| *k != "name" && *k != "enabled").map(|(k, v)| (k.clone(), v.clone())));
             let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
+            // A flange's inputs follow the planes its wall goes to (D229): the sheet, then those.
+            let inputs = match &op {
+                Op::Flange { to, .. } => {
+                    let planes = to.iter().map(|p| match s.graph.find(&p.plane) {
+                        Some(i) if i < ix => Ok(i),
+                        _ => Err(format!("a flange goes to `{}`, not a feature before it", p.plane)),
+                    });
+                    let mut all: Vec<NodeIx> = s.graph.nodes()[ix as usize].inputs.iter().copied().take(1).collect();
+                    for plane in planes {
+                        let plane = plane?;
+                        if !all.contains(&plane) {
+                            all.push(plane);
+                        }
+                    }
+                    Some(all)
+                }
+                _ => None,
+            };
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
+            if let Some(inputs) = inputs {
+                s.graph.set_inputs(ix, &inputs).map_err(|e| e.to_string())?;
+            }
             Ok(s.rebuild_recording(ix))
         },
     },

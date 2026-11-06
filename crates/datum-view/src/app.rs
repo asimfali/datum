@@ -869,6 +869,9 @@ struct FlangeForm {
     from_end: bool,
     /// The bend relief beside a flange narrower than its edge: `none`, `square`, `round`.
     bend: &'static str,
+    /// The work plane each edge of the wall goes to (none: it stays where it is) and the gap short
+    /// of it (D229), for each of [`WALL_EDGES`].
+    to: [(String, String); 3],
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -886,18 +889,42 @@ impl FlangeForm {
             "between" => json!({"kind": "between", "start": a, "end": b}),
             _ => json!({"kind": "edge"}),
         };
+        let mut to = json!({});
+        for (edge, (plane, gap)) in WALL_EDGES.into_iter().zip(&self.to) {
+            if !plane.is_empty() {
+                to[edge] = json!({"plane": plane, "gap": if gap.trim().is_empty() { json!(0.0) } else { value_of(gap) }});
+            }
+        }
         json!({"name": self.name, "height": value_of(&self.height), "height_along": self.along, "angle": value_of(&self.angle), "flip": self.flip,
             "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "extent": extent, "bend_relief": self.bend,
-            "bend_position": if self.flush { "flush" } else { "outside" }})
+            "bend_position": if self.flush { "flush" } else { "outside" }, "to": to})
     }
 
     /// The `flange` feature the form makes on edges `edges` of body `body`.
     fn params(&self, body: &str, edges: &[String]) -> Json {
         let mut j = self.fields();
         j["op"] = json!("flange");
-        j["inputs"] = json!([body]);
+        let mut inputs = vec![body];
+        for (plane, _) in &self.to {
+            if !plane.is_empty() && !inputs.contains(&plane.as_str()) {
+                inputs.push(plane);
+            }
+        }
+        j["inputs"] = json!(inputs);
         j["edges"] = json!(edges);
         j
+    }
+}
+
+/// The edges of a flange's wall that may go to a plane (D229), as the feature says them.
+const WALL_EDGES: [&str; 3] = ["start", "end", "top"];
+
+/// The form's label of edge `e` of a wall.
+fn wall_edge_label<'a>(i18n: &'a crate::i18n::I18n, e: &str) -> &'a str {
+    match e {
+        "start" => i18n.t("flange-to-start", "Wall's start"),
+        "end" => i18n.t("flange-to-end", "Wall's end"),
+        _ => i18n.t("flange-to-top", "Wall's free edge"),
     }
 }
 
@@ -4293,6 +4320,13 @@ impl Viewer {
                     }),
                     from_end: f["extent"]["from_end"] == true,
                     bend: ["square", "round"].into_iter().find(|b| f["bend_relief"] == *b).unwrap_or("none"),
+                    to: WALL_EDGES.map(|e| {
+                        let to = &f["to"][e];
+                        (
+                            to["plane"].as_str().unwrap_or_default().to_string(),
+                            if to["gap"].is_null() { String::new() } else { definition(&to["gap"]) },
+                        )
+                    }),
                     fresh: true,
                     sent: None,
                     editing: true,
@@ -4594,6 +4628,7 @@ impl Viewer {
             b: String::new(),
             from_end: false,
             bend: "none",
+            to: Default::default(),
             fresh: true,
             sent: None,
             editing: false,
@@ -4604,6 +4639,13 @@ impl Viewer {
     /// every change, Enter or OK makes it once the preview of what it says now is not refused,
     /// Esc or Cancel drops it.
     fn flange_window(&mut self, ctx: &egui::Context) {
+        // The work planes made before the flange: what its wall may go to.
+        let planes: Vec<String> = {
+            let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array());
+            let before =
+                features.into_iter().flatten().take_while(|g| self.flange.as_ref().is_none_or(|f| !f.editing || g["name"] != f.name.as_str()));
+            before.filter(|g| g["op"] == "plane").filter_map(|g| g["name"].as_str().map(String::from)).collect()
+        };
         let Some(f) = &mut self.flange else { return };
         let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
         let (command, params) = match self.flange_edges.first() {
@@ -4625,7 +4667,9 @@ impl Viewer {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(self.i18n.t("flange-height", "Height"));
-                    let r = ui.add(
+                    // The free edge at a plane, that is the height.
+                    let r = ui.add_enabled(
+                        f.to[2].0.is_empty(),
                         egui::TextEdit::singleline(&mut f.height)
                             .desired_width(120.0)
                             .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
@@ -4696,6 +4740,24 @@ impl Viewer {
                         ui.radio_value(&mut f.bend, "none", self.i18n.t("flange-bend-relief-none", "None"));
                         ui.radio_value(&mut f.bend, "square", self.i18n.t("flange-bend-relief-square", "Square"));
                         ui.radio_value(&mut f.bend, "round", self.i18n.t("flange-bend-relief-round", "Round"));
+                    });
+                }
+                // Each edge of the wall: where it is, or at a work plane, a gap short of it (D229).
+                for (edge, (plane, gap)) in WALL_EDGES.into_iter().zip(&mut f.to) {
+                    let by_edge = self.i18n.t("flange-to-edge", "By the edge");
+                    ui.horizontal(|ui| {
+                        ui.label(wall_edge_label(&self.i18n, edge));
+                        let shown = if plane.is_empty() { by_edge } else { plane.as_str() };
+                        egui::ComboBox::from_id_salt(("flange-to", edge)).selected_text(shown).show_ui(ui, |ui| {
+                            ui.selectable_value(plane, String::new(), by_edge);
+                            for p in &planes {
+                                ui.selectable_value(plane, p.clone(), p);
+                            }
+                        });
+                        if !plane.is_empty() {
+                            ui.label(self.i18n.t("flange-to-gap", "Gap"));
+                            ui.add(egui::TextEdit::singleline(gap).desired_width(60.0).hint_text("0"));
+                        }
                     });
                 }
                 // How the walls close a corner where flanges meet: 1 is along the first edge picked.
@@ -8874,14 +8936,16 @@ mod tests {
             b: String::new(),
             from_end: false,
             bend: "round",
+            to: [(String::new(), String::new()), ("joint".into(), "1".into()), ("joint".into(), String::new())],
             fresh: false,
             sent: None,
             editing: false,
         };
         assert_eq!(
             form.params("sheet1", &faces),
-            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "angle": "h + 5",
-                "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}, "bend_relief": "round", "bend_position": "flush"})
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1", "joint"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "angle": "h + 5",
+                "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}, "bend_relief": "round", "bend_position": "flush",
+                "to": {"end": {"plane": "joint", "gap": 1.0}, "top": {"plane": "joint", "gap": 0.0}}})
         );
     }
 
