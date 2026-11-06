@@ -747,7 +747,9 @@ fn check_record(rec: &Records, e: &Json, i18n: &I18n) -> Result<(), String> {
             Some("sheet") if e["thickness"].is_null() => {
                 return Err(i18n.t("table-rule-thickness", "The thickness is a number above zero, in mm").to_string());
             }
-            Some("sheet") if !datum_model::library::of_thickness(&e["radius"], e["thickness"].as_f64().unwrap_or_default()).is_ok_and(|r| r > 0.0) => {
+            Some("sheet")
+                if !datum_model::library::of_thickness(&e["radius"], e["thickness"].as_f64().unwrap_or_default()).is_ok_and(|r| r > 0.0) =>
+            {
                 return Err(radius_wanted(i18n));
             }
             _ => {}
