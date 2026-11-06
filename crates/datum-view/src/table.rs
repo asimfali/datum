@@ -663,8 +663,19 @@ pub const MATERIALS: Records =
 /// The rules of one material: the `material` key is not a column.
 pub const RULES: Records = Records {
     level: "rule",
-    keys: &["name", "kind", "thickness", "radius", "k_factor", "corner_gap", "relief_diameter", "description"],
-    widths: &[35.0, 25.0, 25.0, 45.0, 20.0, 40.0, 40.0, 50.0],
+    keys: &[
+        "name",
+        "kind",
+        "thickness",
+        "radius",
+        "k_factor",
+        "corner_gap",
+        "relief_diameter",
+        "bend_relief_width",
+        "bend_relief_depth",
+        "description",
+    ],
+    widths: &[35.0, 25.0, 25.0, 45.0, 20.0, 40.0, 40.0, 40.0, 40.0, 50.0],
 };
 
 impl Records {
@@ -685,6 +696,8 @@ fn header<'a>(key: &str, i18n: &'a I18n) -> &'a str {
         "k_factor" => i18n.t("table-k-factor", "K-factor"),
         "corner_gap" => i18n.t("table-corner-gap", "Corner gap (mm or of t)"),
         "relief_diameter" => i18n.t("table-relief", "Relief Ø (mm or of t)"),
+        "bend_relief_width" => i18n.t("table-bend-relief-width", "Bend relief width (mm or of t)"),
+        "bend_relief_depth" => i18n.t("table-bend-relief-depth", "Bend relief depth (mm or of t)"),
         _ => i18n.t("table-radius", "Bend radius (mm or of t)"),
     }
 }
@@ -740,16 +753,19 @@ fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Opti
             _ if key == "density" => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
             _ => Err(i18n.t("table-rule-thickness", "The thickness is a number above zero, in mm").to_string()),
         },
-        "radius" | "corner_gap" | "relief_diameter" if !text.is_empty() => {
+        "radius" | "corner_gap" | "relief_diameter" | "bend_relief_width" | "bend_relief_depth" if !text.is_empty() => {
             let v = value_of(text);
             match datum_model::library::of_thickness(&v, 1.0) {
-                Ok(r) if r > 0.0 || (r == 0.0 && key != "relief_diameter") => Ok(Some(v)),
+                Ok(r) if r > 0.0 || (r == 0.0 && matches!(key, "radius" | "corner_gap")) => Ok(Some(v)),
                 _ if key == "corner_gap" => Err(i18n
                     .t("table-rule-corner-gap", "The corner gap is a number in mm, not below zero, or a formula of the thickness t")
                     .to_string()),
                 _ if key == "relief_diameter" => {
                     Err(i18n.t("table-rule-relief", "The relief's Ø is a number in mm above zero, or a formula of the thickness t").to_string())
                 }
+                _ if key != "radius" => Err(i18n
+                    .t("table-rule-bend-relief", "A bend relief's width and depth are numbers in mm above zero, or formulas of the thickness t")
+                    .to_string()),
                 _ => Err(radius_wanted(i18n)),
             }
         }
@@ -1314,11 +1330,12 @@ mod tests {
         let t = records(&RULES, &rules(), &pending, &I18n::default());
         assert_eq!(t.rows().len(), 4, "header, two rules, a new one");
         assert_eq!(
-            t.copy((0, 0), (0, 7)),
-            "Name\tKind\tThickness (mm)\tBend radius (mm or of t)\tK-factor\tCorner gap (mm or of t)\tRelief Ø (mm or of t)\tDescription"
+            t.copy((0, 0), (0, 9)),
+            "Name\tKind\tThickness (mm)\tBend radius (mm or of t)\tK-factor\tCorner gap (mm or of t)\tRelief Ø (mm or of t)\t\
+             Bend relief width (mm or of t)\tBend relief depth (mm or of t)\tDescription"
         );
-        assert_eq!(t.copy((1, 0), (2, 7)), "Лист 2\tSheet\t2\t1.5 * t\t0.44\tt\t2 * t\t\nДеталь\tPart\t\t\t\t\t\t");
-        assert_eq!(t.copy((3, 0), (3, 7)), "Н\tPart\t\t\t\t\t\t");
+        assert_eq!(t.copy((1, 0), (2, 9)), "Лист 2\tSheet\t2\t1.5 * t\t0.44\tt\t2 * t\t\t\t\nДеталь\tPart\t\t\t\t\t\t\t\t");
+        assert_eq!(t.copy((3, 0), (3, 9)), "Н\tPart\t\t\t\t\t\t\t\t");
     }
 
     #[test]

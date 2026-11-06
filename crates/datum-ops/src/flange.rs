@@ -30,8 +30,35 @@ pub struct FlangeDims {
     /// How walls meeting at a corner close it, and the gap between them there.
     pub corner: Closing,
     pub gap: Option<f64>,
-    /// How much of its edge each flange takes.
+    /// How much of its edge each flange takes, and the relief cut beside its bend where that
+    /// leaves the edge's rest flat.
     pub width: Width,
+    pub notch: Option<Notch>,
+}
+
+/// A bend relief at an end of a flange narrower than its edge (D229): a slot into the sheet beside
+/// the bend, `width` along the edge, `depth` into the sheet, its bottom square or round.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Notch {
+    pub round: bool,
+    pub width: f64,
+    pub depth: f64,
+}
+
+/// The bend relief a flange narrower than its edge cuts beside its bend (D229).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BendRelief {
+    #[default]
+    None,
+    Square,
+    Round,
+}
+
+impl BendRelief {
+    pub fn is_none(&self) -> bool {
+        *self == Self::None
+    }
 }
 
 /// How much of the edge a flange takes (D229, as Inventor's width extents): all of it; `width`
@@ -166,7 +193,7 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
                 continue;
             }
             done.push(end);
-            let (b, middle) = narrowed(feature, &body, e, dims.width)?;
+            let (b, middle) = narrowed(feature, &body, e, dims.width, dims.notch)?;
             body = b;
             middles.push(format!("{middle:?}"));
         }
@@ -407,15 +434,19 @@ fn end_face(target: &Body, e: TopoId) -> Result<TopoId, BrepError> {
 }
 
 /// `target` with the end whose long edge is `e` divided across at the flange's width `width`: a
-/// piece at each end (where the width leaves one) and the middle, which keeps the end's ID; and
-/// the middle's edge on the side of `e`.
-fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width) -> Result<(Body, TopoId), BrepError> {
+/// piece at each end (where the width leaves one) and the middle, which keeps the end's ID; with
+/// `notch`, a bend relief cut into the sheet beside each end of the middle that is not the edge's
+/// end. And the middle's edge on the side of `e`.
+fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Option<Notch>) -> Result<(Body, TopoId), BrepError> {
     let he = |h: Ix| target.half_edges()[h as usize];
     let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
     let (f, picked, [l0, l1]) = end_by_edge(target, e)?;
     if target.edge_curve(&target.edges()[he(l0).edge as usize]).is_some() || target.edge_curve(&target.edges()[he(l1).edge as usize]).is_some() {
         return Err(BrepError::Unsupported("flange: a width on a curved end".into()));
     }
+    let Surface::Plane(end) = target.faces()[f as usize].surface else {
+        return Err(BrepError::Unsupported("flange: a width on a curved end".into()));
+    };
     let id = |v: Ix| target.vertices()[v as usize].id;
     // Round the end: A0 → A1 along one long edge, C0 → C1 back along the other; C1 across from A0.
     let (a0, a1) = (he(l0).origin, he(target.next(l0)).origin);
@@ -425,24 +456,51 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width) -> Result<(
     // The edge's start: its end with the lower vertex ID; along A0 → A1 from A0.
     let (sa, sb) = if id(a0) < id(a1) { (sa, sb) } else { (length - sb, length - sa) };
     let u = (target.point(a1) - target.point(a0)) * (1.0 / length);
+    // Into the sheet, square to the end.
+    let inward = unit(end.normal) * -1.0;
+    let (low, high) = (sa > 0.0, sb < length);
+    if let Some(n) = notch {
+        if !(n.width > 0.0 && n.depth > 0.0 && n.width.is_finite() && n.depth.is_finite()) || (n.round && n.depth < 0.5 * n.width) {
+            return Err(BrepError::Degenerate(format!("a bend relief {} wide and {} deep", n.width, n.depth)));
+        }
+        if (low && sa - n.width <= 0.0) || (high && sb + n.width >= length) {
+            return Err(BrepError::Degenerate("a bend relief reaches the edge's end: offset the flange further".into()));
+        }
+    }
     let mut vertices = target.vertices().to_vec();
     let key = target.faces()[f as usize].id;
-    let mut at = |k: u64, from: Ix, s: f64| -> TopoId {
+    // A vertex at `s` along the edge from `from`, `deep` into the sheet.
+    let mut at = |k: u64, from: Ix, s: f64, deep: f64| -> TopoId {
         let v = TopoId::derive("flange.width").id(feature).id(key).index(k).finish();
-        vertices.push(Vertex { id: v, point: target.point(from) + u * s });
+        vertices.push(Vertex { id: v, point: target.point(from) + u * s + inward * deep });
         v
     };
     // On A0 → A1 at `s`, and across on C0 → C1 (from C1, across from A0).
-    let (pa, qa) = if sa > 0.0 { (at(0, a0, sa), at(1, c1, sa)) } else { (id(a0), id(c1)) };
-    let (pb, qb) = if sb < length { (at(2, a0, sb), at(3, c1, sb)) } else { (id(a1), id(c0)) };
+    let (pa, qa) = if low { (at(0, a0, sa, 0.0), at(1, c1, sa, 0.0)) } else { (id(a0), id(c1)) };
+    let (pb, qb) = if high { (at(2, a0, sb, 0.0), at(3, c1, sb, 0.0)) } else { (id(a1), id(c0)) };
+    // Each relief: on both lines, its corner on the edge away from the flange, its two corners
+    // deep (the side at the flange, then away; round: the arc's ends).
+    let deep = notch.map_or(0.0, |n| if n.round { n.depth - 0.5 * n.width } else { n.depth });
+    let mut relief = |k: u64, s_near: f64, s_far: f64| -> [[TopoId; 3]; 2] {
+        [(a0, 0), (c1, 1)].map(|(from, l)| {
+            let k = 10 + 6 * k + 3 * l;
+            [at(k, from, s_far, 0.0), at(k + 1, from, s_near, deep), at(k + 2, from, s_far, deep)]
+        })
+    };
+    let w = notch.map_or(0.0, |n| n.width);
+    let lows = (notch.is_some() && low).then(|| relief(0, sa, sa - w));
+    let highs = (notch.is_some() && high).then(|| relief(1, sb, sb + w));
     let mut faces: Vec<FaceSpec> = Vec::new();
+    let surface = target.faces()[f as usize].surface;
     let piece = |n: u64| TopoId::derive("sheet.divided").id(key).index(n).finish();
-    if sa > 0.0 {
-        faces.push(FaceSpec { id: piece(0), surface: target.faces()[f as usize].surface, loops: vec![vec![id(a0), pa, qa, id(c1)]] });
+    if low {
+        let (p, q) = lows.map_or((pa, qa), |[p, q]| (p[0], q[0]));
+        faces.push(FaceSpec { id: piece(0), surface, loops: vec![vec![id(a0), p, q, id(c1)]] });
     }
-    faces.push(FaceSpec { id: key, surface: target.faces()[f as usize].surface, loops: vec![vec![pa, pb, qb, qa]] });
-    if sb < length {
-        faces.push(FaceSpec { id: piece(1), surface: target.faces()[f as usize].surface, loops: vec![vec![pb, id(a1), id(c0), qb]] });
+    faces.push(FaceSpec { id: key, surface, loops: vec![vec![pa, pb, qb, qa]] });
+    if high {
+        let (p, q) = highs.map_or((pb, qb), |[p, q]| (p[0], q[0]));
+        faces.push(FaceSpec { id: piece(1), surface, loops: vec![vec![p, id(a1), id(c0), q]] });
     }
     // The faces beside the long edges run them the other way: the new vertices in between.
     let (across0, across1) = (face_of(he(l0).twin), face_of(he(l1).twin));
@@ -458,13 +516,66 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width) -> Result<(
         }
         spec
     };
-    let new = |v: TopoId, real: bool| real.then_some(v);
-    let run0: Vec<TopoId> = [new(pb, sb < length), new(pa, sa > 0.0)].into_iter().flatten().collect();
-    let run1: Vec<TopoId> = [new(qa, sa > 0.0), new(qb, sb < length)].into_iter().flatten().collect();
+    // Along A1 → A0 (down `s`): the high relief from its far side in, the middle, the low one out.
+    let mut run0: Vec<TopoId> = Vec::new();
+    if high {
+        run0.extend(highs.map_or(vec![], |[p, _]| vec![p[0], p[2], p[1]]));
+        run0.push(pb);
+    }
+    if low {
+        run0.push(pa);
+        run0.extend(lows.map_or(vec![], |[p, _]| vec![p[1], p[2], p[0]]));
+    }
+    // Along C1 → C0 (up `s`): the low relief in, the middle, the high one out.
+    let mut run1: Vec<TopoId> = Vec::new();
+    if low {
+        run1.extend(lows.map_or(vec![], |[_, q]| vec![q[0], q[2], q[1]]));
+        run1.push(qa);
+    }
+    if high {
+        run1.push(qb);
+        run1.extend(highs.map_or(vec![], |[_, q]| vec![q[1], q[2], q[0]]));
+    }
     faces.push(inserted(across0, id(a1), id(a0), &run0));
     faces.push(inserted(across1, id(c1), id(c0), &run1));
+    let mut curves = target.curve_specs();
+    // The reliefs' walls: the side away from the flange, the bottom, the side at it.
+    let point = |v: TopoId| vertices.iter().find(|x| x.id == v).map_or(Vec3::ZERO, |x| x.point);
+    let across = unit(target.point(c1) - target.point(a0) - u * (target.point(c1) - target.point(a0)).dot(u));
+    for (k, (cut, near, toward)) in [(lows, (pa, qa), 1.0), (highs, (pb, qb), -1.0)].into_iter().enumerate() {
+        let (Some([p, q]), Some(n)) = (cut, notch) else { continue };
+        let face = |tag: &str, surface: Surface, ids: Vec<TopoId>, outward: Vec3| -> FaceSpec {
+            let pts: Vec<Vec3> = ids.iter().map(|&v| point(v)).collect();
+            let normal = (0..pts.len()).fold(Vec3::ZERO, |s, i| s + pts[i].cross(pts[(i + 1) % pts.len()]));
+            let ids = if normal.dot(outward) < 0.0 { ids.into_iter().rev().collect() } else { ids };
+            FaceSpec { id: TopoId::derive(tag).id(feature).id(key).index(k as u64).finish(), surface, loops: vec![ids] }
+        };
+        // Away from the flange `toward` is −u at the low end: the far side faces the slot, +u.
+        let far = u * toward;
+        faces.push(face("flange.relief.far", Surface::Plane(Plane { origin: point(p[0]), normal: far }), vec![p[0], p[2], q[2], q[0]], far));
+        faces.push(face(
+            "flange.relief.near",
+            Surface::Plane(Plane { origin: point(p[1]), normal: far * -1.0 }),
+            vec![p[1], near.0, near.1, q[1]],
+            far * -1.0,
+        ));
+        let up = inward * -1.0;
+        let bottom = if n.round {
+            // A half circle from the side at the flange to the far side, through the deepest point.
+            let c = (point(p[1]) + point(p[2])) * 0.5;
+            let axis = unit((point(p[1]) - c).cross(inward));
+            for (a, b) in [(p[1], p[2]), (q[1], q[2])] {
+                let centre = (point(a) + point(b)) * 0.5;
+                curves.push(CurveSpec { from: a, to: b, curve: Curve::Arc(Arc { center: centre, axis, radius: 0.5 * n.width }) });
+            }
+            Surface::Cylinder(Cylinder { origin: c, axis: across, radius: 0.5 * n.width, convex: false })
+        } else {
+            Surface::Plane(Plane { origin: point(p[1]), normal: up })
+        };
+        faces.push(face("flange.relief.bottom", bottom, vec![p[1], p[2], q[2], q[1]], up));
+    }
     faces.extend((0..target.faces().len() as Ix).filter(|&x| x != f && x != across0 && x != across1).map(|x| target.face_spec(x)));
-    let body = build_with_curves(vertices, faces, target.curve_specs())?;
+    let body = build_with_curves(vertices, faces, curves)?;
     // The middle's edge on the picked side: between its new ends.
     let ends = if picked == l0 { [pa, pb] } else { [qb, qa] };
     let edge = body

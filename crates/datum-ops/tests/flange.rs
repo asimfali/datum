@@ -431,6 +431,33 @@ fn a_flange_on_part_of_its_edge() {
     }
 }
 
+/// A bend relief beside a short flange's bend (D229): a slot into the plate at each end of the
+/// flange that is not the edge's end, `w` along the edge, `d` deep; its bottom square or round.
+#[test]
+fn a_bend_relief_beside_a_short_flange() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    let edge = long_edges(&p, &long[0]);
+    let (w, d) = (2.0, 3.0);
+    let half_disc = std::f64::consts::PI * 0.125 * w * w;
+    for (extent, notches) in
+        [(serde_json::json!({"kind": "center", "width": 30}), 2.0), (serde_json::json!({"kind": "between", "start": 0, "end": 25}), 1.0)]
+    {
+        let plain = flange(&p, &edge, serde_json::json!({"extent": extent})).unwrap();
+        for (shape, slot) in [("square", w * d), ("round", w * (d - 0.5 * w) + half_disc)] {
+            let b = flange(&p, &edge, serde_json::json!({"extent": extent, "bend_relief": shape, "bend_relief_width": w, "bend_relief_depth": d}))
+                .unwrap();
+            assert!(close(plain.volume() - b.volume(), notches * slot * T), "{extent} {shape}: {}", plain.volume() - b.volume());
+            let f = unfold_side(&b, false, K).unwrap();
+            assert!(f.size.x > 0.0);
+        }
+    }
+    // Reaching the edge's end, or without the rule's sizes: refused.
+    let near = serde_json::json!({"kind": "offset", "offset": 1, "width": 30});
+    assert!(flange(&p, &edge, serde_json::json!({"extent": near, "bend_relief": "square", "bend_relief_width": w, "bend_relief_depth": d})).is_err());
+    assert!(flange(&p, &edge, serde_json::json!({"extent": {"kind": "center", "width": 30}, "bend_relief": "square"})).is_err());
+}
+
 #[test]
 fn refusals() {
     let u = u_sheet();
