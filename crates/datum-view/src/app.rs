@@ -6650,6 +6650,9 @@ mod tests {
             }
             loop {
                 window_until(&mut h, "the model comes", |v| !v.busy);
+                // Here a table's window lies in the frame, over the menu; in the program it is a
+                // window of its own.
+                h.state_mut().table = None;
                 window_frame(&mut h);
                 let at = h.state().playing.as_ref().unwrap().step;
                 let steps = &h.state().lessons[lesson].1.as_ref().unwrap().steps;
