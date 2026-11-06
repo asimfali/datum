@@ -541,15 +541,7 @@ fn end_by_edge(target: &Body, e: TopoId) -> Result<(Ix, Ix, [Ix; 2]), BrepError>
     let k = target.edges().binary_search_by_key(&e, |x| x.id).map_err(|_| BrepError::LostReference(format!("edge {e:?} is not in the body")))?;
     let h = target.edges()[k].half;
     // Across the thickness: a face of the sheet's sides (a rectangular plate's) is no end.
-    let skip = crate::unfold::branches(target);
-    let sides: BTreeSet<Ix> = crate::unfold::sheet_sides(target)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| crate::unfold::chain_through(target, s, &skip).ok())
-        .flatten()
-        .flatten()
-        .collect();
+    let sides = crate::unfold::side_faces(target).unwrap_or_default();
     [h, he(h).twin]
         .into_iter()
         .filter(|&g| !sides.contains(&face_of(g)))
@@ -806,14 +798,7 @@ fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<
         _ => None,
     };
     let skip = crate::unfold::branches(body);
-    let sides: BTreeSet<Ix> = crate::unfold::sheet_sides(body)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|s| crate::unfold::chain_through(body, s, &skip).ok())
-        .flatten()
-        .flatten()
-        .collect();
+    let sides = crate::unfold::side_faces(body).unwrap_or_default();
     // An end's long edge: a flange on that end (a face across the thickness, not of the sheet's
     // sides, which a wall is).
     for g in [h, he(h).twin] {
@@ -983,9 +968,7 @@ fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool, taken
 /// sheet's two sides), flat, four edges, the long two on parallel flat sides of the sheet. What
 /// the window lights up for a flange; the flange itself checks the same.
 pub fn flange_ends(body: &Body) -> Vec<TopoId> {
-    let Ok(sides) = crate::unfold::sheet_sides(body) else { return Vec::new() };
-    let skip = crate::unfold::branches(body);
-    let on_sides: BTreeSet<Ix> = sides.iter().filter_map(|&s| crate::unfold::chain_through(body, s, &skip).ok()).flatten().flatten().collect();
+    let Ok(on_sides) = crate::unfold::side_faces(body) else { return Vec::new() };
     (0..body.faces().len() as Ix).filter(|x| !on_sides.contains(x) && end_of(body, *x).is_some()).map(|x| body.faces()[x as usize].id).collect()
 }
 
@@ -994,8 +977,7 @@ pub fn flange_ends(body: &Body) -> Vec<TopoId> {
 pub fn flange_edges(body: &Body) -> Vec<(TopoId, [Vec3; 2])> {
     let he = |h: Ix| body.half_edges()[h as usize];
     let skip = crate::unfold::branches(body);
-    let Ok(sides) = crate::unfold::sheet_sides(body) else { return Vec::new() };
-    let on_sides: BTreeSet<Ix> = sides.iter().filter_map(|&s| crate::unfold::chain_through(body, s, &skip).ok()).flatten().flatten().collect();
+    let Ok(on_sides) = crate::unfold::side_faces(body) else { return Vec::new() };
     let flat = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_));
     let mut out: Vec<(TopoId, [Vec3; 2])> = Vec::new();
     for &x in on_sides.iter().filter(|&&x| flat(x)) {

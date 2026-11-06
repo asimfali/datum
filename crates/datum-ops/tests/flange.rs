@@ -1116,3 +1116,30 @@ fn a_plane_through_a_walls_end_leaves_no_step() {
         }
     }
 }
+
+/// Rims on two neighbouring walls of a tray: the sheet branches past flanges on its sides. Not laid
+/// out yet, so refused: the rim's own chain used to pass for the sheet, a blank of 100 × 2 (D233).
+/// Rims on two opposite walls still lie out, along the chain through the plate.
+#[test]
+fn rims_on_neighbouring_walls_get_no_wrong_blank() {
+    let p = plate();
+    let ends = [faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T)].concat();
+    let tray = flange(&p, &ends_edges(&p, &ends), serde_json::json!({})).unwrap();
+    let tops: Vec<String> = flange_ends(&tray).iter().map(|e| format!("{e:?}")).collect();
+    let rim = |b: &Body, top: &str| flange(b, &long_edges(b, top)[..1], serde_json::json!({"height": 10})).unwrap();
+    // The wall across the plate from the first is the one as long.
+    let area = |face: &str| tray.face_area((0..tray.faces().len()).find(|&x| hex(&tray, x) == face).unwrap() as u32);
+    let far = tops[1..].iter().find(|t| close(area(t), area(&tops[0]))).unwrap();
+    let near = tops[1..].iter().find(|t| *t != far).unwrap();
+    let one = rim(&tray, &tops[0]);
+    let opposite = rim(&one, far);
+    let size = unfold_side(&opposite, false, K).unwrap().size;
+    let across = 160.0 - area(&tops[0]) / T + 2.0 * (longer(20.0, 90.0) + longer(10.0, 90.0));
+    assert!(close(size.x, across) || close(size.y, across), "{size:?}, {across}");
+    let beside = rim(&opposite, near);
+    let err = unfold_side(&beside, false, K).unwrap_err();
+    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("branches")), "{err}");
+    // The plate stays the sheet's side, however far the rims reach.
+    let sides = datum_ops::sheet_sides(&beside).unwrap();
+    assert!(close(beside.face_area(sides[0]), 100.0 * 60.0), "{}", beside.face_area(sides[0]));
+}
