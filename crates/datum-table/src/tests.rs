@@ -115,3 +115,21 @@ fn a_fraction_is_stacked_on_the_middle_line() {
     assert_eq!(line.at([14.0, 13.0]).map(|b| (b.piece, b.slot)), Some((1, Slot::Under)));
     assert_eq!(line.at([40.0, 12.0]), None);
 }
+
+/// A header too wide for its column goes in two lines, split where the wider is narrowest; one
+/// that fits, or has no space, stays as it is.
+#[test]
+fn a_wide_header_takes_two_lines() {
+    // Every letter as wide as the text is high.
+    let width = |t: &str, h: f64| t.chars().count() as f64 * h;
+    let cell = Rect { x: 0.0, y: 0.0, w: 12.0, h: TWO_LINE_ROW };
+    let (ps, line) = two_lines("Зазор в углу, мм", cell, 1.0, &width).unwrap();
+    assert_eq!(ps, [Piece::Text("Зазор в".into()), Piece::Text("углу, мм".into())]);
+    let [a, b] = &line.boxes[..] else { panic!() };
+    assert!(a.rect.y + a.rect.h < b.rect.y && (a.rect.y + b.rect.y + b.rect.h) / 2.0 == cell.h / 2.0);
+    assert_eq!(two_lines("Имя", cell, 1.0, &width), None);
+    assert_eq!(two_lines("Сверхдлинноеоднослово", cell, 1.0, &width), None);
+    let mut t = grid();
+    t.set_height(0, TWO_LINE_ROW);
+    assert_eq!(t.rows(), [TWO_LINE_ROW, ROW, ROW]);
+}

@@ -129,3 +129,22 @@ pub fn place(pieces: &[Piece], cell: Rect, height: f64, width: &dyn Fn(&str, f64
     }
     line
 }
+
+/// `text` in two lines in `cell` (a header too wide for its column), split at the space that
+/// makes the wider line narrowest, each line from the cell's left edge after [`PAD`], `height`
+/// high, the two centred on the cell's middle; none when it fits one line or has no space.
+pub fn two_lines(text: &str, cell: Rect, height: f64, width: &dyn Fn(&str, f64) -> f64) -> Option<(Vec<Piece>, Line)> {
+    if width(text, height) + 2.0 * PAD <= cell.w {
+        return None;
+    }
+    let wider = |k: usize| width(text[..k].trim_end(), height).max(width(text[k..].trim_start(), height));
+    let k = text.match_indices(' ').map(|(k, _)| k).min_by(|&a, &b| wider(a).total_cmp(&wider(b)))?;
+    let (first, second) = (text[..k].trim_end(), text[k..].trim_start());
+    let (mid, gap) = (cell.y + cell.h / 2.0, height / 4.0);
+    let x = cell.x + PAD;
+    let boxes = vec![
+        Boxed { piece: 0, slot: Slot::Text, rect: Rect { x, y: mid - gap / 2.0 - height, w: width(first, height), h: height } },
+        Boxed { piece: 1, slot: Slot::Text, rect: Rect { x, y: mid + gap / 2.0, w: width(second, height), h: height } },
+    ];
+    Some((vec![Piece::Text(first.into()), Piece::Text(second.into())], Line { boxes, bars: Vec::new() }))
+}

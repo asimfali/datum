@@ -6,10 +6,13 @@
 
 mod content;
 
-pub use content::{Boxed, Line, PAD, Piece, STACK, Slot, TEXT, pieces, place, text_of};
+pub use content::{Boxed, Line, PAD, Piece, STACK, Slot, TEXT, pieces, place, text_of, two_lines};
 
 /// The height of a row on a drawing by ESKD, and of a new row.
 pub const ROW: f64 = 8.0;
+
+/// The height of a header row whose text takes two lines ([`two_lines`]).
+pub const TWO_LINE_ROW: f64 = ROW + TEXT * 1.25;
 
 /// A grid of cells: widths of its columns, heights of its rows, and each cell's text, row by row.
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +46,13 @@ impl Table {
     pub fn set(&mut self, row: usize, column: usize, text: impl Into<String>) {
         if let Some(k) = self.index(row, column) {
             self.cells[k] = text.into();
+        }
+    }
+
+    /// Row `row` made `height` high.
+    pub fn set_height(&mut self, row: usize, height: f64) {
+        if let Some(h) = self.rows.get_mut(row) {
+            *h = height;
         }
     }
 

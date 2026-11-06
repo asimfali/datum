@@ -328,7 +328,7 @@ impl Doc {
                 ks.insert(ix as NodeIx, k);
             }
             let Some(t) = rule.element["thickness"].as_f64() else { continue };
-            let Ok(r) = crate::library::bend_radius(&rule.element["radius"], t) else { continue };
+            let Ok(r) = crate::library::of_thickness(&rule.element["radius"], t) else { continue };
             let mut op = g.nodes()[ix].op.clone();
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
