@@ -134,6 +134,13 @@ pub(crate) enum Request {
     Preview(Option<(&'static str, Json)>),
 }
 
+/// Whether `folder` lies in the program's: a new version replaces that folder, and what is in it
+/// is easily lost with it.
+fn beside_program(folder: &std::path::Path) -> bool {
+    let inside = |exe: PathBuf| exe.parent().is_some_and(|d| std::path::absolute(folder).is_ok_and(|f| f.starts_with(d)));
+    std::env::current_exe().ok().is_some_and(inside)
+}
+
 /// A lesson under way: its place in `lessons`, the step reached.
 struct Playing {
     lesson: usize,
@@ -766,6 +773,8 @@ struct Viewer {
     lessons: Vec<crate::lessons::Read>,
     /// The lesson being played.
     playing: Option<Playing>,
+    /// The materials and the rules of the project itself, not of the program beside it.
+    own_records: (Vec<Json>, Vec<Json>),
     /// This frame's places a lesson can point at, by action or place name.
     spots: BTreeMap<&'static str, egui::Rect>,
     /// The rectangle of the pane showing the sketch edited (the 3D view's, or the flat pattern's
@@ -1281,6 +1290,7 @@ impl Viewer {
             viewport: egui::Rect::ZERO,
             lessons: crate::lessons::folder().map_or_else(Vec::new, |d| crate::lessons::read(&d)),
             playing: None,
+            own_records: Default::default(),
             spots: BTreeMap::new(),
             sketch_rect: egui::Rect::ZERO,
             blank_fitted: false,
@@ -1319,6 +1329,12 @@ impl Viewer {
         self.worked_in = None;
         self.project = folder;
         self.reload_library();
+        self.reload_library_records();
+        // A model without a file works in the project open: its library, its rules.
+        if self.model.is_some() {
+            let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
+            self.send(Request::Command("set_project", params));
+        }
     }
 
     /// The project the window works in: the model file's own (a model keeps its project's
@@ -1332,9 +1348,13 @@ impl Viewer {
 
     fn reload_library_records(&mut self) {
         let project = self.current_project();
-        let read = |level| datum_model::library::load(level, project.as_deref()).entries.into_iter().map(|e| e.element).collect();
-        self.materials = read("material");
-        self.rules = read("rule");
+        let (materials, rules) = (datum_model::library::load("material", project.as_deref()), datum_model::library::load("rule", project.as_deref()));
+        let own = |lib: &datum_model::library::Library| {
+            lib.entries.iter().filter(|e| e.source == datum_model::library::Source::Project).map(|e| e.element.clone()).collect()
+        };
+        self.own_records = (own(&materials), own(&rules));
+        self.materials = materials.entries.into_iter().map(|e| e.element).collect();
+        self.rules = rules.entries.into_iter().map(|e| e.element).collect();
     }
 
     /// Opens the table window on `source`, or closes it if that is what it shows.
@@ -1566,7 +1586,8 @@ impl Viewer {
         }
         self.leave();
         self.set_path(None);
-        self.send(Request::Command("new", json!({})));
+        let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
+        self.send(Request::Command("new", params));
     }
 
     /// Closes the model (Close, Ctrl+W): the window shows none. Whether it is gone: the engineer
@@ -1627,13 +1648,20 @@ impl Viewer {
             "tool": self.sketch.as_ref().map(|sk| format!("{:?}", sk.draft.tool).to_lowercase()),
             "picking": self.picking.map(|p| format!("{p:?}").to_lowercase()),
             "form": self.extrusion.is_some(),
-            "rule_chosen": self.next_rule.is_some(),
+            "sheet_rule": self.sheet_rule().is_some(),
+            "table": self.table.as_ref().map(|t| format!("{:?}", t.0).to_lowercase()),
+            "project": self.project.is_some(),
+            "project_safe": self.project.as_ref().is_some_and(|p| !beside_program(p)),
+            "own_materials": self.own_records.0,
+            "own_rules": self.own_records.1,
             "saved": self.path.is_some() && !self.modified(),
         })
     }
 
     fn step_done(&self, step: &crate::lessons::Step) -> bool {
-        step.done.window.as_ref().is_none_or(|w| crate::lessons::matches(w, &self.lesson_window()))
+        // A step to read is done by its button.
+        (step.done.window.is_some() || step.done.model.is_some())
+            && step.done.window.as_ref().is_none_or(|w| crate::lessons::matches(w, &self.lesson_window()))
             && step.done.model.as_ref().is_none_or(|p| self.model.as_ref().is_some_and(|m| crate::lessons::matches(p, &m.inspect)))
     }
 
@@ -1660,7 +1688,7 @@ impl Viewer {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
         let mut open = true;
-        let mut finished = false;
+        let (mut finished, mut read) = (false, false);
         let window = egui::Window::new(&lesson.title).id(egui::Id::new("datum_lesson")).open(&mut open).collapsible(false).resizable(false);
         window.anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0]).default_width(340.0).show(ctx, |ui| match now {
             Some(s) => {
@@ -1680,6 +1708,9 @@ impl Viewer {
                 if !s.hint.is_empty() {
                     ui.collapsing(self.i18n.t("lesson-stuck", "Stuck?"), |ui| ui.label(&s.hint));
                 }
+                if s.done.window.is_none() && s.done.model.is_none() {
+                    read = ui.button(self.i18n.t("lesson-next", "Next")).clicked();
+                }
             }
             None => {
                 ui.strong(self.i18n.t("lesson-finished", "Lesson finished: the model is yours."));
@@ -1689,7 +1720,7 @@ impl Viewer {
         if !open || finished {
             self.playing = None;
         } else if let Some(p) = &mut self.playing {
-            p.step = step;
+            p.step = step + usize::from(read);
         }
     }
 
@@ -6295,6 +6326,7 @@ mod tests {
             viewport: egui::Rect::ZERO,
             lessons: Vec::new(),
             playing: None,
+            own_records: Default::default(),
             spots: BTreeMap::new(),
             sketch_rect: egui::Rect::ZERO,
             blank_fitted: false,
@@ -6362,7 +6394,7 @@ mod tests {
     /// engineer has drawn four lines and built the plate, and not before.
     #[test]
     fn the_first_lesson_is_true_to_the_model() {
-        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons/01-new-part.json")).unwrap();
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons/02-new-part.json")).unwrap();
         let lesson = crate::lessons::Lesson::parse(&text).unwrap();
         let (sketch_done, plate_done) = (lesson.steps[4].done.model.as_ref().unwrap(), lesson.steps[5].done.model.as_ref().unwrap());
         let root = std::env::temp_dir().join(format!("datum-lesson-test-{}", std::process::id()));
@@ -6400,6 +6432,117 @@ mod tests {
         run("plate", json!({"name": "face", "sketch": "skel", "rule": "Лист"}));
         let built = run("inspect", json!({}));
         assert!(crate::lessons::matches(plate_done, &built), "plate: {built}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn sent(inbox: &std::sync::mpsc::Receiver<Request>) -> Vec<(&'static str, Json)> {
+        inbox
+            .try_iter()
+            .filter_map(|r| match r {
+                Request::Command(c, p) => Some((c, p)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A fresh project folder in the temp directory, marked with `datum-project.json`.
+    fn project_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("datum-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("part")).unwrap();
+        std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+        root
+    }
+
+    /// New model and `set_project` tell the session the project open, if any.
+    #[test]
+    fn the_session_is_told_the_project() {
+        let (mut v, inbox) = viewer("parametric.json");
+        v.new_model();
+        let cmds = sent(&inbox);
+        assert_eq!(cmds.len(), 1, "{cmds:?}");
+        assert_eq!(cmds[0].0, "new");
+        assert!(cmds[0].1.get("project").is_none(), "{:?}", cmds[0].1);
+        let root = project_root("viewer_told_project");
+        v.project = Some(root.clone());
+        v.new_model();
+        let cmds = sent(&inbox);
+        assert_eq!((cmds[0].0, &cmds[0].1["project"]), ("new", &json!(root)));
+        v.set_project(Some(root.clone()));
+        let cmds = sent(&inbox);
+        assert_eq!((cmds[0].0, &cmds[0].1["project"]), ("set_project", &json!(root)));
+        v.set_project(None);
+        let cmds = sent(&inbox);
+        assert_eq!(cmds[0].0, "set_project");
+        assert!(cmds[0].1.get("project").is_none());
+        v.model = None;
+        v.set_project(Some(root.clone()));
+        assert!(sent(&inbox).is_empty(), "no model, nothing to tell");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A project beside the program is not safe from a new version; one elsewhere is.
+    #[test]
+    fn beside_the_program_is_told_from_elsewhere() {
+        let exe = std::env::current_exe().unwrap();
+        assert!(beside_program(&exe.parent().unwrap().join("some-project")));
+        let temp = std::env::temp_dir();
+        if !temp.starts_with(exe.parent().unwrap()) {
+            assert!(!beside_program(&temp.join("some-project")));
+        }
+    }
+
+    /// A step to read is not done by the model, only by its button: the lesson stays on it.
+    #[test]
+    fn a_step_to_read_waits_for_its_button() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        let text = r#"{"format": "datum-lesson/1", "title": "t", "steps": [{"what": "read this"}]}"#;
+        v.lessons = vec![("t.json".into(), crate::lessons::Lesson::parse(text))];
+        let lesson = v.lessons[0].1.as_ref().unwrap();
+        assert!(!v.step_done(&lesson.steps[0]));
+        v.busy = false;
+        let playing = Playing { lesson: 0, step: 0 };
+        assert_eq!(v.lesson_step(&playing, lesson), 0);
+    }
+
+    /// The project lesson is true to real files: what the engineer writes in the project's library
+    /// through a real session is what its patterns look for.
+    #[test]
+    fn the_project_lesson_is_true_to_the_files() {
+        let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons/01-project.json")).unwrap();
+        let lesson = crate::lessons::Lesson::parse(&text).unwrap();
+        let (materials_step, rules_step) = (&lesson.steps[3], &lesson.steps[5]);
+        let root = project_root("viewer_project_lesson");
+        let (mut v, _inbox) = viewer("parametric.json");
+        v.project = Some(root.clone());
+        v.path = None;
+        v.model = None;
+        v.reload_library_records();
+        assert!(v.own_records.0.is_empty() && v.own_records.1.is_empty(), "{:?}", v.own_records);
+        assert!(!v.step_done(materials_step) && !v.step_done(rules_step));
+        let mut s = Session::default();
+        let mut run = |cmd: &str, p: Json| s.execute(cmd, &p).unwrap_or_else(|e| panic!("{cmd}: {e}"));
+        run("new", json!({"project": root.display().to_string()}));
+        v.reload_library_records();
+        assert!(!v.step_done(materials_step), "no material yet");
+        run("put_library", json!({"level": "material", "element": {"name": "Сталь"}}));
+        v.reload_library_records();
+        assert!(!v.step_done(materials_step), "a name only is not a material of the lesson: {:?}", v.own_records);
+        run("put_library", json!({"level": "material", "element": {"name": "Сталь", "density": 7850}, "was": "Сталь"}));
+        v.reload_library_records();
+        assert!(v.step_done(materials_step), "{:?}", v.own_records);
+        assert!(!v.step_done(rules_step));
+        run("put_library", json!({"level": "rule", "element": {"name": "Деталь", "kind": "part", "material": "Сталь"}}));
+        v.reload_library_records();
+        assert!(!v.step_done(rules_step), "a part rule is not a sheet rule: {:?}", v.own_records);
+        run(
+            "put_library",
+            json!({"level": "rule", "element": {"name": "Лист", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t"}}),
+        );
+        v.reload_library_records();
+        assert!(v.step_done(rules_step), "{:?}", v.own_records);
+        // The records are the project's own only.
+        assert!(v.own_records.0.iter().all(|m| m["name"] == "Сталь") && v.own_records.1.len() == 2);
         let _ = std::fs::remove_dir_all(&root);
     }
 

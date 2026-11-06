@@ -17,7 +17,8 @@ const PLACES: [&str; 10] =
     ["menu.file", "menu.edit", "menu.view", "menu.sketch", "menu.help", "toolbar.material", "toolbar.rule", "view", "sketch.done", "form.ok"];
 
 /// What of the window a step's `done` may ask about; [`matches`] compares with these.
-const WINDOW: [&str; 7] = ["model", "sketch", "tool", "picking", "form", "rule_chosen", "saved"];
+const WINDOW: [&str; 12] =
+    ["model", "sketch", "tool", "picking", "form", "sheet_rule", "saved", "table", "project", "project_safe", "own_materials", "own_rules"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -44,7 +45,9 @@ pub struct Step {
     /// name the menu next.
     #[serde(default)]
     pub at: Vec<String>,
-    /// What the window (`window`) and the model's `inspect` (`model`) must look like, by [`matches`].
+    /// What the window (`window`) and the model's `inspect` (`model`) must look like, by
+    /// [`matches`]. Neither: a step to read, done by its button.
+    #[serde(default)]
     pub done: Done,
 }
 
@@ -77,9 +80,6 @@ impl Lesson {
             let n = k + 1;
             if let Some(name) = step.at.iter().find(|a| !known_place(a)) {
                 return Err(format!("step {n}: no action or place {name:?}"));
-            }
-            if step.done.window.is_none() && step.done.model.is_none() {
-                return Err(format!("step {n}: nothing says it is done"));
             }
             if let Some(window) = &step.done.window {
                 let keys = window.as_object().ok_or_else(|| format!("step {n}: `window` is not an object"))?;
@@ -214,8 +214,9 @@ mod tests {
         let two = |bad: &str| format!(r#"{{"format": "{FORMAT}", "title": "t", "steps": [{OK_STEP}, {bad}]}}"#);
         let e = refused(&two(r#"{"what": "w", "at": ["no.such.thing"], "done": {"window": {"model": true}}}"#));
         assert!(e.contains("step 2") && e.contains("no.such.thing"), "{e}");
-        let e = refused(&two(r#"{"what": "w", "done": {}}"#));
-        assert!(e.contains("step 2"), "{e}");
+        // A step without `done` is one to read, advanced by a button.
+        assert!(Lesson::parse(&two(r#"{"what": "w", "done": {}}"#)).is_ok());
+        assert!(Lesson::parse(&two(r#"{"what": "w"}"#)).is_ok());
         let e = refused(&two(r#"{"what": "w", "done": {"window": {"bogus": true}}}"#));
         assert!(e.contains("step 2") && e.contains("bogus"), "{e}");
         let e = refused(&step(r#"{"what": "w", "done": {"window": {"bogus": true}}}"#));
@@ -260,16 +261,18 @@ mod tests {
         assert!(all[0].1.is_ok() && all[1].1.is_err() && all[2].1.is_ok());
     }
 
-    /// The fallback of the mark: some name of each step of the first lesson is a place the window
-    /// fills every frame (the menu bar, the view), so the mark is never lost with a menu closed.
-    /// Checked by names; that the window fills them is `lesson_card`'s `spots`.
+    /// The fallback of the mark: a step that names places has some name of a place the window fills
+    /// every frame (the menu bar, the view), so the mark is never lost with a menu closed.
+    /// Checked by names; that the window fills them is `lesson_card`'s `spots`. Steps without `at`
+    /// happen in a window of their own (a table) and have no mark.
     #[test]
-    fn every_step_of_the_first_lesson_names_an_always_shown_place() {
-        let text = std::fs::read_to_string(repo_lessons().join("01-new-part.json")).unwrap();
-        let lesson = Lesson::parse(&text).unwrap();
-        for (k, step) in lesson.steps.iter().enumerate() {
-            let shown = step.at.iter().any(|a| a.starts_with("menu.") || a.starts_with("toolbar.") || a == "view");
-            assert!(shown, "step {}: {:?} has no always-shown place", k + 1, step.at);
+    fn every_step_with_places_names_an_always_shown_one() {
+        for (file, lesson) in read(&repo_lessons()) {
+            let lesson = lesson.unwrap();
+            for (k, step) in lesson.steps.iter().enumerate().filter(|(_, s)| !s.at.is_empty()) {
+                let shown = step.at.iter().any(|a| a.starts_with("menu.") || a.starts_with("toolbar.") || a == "view");
+                assert!(shown, "{} step {}: {:?} has no always-shown place", file.display(), k + 1, step.at);
+            }
         }
     }
 }

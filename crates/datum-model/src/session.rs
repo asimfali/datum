@@ -31,6 +31,8 @@ pub struct Session {
     evaluator: Evaluator,
     last: Evaluation,
     path: Option<PathBuf>,
+    /// The project a model without a file works in.
+    project: Option<PathBuf>,
     /// The model as last opened or saved: what differs from it is not saved yet.
     saved: Doc,
     /// Models before each change (and the level then worked in), the latest last; and those
@@ -62,6 +64,7 @@ impl Default for Session {
             evaluator,
             last,
             path: None,
+            project: None,
             saved: Doc::default(),
             undo: Vec::new(),
             redo: Vec::new(),
@@ -78,7 +81,25 @@ struct Command {
 }
 
 const COMMANDS: &[Command] = &[
-    Command { name: "new", description: "Start an empty model.", params: no_params, run: |s, _| Ok(s.replace(Doc::default(), None)) },
+    Command {
+        name: "new",
+        description: "Start an empty model; `project`: the folder of the project it works in until it is saved (its library, its rules).",
+        params: || json!({"type": "object", "properties": {"project": {"type": "string"}}}),
+        run: |s, p| {
+            s.project = p.get("project").and_then(Value::as_str).map(PathBuf::from);
+            Ok(s.replace(Doc::default(), None))
+        },
+    },
+    Command {
+        name: "set_project",
+        description: "The project a model without a file works in (`project`: its folder; none: no project): its library, its rules. \
+                      A model with a file works in the project of its file.",
+        params: || json!({"type": "object", "properties": {"project": {"type": "string"}}}),
+        run: |s, p| {
+            s.project = p.get("project").and_then(Value::as_str).map(PathBuf::from);
+            Ok(s.rebuild())
+        },
+    },
     Command {
         name: "open",
         description: "Open a model file (.json).",
@@ -478,7 +499,7 @@ const COMMANDS: &[Command] = &[
         },
         run: |s, p| {
             let level = text(p, "level")?;
-            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.path.as_deref(), s.project().as_deref())?;
+            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.project().as_deref())?;
             // A rule edited: the sheets made by it take its thickness (D193).
             if level == "rule" {
                 s.rebuild();
@@ -1007,9 +1028,13 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
 }
 
 impl Session {
-    /// The project of the model's file (its root), if it has one.
+    /// The project worked in: that of the model's file (its root), if it has one; without a file,
+    /// the one given.
     fn project(&self) -> Option<PathBuf> {
-        self.path.as_deref().and_then(crate::workspace::project_root)
+        match &self.path {
+            Some(path) => crate::workspace::project_root(path),
+            None => self.project.clone(),
+        }
     }
 
     /// Applies `edit_sketch` patch `p` to sketch feature `name`.

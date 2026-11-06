@@ -130,6 +130,7 @@ lessons-none = Нет уроков в { $path }
 lesson-step = Шаг { $n } из { $m }
 lesson-key = Клавиша: { $key }
 lesson-stuck = Не получается?
+lesson-next = Дальше
 lesson-finished = Урок пройден: модель ваша.
 search = Поиск
 library-hint = Двойной щелчок — поставить · перетащите на эскиз
