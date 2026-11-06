@@ -30,6 +30,69 @@ pub struct FlangeDims {
     /// How walls meeting at a corner close it, and the gap between them there.
     pub corner: Closing,
     pub gap: Option<f64>,
+    /// How much of its edge each flange takes.
+    pub width: Width,
+}
+
+/// How much of the edge a flange takes (D229, as Inventor's width extents): all of it; `width`
+/// in the middle; `width` from `offset` off the edge's start (`from_end`: its end); or all but
+/// `start` and `end` off its ends. The edge's start: its end with the lower vertex ID.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Extent<N> {
+    #[default]
+    Edge,
+    Center {
+        width: N,
+    },
+    Offset {
+        offset: N,
+        width: N,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_end: bool,
+    },
+    Between {
+        start: N,
+        end: N,
+    },
+}
+
+/// The extent with its numbers.
+pub type Width = Extent<f64>;
+
+impl<N> Extent<N> {
+    pub fn is_edge(&self) -> bool {
+        matches!(self, Self::Edge)
+    }
+
+    /// The same with each number `f` of it.
+    pub fn map<M, E>(&self, mut f: impl FnMut(&N, &str) -> Result<M, E>) -> Result<Extent<M>, E> {
+        Ok(match self {
+            Self::Edge => Extent::Edge,
+            Self::Center { width } => Extent::Center { width: f(width, "width")? },
+            Self::Offset { offset, width, from_end } => {
+                Extent::Offset { offset: f(offset, "offset")?, width: f(width, "width")?, from_end: *from_end }
+            }
+            Self::Between { start, end } => Extent::Between { start: f(start, "start")?, end: f(end, "end")? },
+        })
+    }
+}
+
+impl Width {
+    /// Where on an edge `length` long the flange begins and ends, from the edge's start.
+    fn span(&self, length: f64) -> Result<(f64, f64), BrepError> {
+        let (a, b) = match *self {
+            Self::Edge => (0.0, length),
+            Self::Center { width } => (0.5 * (length - width), 0.5 * (length + width)),
+            Self::Offset { offset, width, from_end: false } => (offset, offset + width),
+            Self::Offset { offset, width, from_end: true } => (length - offset - width, length - offset),
+            Self::Between { start, end } => (start, length - end),
+        };
+        if !(0.0 <= a && a < b && b <= length) {
+            return Err(BrepError::Degenerate(format!("a flange's width from {a:.3} to {b:.3} lies not on its edge {length:.3} long")));
+        }
+        Ok((a, b))
+    }
 }
 
 /// How the walls of flanges meeting at a corner close it (D229).
@@ -91,6 +154,24 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         .iter()
         .map(|e| u128::from_str_radix(e, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{e}` is not an edge ID"))))
         .collect::<Result<_, _>>()?;
+    // Narrower than its edge: the end divided first, the flange on its middle (D229).
+    if !dims.width.is_edge() {
+        let mut body = target.clone();
+        let mut middles = Vec::new();
+        // Each end once, by either of its long edges.
+        let mut done: Vec<TopoId> = Vec::new();
+        for &e in &ids {
+            let end = end_face(target, e)?;
+            if done.contains(&end) {
+                continue;
+            }
+            done.push(end);
+            let (b, middle) = narrowed(feature, &body, e, dims.width)?;
+            body = b;
+            middles.push(format!("{middle:?}"));
+        }
+        return flanges(feature, &body, &middles, FlangeDims { width: Width::Edge, ..dims });
+    }
     // Each flange once, by the corners of what it stands on.
     let mut sites: Vec<(TopoId, [TopoId; 4], Base)> = Vec::new();
     for &e in &ids {
@@ -306,6 +387,99 @@ fn open_corner(target: &Body, a: &Base, b: &Base, angle: f64) -> Result<(), Brep
         return later("flanges at an inner corner");
     }
     Ok(())
+}
+
+/// The end whose long edge is `e`: the face, `e`'s half-edge on it, and its two long half-edges.
+fn end_by_edge(target: &Body, e: TopoId) -> Result<(Ix, Ix, [Ix; 2]), BrepError> {
+    let he = |h: Ix| target.half_edges()[h as usize];
+    let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
+    let k = target.edges().binary_search_by_key(&e, |x| x.id).map_err(|_| BrepError::LostReference(format!("edge {e:?} is not in the body")))?;
+    let h = target.edges()[k].half;
+    [h, he(h).twin]
+        .into_iter()
+        .find_map(|g| end_of(target, face_of(g)).filter(|(long, _)| long.contains(&g)).map(|(long, _)| (face_of(g), g, long)))
+        .ok_or_else(|| BrepError::Unsupported("flange: a width on a wall's edge along the sheet's side comes later".into()))
+}
+
+/// The ID of the end whose long edge is `e`.
+fn end_face(target: &Body, e: TopoId) -> Result<TopoId, BrepError> {
+    end_by_edge(target, e).map(|(f, ..)| target.faces()[f as usize].id)
+}
+
+/// `target` with the end whose long edge is `e` divided across at the flange's width `width`: a
+/// piece at each end (where the width leaves one) and the middle, which keeps the end's ID; and
+/// the middle's edge on the side of `e`.
+fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width) -> Result<(Body, TopoId), BrepError> {
+    let he = |h: Ix| target.half_edges()[h as usize];
+    let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
+    let (f, picked, [l0, l1]) = end_by_edge(target, e)?;
+    if target.edge_curve(&target.edges()[he(l0).edge as usize]).is_some() || target.edge_curve(&target.edges()[he(l1).edge as usize]).is_some() {
+        return Err(BrepError::Unsupported("flange: a width on a curved end".into()));
+    }
+    let id = |v: Ix| target.vertices()[v as usize].id;
+    // Round the end: A0 → A1 along one long edge, C0 → C1 back along the other; C1 across from A0.
+    let (a0, a1) = (he(l0).origin, he(target.next(l0)).origin);
+    let (c0, c1) = (he(l1).origin, he(target.next(l1)).origin);
+    let length = (target.point(a1) - target.point(a0)).dot(target.point(a1) - target.point(a0)).sqrt();
+    let (sa, sb) = width.span(length)?;
+    // The edge's start: its end with the lower vertex ID; along A0 → A1 from A0.
+    let (sa, sb) = if id(a0) < id(a1) { (sa, sb) } else { (length - sb, length - sa) };
+    let u = (target.point(a1) - target.point(a0)) * (1.0 / length);
+    let mut vertices = target.vertices().to_vec();
+    let key = target.faces()[f as usize].id;
+    let mut at = |k: u64, from: Ix, s: f64| -> TopoId {
+        let v = TopoId::derive("flange.width").id(feature).id(key).index(k).finish();
+        vertices.push(Vertex { id: v, point: target.point(from) + u * s });
+        v
+    };
+    // On A0 → A1 at `s`, and across on C0 → C1 (from C1, across from A0).
+    let (pa, qa) = if sa > 0.0 { (at(0, a0, sa), at(1, c1, sa)) } else { (id(a0), id(c1)) };
+    let (pb, qb) = if sb < length { (at(2, a0, sb), at(3, c1, sb)) } else { (id(a1), id(c0)) };
+    let mut faces: Vec<FaceSpec> = Vec::new();
+    let piece = |n: u64| TopoId::derive("sheet.divided").id(key).index(n).finish();
+    if sa > 0.0 {
+        faces.push(FaceSpec { id: piece(0), surface: target.faces()[f as usize].surface, loops: vec![vec![id(a0), pa, qa, id(c1)]] });
+    }
+    faces.push(FaceSpec { id: key, surface: target.faces()[f as usize].surface, loops: vec![vec![pa, pb, qb, qa]] });
+    if sb < length {
+        faces.push(FaceSpec { id: piece(1), surface: target.faces()[f as usize].surface, loops: vec![vec![pb, id(a1), id(c0), qb]] });
+    }
+    // The faces beside the long edges run them the other way: the new vertices in between.
+    let (across0, across1) = (face_of(he(l0).twin), face_of(he(l1).twin));
+    let inserted = |x: Ix, from: TopoId, to: TopoId, run: &[TopoId]| -> FaceSpec {
+        let mut spec = target.face_spec(x);
+        for l in &mut spec.loops {
+            let n = l.len();
+            if let Some(k) = (0..n).find(|&k| (l[k], l[(k + 1) % n]) == (from, to)) {
+                for (j, v) in run.iter().enumerate() {
+                    l.insert(k + 1 + j, *v);
+                }
+            }
+        }
+        spec
+    };
+    let new = |v: TopoId, real: bool| real.then_some(v);
+    let run0: Vec<TopoId> = [new(pb, sb < length), new(pa, sa > 0.0)].into_iter().flatten().collect();
+    let run1: Vec<TopoId> = [new(qa, sa > 0.0), new(qb, sb < length)].into_iter().flatten().collect();
+    faces.push(inserted(across0, id(a1), id(a0), &run0));
+    faces.push(inserted(across1, id(c1), id(c0), &run1));
+    faces.extend((0..target.faces().len() as Ix).filter(|&x| x != f && x != across0 && x != across1).map(|x| target.face_spec(x)));
+    let body = build_with_curves(vertices, faces, target.curve_specs())?;
+    // The middle's edge on the picked side: between its new ends.
+    let ends = if picked == l0 { [pa, pb] } else { [qb, qa] };
+    let edge = body
+        .edges()
+        .iter()
+        .find(|x| {
+            let (v, w) = (
+                body.vertices()[body.half_edges()[x.half as usize].origin as usize].id,
+                body.vertices()[body.half_edges()[body.next(x.half) as usize].origin as usize].id,
+            );
+            (v, w) == (ends[0], ends[1]) || (w, v) == (ends[0], ends[1])
+        })
+        .map(|x| x.id)
+        .ok_or_else(|| BrepError::Invalid("flange: the middle of the end lost its edge".into()))?;
+    Ok((body, edge))
 }
 
 /// What a flange stands on: the edge of the sheet's side it turns toward (`inner`, at the start

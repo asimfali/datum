@@ -851,6 +851,12 @@ struct FlangeForm {
     corner: &'static str,
     /// The height along the flange, not square to the sheet.
     along: bool,
+    /// How much of the edge it takes (D229): `edge`, `center` (width `a`), `offset` (offset `a`,
+    /// width `b`, from the edge's end if `from_end`), `between` (offsets `a` and `b`).
+    extent: &'static str,
+    a: String,
+    b: String,
+    from_end: bool,
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -861,8 +867,15 @@ struct FlangeForm {
 impl FlangeForm {
     /// What the form says of the flange: the fields an edit of it changes.
     fn fields(&self) -> Json {
+        let (a, b) = (value_of(&self.a), value_of(&self.b));
+        let extent = match self.extent {
+            "center" => json!({"kind": "center", "width": a}),
+            "offset" => json!({"kind": "offset", "offset": a, "width": b, "from_end": self.from_end}),
+            "between" => json!({"kind": "between", "start": a, "end": b}),
+            _ => json!({"kind": "edge"}),
+        };
         json!({"name": self.name, "height": value_of(&self.height), "height_along": self.along, "angle": value_of(&self.angle), "flip": self.flip,
-            "relief": if self.round { "round" } else { "square" }, "corner": self.corner})
+            "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "extent": extent})
     }
 
     /// The `flange` feature the form makes on edges `edges` of body `body`.
@@ -872,6 +885,19 @@ impl FlangeForm {
         j["inputs"] = json!([body]);
         j["edges"] = json!(edges);
         j
+    }
+}
+
+/// How much of its edge a flange takes (D229), as the feature says it.
+const EXTENTS: [&str; 4] = ["edge", "center", "offset", "between"];
+
+/// The form's label of width extent `e`.
+fn extent_label<'a>(i18n: &'a crate::i18n::I18n, e: &str) -> &'a str {
+    match e {
+        "center" => i18n.t("flange-extent-center", "Centered"),
+        "offset" => i18n.t("flange-extent-offset", "Offset"),
+        "between" => i18n.t("flange-extent-between", "Between offsets"),
+        _ => i18n.t("flange-extent-edge", "Whole edge"),
     }
 }
 
@@ -4231,6 +4257,17 @@ impl Viewer {
                     round: f["relief"] == "round",
                     corner: CORNERS.into_iter().find(|c| f["corner"] == *c).unwrap_or("open"),
                     along: f["height_along"] == true,
+                    extent: EXTENTS.into_iter().find(|e| f["extent"]["kind"] == *e).unwrap_or("edge"),
+                    a: definition(match f["extent"]["kind"].as_str() {
+                        Some("center") => &f["extent"]["width"],
+                        Some("offset") => &f["extent"]["offset"],
+                        _ => &f["extent"]["start"],
+                    }),
+                    b: definition(match f["extent"]["kind"].as_str() {
+                        Some("offset") => &f["extent"]["width"],
+                        _ => &f["extent"]["end"],
+                    }),
+                    from_end: f["extent"]["from_end"] == true,
                     fresh: true,
                     sent: None,
                     editing: true,
@@ -4526,6 +4563,10 @@ impl Viewer {
             round: false,
             corner: "open",
             along: false,
+            extent: "edge",
+            a: String::new(),
+            b: String::new(),
+            from_end: false,
             fresh: true,
             sent: None,
             editing: false,
@@ -4586,6 +4627,35 @@ impl Viewer {
                     ui.radio_value(&mut f.round, false, self.i18n.t("flange-relief-square", "Square"));
                     ui.radio_value(&mut f.round, true, self.i18n.t("flange-relief-round", "Round"));
                 });
+                // How much of the edge: as Inventor's width extents.
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("flange-extent", "Width"));
+                    egui::ComboBox::from_id_salt("flange-extent").selected_text(extent_label(&self.i18n, f.extent)).show_ui(ui, |ui| {
+                        for e in EXTENTS {
+                            ui.selectable_value(&mut f.extent, e, extent_label(&self.i18n, e));
+                        }
+                    });
+                });
+                let hint = self.i18n.t("plane-offset-hint", "number or formula");
+                let field = |ui: &mut egui::Ui, label: &str, text: &mut String| {
+                    ui.horizontal(|ui| {
+                        ui.label(label);
+                        ui.add(egui::TextEdit::singleline(text).desired_width(120.0).hint_text(hint));
+                    });
+                };
+                match f.extent {
+                    "center" => field(ui, self.i18n.t("flange-width", "Width of the flange"), &mut f.a),
+                    "offset" => {
+                        field(ui, self.i18n.t("flange-offset", "Offset"), &mut f.a);
+                        field(ui, self.i18n.t("flange-width", "Width of the flange"), &mut f.b);
+                        ui.checkbox(&mut f.from_end, self.i18n.t("flange-from-end", "From the other end"));
+                    }
+                    "between" => {
+                        field(ui, self.i18n.t("flange-offset-1", "Offset 1"), &mut f.a);
+                        field(ui, self.i18n.t("flange-offset-2", "Offset 2"), &mut f.b);
+                    }
+                    _ => {}
+                }
                 // How the walls close a corner where flanges meet: 1 is along the first edge picked.
                 ui.horizontal(|ui| {
                     ui.label(self.i18n.t("flange-corner", "Corner joint"));
@@ -8744,6 +8814,10 @@ mod tests {
             round: true,
             corner: "miter",
             along: false,
+            extent: "center",
+            a: "30".into(),
+            b: String::new(),
+            from_end: false,
             fresh: false,
             sent: None,
             editing: false,
@@ -8751,7 +8825,7 @@ mod tests {
         assert_eq!(
             form.params("sheet1", &faces),
             json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "angle": "h + 5",
-                "flip": true, "relief": "round", "corner": "miter"})
+                "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}})
         );
     }
 

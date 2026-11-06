@@ -142,6 +142,40 @@
         "3750fee5adb7ef3f95f6027fb4eef149",
         "e50fb5e8ee4da85030a8c33ee0508229"
       ]
+    },
+    {
+      "name": "narrow",
+      "op": "flange",
+      "inputs": [
+        "plate"
+      ],
+      "height": 20,
+      "radius": 2,
+      "extent": {
+        "kind": "center",
+        "width": 40
+      },
+      "edges": [
+        "3489ce77abfd1cc29e371b79f028f68d"
+      ]
+    },
+    {
+      "name": "offsets",
+      "op": "flange",
+      "inputs": [
+        "plate"
+      ],
+      "height": 20,
+      "radius": 2,
+      "extent": {
+        "kind": "between",
+        "start": 10,
+        "end": 30
+      },
+      "edges": [
+        "3489ce77abfd1cc29e371b79f028f68d",
+        "e0a23887328334329e8ab0a2c79d9c18"
+      ]
     }
   ]
 }
