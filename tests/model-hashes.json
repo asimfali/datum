@@ -270,6 +270,8 @@
   "sheet_tray.json": {
     "outline": "0e986b46551fcef99375e88081ef00a597bf89b847fbef54e18815d047d2e166",
     "plate": "3130c303223acfd8fbd140d8affdfb9238ff3f9cfe3b6e43a45f5d77929345bd",
+    "relieved": "1a412778c8808b0b09d7e30d0de5a7993076ac50931ca43c8038a0512f198738",
+    "relieved_blank": "5a95a6676b916c478e8f598fbee1b4c8e03ee320d69d35a23c2ccd2a068475a8",
     "tray": "2c0746f1296cc6c80b6f9beb6985044a307bcc26f7e7eb5cdfa764de318f58de"
   },
   "sketch_plate.json": {
