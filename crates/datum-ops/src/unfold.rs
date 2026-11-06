@@ -192,7 +192,8 @@ pub(crate) fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
     let he = |h: Ix| body.half_edges()[h as usize];
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
     let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
-    body.loop_half_edges(body.faces()[x as usize].first_loop)
+    body.face_loops(x)
+        .flat_map(|l| body.loop_half_edges(l))
         .filter_map(|h| {
             let y = face_of(he(h).twin);
             let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
@@ -284,7 +285,7 @@ pub(crate) fn chain_through(body: &Body, f: Ix, skip: &BTreeSet<Ix>) -> Result<V
     let home = strip(body, f);
     let ways = beside(body, &home, skip);
     if ways.len() > 2 {
-        return Err(unsupported("the face meets more than two faces smoothly: not a sheet"));
+        return Err(unsupported("the sheet branches further than flanges on its sides: not laid out yet"));
     }
     let mut halves = Vec::new();
     for first in ways {
@@ -298,7 +299,7 @@ pub(crate) fn chain_through(body: &Body, f: Ix, skip: &BTreeSet<Ix>) -> Result<V
                     half.push(t.clone());
                     (prev, cur) = (cur, t.clone());
                 }
-                _ => return Err(unsupported("a face meets more than two faces smoothly: not a sheet")),
+                _ => return Err(unsupported("the sheet branches further than flanges on its sides: not laid out yet")),
             }
         }
         halves.push(half);
@@ -309,41 +310,126 @@ pub(crate) fn chain_through(body: &Body, f: Ix, skip: &BTreeSet<Ix>) -> Result<V
     Ok(chain)
 }
 
-/// The faces naming the two sides of the sheet `body` is, the front first: the two longest
-/// chains of faces going on smoothly (a plate's two faces; a bent sheet's inner and outer side).
-/// The front is the side facing more toward +Z, then +Y, then +X: seen from there the blank has
-/// the orientation of a sketch on XY. A solid with no two sides standing out is no sheet.
+/// A region of faces going on smoothly into each other, a strip's pieces together: a side of a sheet
+/// or an edge of it.
+struct Region {
+    faces: Vec<Ix>,
+    /// Its strips join in a ring (a closed path, the rounded rim of a plate): no blank can lie flat
+    /// from one.
+    ring: bool,
+}
+
+/// The regions of `body`'s faces on planes, cylinders and cones, in order of their least face.
+fn regions(body: &Body) -> Vec<Region> {
+    let faces = body.faces();
+    let plain = |x: Ix| matches!(faces[x as usize].surface, Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_));
+    // Each face's strip: its least face of the same surface. The pieces a cut leaves keep the
+    // surface bit for bit (D201), so sorted bits find them without comparing all with all.
+    let bits = |x: Ix| -> [u64; 10] {
+        let v = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+        let (kind, [a, b, c], [d, e, f], g, h, i) = match faces[x as usize].surface {
+            Surface::Plane(p) => (0, v(p.origin), v(p.normal), 0, 0, 0),
+            Surface::Cylinder(c) => (1, v(c.origin), v(c.axis), c.radius.to_bits(), 0, u64::from(c.convex)),
+            Surface::Cone(c) => (2, v(c.origin), v(c.axis), c.radius.to_bits(), c.slope.to_bits(), u64::from(c.convex)),
+            Surface::Wall(_) => (3, [0; 3], [0; 3], 0, 0, 0),
+        };
+        [kind, a, b, c, d, e, f, g, h, i]
+    };
+    let mut sorted: Vec<([u64; 10], Ix)> = (0..faces.len() as Ix).filter(|&x| plain(x)).map(|x| (bits(x), x)).collect();
+    sorted.sort_unstable();
+    let mut strip_of: Vec<Ix> = (0..faces.len() as Ix).collect();
+    for w in sorted.windows(2) {
+        if w[0].0 == w[1].0 {
+            strip_of[w[1].1 as usize] = strip_of[w[0].1 as usize];
+        }
+    }
+    // The strips beside each other, each pair once, lower first.
+    let mut pairs: BTreeSet<(Ix, Ix)> = BTreeSet::new();
+    for x in (0..faces.len() as Ix).filter(|&x| plain(x)) {
+        for (y, _) in smooth(body, x).into_iter().filter(|&(y, _)| plain(y)) {
+            let (a, b) = (strip_of[x as usize], strip_of[y as usize]);
+            if a != b {
+                pairs.insert((a.min(b), a.max(b)));
+            }
+        }
+    }
+    // Joined by the pairs: a strip's root its region's least strip.
+    let mut root: Vec<Ix> = (0..faces.len() as Ix).collect();
+    fn find(root: &mut [Ix], mut x: Ix) -> Ix {
+        while root[x as usize] != x {
+            root[x as usize] = root[root[x as usize] as usize];
+            x = root[x as usize];
+        }
+        x
+    }
+    // A pair joining what is already joined closes a ring: a tree has none.
+    let mut rings: BTreeSet<Ix> = BTreeSet::new();
+    for &(a, b) in &pairs {
+        let (p, q) = (find(&mut root, a), find(&mut root, b));
+        if p == q {
+            rings.insert(p);
+        } else {
+            let (lo, hi) = (p.min(q), p.max(q));
+            root[hi as usize] = lo;
+            if rings.remove(&hi) {
+                rings.insert(lo);
+            }
+        }
+    }
+    let mut by_root: BTreeMap<Ix, Vec<Ix>> = BTreeMap::new();
+    for x in (0..faces.len() as Ix).filter(|&x| plain(x)) {
+        let strip = strip_of[x as usize];
+        by_root.entry(find(&mut root, strip)).or_default().push(x);
+    }
+    by_root.into_iter().map(|(r, faces)| Region { faces, ring: rings.contains(&r) }).collect()
+}
+
+/// The faces naming the two sides of the sheet `body` is, the front first: the two largest regions
+/// of faces going on smoothly (a plate's two faces; a bent sheet's inner and outer side), however
+/// they branch. The front is the side facing more toward +Z, then +Y, then +X: seen from there the
+/// blank has the orientation of a sketch on XY. A solid with no two sides standing out is no sheet;
+/// nor is one whose largest regions close in a ring: its caps must not pass for its sides.
 pub fn sheet_sides(body: &Body) -> Result<[Ix; 2], BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
-    let plain = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_) | Surface::Cylinder(_) | Surface::Cone(_));
-    // Flanges on the sheet's sides are no side of it.
+    // Flanges on the sheet's sides are no part of the side's measure: what they add must not turn
+    // which side is the front or which face it is named by.
     let skip = branches(body);
-    let mut seen: BTreeSet<Ix> = skip.clone();
-    // Each chain: its area, its area vector, the face of it with the largest area.
-    let mut chains: Vec<(f64, Vec3, Ix)> = Vec::new();
-    for f in 0..body.faces().len() as Ix {
-        if seen.contains(&f) || !plain(f) {
+    let mut rings = 0.0_f64;
+    // Each region: its area, its area vector, the face of it with the largest area.
+    let mut sides: Vec<(f64, Vec3, Ix)> = Vec::new();
+    for region in regions(body) {
+        let faces: Vec<Ix> = region.faces.into_iter().filter(|x| !skip.contains(x)).collect();
+        let area: f64 = faces.iter().map(|&x| body.face_area(x)).sum();
+        if region.ring {
+            rings = rings.max(area);
             continue;
         }
-        let Ok(chain) = chain_through(body, f, &skip) else { continue };
-        let chain: Vec<Ix> = chain.into_iter().flatten().collect();
-        seen.extend(chain.iter().copied());
-        if !chain.iter().all(|&x| plain(x)) {
-            continue;
-        }
-        let area: f64 = chain.iter().map(|&x| body.face_area(x)).sum();
-        let vector = chain.iter().fold(Vec3::ZERO, |s, &x| s + body.face_area_vector(x));
-        let main = chain.iter().copied().max_by(|&a, &b| body.face_area(a).total_cmp(&body.face_area(b))).unwrap_or(f);
-        chains.push((area, vector, main));
+        let Some(&first) = faces.first() else { continue };
+        let vector = faces.iter().fold(Vec3::ZERO, |s, &x| s + body.face_area_vector(x));
+        let main = faces.iter().copied().max_by(|&a, &b| body.face_area(a).total_cmp(&body.face_area(b))).unwrap_or(first);
+        sides.push((area, vector, main));
     }
-    chains.sort_by(|a, b| b.0.total_cmp(&a.0));
-    let [front, back, rest @ ..] = &chains[..] else { return Err(unsupported("fewer than two sides: not a sheet")) };
+    sides.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let [front, back, rest @ ..] = &sides[..] else { return Err(unsupported("fewer than two sides: not a sheet")) };
     if rest.first().is_some_and(|third| third.0 >= back.0) {
         return Err(unsupported("no two sides stand out: not a sheet"));
+    }
+    if rings > back.0 {
+        return Err(unsupported("the sheet closes on itself: a closed path comes later"));
     }
     let toward = |v: Vec3| [v.z, v.y, v.x];
     let first = toward(front.1).iter().zip(toward(back.1)).find_map(|(a, b)| (*a != b).then_some(*a > b));
     Ok(if first == Some(false) { [back.2, front.2] } else { [front.2, back.2] })
+}
+
+/// The faces of both sides of sheet `body`, the flanges on its sides left out.
+pub(crate) fn side_faces(body: &Body) -> Result<BTreeSet<Ix>, BrepError> {
+    let skip = branches(body);
+    let mut out = BTreeSet::new();
+    for s in sheet_sides(body)? {
+        out.extend(chain_through(body, s, &skip)?.into_iter().flatten());
+    }
+    Ok(out)
 }
 
 /// The flat blank of the sheet one face of which is `face` of `body`, seen from that face's side,
