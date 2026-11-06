@@ -133,10 +133,9 @@ pub enum Op {
     /// given), from the input work plane, from plane face `face` of the input body, or through
     /// three `points` (D204): its origin the first, its X toward the second, its normal by the
     /// right hand from the second to the third. Sketches lie on it (as their input), extrusions go
-    /// up to it. With `line`, a line of a sketch input, the plane goes through that line, square to
-    /// the origin plane, work plane or face it would otherwise be offset from; its origin the
-    /// line's start, its X along the line. No input, the plane, the body, or what the points are
-    /// of (up to three).
+    /// up to it. With `line`, a line of the sketch that is its one input, the plane goes through that
+    /// line, square to the sketch; its origin the line's start, its X along the line. No input, the
+    /// plane, the body, the sketch, or what the points are of (up to three).
     Plane {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         base: Option<OriginPlane>,
@@ -722,29 +721,28 @@ impl Op {
         }
         // A work plane, and a sketch on one, take no body.
         if let Self::Plane { base, face, points, line, offset } = self {
-            // The sketch a line is of aside, the input is what the plane is offset from or square to.
-            let others: Vec<&Value> =
-                values.iter().enumerate().filter(|(k, _)| line.as_ref().is_none_or(|l| l.input != *k)).map(|(_, v)| *v).collect();
-            let from = match (others.first(), face) {
+            let from = match (line, values.first(), face) {
+                (Some(_), ..) if base.is_some() || face.is_some() || !points.is_empty() || values.len() != 1 => {
+                    return Err(BrepError::Sketch(
+                        "a plane through a line stands square to the line's sketch, its one input: it takes no `base`, `face` or `points`".into(),
+                    ));
+                }
+                (Some(l), ..) => square_to_sketch(l, values)?,
                 _ if !points.is_empty() => {
-                    if base.is_some() || face.is_some() || line.is_some() {
-                        return Err(BrepError::Sketch("a plane through points takes no `base`, `face` or `line`".into()));
+                    if base.is_some() || face.is_some() {
+                        return Err(BrepError::Sketch("a plane through points takes no `base` or `face`".into()));
                     }
                     through(points, values)?
                 }
-                (None, None) => base.unwrap_or_default().plane(),
-                (Some(v), None) if base.is_none() => {
+                (_, None, None) => base.unwrap_or_default().plane(),
+                (_, Some(v), None) if base.is_none() => {
                     *v.plane().ok_or_else(|| BrepError::Sketch("a plane takes a work plane as its input, or a body with `face`".into()))?
                 }
-                (Some(v), Some(f)) if base.is_none() => {
+                (_, Some(v), Some(f)) if base.is_none() => {
                     face_plane(v.body().ok_or_else(|| BrepError::Sketch("a plane on a face takes the body as its input".into()))?, f)?
                 }
-                _ if others.len() > 1 => return Err(BrepError::Sketch("a plane takes more than one input only through `points` or a `line`".into())),
+                _ if values.len() > 1 => return Err(BrepError::Sketch("a plane takes more than one input only through `points`".into())),
                 _ => return Err(BrepError::Sketch("a plane is offset from one thing: an origin plane (`base`), a work plane, or a face".into())),
-            };
-            let from = match line {
-                Some(l) => square_through(l, values, &from)?,
-                None => from,
             };
             let n = from.normal * (1.0 / from.normal.dot(from.normal).sqrt());
             return Ok(Value::Plane(SketchPlane { origin: from.origin + n * num(offset)?, ..from }));
@@ -984,9 +982,9 @@ fn sketch_point(s: &Placed, name: &str, k: usize) -> Result<Vec3, BrepError> {
     Ok(o + x * p.x + y * p.y)
 }
 
-/// The plane through line `l` of `values`, square to plane `to`: origin the line's start, X along
-/// it. A line square to `to`, decided exactly, lies in a whole sheaf of such planes.
-fn square_through(l: &LineOf, values: &[&Value], to: &SketchPlane) -> Result<SketchPlane, BrepError> {
+/// The plane through line `l` of `values`, square to the line's sketch: origin the line's start, X
+/// along it.
+fn square_to_sketch(l: &LineOf, values: &[&Value]) -> Result<SketchPlane, BrepError> {
     let s = values
         .get(l.input)
         .and_then(|v| v.sketch())
@@ -994,10 +992,7 @@ fn square_through(l: &LineOf, values: &[&Value], to: &SketchPlane) -> Result<Ske
     let line = s.lines.get(&l.line).ok_or_else(|| BrepError::LostReference(format!("no line `{}` in the sketch of input {}", l.line, l.input)))?;
     let (a, b) = (sketch_point(s, &line.from, l.input)?, sketch_point(s, &line.to, l.input)?);
     let d = b - a;
-    if sketch::parallel(d, to.normal) {
-        return Err(BrepError::Degenerate(format!("line `{}` is square to the plane: no one plane goes through it square to that", l.line)));
-    }
-    let n = d.cross(to.normal);
+    let n = d.cross(s.frame[3]);
     Ok(SketchPlane { origin: a, x_axis: d * (1.0 / d.dot(d).sqrt()), normal: n * (1.0 / n.dot(n).sqrt()) })
 }
 
