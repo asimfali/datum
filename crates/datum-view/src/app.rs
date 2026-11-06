@@ -1662,7 +1662,8 @@ impl Viewer {
         // A step to read is done by its button.
         (step.done.window.is_some() || step.done.model.is_some())
             && step.done.window.as_ref().is_none_or(|w| crate::lessons::matches(w, &self.lesson_window()))
-            && step.done.model.as_ref().is_none_or(|p| self.model.as_ref().is_some_and(|m| crate::lessons::matches(p, &m.inspect)))
+            // A form's preview shows in `inspect` what is not made yet.
+            && step.done.model.as_ref().is_none_or(|p| self.model.as_ref().is_some_and(|m| m.preview.is_none() && crate::lessons::matches(p, &m.inspect)))
     }
 
     /// The step reached: past those done, unless a command is on its way and what shows is old.
@@ -4353,6 +4354,7 @@ impl Viewer {
         // depth must not let Enter make this one).
         let (shown, params) = x.params(&sketch, on_face, next_rule.as_deref());
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let (mut add, mut cancel) = (false, false);
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 let through = x.through && shown == "cut";
@@ -4472,14 +4474,21 @@ impl Viewer {
                         ui.colored_label(ui.visuals().error_fg_color, why);
                     }
                 }
+                ui.horizontal(|ui| {
+                    let ok = !refused && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params);
+                    let r = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK")));
+                    self.spots.insert("form.ok", r.rect);
+                    add = r.clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
+                });
             });
         });
         let params = x.params(&sketch, on_face, next_rule.as_deref()).1;
         let command = x.command();
-        if esc {
+        if esc || cancel {
             self.close_extrusion();
         } else if !refused {
-            if enter && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params) {
+            if (enter || add) && preview.is_some_and(Result::is_ok) && x.sent.as_ref() == Some(&params) {
                 self.close_extrusion();
                 self.send(Request::Command(command, params));
             } else if x.sent.as_ref() != Some(&params) {
