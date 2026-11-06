@@ -25,12 +25,6 @@
       }
     },
     {
-      "name": "up",
-      "op": "plane",
-      "base": "xz",
-      "offset": -5
-    },
-    {
       "name": "joint",
       "op": "plane",
       "inputs": [
@@ -42,21 +36,8 @@
       }
     },
     {
-      "name": "joint_up",
-      "op": "plane",
-      "inputs": [
-        "skeleton",
-        "up"
-      ],
-      "line": {
-        "input": 0,
-        "line": "seam"
-      }
-    },
-    {
       "name": "joint_off",
       "op": "plane",
-      "base": "xy",
       "inputs": [
         "skeleton"
       ],

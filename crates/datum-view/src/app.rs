@@ -340,15 +340,9 @@ struct PlaneLine {
 }
 
 impl PlaneLine {
-    /// The fields of a work plane through this line, square to what `from` says (a `base`, or
-    /// `inputs` of a work plane, or of a body with `face`): the line's sketch comes first.
-    fn plane_fields(&self, from: Json) -> Json {
-        let mut fields = from;
-        let mut inputs = vec![json!(self.sketch)];
-        inputs.extend(fields["inputs"].as_array().cloned().unwrap_or_default());
-        fields["inputs"] = json!(inputs);
-        fields["line"] = json!({"input": 0, "line": self.line});
-        fields
+    /// The form of a work plane through this line, square to its sketch: on the line to begin with.
+    fn plane_draft(&self) -> (Json, String) {
+        (json!({"inputs": [self.sketch], "line": {"input": 0, "line": self.line}}), "0".into())
     }
 }
 
@@ -853,8 +847,6 @@ struct Viewer {
     plane_draft: Option<(Json, String)>,
     /// The points a work plane through three is picked by so far (D204), as the model's spots.
     plane_points: Vec<(Json, datum_math::Vec3)>,
-    /// The sketch line a new work plane goes through, once picked: the plane it is square to next.
-    plane_line: Option<PlaneLine>,
     /// The ends of sheet metal picked for a flange (D205): the body's feature and the face.
     flange_edges: Vec<(String, datum_brep::TopoId)>,
     /// A flange being asked for: its form.
@@ -1473,7 +1465,6 @@ impl Viewer {
             under: None,
             plane_draft: None,
             plane_points: Vec::new(),
-            plane_line: None,
             flange_edges: Vec::new(),
             flange: None,
             revolve: None,
@@ -3822,17 +3813,13 @@ impl Viewer {
                         );
                     }
                 }
-                // The line picked, and the one under the cursor.
-                let hovered = match self.under {
-                    Some(Under::Line(k)) => m.lines.get(k),
-                    _ => None,
-                };
-                for l in self.plane_line.iter().chain(hovered) {
-                    if let (Some(a), Some(b)) =
+                // The line under the cursor.
+                if let Some(Under::Line(k)) = self.under
+                    && let Some(l) = m.lines.get(k)
+                    && let (Some(a), Some(b)) =
                         (on_screen(&view_projection, l.ends[0] - anchor, rect), on_screen(&view_projection, l.ends[1] - anchor, rect))
-                    {
-                        painter.line_segment([a, b], egui::Stroke::new(3.0, orange));
-                    }
+                {
+                    painter.line_segment([a, b], egui::Stroke::new(3.0, orange));
                 }
                 if let Some(Under::Spot(k)) = self.under
                     && let Some(at) = m.spots.get(k).and_then(|(_, p)| on_screen(&view_projection, *p - anchor, rect))
@@ -3853,12 +3840,9 @@ impl Viewer {
                     };
                     &branch_hint
                 }
-                Purpose::Plane if self.plane_line.is_some() => {
-                    self.i18n.t("plane-pick-square", "Click the origin plane, work plane or plane face the new plane goes square to · Esc: cancel")
-                }
                 Purpose::Plane => self.i18n.t(
                     "plane-pick",
-                    "Click an origin plane, a work plane or a plane face to offset the new plane from, three points for a plane through them, or a sketch line for a plane through it · Esc: cancel",
+                    "Click an origin plane, a work plane or a plane face to offset the new plane from, three points for a plane through them, or a sketch line for a plane through it, square to its sketch · Esc: cancel",
                 ),
             };
             painter.text(
@@ -3908,11 +3892,9 @@ impl Viewer {
             let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
             let size = crate::origin::half(m.scene.bounds);
             let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
-            // A sketch line takes the next pick to a plane: no more points or lines then.
-            let free = self.plane_line.is_none();
             // A work plane through points: the point nearest the cursor within a few pixels.
             let spot = match (purpose, offset) {
-                (Purpose::Plane, Some((x, y))) if free => {
+                (Purpose::Plane, Some((x, y))) => {
                     let (anchor, radius) = sphere(&m.scene);
                     let (vp, _) = self.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
@@ -3928,7 +3910,7 @@ impl Viewer {
             };
             // Or else a line of a sketch, unless points are being picked.
             let line = match (purpose, offset) {
-                (Purpose::Plane, Some((x, y))) if free && self.plane_points.is_empty() => {
+                (Purpose::Plane, Some((x, y))) if self.plane_points.is_empty() => {
                     let (anchor, radius) = sphere(&m.scene);
                     let (vp, _) = self.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
@@ -4003,7 +3985,6 @@ impl Viewer {
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.picking = None;
                 self.plane_points.clear();
-                self.plane_line = None;
                 self.flange_edges.clear();
                 self.branch_main = None;
             } else if self.picking == Some(Purpose::Flange) && !self.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -4051,9 +4032,10 @@ impl Viewer {
                     self.picking = None;
                 }
             }
-            // A line picked: the plane it goes square to next.
+            // A line picked: the plane through it, square to its sketch.
             Some((Purpose::Plane, Under::Line(k))) => {
-                self.plane_line = self.model.as_ref().and_then(|m| m.lines.get(k).cloned());
+                self.plane_draft = self.model.as_ref().and_then(|m| m.lines.get(k)).map(PlaneLine::plane_draft);
+                self.picking = None;
             }
             // Points and lines are picked for a work plane alone.
             Some((Purpose::Sketch | Purpose::Look, Under::Spot(_) | Under::Line(_))) => {}
@@ -4087,11 +4069,7 @@ impl Viewer {
                     Under::Face(f) => json!({"inputs": [body(self, f)], "face": format!("{:?}", f.face)}),
                     Under::Spot(_) | Under::Line(_) => return,
                 };
-                // Through a line, it lies on the line: no offset to begin with.
-                self.plane_draft = Some(match self.plane_line.take() {
-                    Some(l) => (l.plane_fields(from), "0".into()),
-                    None => (from, "10".into()),
-                });
+                self.plane_draft = Some((from, "10".into()));
                 self.plane_points.clear();
                 self.picking = None;
             }
@@ -6277,11 +6255,16 @@ impl Viewer {
                 self.revolve(at);
             }
             Act::WorkPlane => {
-                // One line selected in the open sketch: the plane goes through it.
+                // One line selected in the open sketch: the plane goes through it, nothing to pick.
                 let line = self.selected_line();
                 self.leave();
-                self.pick(Purpose::Plane);
-                self.plane_line = line.filter(|_| self.picking == Some(Purpose::Plane));
+                match line {
+                    Some(l) => {
+                        self.picking = None;
+                        self.plane_draft = Some(l.plane_draft());
+                    }
+                    None => self.pick(Purpose::Plane),
+                }
             }
             Act::Flange => {
                 self.leave();
@@ -6937,7 +6920,6 @@ mod tests {
             under: None,
             plane_draft: None,
             plane_points: Vec::new(),
-            plane_line: None,
             flange_edges: Vec::new(),
             flange: None,
             revolve: None,
@@ -7592,21 +7574,18 @@ mod tests {
         frame(&mut v, vec![click(true), click(false)]);
         assert_eq!(v.picking, None);
         assert_eq!((v.camera.right, v.camera.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)), "from above");
-        // A work plane through a sketch line: the line picked, then the plane it goes square to,
-        // at the same place on the screen; the sketch comes first among its inputs, no offset.
+        // A work plane through a sketch line: the line picked is all it takes; no offset.
         v.camera = Camera::default();
         let through = PlaneLine {
             sketch: "skeleton".into(),
             line: "l".into(),
             ends: [datum_math::Vec3::new(1.0, -2.0, 0.0), datum_math::Vec3::new(3.0, -2.0, 0.0)],
         };
-        v.model.as_mut().unwrap().lines = vec![through.clone()];
+        v.model.as_mut().unwrap().lines = vec![through];
         v.pick(Purpose::Plane);
         frame(&mut v, vec![click(true), click(false)]);
-        assert_eq!((v.plane_line.as_ref(), v.picking), (Some(&through), Some(Purpose::Plane)), "the line picked, the plane still to pick");
-        frame(&mut v, vec![click(true), click(false)]);
-        assert_eq!(v.plane_draft, Some((json!({"base": "xy", "inputs": ["skeleton"], "line": {"input": 0, "line": "l"}}), "0".to_string())));
-        assert_eq!((v.plane_line.as_ref(), v.picking), (None, None));
+        assert_eq!(v.plane_draft, Some((json!({"inputs": ["skeleton"], "line": {"input": 0, "line": "l"}}), "0".to_string())));
+        assert_eq!(v.picking, None);
         v.plane_draft = None;
         v.model.as_mut().unwrap().lines.clear();
         // A work plane from XY: the plane picked, then its offset typed and Enter.
@@ -9375,13 +9354,33 @@ mod tests {
         assert_eq!(previewed(reply.clone(), &json!("extrude4")), Ok(reply));
     }
 
-    /// Through a sketch line, square to a work plane or a face: the sketch first, what is picked after.
+    /// One line selected in the open sketch: the plane command opens its form at once, nothing to
+    /// pick (D232).
     #[test]
-    fn a_plane_through_a_line_takes_what_it_is_square_to() {
-        let l = PlaneLine { sketch: "s".into(), line: "l".into(), ends: [datum_math::Vec3::ZERO; 2] };
-        let line = json!({"input": 0, "line": "l"});
-        assert_eq!(l.plane_fields(json!({"inputs": ["joint"]})), json!({"inputs": ["s", "joint"], "line": line}));
-        assert_eq!(l.plane_fields(json!({"inputs": ["box"], "face": "ab"})), json!({"inputs": ["s", "box"], "face": "ab", "line": line}));
+    fn the_plane_command_on_a_selected_line_asks_for_nothing_more() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        let name = v.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.keys().next().unwrap().clone();
+        v.sketch.as_mut().unwrap().selected = vec![crate::sketch::Pick::Curve(name.clone())];
+        let mut h = egui_kittest::Harness::builder().build_ui_state(
+            |ui, v: &mut Viewer| {
+                if v.sketch.is_some() {
+                    v.run(ui, Act::WorkPlane);
+                }
+            },
+            v,
+        );
+        h.run();
+        let v = h.into_state();
+        assert_eq!(v.picking, None);
+        assert_eq!(v.plane_draft, Some((json!({"inputs": ["outline"], "line": {"input": 0, "line": name}}), "0".to_string())));
     }
 
     /// Three points picked for a work plane (D204): the features they are of become its inputs,
