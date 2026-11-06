@@ -131,3 +131,16 @@ fn a_rename_follows_into_a_plane_through_points() {
     let all = run(&mut s, "inspect", json!({}));
     assert!(all["features"].as_array().unwrap().iter().all(|f| f.get("error").is_none()), "{all}");
 }
+
+/// A line renamed in its sketch: the plane through it follows.
+#[test]
+fn a_rename_follows_into_a_plane_through_a_line() {
+    let mut s = Session::default();
+    let sketch = json!({"points": {"a": [0, 0], "b": [10, 5]}, "lines": {"l": {"from": "a", "to": "b"}}});
+    run(&mut s, "add", json!({"name": "skeleton", "op": "sketch", "sketch": sketch}));
+    run(&mut s, "add", json!({"name": "joint", "op": "plane", "inputs": ["skeleton"], "line": {"input": 0, "line": "l"}}));
+    run(&mut s, "rename_in_sketch", json!({"name": "skeleton", "from": "l", "to": "seam"}));
+    let f = feature(&mut s, "joint");
+    assert_eq!(f["line"]["line"], "seam", "{f}");
+    assert!(f.get("error").is_none(), "{f}");
+}
