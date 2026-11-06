@@ -395,6 +395,42 @@ fn flanges_at_an_inner_corner_are_refused() {
     assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("inner corner")), "{err}");
 }
 
+/// Width extents (D229, as Inventor's): the flange on part of its edge, the end's rest kept; the
+/// volume that of a flange as wide, the blank as wide as before (the plate) and the flange's strip.
+#[test]
+fn a_flange_on_part_of_its_edge() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    let edge = long_edges(&p, &long[0]);
+    for (extent, width) in [
+        (serde_json::json!({"kind": "center", "width": 30}), 30.0),
+        (serde_json::json!({"kind": "offset", "offset": 10, "width": 30}), 30.0),
+        (serde_json::json!({"kind": "offset", "offset": 10, "width": 30, "from_end": true}), 30.0),
+        (serde_json::json!({"kind": "between", "start": 10, "end": 25}), 65.0),
+        (serde_json::json!({"kind": "between", "start": 0, "end": 25}), 75.0),
+    ] {
+        let b = flange(&p, &edge, serde_json::json!({"extent": extent})).unwrap();
+        assert!(close(b.volume() - p.volume(), added(1.0, width, 20.0, 90.0)), "{extent}: {}", b.volume() - p.volume());
+        let (size, _, bends) = blank(&b);
+        assert!(close(size.0, 60.0 + longer(20.0, 90.0)) && close(size.1, 100.0), "{extent}: {size:?}");
+        assert_eq!(bends, 2);
+    }
+    // From the edge's start and from its end: mirror images on the 100 long edge.
+    let span = |from_end: bool| {
+        let extent = serde_json::json!({"kind": "offset", "offset": 10, "width": 30, "from_end": from_end});
+        let b = flange(&p, &edge, serde_json::json!({"extent": extent})).unwrap();
+        let xs: Vec<f64> = b.vertices().iter().filter(|v| v.point.z == 20.0).map(|v| v.point.x).collect();
+        (xs.iter().copied().fold(f64::INFINITY, f64::min), xs.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+    };
+    let mut both = [span(false), span(true)];
+    both.sort_by(|a, b| a.0.total_cmp(&b.0));
+    assert!(close(both[0].0, 10.0) && close(both[0].1, 40.0) && close(both[1].0, 60.0) && close(both[1].1, 90.0), "{both:?}");
+    // Wider than the edge, or off it: refused.
+    for extent in [serde_json::json!({"kind": "center", "width": 120}), serde_json::json!({"kind": "offset", "offset": 80, "width": 30})] {
+        assert!(matches!(flange(&p, &edge, serde_json::json!({"extent": extent})), Err(BrepError::Degenerate(_))), "{extent}");
+    }
+}
+
 #[test]
 fn refusals() {
     let u = u_sheet();
