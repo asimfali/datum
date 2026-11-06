@@ -13,7 +13,7 @@ use crate::actions::ACTIONS;
 const FORMAT: &str = "datum-lesson/1";
 
 /// What a lesson may point at besides an action: the menus and the window's own places.
-const PLACES: [&str; 12] = [
+const PLACES: [&str; 15] = [
     "menu.file",
     "menu.edit",
     "menu.view",
@@ -26,14 +26,32 @@ const PLACES: [&str; 12] = [
     "view",
     "sketch.done",
     "form.ok",
+    "pattern.count",
+    "pattern.select",
+    "pattern.done",
 ];
 
 /// What of the window a step's `done` may ask about; [`matches`] compares with these.
-const WINDOW: [&str; 12] =
-    ["model", "sketch", "tool", "picking", "form", "sheet_rule", "saved", "table", "project", "project_safe", "own_materials", "own_rules"];
+const WINDOW: [&str; 15] = [
+    "model",
+    "sketch",
+    "tool",
+    "picking",
+    "form",
+    "sheet_rule",
+    "saved",
+    "table",
+    "project",
+    "project_safe",
+    "own_materials",
+    "own_rules",
+    "selected",
+    "pattern_menu",
+    "pattern_picked",
+];
 
 /// The keys a lesson may press by name, not being an action's.
-const KEYS: [&str; 2] = ["enter", "escape"];
+const KEYS: [&str; 3] = ["enter", "escape", "select_all"];
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -81,12 +99,17 @@ pub enum Move {
     Point(String),
     /// The cursor goes to this place and clicks.
     Click(String),
-    /// The key of this action, as it is now; or `enter`, `escape`.
+    /// The key of this action, as it is now; or `enter`, `escape`, `select_all`.
     Key(String),
+    /// Types this into the field that has the keyboard.
+    Type(String),
     /// The cursor goes to this point of the sketch's view and clicks: from its middle, a share of
     /// its half width and half height, up positive. The zoom depends on the window: millimetres
     /// might be off screen, and an empty sketch has nothing to place by.
     Sketch([f32; 2]),
+    /// The cursor goes to the sketch's first curve of this kind (`line`, `circle`) and clicks,
+    /// wherever the engineer drew it.
+    Curve(String),
     /// Writes a library element: what is typed in a table window, which the hand cannot reach.
     Put { level: String, element: Json },
 }
@@ -146,6 +169,9 @@ impl Lesson {
                     Move::Key(name) if !KEYS.contains(&name.as_str()) && !ACTIONS.iter().any(|a| a.name == name) => {
                         return Err(format!("step {n}: no action or key {name:?}"));
                     }
+                    Move::Curve(kind) if !matches!(kind.as_str(), "line" | "circle") => {
+                        return Err(format!("step {n}: `curve` is a line or a circle, not {kind:?}"));
+                    }
                     Move::Put { level, .. } if !matches!(level.as_str(), "material" | "rule") => {
                         return Err(format!("step {n}: `put` writes a material or a rule, not {level:?}"));
                     }
@@ -194,6 +220,7 @@ const PATIENCE: f32 = 5.0;
 pub enum Aim {
     Spot(egui::Pos2),
     Keys(egui::Key, egui::Modifiers, String),
+    Text(String),
     Put(String, Json),
 }
 
@@ -260,6 +287,12 @@ impl Hand {
                         out.push(event(true));
                         self.pressed = Some(label);
                         self.phase = Phase::Release(event(false));
+                    }
+                    Some(Aim::Text(text)) => {
+                        self.waited = 0.0;
+                        out.push(egui::Event::Text(text.clone()));
+                        self.pressed = Some(text);
+                        self.phase = Phase::Rest(REST);
                     }
                     Some(Aim::Put(level, element)) => {
                         self.waited = 0.0;
@@ -737,6 +770,41 @@ mod tests {
         }
         assert!(finished);
         assert_eq!(puts, [("material".to_string(), json!({"name": "x", "density": 1}))]);
+    }
+
+    #[test]
+    fn typed_text_comes_out_once_and_the_hand_goes_on() {
+        let mut hand = Hand::new(moves(r#"{"what": "w", "show": [{"type": "5"}, {"key": "enter"}]}"#), pos(0.0, 0.0));
+        let aim = |m: &Move| match m {
+            Move::Type(t) => Some(Aim::Text(t.clone())),
+            Move::Key(_) => Some(Aim::Keys(egui::Key::Enter, egui::Modifiers::NONE, "Enter".into())),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        assert!(matches!(hand.tick(DT, false, aim, &mut out), Tick::Going));
+        assert!(matches!(out.as_slice(), [egui::Event::Text(t)] if t == "5"), "{out:?}");
+        assert_eq!(hand.pressed.as_deref(), Some("5"));
+        // The rest, then the next move: the key.
+        let mut frames = 0;
+        loop {
+            out.clear();
+            frames += 1;
+            assert!(matches!(hand.tick(DT, false, aim, &mut out), Tick::Going));
+            assert!(!out.iter().any(|e| matches!(e, egui::Event::Text(_))), "typed twice");
+            if out.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })) {
+                break;
+            }
+            assert!(frames < 1000);
+        }
+        assert!(frames >= 20, "it rested first: {frames}");
+        assert_eq!(hand.pressed.as_deref(), Some("Enter"));
+    }
+
+    #[test]
+    fn select_all_and_typing_parse() {
+        assert!(Lesson::parse(&lesson(&json!({"what": "w", "show": [{"key": "select_all"}]}))).is_ok());
+        let l = Lesson::parse(&lesson(&json!({"what": "w", "show": [{"type": "5"}]}))).unwrap();
+        assert!(matches!(l.steps[0].show.as_slice(), [Move::Type(t)] if t == "5"));
     }
 
     #[test]
