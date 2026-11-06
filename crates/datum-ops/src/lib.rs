@@ -26,7 +26,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
-pub use flange::{BendRelief, Closing, Extent, FlangeDims, Notch, Relief, Width, flange_edges, flange_ends, flanges};
+pub use flange::{BendPosition, BendRelief, Closing, Extent, FlangeDims, Notch, Relief, Width, flange_edges, flange_ends, flanges};
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
 use schemars::JsonSchema;
@@ -189,6 +189,9 @@ pub enum Op {
         bend_relief_width: Option<Num>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         bend_relief_depth: Option<Num>,
+        /// Where the bend lies against the edge (D229): beyond it (default) or flush.
+        #[serde(default, skip_serializing_if = "BendPosition::is_outside")]
+        bend_position: BendPosition,
     },
     /// Sheet metal from the input sketch's path: its lines and arcs (an open chain, from point
     /// `start` or else from its end named first) given `thickness` on `side` of the path (looking
@@ -604,6 +607,7 @@ impl Op {
                 bend_relief,
                 bend_relief_width,
                 bend_relief_depth,
+                bend_position,
             } => Self::Flange {
                 edges: edges.clone(),
                 height: r(height, "height")?,
@@ -620,6 +624,7 @@ impl Op {
                 bend_relief: *bend_relief,
                 bend_relief_width: bend_relief_width.as_ref().map(|n| r(n, "bend_relief_width")).transpose()?,
                 bend_relief_depth: bend_relief_depth.as_ref().map(|n| r(n, "bend_relief_depth")).transpose()?,
+                bend_position: *bend_position,
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
@@ -831,6 +836,7 @@ impl Op {
                 bend_relief,
                 bend_relief_width,
                 bend_relief_depth,
+                bend_position,
             } => {
                 let Some(radius) = radius else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let round = match relief {
@@ -855,6 +861,7 @@ impl Op {
                     corner: *corner,
                     gap,
                     width: extent.map(|n, _| num(n))?,
+                    flush: *bend_position == BendPosition::Flush,
                     notch: match (bend_relief, bend_relief_width, bend_relief_depth) {
                         (BendRelief::None, ..) => None,
                         (shape, Some(w), Some(d)) => Some(Notch { round: *shape == BendRelief::Round, width: num(w)?, depth: num(d)? }),

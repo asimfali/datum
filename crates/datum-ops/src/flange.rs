@@ -34,6 +34,26 @@ pub struct FlangeDims {
     /// leaves the edge's rest flat.
     pub width: Width,
     pub notch: Option<Notch>,
+    /// The bend flush (D229): set back so the flange's outer faces meet the sheet's at the edge,
+    /// not added beyond it.
+    pub flush: bool,
+}
+
+/// Where a flange's bend lies against its edge (D229, as Inventor's bend position): beyond it,
+/// the flange added to the sheet; or flush, the sheet set back so the flange's outer faces meet
+/// its own at the edge.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BendPosition {
+    #[default]
+    Outside,
+    Flush,
+}
+
+impl BendPosition {
+    pub fn is_outside(&self) -> bool {
+        *self == Self::Outside
+    }
 }
 
 /// A bend relief at an end of a flange narrower than its edge (D229): a slot into the sheet beside
@@ -182,10 +202,11 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         .map(|e| u128::from_str_radix(e, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{e}` is not an edge ID"))))
         .collect::<Result<_, _>>()?;
     // Narrower than its edge: the end divided first, the flange on its middle (D229).
-    if !dims.width.is_edge() {
+    if !dims.width.is_edge() || dims.flush {
         let mut body = target.clone();
         let mut middles = Vec::new();
-        // Each end once, by either of its long edges.
+        // Each end once, by either of its long edges; by its face's ID, which stays as the ends
+        // beside it are cut (their corners, flush, move).
         let mut done: Vec<TopoId> = Vec::new();
         for &e in &ids {
             let end = end_face(target, e)?;
@@ -193,11 +214,15 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
                 continue;
             }
             done.push(end);
-            let (b, middle) = narrowed(feature, &body, e, dims.width, dims.notch)?;
-            body = b;
-            middles.push(format!("{middle:?}"));
+            body = narrowed(feature, &body, end, dims.width, dims.notch, dims.flush.then_some((dims.radius, dims.angle)))?;
         }
-        return flanges(feature, &body, &middles, FlangeDims { width: Width::Edge, ..dims });
+        // Each middle by a long edge, once all are cut: it keeps its end's ID.
+        for end in done {
+            let f = body.faces().binary_search_by_key(&end, |x| x.id).map_err(|_| BrepError::Invalid("flange: an end lost".into()))? as Ix;
+            let ([h, _], _) = end_of(&body, f).ok_or_else(|| BrepError::Invalid("flange: an end's middle is no end".into()))?;
+            middles.push(format!("{:?}", body.edges()[body.half_edges()[h as usize].edge as usize].id));
+        }
+        return flanges(feature, &body, &middles, FlangeDims { width: Width::Edge, flush: false, ..dims });
     }
     // Each flange once, by the corners of what it stands on.
     let mut sites: Vec<(TopoId, [TopoId; 4], Base)> = Vec::new();
@@ -422,8 +447,19 @@ fn end_by_edge(target: &Body, e: TopoId) -> Result<(Ix, Ix, [Ix; 2]), BrepError>
     let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
     let k = target.edges().binary_search_by_key(&e, |x| x.id).map_err(|_| BrepError::LostReference(format!("edge {e:?} is not in the body")))?;
     let h = target.edges()[k].half;
+    // Across the thickness: a face of the sheet's sides (a rectangular plate's) is no end.
+    let skip = crate::unfold::branches(target);
+    let sides: BTreeSet<Ix> = crate::unfold::sheet_sides(target)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|s| crate::unfold::chain_through(target, s, &skip).ok())
+        .flatten()
+        .flatten()
+        .collect();
     [h, he(h).twin]
         .into_iter()
+        .filter(|&g| !sides.contains(&face_of(g)))
         .find_map(|g| end_of(target, face_of(g)).filter(|(long, _)| long.contains(&g)).map(|(long, _)| (face_of(g), g, long)))
         .ok_or_else(|| BrepError::Unsupported("flange: a width on a wall's edge along the sheet's side comes later".into()))
 }
@@ -433,14 +469,26 @@ fn end_face(target: &Body, e: TopoId) -> Result<TopoId, BrepError> {
     end_by_edge(target, e).map(|(f, ..)| target.faces()[f as usize].id)
 }
 
-/// `target` with the end whose long edge is `e` divided across at the flange's width `width`: a
+/// `target` with the end `end_id` divided across at the flange's width `width`: a
 /// piece at each end (where the width leaves one) and the middle, which keeps the end's ID; with
 /// `notch`, a bend relief cut into the sheet beside each end of the middle that is not the edge's
-/// end. And the middle's edge on the side of `e`.
-fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Option<Notch>) -> Result<(Body, TopoId), BrepError> {
+/// end; with `flush` (the bend's radius and angle), the middle set back into the sheet so that
+/// the flange's outer faces meet the sheet's at the edge (D229, the bend flush), the reliefs from
+/// there on.
+fn narrowed(
+    feature: TopoId,
+    target: &Body,
+    end_id: TopoId,
+    width: Width,
+    notch: Option<Notch>,
+    flush: Option<(f64, f64)>,
+) -> Result<Body, BrepError> {
     let he = |h: Ix| target.half_edges()[h as usize];
     let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
-    let (f, picked, [l0, l1]) = end_by_edge(target, e)?;
+    let f =
+        target.faces().binary_search_by_key(&end_id, |x| x.id).map_err(|_| BrepError::LostReference(format!("end {end_id:?} is not in the body")))?
+            as Ix;
+    let ([l0, l1], _) = end_of(target, f).ok_or_else(|| BrepError::Unsupported("flange: a width on what is no end of the sheet".into()))?;
     if target.edge_curve(&target.edges()[he(l0).edge as usize]).is_some() || target.edge_curve(&target.edges()[he(l1).edge as usize]).is_some() {
         return Err(BrepError::Unsupported("flange: a width on a curved end".into()));
     }
@@ -459,6 +507,16 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Opti
     // Into the sheet, square to the end.
     let inward = unit(end.normal) * -1.0;
     let (low, high) = (sa > 0.0, sb < length);
+    let across = target.point(c1) - target.point(a0) - u * (target.point(c1) - target.point(a0)).dot(u);
+    let t = across.dot(across).sqrt();
+    // Flush: back by where the outer faces of the sheet and the flange meet, `(r + t)·tan(a/2)`
+    // (at a right angle exactly `r + t`).
+    let recess = flush.map_or(0.0, |(r, a)| (r + t) * if a == 90.0 { 1.0 } else { libm::tan(0.5 * a.to_radians()) });
+    // Flush and narrower than its edge, the bend would sit against the sheet's rest beside it:
+    // only a relief makes room (as bending it does).
+    if recess > 0.0 && notch.is_none() && (low || high) {
+        return Err(BrepError::Unsupported("a flush flange narrower than its edge takes a bend relief".into()));
+    }
     if let Some(n) = notch {
         if !(n.width > 0.0 && n.depth > 0.0 && n.width.is_finite() && n.depth.is_finite()) || (n.round && n.depth < 0.5 * n.width) {
             return Err(BrepError::Degenerate(format!("a bend relief {} wide and {} deep", n.width, n.depth)));
@@ -469,22 +527,50 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Opti
     }
     let mut vertices = target.vertices().to_vec();
     let key = target.faces()[f as usize].id;
-    // A vertex at `s` along the edge from `from`, `deep` into the sheet.
-    let mut at = |k: u64, from: Ix, s: f64, deep: f64| -> TopoId {
+    // A new vertex `k` at `point`; the point `s` along the edge from `from`, `deep` into the sheet.
+    let mut put = |k: u64, point: Vec3| -> TopoId {
         let v = TopoId::derive("flange.width").id(feature).id(key).index(k).finish();
-        vertices.push(Vertex { id: v, point: target.point(from) + u * s + inward * deep });
+        vertices.push(Vertex { id: v, point });
         v
     };
-    // On A0 → A1 at `s`, and across on C0 → C1 (from C1, across from A0).
-    let (pa, qa) = if low { (at(0, a0, sa, 0.0), at(1, c1, sa, 0.0)) } else { (id(a0), id(c1)) };
-    let (pb, qb) = if high { (at(2, a0, sb, 0.0), at(3, c1, sb, 0.0)) } else { (id(a1), id(c0)) };
+    let pos = |from: Ix, s: f64, deep: f64| target.point(from) + u * s + inward * deep;
+    // On A0 → A1 at `s`, and across on C0 → C1 (from C1, across from A0), set back by `recess`.
+    // At the edge's end, flush, the sheet's corner moves: where the faces beside it meet the
+    // set-back end.
+    let plane_of = |x: Ix| match target.faces()[x as usize].surface {
+        Surface::Plane(p) => Ok((unit(p.normal), p.origin)),
+        _ => Err(BrepError::Unsupported("flange: a flush bend beside a curved face".into())),
+    };
+    let set_back = (target.point(a0) + inward * recess).dot(unit(end.normal));
+    let (top, bottom) = (plane_of(face_of(he(l0).twin))?, plane_of(face_of(he(l1).twin))?);
+    let corner = |side: Ix, sheet: (Vec3, Vec3)| -> Result<Vec3, BrepError> {
+        let side = plane_of(side)?;
+        solve([sheet.0, side.0, unit(end.normal)], [sheet.1.dot(sheet.0), side.1.dot(side.0), set_back])
+            .ok_or_else(|| BrepError::Degenerate("flange: the sheet's side runs along the end".into()))
+    };
+    let (side_a, side_b) = (face_of(he(target.next(l1)).twin), face_of(he(target.next(l0)).twin));
+    let mut moved: Vec<(TopoId, TopoId)> = Vec::new();
+    let mut ends = |k: u64, inner: bool, s: f64, (v, w): (Ix, Ix), side: Ix| -> Result<[TopoId; 2], BrepError> {
+        if inner {
+            return Ok([put(k, pos(a0, s, recess)), put(k + 1, pos(c1, s, recess))]);
+        }
+        if recess == 0.0 {
+            return Ok([id(v), id(w)]);
+        }
+        let ids = [put(k, corner(side, top)?), put(k + 1, corner(side, bottom)?)];
+        moved.extend([(id(v), ids[0]), (id(w), ids[1])]);
+        Ok(ids)
+    };
+    let [pa, qa] = ends(0, low, sa, (a0, c1), side_a)?;
+    let [pb, qb] = ends(2, high, sb, (a1, c0), side_b)?;
     // Each relief: on both lines, its corner on the edge away from the flange, its two corners
-    // deep (the side at the flange, then away; round: the arc's ends).
-    let deep = notch.map_or(0.0, |n| if n.round { n.depth - 0.5 * n.width } else { n.depth });
+    // deep (the side at the flange, then away; round: the arc's ends); its depth from the bend
+    // line, which a flush bend sets back.
+    let deep = recess + notch.map_or(0.0, |n| if n.round { n.depth - 0.5 * n.width } else { n.depth });
     let mut relief = |k: u64, s_near: f64, s_far: f64| -> [[TopoId; 3]; 2] {
         [(a0, 0), (c1, 1)].map(|(from, l)| {
             let k = 10 + 6 * k + 3 * l;
-            [at(k, from, s_far, 0.0), at(k + 1, from, s_near, deep), at(k + 2, from, s_far, deep)]
+            [put(k, pos(from, s_far, 0.0)), put(k + 1, pos(from, s_near, deep)), put(k + 2, pos(from, s_far, deep))]
         })
     };
     let w = notch.map_or(0.0, |n| n.width);
@@ -497,7 +583,12 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Opti
         let (p, q) = lows.map_or((pa, qa), |[p, q]| (p[0], q[0]));
         faces.push(FaceSpec { id: piece(0), surface, loops: vec![vec![id(a0), p, q, id(c1)]] });
     }
-    faces.push(FaceSpec { id: key, surface, loops: vec![vec![pa, pb, qb, qa]] });
+    let middle = if recess > 0.0 {
+        Surface::Plane(Plane { origin: vertices.iter().find(|x| x.id == pa).map_or(end.origin, |x| x.point), normal: end.normal })
+    } else {
+        surface
+    };
+    faces.push(FaceSpec { id: key, surface: middle, loops: vec![vec![pa, pb, qb, qa]] });
     if high {
         let (p, q) = highs.map_or((pb, qb), |[p, q]| (p[0], q[0]));
         faces.push(FaceSpec { id: piece(1), surface, loops: vec![vec![p, id(a1), id(c0), q]] });
@@ -541,7 +632,7 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Opti
     let mut curves = target.curve_specs();
     // The reliefs' walls: the side away from the flange, the bottom, the side at it.
     let point = |v: TopoId| vertices.iter().find(|x| x.id == v).map_or(Vec3::ZERO, |x| x.point);
-    let across = unit(target.point(c1) - target.point(a0) - u * (target.point(c1) - target.point(a0)).dot(u));
+    let across = unit(across);
     for (k, (cut, near, toward)) in [(lows, (pa, qa), 1.0), (highs, (pb, qb), -1.0)].into_iter().enumerate() {
         let (Some([p, q]), Some(n)) = (cut, notch) else { continue };
         let face = |tag: &str, surface: Surface, ids: Vec<TopoId>, outward: Vec3| -> FaceSpec {
@@ -575,22 +666,18 @@ fn narrowed(feature: TopoId, target: &Body, e: TopoId, width: Width, notch: Opti
         faces.push(face("flange.relief.bottom", bottom, vec![p[1], p[2], q[2], q[1]], up));
     }
     faces.extend((0..target.faces().len() as Ix).filter(|&x| x != f && x != across0 && x != across1).map(|x| target.face_spec(x)));
-    let body = build_with_curves(vertices, faces, curves)?;
-    // The middle's edge on the picked side: between its new ends.
-    let ends = if picked == l0 { [pa, pb] } else { [qb, qa] };
-    let edge = body
-        .edges()
-        .iter()
-        .find(|x| {
-            let (v, w) = (
-                body.vertices()[body.half_edges()[x.half as usize].origin as usize].id,
-                body.vertices()[body.half_edges()[body.next(x.half) as usize].origin as usize].id,
-            );
-            (v, w) == (ends[0], ends[1]) || (w, v) == (ends[0], ends[1])
-        })
-        .map(|x| x.id)
-        .ok_or_else(|| BrepError::Invalid("flange: the middle of the end lost its edge".into()))?;
-    Ok((body, edge))
+    // Flush at the edge's end: the sheet's corner moved, in every face it was a corner of.
+    for face in &mut faces {
+        for l in &mut face.loops {
+            for v in l.iter_mut() {
+                if let Some((_, new)) = moved.iter().find(|(old, _)| old == v) {
+                    *v = *new;
+                }
+            }
+        }
+    }
+    vertices.retain(|x| !moved.iter().any(|(old, _)| *old == x.id));
+    build_with_curves(vertices, faces, curves)
 }
 
 /// What a flange stands on: the edge of the sheet's side it turns toward (`inner`, at the start

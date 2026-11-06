@@ -849,6 +849,8 @@ struct FlangeForm {
     flip: bool,
     round: bool,
     corner: &'static str,
+    /// The bend flush with the edge (D229), not beyond it.
+    flush: bool,
     /// The height along the flange, not square to the sheet.
     along: bool,
     /// How much of the edge it takes (D229): `edge`, `center` (width `a`), `offset` (offset `a`,
@@ -877,7 +879,8 @@ impl FlangeForm {
             _ => json!({"kind": "edge"}),
         };
         json!({"name": self.name, "height": value_of(&self.height), "height_along": self.along, "angle": value_of(&self.angle), "flip": self.flip,
-            "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "extent": extent, "bend_relief": self.bend})
+            "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "extent": extent, "bend_relief": self.bend,
+            "bend_position": if self.flush { "flush" } else { "outside" }})
     }
 
     /// The `flange` feature the form makes on edges `edges` of body `body`.
@@ -4257,6 +4260,7 @@ impl Viewer {
                     angle: if f["angle"].is_null() { "90".into() } else { definition(&f["angle"]) },
                     flip: f["flip"] == true,
                     round: f["relief"] == "round",
+                    flush: f["bend_position"] == "flush",
                     corner: CORNERS.into_iter().find(|c| f["corner"] == *c).unwrap_or("open"),
                     along: f["height_along"] == true,
                     extent: EXTENTS.into_iter().find(|e| f["extent"]["kind"] == *e).unwrap_or("edge"),
@@ -4564,6 +4568,7 @@ impl Viewer {
             angle: "90".into(),
             flip: false,
             round: false,
+            flush: false,
             corner: "open",
             along: false,
             extent: "edge",
@@ -4624,6 +4629,12 @@ impl Viewer {
                 if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
                     f.flip = !f.flip;
                 }
+                // Where the bend lies against the edge (D229): beyond it, or flush with it.
+                ui.horizontal(|ui| {
+                    ui.label(self.i18n.t("flange-position", "Bend position"));
+                    ui.radio_value(&mut f.flush, false, self.i18n.t("flange-position-outside", "Outside"));
+                    ui.radio_value(&mut f.flush, true, self.i18n.t("flange-position-flush", "Flush"));
+                });
                 // Where flanges meet at a corner (D229): the square the bends leave, or a circle of
                 // the rule's diameter too.
                 ui.horizontal(|ui| {
@@ -8825,6 +8836,7 @@ mod tests {
             angle: "h + 5".into(),
             flip: true,
             round: true,
+            flush: true,
             corner: "miter",
             along: false,
             extent: "center",
@@ -8839,7 +8851,7 @@ mod tests {
         assert_eq!(
             form.params("sheet1", &faces),
             json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "angle": "h + 5",
-                "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}, "bend_relief": "round"})
+                "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}, "bend_relief": "round", "bend_position": "flush"})
         );
     }
 

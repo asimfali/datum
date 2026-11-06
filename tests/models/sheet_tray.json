@@ -195,6 +195,44 @@
       "edges": [
         "3489ce77abfd1cc29e371b79f028f68d"
       ]
+    },
+    {
+      "name": "flush",
+      "op": "flange",
+      "inputs": [
+        "plate"
+      ],
+      "height": 20,
+      "radius": 2,
+      "bend_position": "flush",
+      "corner": "overlap_1",
+      "corner_gap": 1,
+      "edges": [
+        "3489ce77abfd1cc29e371b79f028f68d",
+        "3750fee5adb7ef3f95f6027fb4eef149",
+        "e0a23887328334329e8ab0a2c79d9c18",
+        "e50fb5e8ee4da85030a8c33ee0508229"
+      ]
+    },
+    {
+      "name": "flush_short",
+      "op": "flange",
+      "inputs": [
+        "plate"
+      ],
+      "height": 20,
+      "radius": 2,
+      "bend_position": "flush",
+      "extent": {
+        "kind": "center",
+        "width": 40
+      },
+      "bend_relief": "round",
+      "bend_relief_width": 2,
+      "bend_relief_depth": 2,
+      "edges": [
+        "3489ce77abfd1cc29e371b79f028f68d"
+      ]
     }
   ]
 }

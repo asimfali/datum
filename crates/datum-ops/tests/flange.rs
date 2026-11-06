@@ -425,6 +425,14 @@ fn a_flange_on_part_of_its_edge() {
     let mut both = [span(false), span(true)];
     both.sort_by(|a, b| a.0.total_cmp(&b.0));
     assert!(close(both[0].0, 10.0) && close(both[0].1, 40.0) && close(both[1].0, 60.0) && close(both[1].1, 90.0), "{both:?}");
+    // Either edge of either long end, alone: the end found across the thickness, never the
+    // plate's own face (rectangular too).
+    for face in &long {
+        for e in long_edges(&p, face) {
+            let b = flange(&p, &[e], serde_json::json!({"extent": {"kind": "center", "width": 30}})).unwrap();
+            assert!(close(b.volume() - p.volume(), added(1.0, 30.0, 20.0, 90.0)));
+        }
+    }
     // Wider than the edge, or off it: refused.
     for extent in [serde_json::json!({"kind": "center", "width": 120}), serde_json::json!({"kind": "offset", "offset": 80, "width": 30})] {
         assert!(matches!(flange(&p, &edge, serde_json::json!({"extent": extent})), Err(BrepError::Degenerate(_))), "{extent}");
@@ -456,6 +464,49 @@ fn a_bend_relief_beside_a_short_flange() {
     let near = serde_json::json!({"kind": "offset", "offset": 1, "width": 30});
     assert!(flange(&p, &edge, serde_json::json!({"extent": near, "bend_relief": "square", "bend_relief_width": w, "bend_relief_depth": d})).is_err());
     assert!(flange(&p, &edge, serde_json::json!({"extent": {"kind": "center", "width": 30}, "bend_relief": "square"})).is_err());
+}
+
+/// The bend flush (D229, Inventor's «inside base face extents»): the plate set back by `r + t`, the
+/// flange's outer face where the edge was; the flange no wider than the plate's own extents.
+#[test]
+fn a_flush_flange() {
+    let p = plate();
+    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
+    let edge = long_edges(&p, &long[0]);
+    let back = R + T;
+    let flush = |extra: serde_json::Value| {
+        let mut j = serde_json::json!({"bend_position": "flush"});
+        for (k, v) in extra.as_object().unwrap() {
+            j[k] = v.clone();
+        }
+        j
+    };
+    // The whole edge: the plate as wide as before, back by `r + t` along the edge.
+    let b = flange(&p, &edge, flush(serde_json::json!({}))).unwrap();
+    assert!(close(b.volume() - p.volume(), added(1.0, 100.0, 20.0, 90.0) - 100.0 * back * T), "{}", b.volume() - p.volume());
+    let within = |b: &Body| {
+        let (have, plate) = (b.bounds(), p.bounds());
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        near(have.0.x, plate.0.x) && near(have.1.x, plate.1.x) && near(have.0.y, plate.0.y) && near(have.1.y, plate.1.y)
+    };
+    assert!(within(&b), "{:?}", b.bounds());
+    unfold_side(&b, false, K).unwrap();
+    // Narrower: only with a bend relief, its slot from the bend line on: the middle and both slots
+    // set back.
+    let centre = serde_json::json!({"kind": "center", "width": 30});
+    assert!(matches!(flange(&p, &edge, flush(serde_json::json!({"extent": centre}))), Err(BrepError::Unsupported(_))));
+    let (w, d) = (2.0, 3.0);
+    for (shape, slot) in [("square", w * (back + d)), ("round", w * (back + d - 0.5 * w) + std::f64::consts::PI * 0.125 * w * w)] {
+        let extra = serde_json::json!({"extent": centre, "bend_relief": shape, "bend_relief_width": w, "bend_relief_depth": d});
+        let r = flange(&p, &edge, flush(extra)).unwrap();
+        let expected = added(1.0, 30.0, 20.0, 90.0) - 30.0 * back * T - 2.0 * slot * T;
+        assert!(close(r.volume() - p.volume(), expected), "{shape}: {} vs {expected}", r.volume() - p.volume());
+        unfold_side(&r, false, K).unwrap();
+    }
+    // All four edges: a tray within the plate's extents.
+    let all = flange(&p, &ends_edges(&p, &[long, short].concat()), flush(serde_json::json!({}))).unwrap();
+    assert!(within(&all), "{:?}", all.bounds());
+    unfold_side(&all, false, K).unwrap();
 }
 
 #[test]
