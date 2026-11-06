@@ -6,47 +6,190 @@
     {
       "what": "Создайте новую модель: меню «Файл», пункт «Создать».",
       "why": "Всё живёт в модели: без неё эскизу и детали негде быть, поэтому эскиз до этого шага не начать.",
-      "at": ["file.new", "menu.file"],
-      "done": { "window": { "model": true } }
+      "at": [
+        "file.new",
+        "menu.file"
+      ],
+      "show": [
+        {
+          "click": "menu.file"
+        },
+        {
+          "click": "file.new"
+        }
+      ],
+      "done": {
+        "window": {
+          "model": true
+        }
+      }
     },
     {
       "what": "Выберите материал, затем проверьте правило: нужно листовое, например созданное в первом уроке.",
       "why": "Правило задаёт материал, толщину и радиус гиба. Выбирать его вам: ошибка в правиле — это брак на гибке.",
       "hint": "Списки материала и правила — в верхней панели. Пусто? Пройдите урок «Проект, материал и правило». Шаг не засчитывается? Выбрано правило обычной детали, а нужно листовое.",
-      "at": ["toolbar.material"],
-      "done": { "window": { "sheet_rule": true } }
+      "at": [
+        "toolbar.material"
+      ],
+      "show": [
+        {
+          "click": "toolbar.material"
+        }
+      ],
+      "own": true,
+      "done": {
+        "window": {
+          "sheet_rule": true
+        }
+      }
     },
     {
       "what": "Начните эскиз.",
       "why": "Деталь начинается с контура на плоскости.",
-      "at": ["sketch.new", "menu.sketch"],
-      "done": { "window": { "picking": "sketch" } }
+      "at": [
+        "sketch.new",
+        "menu.sketch"
+      ],
+      "show": [
+        {
+          "key": "sketch.new"
+        }
+      ],
+      "done": {
+        "window": {
+          "picking": "sketch"
+        }
+      }
     },
     {
       "what": "Щёлкните плоскость, на которой рисовать, или нажмите Enter — будет XY.",
       "why": "Плоскость — база эскиза: от неё строится всё остальное.",
-      "at": ["view"],
-      "done": { "window": { "sketch": true } }
+      "at": [
+        "view"
+      ],
+      "show": [
+        {
+          "point": "view"
+        },
+        {
+          "key": "enter"
+        }
+      ],
+      "done": {
+        "window": {
+          "sketch": true
+        }
+      }
     },
     {
       "what": "Возьмите «Линию» и нарисуйте прямоугольник: четыре щелчка по углам и пятый — в первую точку.",
       "why": "Замкнутый контур при листовом правиле становится гранью листа; незамкнутый — листом по траектории с гибами.",
       "hint": "Длину можно ввести числом и нажать Enter. Правый щелчок или Esc заканчивает линию.",
-      "at": ["sketch.line", "menu.sketch"],
-      "done": { "model": { "features": [{ "op": "sketch", "sketch": { "lines": { "at_least": 4 } } }] } }
+      "at": [
+        "sketch.line",
+        "menu.sketch"
+      ],
+      "show": [
+        {
+          "key": "sketch.line"
+        },
+        {
+          "sketch": [
+            -0.5,
+            -0.3
+          ]
+        },
+        {
+          "sketch": [
+            0.5,
+            -0.3
+          ]
+        },
+        {
+          "sketch": [
+            0.5,
+            0.3
+          ]
+        },
+        {
+          "sketch": [
+            -0.5,
+            0.3
+          ]
+        },
+        {
+          "sketch": [
+            -0.5,
+            -0.3
+          ]
+        },
+        {
+          "key": "escape"
+        }
+      ],
+      "done": {
+        "model": {
+          "features": [
+            {
+              "op": "sketch",
+              "sketch": {
+                "lines": {
+                  "at_least": 4
+                }
+              }
+            }
+          ]
+        }
+      }
     },
     {
       "what": "Постройте деталь: выдавите контур, в форме нажмите OK или Enter.",
       "why": "Толщину не вводите: она приходит из правила. Сменив правило, вы смените и толщину.",
       "hint": "Окно просит выбрать контур? Значит, контур не замкнут или контуров несколько: выделите нужные линии.",
-      "at": ["form.ok", "part.extrude", "menu.sketch"],
-      "done": { "model": { "features": [{ "op": "plate" }] } }
+      "at": [
+        "form.ok",
+        "part.extrude",
+        "menu.sketch"
+      ],
+      "show": [
+        {
+          "key": "part.extrude"
+        },
+        {
+          "click": "form.ok"
+        }
+      ],
+      "done": {
+        "model": {
+          "features": [
+            {
+              "op": "plate"
+            }
+          ]
+        }
+      }
     },
     {
       "what": "Сохраните модель.",
       "why": "Модель — обычный текстовый файл JSON: его можно хранить в git и сравнивать версии.",
-      "at": ["file.save", "menu.file"],
-      "done": { "window": { "saved": true } }
+      "at": [
+        "file.save",
+        "menu.file"
+      ],
+      "show": [
+        {
+          "click": "menu.file"
+        },
+        {
+          "point": "file.save"
+        }
+      ],
+      "own": true,
+      "done": {
+        "window": {
+          "saved": true
+        }
+      }
     }
   ]
 }

@@ -132,6 +132,25 @@ pub(crate) enum Request {
     /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
     /// model until `None`.
     Preview(Option<(&'static str, Json)>),
+    /// Remember the model as it is, to come back to by `Back` (a lesson's step shown, D230).
+    Mark,
+    Back,
+}
+
+/// The window's hand: a cursor at `at`, with the key it last pressed beside it.
+fn paint_hand(ctx: &egui::Context, at: egui::Pos2, pressed: Option<&str>) {
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("datum_lesson_hand")));
+    let visuals = ctx.global_style().visuals.clone();
+    let colour = visuals.warn_fg_color;
+    let point = |x: f32, y: f32| at + egui::vec2(x, y) * 1.4;
+    let arrow = vec![point(0.0, 0.0), point(0.0, 16.0), point(4.0, 12.0), point(7.0, 19.0), point(10.0, 18.0), point(7.0, 11.0), point(12.0, 11.0)];
+    painter.add(egui::Shape::convex_polygon(arrow, colour, egui::Stroke::new(1.0, visuals.extreme_bg_color)));
+    if let Some(key) = pressed {
+        let galley = painter.layout_no_wrap(key.to_string(), egui::FontId::proportional(18.0), visuals.extreme_bg_color);
+        let spot = at + egui::vec2(24.0, 24.0);
+        painter.rect_filled(egui::Rect::from_min_size(spot, galley.size()).expand(6.0), 4.0, colour);
+        painter.galley(spot, galley, visuals.extreme_bg_color);
+    }
 }
 
 /// Whether `folder` lies in the program's: a new version replaces that folder, and what is in it
@@ -145,6 +164,26 @@ fn beside_program(folder: &std::path::Path) -> bool {
 struct Playing {
     lesson: usize,
     step: usize,
+    /// The window's hand at work on the step.
+    showing: Option<Showing>,
+    /// The place the hand did not find, for the card to say.
+    lost: Option<String>,
+}
+
+/// The hand at work; `back`: to take it all back at the end, as it was then.
+struct Showing {
+    hand: crate::lessons::Hand,
+    back: Option<Mark>,
+}
+
+/// The window before a step was shown.
+struct Mark {
+    model: bool,
+    sketch: Option<String>,
+    picking: Option<Purpose>,
+    table: Option<crate::table::Source>,
+    next_rule: Option<String>,
+    material: Option<(Option<String>, String)>,
 }
 
 /// What a plane or a face is picked for.
@@ -291,6 +330,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut meshes = MeshCache::default();
     let mut editing: Option<String> = None;
     let mut previewing: Option<(&'static str, Json)> = None;
+    let mut mark = None;
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
         pending.extend(requests.try_iter());
@@ -336,6 +376,12 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 },
                 Request::Editing(name) => editing = name,
                 Request::Preview(p) => previewing = p,
+                Request::Mark => mark = Some(session.checkpoint()),
+                Request::Back => {
+                    if let Some(c) = mark.take() {
+                        session.restore(c);
+                    }
+                }
             }
         }
         for (name, value) in latest {
@@ -1636,7 +1682,7 @@ impl Viewer {
         if self.close() {
             self.next_rule = None;
             self.material = None;
-            self.playing = Some(Playing { lesson, step: 0 });
+            self.playing = Some(Playing { lesson, step: 0, showing: None, lost: None });
         }
     }
 
@@ -1666,9 +1712,120 @@ impl Viewer {
             && step.done.model.as_ref().is_none_or(|p| self.model.as_ref().is_some_and(|m| m.preview.is_none() && crate::lessons::matches(p, &m.inspect)))
     }
 
-    /// The step reached: past those done, unless a command is on its way and what shows is old.
+    /// What move `m` of the hand comes to now; none while its place is not on screen.
+    fn aim(&self, ctx: &egui::Context, m: &crate::lessons::Move) -> Option<crate::lessons::Aim> {
+        use crate::lessons::{Aim, Move};
+        match m {
+            Move::Point(name) | Move::Click(name) => self.spots.get(name.as_str()).map(|r| Aim::Spot(r.center())),
+            Move::Key(name) if name == "enter" => Some(Aim::Keys(egui::Key::Enter, egui::Modifiers::NONE, "Enter".into())),
+            Move::Key(name) if name == "escape" => Some(Aim::Keys(egui::Key::Escape, egui::Modifiers::NONE, "Esc".into())),
+            Move::Key(name) => {
+                let k = self.keys.get(ACTIONS.iter().find(|a| a.name == name)?.act)?;
+                // As a keyboard gives it: Command is Ctrl here.
+                let modifiers = if k.modifiers.command { k.modifiers | egui::Modifiers::CTRL } else { k.modifiers };
+                Some(Aim::Keys(k.logical_key, modifiers, ctx.format_shortcut(k)))
+            }
+            Move::Sketch([x, y]) => {
+                self.sketch.as_ref()?;
+                let half = self.sketch_rect.size() * 0.5;
+                Some(Aim::Spot(self.sketch_rect.center() + egui::vec2(x * half.x, -y * half.y)))
+            }
+            Move::Put { level, element } => Some(Aim::Put(level.clone(), element.clone())),
+        }
+    }
+
+    /// Sets the window's hand to the step reached; `back`: only to show it, taking it back after.
+    fn start_hand(&mut self, ctx: &egui::Context, back: bool) {
+        let Some(p) = &self.playing else { return };
+        let Some((_, Ok(lesson))) = self.lessons.get(p.lesson) else { return };
+        let Some(s) = lesson.steps.get(p.step) else { return };
+        let moves = s.show.clone();
+        let mark = back.then(|| Mark {
+            model: self.model.is_some(),
+            sketch: self.sketch.as_ref().map(|sk| sk.feature.clone()),
+            picking: self.picking,
+            table: self.table.as_ref().map(|t| t.0),
+            next_rule: self.next_rule.clone(),
+            material: self.material.clone(),
+        });
+        if mark.as_ref().is_some_and(|m| m.model) {
+            self.send(Request::Mark);
+        }
+        let cursor = ctx.pointer_latest_pos().unwrap_or_else(|| ctx.content_rect().center());
+        if let Some(p) = &mut self.playing {
+            p.lost = None;
+            p.showing = Some(Showing { hand: crate::lessons::Hand::new(moves, cursor), back: mark });
+        }
+    }
+
+    /// The hand's frame (`raw_input_hook`): its moves take the place of the engineer's input;
+    /// Esc stops it.
+    fn hand_input(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        use crate::lessons::Tick;
+        use egui::Event;
+        let Some(mut showing) = self.playing.as_mut().and_then(|p| p.showing.take()) else { return };
+        let stop = raw.events.iter().any(|e| matches!(e, Event::Key { key: egui::Key::Escape, pressed: true, .. }));
+        raw.events.retain(|e| {
+            !matches!(
+                e,
+                Event::PointerMoved(_)
+                    | Event::MouseMoved(_)
+                    | Event::PointerButton { .. }
+                    | Event::PointerGone
+                    | Event::MouseWheel { .. }
+                    | Event::Zoom(_)
+                    | Event::Key { .. }
+                    | Event::Text(_)
+            )
+        });
+        let tick = if stop { Tick::Finished } else { showing.hand.tick(raw.predicted_dt, self.busy, |m| self.aim(ctx, m), &mut raw.events) };
+        match tick {
+            Tick::Going => {}
+            Tick::Put(level, element) => {
+                self.library_due = true;
+                self.send(Request::Command("put_library", json!({"level": level, "element": element})));
+            }
+            Tick::Finished => return self.end_hand(ctx, showing, None),
+            Tick::Lost(what) => return self.end_hand(ctx, showing, Some(what)),
+        }
+        ctx.request_repaint();
+        if let Some(p) = &mut self.playing {
+            p.showing = Some(showing);
+        }
+    }
+
+    /// The hand's work over: shown only, the window comes back to where it was.
+    fn end_hand(&mut self, ctx: &egui::Context, showing: Showing, lost: Option<String>) {
+        egui::Popup::close_all(ctx);
+        if let Some(p) = &mut self.playing {
+            p.lost = lost;
+        }
+        let Some(mark) = showing.back else { return };
+        self.leave();
+        self.picking = mark.picking;
+        if self.table.as_ref().map(|t| t.0) != mark.table {
+            self.table = None;
+            if let Some(source) = mark.table {
+                self.toggle_table(source);
+            }
+        }
+        self.next_rule = mark.next_rule;
+        self.material = mark.material;
+        if mark.model {
+            self.send(Request::Back);
+            if let Some(sketch) = mark.sketch {
+                self.enter(sketch);
+            }
+        } else {
+            self.send(Request::Close);
+            crate::dock::close(&mut self.dock, crate::dock::Pane::Flat);
+        }
+    }
+
+    /// The step reached: past those done, unless a command is on its way and what shows is old,
+    /// or the hand is at work.
     fn lesson_step(&self, playing: &Playing, lesson: &crate::lessons::Lesson) -> usize {
-        if self.busy {
+        if self.busy || playing.showing.is_some() {
             return playing.step;
         }
         playing.step + lesson.steps[playing.step.min(lesson.steps.len())..].iter().take_while(|s| self.step_done(s)).count()
@@ -1681,7 +1838,11 @@ impl Viewer {
         let (step, total) = (self.lesson_step(playing, lesson), lesson.steps.len());
         let now = lesson.steps.get(step);
         self.spots.insert("view", self.viewport);
-        if let Some(rect) = now.and_then(|s| s.at.iter().find_map(|name| self.spots.get(name.as_str()))) {
+        let hand = playing.showing.as_ref().map(|s| (s.hand.cursor, s.hand.pressed.clone()));
+        let lost = playing.lost.clone();
+        if let Some((at, pressed)) = &hand {
+            paint_hand(ctx, *at, pressed.as_deref());
+        } else if let Some(rect) = now.and_then(|s| s.at.iter().find_map(|name| self.spots.get(name.as_str()))) {
             let beat = (libm::sin(ctx.input(|i| i.time) * 4.0) * 0.5 + 0.5) as f32;
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("datum_lesson_mark")));
             let stroke = egui::Stroke::new(2.0 + beat, ctx.global_style().visuals.warn_fg_color);
@@ -1689,7 +1850,7 @@ impl Viewer {
             ctx.request_repaint_after(std::time::Duration::from_millis(33));
         }
         let mut open = true;
-        let (mut finished, mut read) = (false, false);
+        let (mut finished, mut read, mut show, mut perform) = (false, false, false, false);
         let window = egui::Window::new(&lesson.title).id(egui::Id::new("datum_lesson")).open(&mut open).collapsible(false).resizable(false);
         window.anchor(egui::Align2::RIGHT_BOTTOM, [-16.0, -16.0]).default_width(340.0).show(ctx, |ui| match now {
             Some(s) => {
@@ -1709,8 +1870,26 @@ impl Viewer {
                 if !s.hint.is_empty() {
                     ui.collapsing(self.i18n.t("lesson-stuck", "Stuck?"), |ui| ui.label(&s.hint));
                 }
-                if s.done.window.is_none() && s.done.model.is_none() {
-                    read = ui.button(self.i18n.t("lesson-next", "Next")).clicked();
+                if hand.is_some() {
+                    ui.strong(self.i18n.t("lesson-showing", "Showing… Esc stops it"));
+                } else {
+                    if let Some(what) = &lost {
+                        ui.colored_label(
+                            ui.visuals().error_fg_color,
+                            self.i18n.f("lesson-lost", "Could not show this: { $what }", &[("what", what)]),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        if s.can_show() {
+                            show = ui.button(self.i18n.t("lesson-show", "Show me")).clicked();
+                        }
+                        if s.can_do() {
+                            perform = ui.button(self.i18n.t("lesson-do", "Do it for me")).clicked();
+                        }
+                        if s.done.window.is_none() && s.done.model.is_none() {
+                            read = ui.button(self.i18n.t("lesson-next", "Next")).clicked();
+                        }
+                    });
                 }
             }
             None => {
@@ -1722,6 +1901,12 @@ impl Viewer {
             self.playing = None;
         } else if let Some(p) = &mut self.playing {
             p.step = step + usize::from(read);
+            if read {
+                p.lost = None;
+            }
+        }
+        if show || perform {
+            self.start_hand(ctx, show);
         }
     }
 
@@ -6200,6 +6385,10 @@ impl eframe::App for Viewer {
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
     }
 
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.hand_input(ctx, raw);
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
@@ -6357,6 +6546,152 @@ mod tests {
 
     /// Without a model there is no sketch to start: S sends nothing and picks nothing; with one it
     /// is available and picks a plane.
+    /// While the hand works the engineer's input does not reach the window, and Esc stops it,
+    /// taking back what it did.
+    #[test]
+    fn the_hand_takes_the_input_and_esc_stops_it() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let text = r#"{"format": "datum-lesson/1", "title": "t", "steps": [
+            {"what": "w", "show": [{"key": "enter"}], "done": {"window": {"form": true}}}]}"#;
+        v.lessons = vec![("a.json".into(), crate::lessons::Lesson::parse(text))];
+        v.playing = Some(Playing { lesson: 0, step: 0, showing: None, lost: None });
+        let ctx = egui::Context::default();
+        v.start_hand(&ctx, true);
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Mark)), "a model to come back to");
+        v.busy = true;
+        let click = egui::Event::PointerButton {
+            pos: egui::pos2(5.0, 5.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut raw = egui::RawInput { events: vec![click, egui::Event::Text("x".into())], ..Default::default() };
+        v.hand_input(&ctx, &mut raw);
+        assert!(raw.events.is_empty(), "{:?}", raw.events);
+        assert!(v.playing.as_ref().unwrap().showing.is_some());
+        let esc = egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
+        let mut raw = egui::RawInput { events: vec![esc], ..Default::default() };
+        v.hand_input(&ctx, &mut raw);
+        assert!(raw.events.is_empty() && v.playing.as_ref().unwrap().showing.is_none());
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Back)), "taken back");
+    }
+
+    /// One frame of the whole window: the hand's input, as `raw_input_hook` takes it.
+    fn window_frame(h: &mut egui_kittest::Harness<'_, Viewer>) {
+        let ctx = h.ctx.clone();
+        let mut raw = std::mem::take(h.input_mut());
+        h.state_mut().hand_input(&ctx, &mut raw);
+        *h.input_mut() = raw;
+        h.step();
+    }
+
+    /// Frames until `done`; a worker's rebuild takes what it takes, a lesson does not get stuck.
+    fn window_until(h: &mut egui_kittest::Harness<'_, Viewer>, what: &str, done: impl Fn(&Viewer) -> bool) {
+        let start = std::time::Instant::now();
+        while !done(h.state()) {
+            assert!(start.elapsed().as_secs() < 60, "{what}: never happened");
+            window_frame(h);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// The window as the engineer has it, with the worker: the repo's lessons in `project`.
+    fn lesson_window_harness(project: &std::path::Path) -> egui_kittest::Harness<'static, Viewer> {
+        let project = project.to_path_buf();
+        egui_kittest::Harness::builder().with_size([1280.0, 800.0]).wgpu().build_eframe(move |cc| {
+            let mut v = Viewer::new(None, cc.egui_ctx.clone(), "test".into());
+            v.i18n = crate::i18n::I18n::of("ru");
+            v.lessons = crate::lessons::read(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")));
+            v.set_project(Some(project));
+            v
+        })
+    }
+
+    fn features_of(v: &Viewer) -> usize {
+        v.model.as_ref().map_or(0, |m| m.inspect["features"].as_array().map_or(0, Vec::len))
+    }
+
+    /// Every lesson of the repo, played in the real window from its first step to its last: each
+    /// step that can be shown is shown and taken back, then done by the hand. The moves go the
+    /// way the engineer's do; a menu, key or form that changes breaks this test, not a learner.
+    #[test]
+    fn the_lessons_play_through_the_window() {
+        let project = std::env::temp_dir().join(format!("datum-lessons-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&project);
+        std::fs::create_dir_all(project.join("part")).unwrap();
+        std::fs::write(project.join(datum_model::workspace::PROJECT_FILE), "{}").unwrap();
+        let mut h = lesson_window_harness(&project);
+        let lessons = h.state().lessons.len();
+        assert!(lessons >= 2);
+        let ctx = h.ctx.clone();
+        for lesson in 0..lessons {
+            let title = h.state().lessons[lesson].1.as_ref().unwrap().title.clone();
+            h.state_mut().start_lesson(lesson);
+            window_until(&mut h, "a lesson starts", |v| !v.busy && v.model.is_none());
+            for _ in 0..3 {
+                window_frame(&mut h);
+            }
+            loop {
+                window_until(&mut h, "the model comes", |v| !v.busy);
+                window_frame(&mut h);
+                let at = h.state().playing.as_ref().unwrap().step;
+                let steps = &h.state().lessons[lesson].1.as_ref().unwrap().steps;
+                let Some(step) = steps.get(at) else { break };
+                let (show, perform, own, what) = (step.can_show(), step.can_do(), step.own, step.what.clone());
+                let reading = step.done.window.is_none() && step.done.model.is_none();
+                let said = format!("{title}, step {}: {what}", at + 1);
+                if show {
+                    let (model, features, sketch) =
+                        (h.state().model.is_some(), features_of(h.state()), h.state().sketch.as_ref().map(|s| s.feature.clone()));
+                    h.state_mut().start_hand(&ctx, true);
+                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.busy);
+                    for _ in 0..5 {
+                        window_frame(&mut h);
+                    }
+                    window_until(&mut h, &said, |v| !v.busy);
+                    let v = h.state();
+                    assert_eq!(v.playing.as_ref().unwrap().lost, None, "{said}");
+                    assert_eq!(v.playing.as_ref().unwrap().step, at, "shown, not done: {said}");
+                    assert_eq!(
+                        (v.model.is_some(), features_of(v), v.sketch.as_ref().map(|s| s.feature.clone())),
+                        (model, features, sketch),
+                        "taken back: {said}"
+                    );
+                }
+                if perform {
+                    h.state_mut().start_hand(&ctx, false);
+                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.busy);
+                    assert_eq!(h.state().playing.as_ref().unwrap().lost, None, "{said}");
+                } else if reading {
+                    h.state_mut().playing.as_mut().unwrap().step += 1;
+                } else if own {
+                    // What is the engineer's to choose: the lesson's rule, the file's place. The
+                    // project was chosen before the lesson.
+                    let rule = h.state().rules.iter().find(|r| r["kind"] == "sheet").and_then(|r| r["name"].as_str()).map(String::from);
+                    let v = h.state_mut();
+                    if v.path.is_none() && at + 1 == steps_of(v, lesson) {
+                        let path = project.join("part").join(format!("lesson{lesson}.json"));
+                        v.send(Request::Command("save", json!({"path": path.display().to_string()})));
+                        v.set_path(Some(path));
+                    } else {
+                        v.next_rule = rule;
+                    }
+                }
+                window_until(&mut h, &format!("done: {said}"), |v| v.playing.as_ref().unwrap().step > at);
+            }
+            h.state_mut().playing = None;
+        }
+        let m = h.state().model.as_ref().unwrap();
+        assert!(m.inspect["features"].as_array().unwrap().iter().any(|f| f["op"] == "plate"), "the part was made: {}", m.inspect);
+        assert!(project.join("library/material").join("08пс.json").is_file() && project.join("library/rule").is_dir());
+        drop(h);
+        let _ = std::fs::remove_dir_all(&project);
+    }
+
+    fn steps_of(v: &Viewer, lesson: usize) -> usize {
+        v.lessons[lesson].1.as_ref().unwrap().steps.len()
+    }
+
     #[test]
     fn a_sketch_needs_a_model() {
         let press_s = |v: &mut Viewer| {
@@ -6510,7 +6845,7 @@ mod tests {
         let lesson = v.lessons[0].1.as_ref().unwrap();
         assert!(!v.step_done(&lesson.steps[0]));
         v.busy = false;
-        let playing = Playing { lesson: 0, step: 0 };
+        let playing = Playing { lesson: 0, step: 0, showing: None, lost: None };
         assert_eq!(v.lesson_step(&playing, lesson), 0);
     }
 
