@@ -80,6 +80,23 @@ impl Editor {
     /// rows beyond the table: a paste may reach past its last row.
     pub fn show(&mut self, ui: &mut egui::Ui, table: &Table, editable: &dyn Fn(usize, usize) -> bool, zoom: f32, i18n: &I18n) -> Output {
         self.scale = SCALE * zoom;
+        // A header too wide for its column in two lines, the header row high enough for them.
+        let tall;
+        let table = {
+            let (lay, width) = (layout(table), self.width(ui));
+            let wide = (0..table.columns().len())
+                .any(|c| lay.cell(0, c).is_some_and(|cell| datum_table::two_lines(table.cell(0, c), cell, datum_table::TEXT, &width).is_some()));
+            if wide {
+                tall = {
+                    let mut t = table.clone();
+                    t.set_height(0, datum_table::TWO_LINE_ROW);
+                    t
+                };
+                &tall
+            } else {
+                table
+            }
+        };
         let lay = layout(table);
         let (rows, columns) = (table.rows().len(), table.columns().len());
         let clamp = |(r, c): (usize, usize)| (r.min(rows.saturating_sub(1)), c.min(columns.saturating_sub(1)));
@@ -169,19 +186,30 @@ impl Editor {
     }
 
     /// Every cell's pieces and where they go, the edited cell's with the text typed so far.
+    /// How wide text is at a height, in millimetres, in this frame's font and scale.
+    fn width<'a>(&self, ui: &'a egui::Ui) -> impl Fn(&str, f64) -> f64 + 'a {
+        let (font, scale) = (TextStyle::Body.resolve(ui.style()).family, self.scale);
+        move |t: &str, h: f64| {
+            let galley = ui.painter().layout_no_wrap(t.to_string(), FontId::new(h as f32 * scale, font.clone()), Color32::PLACEHOLDER);
+            f64::from(galley.size().x / scale)
+        }
+    }
+
     fn laid_out(&self, ui: &egui::Ui, table: &Table, lay: &datum_table::Layout) -> Vec<(Vec<Piece>, Line)> {
-        let font = TextStyle::Body.resolve(ui.style());
-        let width = |t: &str, h: f64| {
-            let galley = ui.painter().layout_no_wrap(t.to_string(), FontId::new(h as f32 * self.scale, font.family.clone()), Color32::PLACEHOLDER);
-            f64::from(galley.size().x / self.scale)
-        };
+        let width = self.width(ui);
         let edited = self.editing.as_ref().filter(|e| e.part.is_some());
         let (rows, columns) = (table.rows().len(), table.columns().len());
         (0..rows * columns)
             .map(|k| {
                 let at = (k / columns, k % columns);
+                let cell = lay.cell(at.0, at.1);
+                if at.0 == 0
+                    && let Some(two) = cell.and_then(|cell| datum_table::two_lines(table.cell(0, at.1), cell, datum_table::TEXT, &width))
+                {
+                    return two;
+                }
                 let ps = edited.filter(|e| e.at == at).map_or_else(|| pieces(table.cell(at.0, at.1)), Editing::current);
-                let line = lay.cell(at.0, at.1).map(|cell| place(&ps, cell, datum_table::TEXT, &width)).unwrap_or_default();
+                let line = cell.map(|cell| place(&ps, cell, datum_table::TEXT, &width)).unwrap_or_default();
                 (ps, line)
             })
             .collect()
@@ -273,7 +301,13 @@ impl Editor {
             self.start(table, (r, c), None);
         }
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Delete)) {
-            out.edits.extend(self.cells().filter(|&(r, c)| editable(r, c)).map(|(r, c)| (r, c, String::new())));
+            // Whole rows selected: they go, as the menu's Delete rows; else the cells are cleared.
+            let columns = table.columns().len();
+            if columns > 1 && self.cursor.1.min(self.anchor.1) == 0 && self.cursor.1.max(self.anchor.1) == columns - 1 {
+                out.delete = self.selected_rows();
+            } else {
+                out.edits.extend(self.cells().filter(|&(r, c)| editable(r, c)).map(|(r, c)| (r, c, String::new())));
+            }
         }
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Minus)) {
             out.delete = self.selected_rows();
@@ -695,8 +729,12 @@ pub fn editable_records(r: usize, _: usize) -> bool {
 fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Option<Json>, String> {
     let text = text.trim();
     match key {
-        "name" if text.is_empty() && rec.is_rule() => Err(i18n.t("table-rule-nameless", "A rule needs a name").to_string()),
-        "name" if text.is_empty() => Err(i18n.t("table-material-nameless", "A material needs a name").to_string()),
+        "name" if text.is_empty() && rec.is_rule() => {
+            Err(i18n.t("table-rule-nameless", "A rule needs a name. To remove a row: select it whole and press Delete").to_string())
+        }
+        "name" if text.is_empty() => {
+            Err(i18n.t("table-material-nameless", "A material needs a name. To remove a row: select it whole and press Delete").to_string())
+        }
         "density" | "thickness" if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
             Ok(d) if d.is_finite() && d > 0.0 => Ok(Some(json!(d))),
             _ if key == "density" => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
@@ -1220,7 +1258,7 @@ mod tests {
         let (sent, error) = material_edits(&[(1, 0, "Сталь 3"), (1, 2, "7850"), (3, 5, "x")], &mut pending);
         assert!(sent.is_empty() && error.is_none());
         for (edit, why) in [
-            ((1, 0, " "), "A material needs a name"),
+            ((1, 0, " "), "A material needs a name. To remove a row: select it whole and press Delete"),
             ((1, 2, "много"), "The density is a number above zero, in kg/m³"),
             ((1, 2, "0"), "The density is a number above zero, in kg/m³"),
             ((1, 0, "АМг2"), "`АМг2` is a material already"),
@@ -1318,7 +1356,7 @@ mod tests {
                 "The bend radius is a number in mm above zero, or a formula of the thickness t",
             ),
             (vec![(3, 0, "Деталь")], "`Деталь` is a rule already"),
-            (vec![(1, 0, " ")], "A rule needs a name"),
+            (vec![(1, 0, " ")], "A rule needs a name. To remove a row: select it whole and press Delete"),
             (vec![(2, 2, "1")], "A part's rule has no thickness, bend radius or other sheet fields"),
         ] {
             let (sent, error) = rule_edits(&edits, &mut pending);
@@ -1405,5 +1443,32 @@ mod tests {
         enter(&mut h, "x");
         let edits = std::mem::take(&mut h.state_mut().2);
         assert!(edits.iter().any(|(_, _, t)| t.contains("[x | ]")), "a new fraction, its over line typed: {edits:?}");
+    }
+    /// Delete on a whole row removes it, as the menu's Delete rows; on part of a row it clears the
+    /// cells (a material removed by clearing its name was refused: a material needs a name).
+    #[test]
+    fn delete_on_a_whole_row_removes_it() {
+        let t = records(&MATERIALS, &library(), &Pending::default(), &I18n::default());
+        let run = |from: (usize, usize), to: (usize, usize)| {
+            let editor = Editor { anchor: from, cursor: to, ..Editor::default() };
+            let mut h = egui_kittest::Harness::builder().with_size([800.0, 200.0]).build_ui_state(
+                |ui, (editor, table, out): &mut (Editor, Table, Output)| {
+                    let o = editor.show(ui, table, &editable_records, 1.0, &I18n::default());
+                    out.edits.extend(o.edits);
+                    out.delete.extend(o.delete);
+                },
+                (editor, t.clone(), Output::default()),
+            );
+            h.run();
+            h.event(Event::Key { key: Key::Delete, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+            h.run();
+            let out = std::mem::take(&mut h.state_mut().2);
+            (out.edits, out.delete)
+        };
+        let last = MATERIALS.keys.len() - 1;
+        let (edits, delete) = run((2, 0), (2, last));
+        assert!(edits.is_empty() && delete == [2], "{edits:?} {delete:?}");
+        let (edits, delete) = run((2, 0), (2, last - 1));
+        assert!(delete.is_empty() && edits.len() == last, "{edits:?} {delete:?}");
     }
 }
