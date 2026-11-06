@@ -1,0 +1,116 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "skeleton",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            100,
+            40
+          ],
+          "b": [
+            130,
+            70
+          ]
+        },
+        "lines": {
+          "seam": {
+            "from": "a",
+            "to": "b"
+          }
+        }
+      }
+    },
+    {
+      "name": "up",
+      "op": "plane",
+      "base": "xz",
+      "offset": -5
+    },
+    {
+      "name": "joint",
+      "op": "plane",
+      "inputs": [
+        "skeleton"
+      ],
+      "line": {
+        "input": 0,
+        "line": "seam"
+      }
+    },
+    {
+      "name": "joint_up",
+      "op": "plane",
+      "inputs": [
+        "skeleton",
+        "up"
+      ],
+      "line": {
+        "input": 0,
+        "line": "seam"
+      }
+    },
+    {
+      "name": "joint_off",
+      "op": "plane",
+      "base": "xy",
+      "inputs": [
+        "skeleton"
+      ],
+      "line": {
+        "input": 0,
+        "line": "seam"
+      },
+      "offset": 3
+    },
+    {
+      "name": "on_joint",
+      "op": "sketch",
+      "inputs": [
+        "joint"
+      ],
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            10,
+            0
+          ],
+          "c": [
+            0,
+            10
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "ca": {
+            "from": "c",
+            "to": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "plate_on_joint",
+      "op": "extrude",
+      "inputs": [
+        "on_joint"
+      ],
+      "z0": 0,
+      "z1": 2
+    }
+  ]
+}

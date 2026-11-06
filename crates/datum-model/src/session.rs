@@ -1531,10 +1531,11 @@ impl Session {
                     .filter(|p| projected_from(self.graph.nodes(), n, p) == Some(ix))
                     .filter_map(|p| p.element.as_mut())
                     .for_each(&mut follow),
-                // A plane through points of this sketch (D204).
-                Op::Plane { points, .. } => {
+                // A plane through points or a line of this sketch (D204).
+                Op::Plane { points, line, .. } => {
                     let k = n.inputs.iter().position(|&i| i == ix);
                     points.iter_mut().filter(|p| p.input == k).filter_map(|p| p.point.as_mut()).for_each(&mut follow);
+                    line.iter_mut().filter(|l| Some(l.input) == k).for_each(|l| follow(&mut l.line));
                 }
                 _ => {}
             }

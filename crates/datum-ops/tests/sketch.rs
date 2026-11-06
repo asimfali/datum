@@ -932,3 +932,50 @@ fn a_slanted_section_of_a_hole_is_an_ellipse() {
         r => panic!("expected a refusal, got {:?}", r.map(|_| ())),
     }
 }
+
+/// A work plane through a line of a sketch, square to a plane: the line lies in it, and it stands
+/// square to what was picked, an origin plane, a work plane or a face; a joint at any angle.
+#[test]
+fn a_plane_through_a_line_square_to_a_plane() {
+    let line = serde_json::json!({"points": {"a": [10, 0], "b": [40, 30]}, "lines": {"l": {"from": "a", "to": "b"}}});
+    let s = eval(&op(serde_json::json!({"op": "sketch", "sketch": line})), "s", &[]).unwrap();
+    let of = serde_json::json!({"input": 0, "line": "l"});
+    let check = |v: &Value, to: Vec3| {
+        let p = v.plane().unwrap();
+        let (a, b) = (Vec3::new(10.0, 0.0, 0.0), Vec3::new(40.0, 30.0, 0.0));
+        assert_eq!(p.origin, a);
+        assert!((b - a).dot(p.normal).abs() < 1e-12, "{:?}", p.normal);
+        assert!(to.dot(p.normal).abs() < 1e-12, "{:?}", p.normal);
+        assert!((p.normal.dot(p.normal) - 1.0).abs() < 1e-12);
+    };
+    // Square to an origin plane: XY by default, XZ named.
+    let v = eval(&op(serde_json::json!({"op": "plane", "line": of})), "p", &[&s]).unwrap();
+    check(&v, Vec3::new(0.0, 0.0, 1.0));
+    let v = eval(&op(serde_json::json!({"op": "plane", "base": "xz", "line": of})), "p", &[&s]).unwrap();
+    check(&v, Vec3::new(0.0, 1.0, 0.0));
+    // Square to a work plane, wherever the line's input stands among the inputs.
+    let work = eval(&op(serde_json::json!({"op": "plane", "base": "xy", "offset": 7})), "w", &[]).unwrap();
+    let v = eval(&op(serde_json::json!({"op": "plane", "line": of})), "p", &[&s, &work]).unwrap();
+    check(&v, Vec3::new(0.0, 0.0, 1.0));
+    let second = serde_json::json!({"input": 1, "line": "l"});
+    let v = eval(&op(serde_json::json!({"op": "plane", "line": second})), "p", &[&work, &s]).unwrap();
+    check(&v, Vec3::new(0.0, 0.0, 1.0));
+    // An offset moves it off the line, along its normal.
+    let v = eval(&op(serde_json::json!({"op": "plane", "line": of, "offset": 5})), "p", &[&s]).unwrap();
+    let n = v.plane().unwrap().normal;
+    assert!((v.plane().unwrap().origin - (Vec3::new(10.0, 0.0, 0.0) + n * 5.0)).dot(n).abs() < 1e-12);
+    // Refused: a line square to the plane; no such line; a line of what is no sketch; with points.
+    let up = serde_json::json!({"points": {"a": [0, 0], "b": [0, 10]}, "lines": {"l": {"from": "a", "to": "b"}}});
+    let upright = eval(
+        &op(serde_json::json!({"op": "sketch", "sketch": up, "plane": {"origin": [0, 0, 0], "x_axis": [1, 0, 0], "normal": [0, -1, 0]}})),
+        "u",
+        &[],
+    )
+    .unwrap();
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "line": of})), "p", &[&upright]), Err(BrepError::Degenerate(_))));
+    let lost = serde_json::json!({"input": 0, "line": "nope"});
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "line": lost})), "p", &[&s]), Err(BrepError::LostReference(_))));
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "line": of})), "p", &[&work]), Err(BrepError::Sketch(_))));
+    let points = serde_json::json!([{"input": 0, "point": "a"}, {"input": 0, "point": "b"}, {}]);
+    assert!(matches!(eval(&op(serde_json::json!({"op": "plane", "points": points, "line": of})), "p", &[&s]), Err(BrepError::Sketch(_))));
+}
