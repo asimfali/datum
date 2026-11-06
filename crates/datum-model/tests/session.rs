@@ -552,3 +552,113 @@ fn a_title_is_no_name_for_commands() {
     assert!(e.contains("`plate`"), "{e}");
     assert_eq!(s.execute("mass_properties", &json!({"name": "nothing"})).unwrap_err(), "no feature named `nothing`");
 }
+
+/// A project folder under the test directory, empty and marked with `datum-project.json`.
+fn project_folder(name: &str) -> std::path::PathBuf {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    root
+}
+
+fn put_rule(s: &mut Session, material: &str, rule: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let m = run(s, "put_library", json!({"level": "material", "element": {"name": material, "density": 7850}}));
+    let r = run(
+        s,
+        "put_library",
+        json!({"level": "rule", "element": {"name": rule, "kind": "sheet", "material": material, "thickness": 2, "radius": "t"}}),
+    );
+    (m["saved"].as_str().unwrap().into(), r["saved"].as_str().unwrap().into())
+}
+
+/// Builds a plate by `rule` from a rectangle; the error of the build, if any.
+fn build_plate(s: &mut Session, rule: &str) -> Result<Value, String> {
+    let points = json!({"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]});
+    let line = |a: &str, b: &str| json!({"from": a, "to": b});
+    s.execute(
+        "add",
+        &json!({"name": "skel", "op": "sketch", "sketch": {"points": points,
+        "lines": {"ab": line("a", "b"), "bc": line("b", "c"), "cd": line("c", "d"), "da": line("d", "a")}}}),
+    )?;
+    s.execute("plate", &json!({"name": "face", "sketch": "skel", "rule": rule}))?;
+    let inspect = s.execute("inspect", &json!({}))?;
+    Ok(inspect)
+}
+
+fn has_feature(inspect: &Value, name: &str) -> bool {
+    inspect.to_string().contains(&format!("\"{name}\""))
+}
+
+/// An unsaved model works in the project it was created in (`new` with `project`): the library
+/// is written there, not beside the program, and its rules are seen before the first save.
+#[test]
+fn an_unsaved_model_works_in_its_project() {
+    let root = project_folder("session_project_new");
+    let mut s = Session::default();
+    run(&mut s, "new", json!({"project": root.display().to_string()}));
+    let (m, r) = put_rule(&mut s, "ProjMat", "ProjRule");
+    assert_eq!(m, root.join("library/material/ProjMat.json"));
+    assert_eq!(r, root.join("library/rule/ProjRule.json"));
+    assert!(m.is_file() && r.is_file());
+    let program = std::env::current_exe().unwrap().parent().unwrap().to_path_buf();
+    assert!(!program.join("library/material/ProjMat.json").exists() && !program.join("library/rule/ProjRule.json").exists());
+    let built = build_plate(&mut s, "ProjRule").unwrap_or_else(|e| panic!("plate by a project rule before the first save: {e}"));
+    assert!(has_feature(&built, "face"), "{built}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// `set_project` on an unsaved model brings its rules; with none they are gone again.
+#[test]
+fn set_project_changes_what_an_unsaved_model_sees() {
+    let root = project_folder("session_project_set");
+    let mut writer = Session::default();
+    run(&mut writer, "new", json!({"project": root.display().to_string()}));
+    put_rule(&mut writer, "SetMat", "SetRule");
+    let rules = |s: &mut Session| run(s, "library", json!({"level": "rule"}))["elements"].to_string();
+    let mut s = Session::default();
+    run(&mut s, "new", json!({}));
+    assert!(!rules(&mut s).contains("SetRule"));
+    assert!(build_plate(&mut s, "SetRule").is_err(), "no project, no rule");
+    let mut s = Session::default();
+    run(&mut s, "new", json!({}));
+    run(&mut s, "set_project", json!({"project": root.display().to_string()}));
+    assert!(rules(&mut s).contains("SetRule"));
+    let built = build_plate(&mut s, "SetRule").unwrap_or_else(|e| panic!("{e}"));
+    assert!(has_feature(&built, "face"), "{built}");
+    run(&mut s, "set_project", json!({}));
+    assert!(!rules(&mut s).contains("SetRule"), "no project again");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A model with a file keeps the project of its file, whatever `set_project` says.
+#[test]
+fn the_project_of_the_file_wins() {
+    let (a, b) = (project_folder("session_project_a"), project_folder("session_project_b"));
+    let mut s = Session::default();
+    run(&mut s, "new", json!({"project": a.display().to_string()}));
+    put_rule(&mut s, "AMat", "ARule");
+    run(&mut s, "save", json!({"path": a.join("part/plate.json").display().to_string()}));
+    run(&mut s, "set_project", json!({"project": b.display().to_string()}));
+    let rules = run(&mut s, "library", json!({"level": "rule"}))["elements"].to_string();
+    assert!(rules.contains("ARule"), "{rules}");
+    let built = build_plate(&mut s, "ARule").unwrap_or_else(|e| panic!("{e}"));
+    assert!(has_feature(&built, "face"), "{built}");
+    let put = run(&mut s, "put_library", json!({"level": "material", "element": {"name": "More", "density": 1}}));
+    assert_eq!(std::path::PathBuf::from(put["saved"].as_str().unwrap()), a.join("library/material/More.json"));
+    let _ = std::fs::remove_dir_all(&a);
+    let _ = std::fs::remove_dir_all(&b);
+}
+
+/// `new` without `project` forgets the project of the one before.
+#[test]
+fn new_without_a_project_has_none() {
+    let root = project_folder("session_project_forgot");
+    let mut s = Session::default();
+    run(&mut s, "new", json!({"project": root.display().to_string()}));
+    put_rule(&mut s, "FMat", "FRule");
+    run(&mut s, "new", json!({}));
+    let rules = run(&mut s, "library", json!({"level": "rule"}))["elements"].to_string();
+    assert!(!rules.contains("FRule"), "{rules}");
+    let _ = std::fs::remove_dir_all(&root);
+}

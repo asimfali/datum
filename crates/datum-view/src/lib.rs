@@ -13,6 +13,7 @@ mod draw;
 mod flat;
 mod i18n;
 mod icons;
+mod lessons;
 pub mod log;
 mod measure;
 mod origin;

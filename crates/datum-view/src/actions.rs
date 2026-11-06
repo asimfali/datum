@@ -301,7 +301,7 @@ pub const ACTIONS: [Action; 51] = [
         Act::Presets,
         "sketch.presets",
         "By presets",
-        "A library element with presets is placed by one of them: ↑ ↓ pick it from the list by the cursor, a click puts it",
+        "A library element with presets is placed by one of them: the up and down arrow keys pick it from the list by the cursor, a click puts it",
         plain(Key::F4),
         Sketch,
     ),
