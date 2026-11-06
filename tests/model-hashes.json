@@ -253,7 +253,7 @@
   "sheet_side_flange.json": {
     "l": "02d2731d3a28bfcc87e28cb5f58ec1dfe79fc85482e51e36af1f44b33199f746",
     "path": "8d24424d4be5a498ff5c3b563765196e1a9bdf8fe60e39e184340d6e05013fe3",
-    "side_flanged": "1ac66f5d07df8643ec86228e61d94a5215673183825d9d35259bd98a634df376"
+    "side_flanged": "f23893c017abbb8b613b67d33381f2e9de6e3fa42a7247ce9e25ef34ad4990c8"
   },
   "sheet_side_notch.json": {
     "l": "b6bd3e9749481bee6f269f0eeda63bf3f393202d82caf382309f6d1a9efc8559",
@@ -268,10 +268,13 @@
     "slotted": "e07e6ada828f4f29811c2fbade047a8362a4457a0c46711b943597d584e9f78c"
   },
   "sheet_tray.json": {
+    "ends": "20b2a3199632d86b4b783b203cff00bd9ef1a8f1baa1033b3be14637fede3121",
+    "mitred": "75fad95f16268990d9db92f40105637aa34cb11ec383cf03e8d59e5a5d81cb82",
     "outline": "0e986b46551fcef99375e88081ef00a597bf89b847fbef54e18815d047d2e166",
     "plate": "3130c303223acfd8fbd140d8affdfb9238ff3f9cfe3b6e43a45f5d77929345bd",
     "relieved": "1a412778c8808b0b09d7e30d0de5a7993076ac50931ca43c8038a0512f198738",
     "relieved_blank": "5a95a6676b916c478e8f598fbee1b4c8e03ee320d69d35a23c2ccd2a068475a8",
+    "sides": "570c65692d675cee34edb9e5edbef8e2679708b291ef38d61bc9dd49bab42ed3",
     "tray": "2c0746f1296cc6c80b6f9beb6985044a307bcc26f7e7eb5cdfa764de318f58de"
   },
   "sketch_plate.json": {

@@ -237,11 +237,24 @@ fn a_flange_turns_to_the_front_or_the_other_side() {
 fn a_flange_of_45_degrees() {
     let u = u_sheet();
     let (base, ..) = blank(&u);
-    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({"angle": 45})).unwrap();
+    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({"angle": 45, "height_along": true})).unwrap();
     assert!(close(b.volume() - u.volume(), added(1.0, WIDTH, 20.0, 45.0)), "{}", b.volume() - u.volume());
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base.0 + longer(20.0, 45.0)) && close(size.1, WIDTH), "{size:?}");
     assert_eq!((counts, bends), ([4, 0, 0], 6));
+}
+
+/// The height square to the sheet (D229): a flange leaning out or in reaches as high as a square
+/// one, its highest point `height` above the sheet's outer surface.
+#[test]
+fn a_flanges_height_is_square_to_the_sheet() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    for angle in [90.0, 45.0, 120.0] {
+        let b = flange(&p, &long_edges(&p, &long[0]), serde_json::json!({"angle": angle})).unwrap();
+        let top = b.vertices().iter().map(|v| v.point.z).fold(f64::NEG_INFINITY, f64::max);
+        assert!((top - 20.0).abs() < 1e-12, "{angle}: {top}");
+    }
 }
 
 #[test]
@@ -302,6 +315,63 @@ fn a_round_relief_at_each_corner_of_a_tray() {
     }
     // Without the rule's diameter and K: refused.
     assert!(flange(&p, &edges, serde_json::json!({"relief": "round"})).is_err());
+}
+
+/// The corners of a tray closed (D229): at a right angle overlapping, the covering wall grows to
+/// the other's outer face (`r + t`), the other to its inner face less the gap (`r − g`); mitred,
+/// both to the plane halfway, cut square to the wall where its inner face meets it: `r` less the
+/// gap's share. The bends stay.
+#[test]
+fn a_trays_corners_closed() {
+    let p = plate();
+    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
+    let edges = ends_edges(&p, &[long, short].concat());
+    let open = flange(&p, &edges, serde_json::json!({})).unwrap();
+    let wall = 20.0 - (R + T);
+    for g in [0.0, 1.0] {
+        let per_corner = |grow: f64| 4.0 * T * wall * grow;
+        for (corner, grow) in
+            [("overlap_1", (R + T) + (R - g)), ("overlap_2", (R + T) + (R - g)), ("miter", 2.0 * (R - g / std::f64::consts::SQRT_2))]
+        {
+            let b = flange(&p, &edges, serde_json::json!({"corner": corner, "corner_gap": g})).unwrap();
+            let added = b.volume() - open.volume();
+            assert!((added - per_corner(grow)).abs() < 1e-9 * b.volume(), "{corner} {g}: {added} vs {}", per_corner(grow));
+            let f = unfold_side(&b, false, K).unwrap();
+            assert!(f.size.x > 0.0 && f.size.y > 0.0);
+        }
+    }
+    // A closed corner takes the rule's gap.
+    assert!(flange(&p, &edges, serde_json::json!({"corner": "miter"})).is_err());
+}
+
+/// The author's tray (D229): the long sides flanged first, square; then the ends at another angle,
+/// their walls going to the long walls' inner faces, the gap short; the long walls stay.
+#[test]
+fn ends_flanged_after_the_sides_go_to_their_walls() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    let sides = flange(&p, &ends_edges(&p, &long), serde_json::json!({})).unwrap();
+    // The ends' edges on the top: at x = 0 and x = 100.
+    let edges = vec![wall_edge(&sides, 0, 0.0, T), wall_edge(&sides, 0, 100.0, T)];
+    for angle in [90.0, 45.0] {
+        let open = flange(&sides, &edges, serde_json::json!({"angle": angle})).unwrap();
+        let closed = flange(&sides, &edges, serde_json::json!({"angle": angle, "corner": "overlap_1", "corner_gap": 1})).unwrap();
+        assert!(closed.volume() > open.volume(), "{angle}");
+        if angle == 90.0 {
+            // Each end's wall grows by `r − g` at each corner: to the long walls' inner faces.
+            let wall = 20.0 - (R + T);
+            assert!(close(closed.volume() - open.volume(), 4.0 * T * wall * (R - 1.0)), "{}", closed.volume() - open.volume());
+        }
+        let f = unfold_side(&closed, false, K).unwrap();
+        assert!(f.size.x > 0.0);
+        // The long walls as they were: their faces' areas.
+        let walls = |b: &Body| faces_of_area(b, 100.0 * wall_height()).len();
+        assert_eq!(walls(&closed), walls(&sides));
+    }
+}
+
+fn wall_height() -> f64 {
+    20.0 - (R + T)
 }
 
 /// At an inner corner of an L-shaped plate the flanges would run into each other: refused.
@@ -434,7 +504,7 @@ fn a_side_flange_on_the_top() {
 }
 
 #[test]
-fn a_side_flange_on_a_leg_goes_outward() {
+fn a_side_flange_on_a_leg_goes_inward() {
     let u = u_of(MID);
     let e = wall_edge(&u, 0, -2.0, 0.0);
     let b = side_of(&u, std::slice::from_ref(&e), serde_json::json!({}));
@@ -442,14 +512,15 @@ fn a_side_flange_on_a_leg_goes_outward() {
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
     assert_eq!((counts, bends), ([6, 0, 0], 6));
-    // Outward: the leg's outer face is at x = −2, the flange reaches x = −20 (2 + 16 + 2 out of the wall).
+    // Inward, the way the top stands from the leg (D229): the sheet's bounds stay.
     let (lo, _) = b.bounds();
-    assert!(close(lo.x.abs(), 20.0), "{lo:?}");
-    // Flipped: inward, the sheet's bounds stay.
+    assert!(close(lo.x.abs(), 2.0), "{lo:?}");
+    // Flipped: outward, the leg's outer face is at x = −2, the flange reaches x = −20 (2 + 16 + 2
+    // out of the wall).
     let f = side_of(&u, &[e], serde_json::json!({"flip": true}));
     assert!(close(f.volume() - u.volume(), added(1.0, LEG, 20.0, 90.0)));
     let (lo, _) = f.bounds();
-    assert!(close(lo.x.abs(), 2.0), "{lo:?}");
+    assert!(close(lo.x.abs(), 20.0), "{lo:?}");
     assert_eq!(blank(&f), blank(&b));
 }
 
@@ -476,7 +547,8 @@ fn several_side_flanges_in_one_operation() {
     assert!(close(size.0, base_blank(&u).0) && close(size.1, WIDTH + longer(20.0, 90.0)), "{size:?}");
     assert_eq!((counts, bends), ([12, 0, 0], 10));
     let (lo, hi) = b.bounds();
-    assert!(close(lo.x.abs(), 20.0) && close(hi.x, MID + 20.0) && close(hi.y, 80.0), "{lo:?} {hi:?}");
+    // Inward, all within the sheet's bounds.
+    assert!(close(lo.x.abs(), 2.0) && close(hi.x, MID + 2.0) && close(hi.y, 62.0), "{lo:?} {hi:?}");
 }
 
 /// A wall flanged on both sides of the sheet's width (z = 0 and z = 40): the blank grows twice.

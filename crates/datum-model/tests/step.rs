@@ -33,7 +33,7 @@ fn reference_models_export_or_say_why_not() {
                 "rolled_perforation" => &["perforated", "slotted"],
                 "rolled_holes" => &["perforated"],
                 "sheet_bend_cut" => &["punched"],
-                "sheet_tray" => &["relieved"],
+                "sheet_tray" => &["relieved", "mitred"],
                 "rolled_trim" => &["trimmed", "trimmed_other"],
                 "branch_tee" => &["main_with_hole", "branch_saddle"],
                 _ => &[],
