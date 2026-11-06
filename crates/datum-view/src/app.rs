@@ -630,6 +630,8 @@ struct TreeRows {
     renaming: Option<Renaming>,
     clicked: Option<String>,
     renamed: Option<(String, String)>,
+    /// A feature its row's menu asked to remove.
+    removed: Option<String>,
 }
 
 impl TreeRows {
@@ -680,6 +682,12 @@ impl TreeRows {
         if r.clicked() {
             self.clicked = Some(key.to_string());
         }
+        r.context_menu(|ui| {
+            if ui.button(i18n.t("feature-remove", "Remove")).clicked() {
+                self.removed = Some(key.to_string());
+                ui.close();
+            }
+        });
     }
 }
 
@@ -3454,7 +3462,17 @@ impl Viewer {
         });
         self.offsets = offsets;
         let (clicked, renamed) = (tree.clicked.take(), tree.renamed.take());
+        // Removed by its row's menu, or by Delete on the row selected (no sketch open, nothing
+        // typed): the model refuses one another feature uses, and says which.
+        let delete = self.sketch.is_none() && !ui.ctx().text_edit_focused() && ui.input(|i| i.key_pressed(egui::Key::Delete));
+        let removed = tree.removed.take().or_else(|| delete.then(|| tree.selected.clone()).flatten());
         self.tree = tree;
+        if let Some(name) = removed {
+            if self.tree.selected.as_ref() == Some(&name) {
+                self.tree.selected = None;
+            }
+            self.send(Request::Command("remove", json!({"name": name})));
+        }
         // A sketch row clicked while an extrusion waits for one gives it its sketch, and where;
         // otherwise a click selects a row, a second click on the selected row renames it.
         let is_sketch = |key: &str| {
@@ -8143,6 +8161,18 @@ mod tests {
     fn press(h: &mut egui_kittest::Harness<'_, Viewer>, key: egui::Key) {
         h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
+    }
+
+    /// Delete on the selected row removes that feature, and the selection goes with it.
+    #[test]
+    fn delete_removes_the_selected_feature() {
+        let (mut h, inbox) = titled_tree();
+        h.run();
+        h.state_mut().tree.selected = Some("plate".into());
+        press(&mut h, egui::Key::Delete);
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("remove", p) if *p == json!({"name": "plate"}))), "removed");
+        assert!(h.state().tree.selected.is_none(), "selection cleared");
     }
 
     /// A row shows its title, and the key in the tooltip.
