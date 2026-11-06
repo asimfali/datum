@@ -31,4 +31,4 @@ png = { workspace = true }
 rfd = { workspace = true }
 
 [dev-dependencies]
-egui_kittest = { workspace = true, features = ["wgpu", "snapshot", "eframe"] }
+egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }

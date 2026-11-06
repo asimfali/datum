@@ -6333,6 +6333,36 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.window(ui, frame.wgpu_render_state());
+    }
+
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        self.hand_input(ctx, raw);
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        storage.set_string(MAXIMIZED, self.maximized.to_string());
+        storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
+        storage.set_string(SIDE_BAR, self.side_bar.to_text());
+        storage.set_string(TOUCHPAD, self.touchpad.to_string());
+        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
+        if self.language_chosen {
+            storage.set_string(LANGUAGE, self.language.clone());
+        }
+        if self.theme_chosen
+            && let Some((word, _)) = crate::settings::THEMES.iter().find(|(_, pref)| *pref == self.theme)
+        {
+            storage.set_string(THEME, word.to_string());
+        }
+        storage.set_string(RECENT, json!(self.recent).to_string());
+        storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
+        storage.set_string(PROJECT, json!(self.project).to_string());
+    }
+}
+
+impl Viewer {
+    /// One frame of the whole window; no render state: all but the 3D picture.
+    fn window(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let start = std::time::Instant::now();
         if self.shown < 2 {
             self.shown += 1;
@@ -6386,10 +6416,7 @@ impl eframe::App for Viewer {
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
             let style = egui_dock::Style::from_egui(ui.style());
-            egui_dock::DockArea::new(&mut dock)
-                .style(style)
-                .show_add_buttons(false)
-                .show_inside(ui, &mut Tabs { v: self, rs: frame.wgpu_render_state() });
+            egui_dock::DockArea::new(&mut dock).style(style).show_add_buttons(false).show_inside(ui, &mut Tabs { v: self, rs });
             self.dock = dock;
         });
         // The flat pattern pane closed on a sketch on the blank finishes the sketch, as Done does.
@@ -6398,29 +6425,6 @@ impl eframe::App for Viewer {
         }
         self.lesson_card(ui.ctx());
         self.ui_ms = smooth(self.ui_ms, start.elapsed().as_secs_f64() * 1e3);
-    }
-
-    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
-        self.hand_input(ctx, raw);
-    }
-
-    fn save(&mut self, storage: &mut dyn eframe::Storage) {
-        storage.set_string(MAXIMIZED, self.maximized.to_string());
-        storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
-        storage.set_string(SIDE_BAR, self.side_bar.to_text());
-        storage.set_string(TOUCHPAD, self.touchpad.to_string());
-        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
-        if self.language_chosen {
-            storage.set_string(LANGUAGE, self.language.clone());
-        }
-        if self.theme_chosen
-            && let Some((word, _)) = crate::settings::THEMES.iter().find(|(_, pref)| *pref == self.theme)
-        {
-            storage.set_string(THEME, word.to_string());
-        }
-        storage.set_string(RECENT, json!(self.recent).to_string());
-        storage.set_string(RECENT_PROJECTS, json!(self.recent_projects).to_string());
-        storage.set_string(PROJECT, json!(self.project).to_string());
     }
 }
 
@@ -6613,13 +6617,11 @@ mod tests {
     /// The window as the engineer has it, with the worker: the repo's lessons in `project`.
     fn lesson_window_harness(project: &std::path::Path) -> egui_kittest::Harness<'static, Viewer> {
         let project = project.to_path_buf();
-        egui_kittest::Harness::builder().with_size([1280.0, 800.0]).build_eframe(move |cc| {
-            let mut v = Viewer::new(None, cc.egui_ctx.clone(), "test".into());
-            v.i18n = crate::i18n::I18n::of("ru");
-            v.lessons = crate::lessons::read(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")));
-            v.set_project(Some(project));
-            v
-        })
+        let mut v = Viewer::new(None, egui::Context::default(), "test".into());
+        v.i18n = crate::i18n::I18n::of("ru");
+        v.lessons = crate::lessons::read(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")));
+        v.set_project(Some(project));
+        egui_kittest::Harness::builder().with_size([1280.0, 800.0]).build_ui_state(|ui, v: &mut Viewer| v.window(ui, None), v)
     }
 
     fn features_of(v: &Viewer) -> usize {
