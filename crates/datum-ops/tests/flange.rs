@@ -600,19 +600,49 @@ fn a_notch_in_a_side_flange() {
     assert_eq!(counts, [12, 0, 0]);
 }
 
-/// A hole on a leg across the edge where its side flange stands reaches the flange: refused.
+/// A hole on a leg across the edge where its side flange stands goes on through the flange's bend
+/// (D229): the blank lays the flange across from the leg, the hole on it one circle.
 #[test]
-fn a_hole_reaching_a_side_flange_is_refused() {
+fn a_hole_reaching_a_side_flange_goes_through_its_bend() {
     let u = u_of(MID);
     let b = side_of(&u, &[wall_edge(&u, 0, -2.0, 0.0)], serde_json::json!({}));
     let target = Value::Body(b.clone());
     let first = b.faces().iter().find(|f| matches!(f.surface, Surface::Plane(p) if p.normal.x < -0.5 && p.origin.x <= 0.0)).unwrap();
-    // The sketch's Y is −z: the circle spans z from −1 to 5.
-    let sketch = serde_json::json!({"points": {"h": [30, -2]}, "circles": {"c": {"center": "h", "diameter": 6}}});
-    let placed = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", first.id), "k_factor": K, "sketch": sketch}))
-        .eval(id("hole"), &[&target])
-        .unwrap();
-    let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
-    let r = cut.eval(id("cut"), &[&target, &placed]);
-    assert!(matches!(r, Err(BrepError::Unsupported(ref m)) if m.contains("flange")), "{:?}", r.map(|_| ()));
+    // The sketch's Y is −z: the circle of 6 spans z from −1 to 5, into the bend; of 14 from −5 to
+    // 9, on into the flange's wall.
+    for d in [6.0, 14.0] {
+        let sketch = serde_json::json!({"points": {"h": [30, -2]}, "circles": {"c": {"center": "h", "diameter": d}}});
+        let placed = op(serde_json::json!({"op": "sketch", "face": format!("{:?}", first.id), "k_factor": K, "sketch": sketch}))
+            .eval(id("hole"), &[&target])
+            .unwrap();
+        let cut = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}));
+        let r = cut.eval(id("cut"), &[&target, &placed]).unwrap().body().unwrap().clone();
+        r.validate().unwrap();
+        tessellate(&r).unwrap();
+        assert!(r.volume() < b.volume());
+        let flat = unfold_side(&r, false, K).unwrap();
+        hole_of(&flat, 0.5 * d);
+    }
+}
+
+/// The hole of radius `r` in `flat`: one circle, or arcs of one circle round it.
+fn hole_of(flat: &datum_ops::Flat, r: f64) -> datum_math::Vec2 {
+    use datum_ops::FlatPiece;
+    let mut centre = None;
+    let mut turn = 0.0;
+    for p in &flat.pieces {
+        let (c, radius, sweep) = match *p {
+            FlatPiece::Circle { center, radius } => (center, radius, std::f64::consts::TAU),
+            FlatPiece::Arc { center, radius, start, end } => (center, radius, (end - start).rem_euclid(std::f64::consts::TAU)),
+            _ => continue,
+        };
+        if (radius - r).abs() > 1e-9 {
+            continue;
+        }
+        let at = *centre.get_or_insert(c);
+        assert!((c.x - at.x).abs() < 1e-9 && (c.y - at.y).abs() < 1e-9, "{c:?} {at:?}");
+        turn += sweep;
+    }
+    assert!((turn - std::f64::consts::TAU).abs() < 1e-9, "{turn} {:?}", flat.pieces);
+    centre.unwrap()
 }

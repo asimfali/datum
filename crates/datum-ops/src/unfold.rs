@@ -185,7 +185,7 @@ impl Laid {
 /// The faces that go on smoothly from `x` across an edge of its outline, each once with the first
 /// half-edge it is across (a cut across the bend line breaks it into several): outward normals
 /// agree along the edge (a bend line), where an end or a cap of the sheet turns by a right angle.
-fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
+pub(crate) fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
     let mut seen = BTreeSet::new();
     let he = |h: Ix| body.half_edges()[h as usize];
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
@@ -203,7 +203,7 @@ fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
 /// The strip of face `x`: the faces of its surface. One face, or the pieces a cut divided it
 /// into (D201): they keep its surface bit for bit, so they are found by it, not by nearness.
 /// In face order.
-fn strip(body: &Body, x: Ix) -> Vec<Ix> {
+pub(crate) fn strip(body: &Body, x: Ix) -> Vec<Ix> {
     let surface = body.faces()[x as usize].surface;
     (0..body.faces().len() as Ix).filter(|&y| body.faces()[y as usize].surface == surface).collect()
 }
@@ -515,7 +515,26 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         Ok(match (curve, &l.lay) {
             (None, _) | (Some(Curve::Arc(_)), Lay::Bend { .. }) => FlatPiece::Line(from, to),
             (Some(Curve::Arc(_)), _) if bend => FlatPiece::Line(from, to),
-            (Some(Curve::Rolled { .. }), _) if l.branch.is_some() => return Err(unsupported("a cut across a flange's bend on the side comes later")),
+            (Some(Curve::Rolled { piece, .. }), Lay::Plane { along, .. }) if l.branch.is_some() => {
+                let Some(Branch { sign, part: Part::Bend { axis, neutral, .. }, .. }) = l.branch else {
+                    return Err(unsupported("a rolled edge on a flange's wall"));
+                };
+                if piece.dev.neutral != neutral {
+                    return Err(unsupported("a cut was made with another K-factor"));
+                }
+                match (piece.arc, piece.trace) {
+                    (_, Some(_)) => return Err(unsupported("a traced cut across a flange's bend on the side comes later")),
+                    (None, None) => FlatPiece::Line(from, to),
+                    (Some(pa), None) => {
+                        // Across X: the development's `u` runs along Y away from the wall, its `v`
+                        // along X.
+                        let o = l.at(piece.dev.point(Vec2::new(0.0, 0.0), neutral), y);
+                        let su = sign * if piece.dev.axis.dot(axis) > 0.0 { 1.0 } else { -1.0 };
+                        let sv = if piece.dev.axis.dot(*along) > 0.0 { 1.0 } else { -1.0 };
+                        arc_piece(Vec2::new(o.x + sv * pa.center.y, o.y + su * pa.center.x), from, to, pa.ccw == (su * sv < 0.0))
+                    }
+                }
+            }
             (Some(Curve::Arc(arc)), Lay::Plane { .. }) => {
                 let n = normal(l.face, body.point(he(h).origin));
                 arc_piece(l.at(arc.center, y), from, to, arc.axis.dot(n) > 0.0)
