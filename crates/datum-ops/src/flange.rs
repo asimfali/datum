@@ -15,13 +15,14 @@ use serde::{Deserialize, Serialize};
 use crate::bent::Corner;
 use crate::sketch::parallel;
 
-/// What a flange is: its height from the outer surface of the sheet (for a right angle; else
-/// along the flange from where its outer surface meets the sheet's), the angle it turns by in
-/// degrees, its bend's inner radius, the side it turns to (`flip`: the other), and at corners
+/// What a flange is: its height from the outer surface of the sheet, square to it up to the
+/// flange's highest point (`along`: for another angle than a right one, along the flange from where
+/// its outer surface meets the sheet's, D205), the angle it turns by in degrees, its bend's inner radius, the side it turns to (`flip`: the other), and at corners
 /// where flanges meet a round relief's diameter and the K-factor the blank is laid at (D229).
 #[derive(Clone, Copy, Debug)]
 pub struct FlangeDims {
     pub height: f64,
+    pub along: bool,
     pub angle: f64,
     pub radius: f64,
     pub flip: bool,
@@ -615,12 +616,23 @@ impl Shape {
         // Turning `n` toward `up`: about `w` or `-w`.
         let axis = if w.cross(n).dot(up) > 0.0 { w } else { w * -1.0 };
         let along = turned(n, axis, turn);
-        // At a right angle exactly `r + t`: tan 45° in floating point is not quite 1, and a flange
-        // as high as its bend would come out a sliver instead of refused.
-        let set_back = (r + t) * if dims.angle == 90.0 { 1.0 } else { libm::tan(0.5 * a) };
-        let wall = dims.height - set_back;
+        // At a right angle exactly `r + t` either way: tan 45° and cos 90° in floating point are
+        // not quite 1 and 0, and a flange as high as its bend would come out a sliver instead of
+        // refused. Square to the sheet: the bend rises `R − c·cos a` to the wall's highest face
+        // (`c` the inner radius leaning out, the outer leaning in), the wall `sin a` a unit.
+        let big = r + t;
+        let (wall, bend) = if dims.angle == 90.0 {
+            (dims.height - big, big)
+        } else if dims.along {
+            let set_back = big * libm::tan(0.5 * a);
+            (dims.height - set_back, set_back)
+        } else {
+            let (sn, cs) = turn;
+            let rise = big - if cs >= 0.0 { r } else { big } * cs;
+            ((dims.height - rise) / sn, rise)
+        };
         if wall.is_nan() || wall <= 0.0 {
-            return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({set_back:.3})", dims.height)));
+            return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({bend:.3})", dims.height)));
         }
         // One axis for the bend's both sides, through the inner edge's start `r` up: both sides
         // turn about it, so the two cylinders are coaxial exactly (made apart, they part in the
@@ -667,35 +679,42 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
         Ok((b.at - p).dot(b.normal) / d)
     };
     // From each corner of the end, about the bend's axis: where the bend ends, and the wall's top;
-    // with a bound at that end, also where the wall's foot meets it. The vertex at the bend's end,
-    // at the wall's foot on the bound (itself when it is there), at the top.
-    let mut corner = |end: usize, v: Ix, k: u64| -> Result<[TopoId; 4], BrepError> {
-        let q = shape.turned(target.point(v));
-        let (vq, ve, vs) = (id("flange.v", k), id("flange.v", k + 1), id("flange.v", 8 + k));
-        vertices.push(Vertex { id: vq, point: q });
-        let (foot, top) = match &bounds[end] {
-            None => (vq, q + along * wall),
+    // with a bound at that end, also where the wall's foot meets it. Cut square to the wall, as a
+    // laser cuts: both faces of the wall end alike, where the first of them meets the plane. For
+    // the inner face and the outer at end `s`: the vertex at the bend's end, at the wall's foot on
+    // the bound (itself when it is there), at the top.
+    let mut side = |s: usize, vi: Ix, vo: Ix| -> Result<[[TopoId; 4]; 2], BrepError> {
+        let q = [vi, vo].map(|v| shape.turned(target.point(v)));
+        let (top, foot) = match &bounds[s] {
+            None => (0.0, 0.0),
             Some(b) => {
-                let out = if end == 0 { -1.0 } else { 1.0 };
-                let (f, h) = (reach(b, q)?, reach(b, q + along * wall)?);
+                let out = if s == 0 { -1.0 } else { 1.0 };
+                // Of the two faces' reach, the nearer the edge's end.
+                let nearer = |x: f64, y: f64| if out > 0.0 { x.min(y) } else { x.max(y) };
+                let foot = nearer(reach(b, q[0])?, reach(b, q[1])?);
+                let top = nearer(reach(b, q[0] + along * wall)?, reach(b, q[1] + along * wall)?);
                 // The bend stays as it is: a plane into it would cut it.
-                if f * out < 0.0 {
+                if foot * out < 0.0 {
                     return Err(BrepError::Unsupported("flange: the corner's plane cuts into the bend: comes later".into()));
                 }
-                if f != 0.0 {
-                    vertices.push(Vertex { id: vs, point: q + w * f });
-                }
-                (if f == 0.0 { vq } else { vs }, q + along * wall + w * h)
+                (top, foot)
             }
         };
-        vertices.push(Vertex { id: ve, point: top });
-        Ok([target.vertices()[v as usize].id, vq, foot, ve])
+        let mut layer = |l: usize, v: Ix| -> [TopoId; 4] {
+            let k = 2 * s as u64 + 4 * l as u64;
+            let (vq, ve, vs) = (id("flange.v", k), id("flange.v", k + 1), id("flange.v", 8 + k));
+            vertices.push(Vertex { id: vq, point: q[l] });
+            if foot != 0.0 {
+                vertices.push(Vertex { id: vs, point: q[l] + w * foot });
+            }
+            vertices.push(Vertex { id: ve, point: q[l] + along * wall + w * top });
+            [target.vertices()[v as usize].id, vq, if foot == 0.0 { vq } else { vs }, ve]
+        };
+        Ok([layer(0, vi), layer(1, vo)])
     };
     // Inner and outer, at the start and end of the width.
-    let [ii0, ji0, fi0, ki0] = corner(0, i0, 0)?;
-    let [ii1, ji1, fi1, ki1] = corner(1, i1, 2)?;
-    let [oo0, po0, fo0, qo0] = corner(0, o0, 4)?;
-    let [oo1, po1, fo1, qo1] = corner(1, o1, 6)?;
+    let [[ii0, ji0, fi0, ki0], [oo0, po0, fo0, qo0]] = side(0, i0, o0)?;
+    let [[ii1, ji1, fi1, ki1], [oo1, po1, fo1, qo1]] = side(1, i1, o1)?;
     let point = |v: TopoId| vertices.iter().find(|x| x.id == v).map_or(Vec3::ZERO, |x| x.point);
     // A loop of `ids` turning about `outward` by the right hand; a vertex twice in a row once.
     let oriented = |mut ids: Vec<TopoId>, outward: Vec3| -> Vec<TopoId> {
@@ -760,7 +779,7 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
     for (s, (join, [ii, ji, fi, ki, qo, fo, po, oo])) in joins.iter().zip(ends).enumerate() {
         let outward = if s == 0 { w * -1.0 } else { w };
         let k = s as u64;
-        if let Some(b) = &bounds[s] {
+        if bounds[s].is_some() {
             faces.push(face("flange.side", k, Surface::Plane(Plane { origin: point(ii), normal: outward }), oriented(vec![ii, ji, po, oo], outward)));
             if (fi, fo) != (ji, po) {
                 faces.push(face(
@@ -770,12 +789,12 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
                     oriented(vec![ji, fi, fo, po], along * -1.0),
                 ));
             }
-            faces.push(face(
-                "flange.bound",
-                k,
-                Surface::Plane(Plane { origin: point(fi), normal: b.normal }),
-                oriented(vec![fi, ki, qo, fo], b.normal),
-            ));
+            // Square to the wall, facing past the end.
+            let mut normal = unit((point(ki) - point(fi)).cross(point(fo) - point(fi)));
+            if normal.dot(outward) < 0.0 {
+                normal = normal * -1.0;
+            }
+            faces.push(face("flange.bound", k, Surface::Plane(Plane { origin: point(fi), normal }), oriented(vec![fi, ki, qo, fo], normal)));
             continue;
         }
         let chain = vec![ii, ji, ki, qo, po, oo];

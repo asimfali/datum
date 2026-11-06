@@ -321,6 +321,7 @@ param-taken = `{ $name }` — уже параметр: меняйте его з�
 plane-offset = Смещение
 plane-offset-hint = число или формула
 flange-height = Высота
+flange-height-along = Высота вдоль фланца (иначе — по перпендикуляру к листу)
 flange-angle = Угол
 flange-flip = Другая сторона
 flange-relief = Разгрузка в углу

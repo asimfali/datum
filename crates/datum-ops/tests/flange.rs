@@ -237,11 +237,24 @@ fn a_flange_turns_to_the_front_or_the_other_side() {
 fn a_flange_of_45_degrees() {
     let u = u_sheet();
     let (base, ..) = blank(&u);
-    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({"angle": 45})).unwrap();
+    let b = flange(&u, &long_edges(&u, &ends(&u)[0]), serde_json::json!({"angle": 45, "height_along": true})).unwrap();
     assert!(close(b.volume() - u.volume(), added(1.0, WIDTH, 20.0, 45.0)), "{}", b.volume() - u.volume());
     let (size, counts, bends) = blank(&b);
     assert!(close(size.0, base.0 + longer(20.0, 45.0)) && close(size.1, WIDTH), "{size:?}");
     assert_eq!((counts, bends), ([4, 0, 0], 6));
+}
+
+/// The height square to the sheet (D229): a flange leaning out or in reaches as high as a square
+/// one, its highest point `height` above the sheet's outer surface.
+#[test]
+fn a_flanges_height_is_square_to_the_sheet() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    for angle in [90.0, 45.0, 120.0] {
+        let b = flange(&p, &long_edges(&p, &long[0]), serde_json::json!({"angle": angle})).unwrap();
+        let top = b.vertices().iter().map(|v| v.point.z).fold(f64::NEG_INFINITY, f64::max);
+        assert!((top - 20.0).abs() < 1e-12, "{angle}: {top}");
+    }
 }
 
 #[test]
@@ -306,7 +319,8 @@ fn a_round_relief_at_each_corner_of_a_tray() {
 
 /// The corners of a tray closed (D229): at a right angle overlapping, the covering wall grows to
 /// the other's outer face (`r + t`), the other to its inner face less the gap (`r − g`); mitred,
-/// both to the plane halfway, each `r + t/2` on average less the gap's share. The bends stay.
+/// both to the plane halfway, cut square to the wall where its inner face meets it: `r` less the
+/// gap's share. The bends stay.
 #[test]
 fn a_trays_corners_closed() {
     let p = plate();
@@ -317,7 +331,7 @@ fn a_trays_corners_closed() {
     for g in [0.0, 1.0] {
         let per_corner = |grow: f64| 4.0 * T * wall * grow;
         for (corner, grow) in
-            [("overlap_1", (R + T) + (R - g)), ("overlap_2", (R + T) + (R - g)), ("miter", 2.0 * (R + 0.5 * T - g / std::f64::consts::SQRT_2))]
+            [("overlap_1", (R + T) + (R - g)), ("overlap_2", (R + T) + (R - g)), ("miter", 2.0 * (R - g / std::f64::consts::SQRT_2))]
         {
             let b = flange(&p, &edges, serde_json::json!({"corner": corner, "corner_gap": g})).unwrap();
             let added = b.volume() - open.volume();

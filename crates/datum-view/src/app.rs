@@ -849,6 +849,8 @@ struct FlangeForm {
     flip: bool,
     round: bool,
     corner: &'static str,
+    /// The height along the flange, not square to the sheet.
+    along: bool,
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -859,7 +861,7 @@ struct FlangeForm {
 impl FlangeForm {
     /// What the form says of the flange: the fields an edit of it changes.
     fn fields(&self) -> Json {
-        json!({"name": self.name, "height": value_of(&self.height), "angle": value_of(&self.angle), "flip": self.flip,
+        json!({"name": self.name, "height": value_of(&self.height), "height_along": self.along, "angle": value_of(&self.angle), "flip": self.flip,
             "relief": if self.round { "round" } else { "square" }, "corner": self.corner})
     }
 
@@ -4228,6 +4230,7 @@ impl Viewer {
                     flip: f["flip"] == true,
                     round: f["relief"] == "round",
                     corner: CORNERS.into_iter().find(|c| f["corner"] == *c).unwrap_or("open"),
+                    along: f["height_along"] == true,
                     fresh: true,
                     sent: None,
                     editing: true,
@@ -4522,6 +4525,7 @@ impl Viewer {
             flip: false,
             round: false,
             corner: "open",
+            along: false,
             fresh: true,
             sent: None,
             editing: false,
@@ -4563,6 +4567,7 @@ impl Viewer {
                         r.request_focus();
                     }
                 });
+                ui.checkbox(&mut f.along, self.i18n.t("flange-height-along", "Height along the flange"));
                 ui.horizontal(|ui| {
                     ui.label(self.i18n.t("flange-angle", "Angle"));
                     ui.add(
@@ -8738,14 +8743,15 @@ mod tests {
             flip: true,
             round: true,
             corner: "miter",
+            along: false,
             fresh: false,
             sent: None,
             editing: false,
         };
         assert_eq!(
             form.params("sheet1", &faces),
-            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "angle": "h + 5", "flip": true,
-                "relief": "round", "corner": "miter"})
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "angle": "h + 5",
+                "flip": true, "relief": "round", "corner": "miter"})
         );
     }
 
