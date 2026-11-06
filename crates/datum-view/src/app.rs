@@ -17,6 +17,7 @@ use crate::actions::{ACTIONS, Act, Action, Keys};
 use crate::camera::Camera;
 use crate::dims::{Axis, Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
+use crate::icons::Icon;
 use crate::render::{BACKGROUND, Frame, Renderer};
 use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
@@ -635,12 +636,12 @@ impl TreeRows {
     /// A feature's row label: its title, or its key without one (then the title's tooltip names
     /// the key), and `tail`; a text field while it is renamed. Enter takes the text, Esc or
     /// leaving the field drops it.
-    fn label(&mut self, ui: &mut egui::Ui, i18n: &crate::i18n::I18n, f: &Json, mark: &str, tail: &str) {
+    fn label(&mut self, ui: &mut egui::Ui, i18n: &crate::i18n::I18n, f: &Json, mark: Icon, tail: &str) {
         let key = f["name"].as_str().unwrap_or_default();
         let title = f["title"].as_str();
         if let Some(r) = self.renaming.as_mut().filter(|r| r.key == key) {
             let id = ui.id().with(("rename", key));
-            ui.label(mark);
+            crate::icons::mark(ui, mark, ui.visuals().text_color());
             let mut edit = egui::TextEdit::singleline(&mut r.text).id(id).desired_width(140.0).show(ui);
             if std::mem::take(&mut r.fresh) {
                 edit.response.request_focus();
@@ -661,13 +662,14 @@ impl TreeRows {
         }
         // Built, but with something to know (D198): the mark says so, the hint what.
         let warnings: Vec<String> = f["warnings"].as_array().into_iter().flatten().map(|w| warning_text(i18n, w)).collect();
-        let mark = if mark == "✔" && !warnings.is_empty() { "⚠" } else { mark };
-        let text = egui::RichText::new(format!("{mark} {}  ·  {tail}", title.unwrap_or(key)));
-        let text = match mark {
-            "✖" => text.color(ui.visuals().error_fg_color),
-            "⚠" => text.color(ui.visuals().warn_fg_color),
-            _ => text,
+        let mark = if mark == Icon::Done && !warnings.is_empty() { Icon::Warning } else { mark };
+        let text = egui::RichText::new(format!("{}  ·  {tail}", title.unwrap_or(key)));
+        let (text, colour) = match mark {
+            Icon::Failed => (text.color(ui.visuals().error_fg_color), ui.visuals().error_fg_color),
+            Icon::Warning => (text.color(ui.visuals().warn_fg_color), ui.visuals().warn_fg_color),
+            _ => (text, ui.visuals().text_color()),
         };
+        crate::icons::mark(ui, mark, colour);
         let mut r = ui.selectable_label(self.selected.as_deref() == Some(key), text);
         if !warnings.is_empty() {
             r = r.on_hover_text(warnings.join("\n"));
@@ -2425,7 +2427,7 @@ impl Viewer {
                     .on_hover_text(self.i18n.t("update-hint", "Its page: what is new, and the download"));
                 ui.separator();
             }
-            use crate::icons::{Icon, button};
+            use crate::icons::button;
             for (act, icon) in [(Act::Undo, Icon::Undo), (Act::Redo, Icon::Redo)] {
                 let a = act.action();
                 if button(ui, icon, self.i18n.label(act), &self.keys.hint(ui.ctx(), &self.i18n, act), self.available(a)).clicked() {
@@ -2722,7 +2724,7 @@ impl Viewer {
                     for (n, _, d, _, err) in &family {
                         let r = ui.selectable_label(chosen.as_ref() == Some(n), format!("{}{n}", "   ".repeat(*d + 1)));
                         let r = match err {
-                            Some(e) => r.on_hover_text(format!("✖ {e}")),
+                            Some(e) => r.on_hover_text(e),
                             None => r,
                         };
                         if r.clicked() {
@@ -2756,7 +2758,7 @@ impl Viewer {
             });
             for (n, _, _, _, err) in &family {
                 if let Some(e) = err {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {n}: {e}"));
+                    crate::icons::marked(ui, Icon::Failed, ui.visuals().error_fg_color, &format!("{n}: {e}"));
                 }
             }
         }
@@ -2940,7 +2942,7 @@ impl Viewer {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
         for n in &m.notes {
-            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {n}"));
+            crate::icons::marked(ui, Icon::Warning, ui.visuals().warn_fg_color, n);
         }
     }
 
@@ -2965,7 +2967,7 @@ impl Viewer {
             // What the sketch breaks downstream: why the model behind did not change.
             for f in m.inspect["features"].as_array().into_iter().flatten().filter(|f| f["name"] != sk.feature.as_str()) {
                 if let (Some(name), Some(e)) = (f["name"].as_str(), f["error"].as_str()) {
-                    ui.colored_label(ui.visuals().error_fg_color, format!("✖ {name}: {e}"));
+                    crate::icons::marked(ui, Icon::Failed, ui.visuals().error_fg_color, &format!("{name}: {e}"));
                 }
             }
             // One under another (D166): what to draw, what to constrain, what to do with the
@@ -3178,7 +3180,8 @@ impl Viewer {
                 };
                 // In a level: one it sets otherwise goes back to the parent's; one it inherits stays.
                 if set.contains(name) {
-                    if ui.button("↺").on_hover_text(self.i18n.t("param-reset-hint", "Set in this variant: back to the parent's value")).clicked() {
+                    let hint = self.i18n.t("param-reset-hint", "Set in this variant: back to the parent's value");
+                    if crate::icons::button(ui, Icon::Undo, self.i18n.t("revert-name", "Back to the parent's"), hint, true).clicked() {
                         revert = Some(json!({"parameter": name}));
                     }
                 } else if (level.is_none() || own_parameters.contains(name))
@@ -3266,7 +3269,7 @@ impl Viewer {
             for f in m.inspect["features"].as_array().into_iter().flatten() {
                 let bare = f["name"].as_str().unwrap_or_default();
                 let op = f["op"].as_str().unwrap_or_default();
-                // In a level: what it changes of its parent's (a dot, ↺ back), what is its own (+).
+                // In a level: what it changes of its parent's (a dot, the undo arrow back), what is its own (+).
                 let (is_changed, is_own) = (changed.iter().any(|c| c == bare), own.iter().any(|c| c == bare));
                 let mut row = |ui: &mut egui::Ui| match f["error"].as_str() {
                     // A flat blank: its size, and its DXF for the turret press.
@@ -3274,7 +3277,7 @@ impl Viewer {
                         let flat = &f["status"]["flat"];
                         ui.horizontal(|ui| {
                             let (w, h) = (flat["width"].as_f64().unwrap_or(0.0), flat["height"].as_f64().unwrap_or(0.0));
-                            tree.label(ui, &self.i18n, f, "✔", &format!("{op}  ·  {w:.1} × {h:.1}"));
+                            tree.label(ui, &self.i18n, f, Icon::Done, &format!("{op}  ·  {w:.1} × {h:.1}"));
                             if ui
                                 .button(self.i18n.t("feature-show", "Show"))
                                 .on_hover_text(self.i18n.t("feature-show-hint", "In the flat pattern pane"))
@@ -3297,7 +3300,7 @@ impl Viewer {
                                 (Some(plane), false) => plane.to_string(),
                                 (None, _) => f["base"].as_str().unwrap_or("xy").to_uppercase(),
                             };
-                            tree.label(ui, &self.i18n, f, "✔", &format!("{from} +"));
+                            tree.label(ui, &self.i18n, f, Icon::Done, &format!("{from} +"));
                             let text = offsets.entry(bare.to_string()).or_default();
                             let r = ui
                                 .add(egui::TextEdit::singleline(text).desired_width(90.0).hint_text(self.i18n.t("offset", "offset")))
@@ -3311,7 +3314,7 @@ impl Viewer {
                     // Changed in the form it was made in, its values in it.
                     None if matches!(op, "revolve" | "rolled" | "trim" | "extrude" | "sheet" | "plate" | "flange") => {
                         ui.horizontal(|ui| {
-                            tree.label(ui, &self.i18n, f, "✔", op);
+                            tree.label(ui, &self.i18n, f, Icon::Done, op);
                             let hint = self.i18n.t("edit-feature", "Change it");
                             if crate::icons::button(ui, crate::icons::Icon::Edit, hint, hint, true).clicked() {
                                 reedit = Some(bare.to_string());
@@ -3325,7 +3328,7 @@ impl Viewer {
                                 crate::icons::paint(ui.painter(), rect.center(), crate::icons::Icon::Flat, ui.visuals().text_color());
                                 r.on_hover_text(self.i18n.t("feature-flat-sketch", "Drawn on the blank"));
                             }
-                            tree.label(ui, &self.i18n, f, "✔", op);
+                            tree.label(ui, &self.i18n, f, Icon::Done, op);
                             if crate::icons::button(
                                 ui,
                                 crate::icons::Icon::Edit,
@@ -3340,19 +3343,23 @@ impl Viewer {
                         });
                     }
                     None => {
-                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, "✔", op));
+                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, Icon::Done, op));
                     }
                     Some(e) => {
-                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, "✖", op));
+                        ui.horizontal(|ui| tree.label(ui, &self.i18n, f, Icon::Failed, op));
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
                 ui.horizontal(|ui| {
                     if is_changed
-                        && ui
-                            .button("↺")
-                            .on_hover_text(self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"))
-                            .clicked()
+                        && crate::icons::button(
+                            ui,
+                            Icon::Undo,
+                            self.i18n.t("revert-name", "Back to the parent's"),
+                            self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"),
+                            true,
+                        )
+                        .clicked()
                     {
                         revert = Some(json!({"feature": bare}));
                     }
@@ -4728,7 +4735,7 @@ impl Viewer {
                         let (mode, body) = (reply["mode"].as_str().unwrap_or_default(), reply["body"].as_str().unwrap_or_default());
                         ui.label(self.i18n.f("extrude-preview", "{ $mode } · { $body }", &[("mode", mode_name(&self.i18n, mode)), ("body", body)]));
                         for w in reply["warnings"].as_array().into_iter().flatten().filter(|w| w["feature"] == params["name"]) {
-                            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {}", warning_text(&self.i18n, w)));
+                            crate::icons::marked(ui, Icon::Warning, ui.visuals().warn_fg_color, &warning_text(&self.i18n, w));
                         }
                     }
                     Some(Err(why)) => {
@@ -5634,7 +5641,7 @@ pub(crate) fn marks(inspect: &Json) -> (Vec<String>, Vec<String>, Vec<String>, V
 /// What parts and variants are, for the hint over them (D152).
 const LEVELS: &str = "A part is a body of the base; a variant takes its part and changes only what differs (a length, a few \
                       holes): a change to the base reaches every variant. A dot: changed here, \
-                      ↺ back as the parent has it, + its own";
+                      the undo arrow takes it back as the parent has it, + its own";
 
 /// `prefix k`, the first not a level's name yet.
 /// A variant as the panel lists it: name, parent, depth, part, error.
@@ -8020,7 +8027,7 @@ mod tests {
     fn a_row_shows_its_title() {
         let (mut h, _inbox) = titled_tree();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").hover();
+        h.get_by_label("Plate  ·  sketch").hover();
         h.run();
         h.get_by_label("Key: outline — commands and the agent use it");
     }
@@ -8031,7 +8038,7 @@ mod tests {
     fn a_title_typed_in_the_row() {
         let (mut h, inbox) = titled_tree();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.get_by_label("Plate  ·  sketch").click();
         h.run();
         assert_eq!(h.state().tree.selected.as_deref(), Some("outline"));
         press(&mut h, egui::Key::F2);
@@ -8056,9 +8063,9 @@ mod tests {
     fn a_second_click_renames_and_esc_cancels() {
         let (mut h, inbox) = titled_tree();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.get_by_label("Plate  ·  sketch").click();
         h.run();
-        h.get_by_label("✔ Plate  ·  sketch").click();
+        h.get_by_label("Plate  ·  sketch").click();
         h.run();
         h.run();
         assert!(h.state().tree.renaming.is_some());
@@ -8228,7 +8235,7 @@ mod tests {
     }
 
     /// A new parameter from the panel (issue #57): Add sends it, a formula as typed; a name
-    /// taken already is refused in the window; ✖ removes one.
+    /// taken already is refused in the window; the remove button drops one.
     #[test]
     fn parameters_are_added_and_removed() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
@@ -8275,7 +8282,7 @@ mod tests {
 
     /// The base and its parts in the panel (D152, D169): a click on a part works in it, in the
     /// variant the product has of it (D160); the base works in the root; a new variant is made of
-    /// its part below the one chosen; in a variant, the sketch it changes has ↺, which takes it back.
+    /// its part below the one chosen; in a variant, the sketch it changes has the undo arrow, which takes it back.
     #[test]
     fn parts_and_variants_in_the_panel() {
         let (mut v, inbox) = viewer("wall_variants.json");
@@ -8303,7 +8310,7 @@ mod tests {
         click(&mut v, "Save");
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("save_set", p) if p["name"] == "Шкаф 2 м")));
         assert_eq!(v.new_set, None);
-        // In the variant of 2.5 m: its sketch changed (a dot), its length set (↺ by the parameter too).
+        // In the variant of 2.5 m: its sketch changed (a dot), its length set (the undo arrow by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
@@ -8311,8 +8318,8 @@ mod tests {
         v.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
         h.run();
-        assert!(h.query_by_label("✔ outline  ·  sketch").is_some());
-        let reverts: Vec<_> = h.get_all_by_label("↺").collect();
+        assert!(h.query_by_label("outline  ·  sketch").is_some());
+        let reverts: Vec<_> = h.get_all_by_label("Back to the parent's").collect();
         assert_eq!(reverts.len(), 3, "the length, the sketch and the notch turned off");
         reverts[1].click();
         h.run();
@@ -8525,7 +8532,7 @@ mod tests {
             egui::Panel::left("datum_side").min_size(340.0).show(ui, |ui| v.side(ui));
         });
         h.run();
-        for row in ["✔ front  ·  XZ +", "✔ back  ·  front +", "✔ on_top  ·  a face of block +"] {
+        for row in ["front  ·  XZ +", "back  ·  front +", "on_top  ·  a face of block +"] {
             h.get_by_label(row);
         }
         h.get_all_by_value("-gap").next().unwrap().click();
@@ -8910,7 +8917,7 @@ mod tests {
         h.run();
         h.get_by_label("Click a sketch in the tree, or an edge of the sheet for a flange");
         assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
-        h.get_by_label("✔ other  ·  sketch").click();
+        h.get_by_label("other  ·  sketch").click();
         h.run();
         assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
     }

@@ -38,6 +38,12 @@ pub enum Icon {
     Flat,
     /// An axis dashed, a turn around it with an arrow: revolve.
     Revolve,
+    /// A check mark: built, done.
+    Done,
+    /// A cross: failed.
+    Failed,
+    /// A triangle with an exclamation mark: something to know.
+    Warning,
 }
 
 /// A square button with `paint` drawing its face in the given colour: `name` for screen
@@ -65,6 +71,21 @@ pub fn tile(ui: &mut Ui, name: &str, hint: &str, on: bool, enabled: bool, paint:
 /// An icon button.
 pub fn button(ui: &mut Ui, icon: Icon, name: &str, hint: &str, enabled: bool) -> Response {
     tile(ui, name, hint, false, enabled, |p, c, colour| paint(p, c, icon, colour))
+}
+
+/// A small non-interactive square of the row's height with `icon` painted in `colour`.
+pub fn mark(ui: &mut Ui, icon: Icon, colour: Color32) {
+    let side = ui.spacing().interact_size.y.max(20.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(side, side), Sense::hover());
+    paint(ui.painter(), rect.center(), icon, colour);
+}
+
+/// A mark and coloured text beside it, wrapped when long.
+pub fn marked(ui: &mut Ui, icon: Icon, colour: Color32, text: &str) {
+    ui.horizontal_top(|ui| {
+        mark(ui, icon, colour);
+        ui.add(egui::Label::new(egui::RichText::new(text).color(colour)).wrap());
+    });
 }
 
 /// Draws `icon` around `c`, about 12 pixels across.
@@ -197,6 +218,18 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             for x in [-2.0, 2.0] {
                 painter.add(egui::Shape::dashed_line(&[at(x, -5.0), at(x, 5.0)], stroke, 1.5, 1.5));
             }
+        }
+        Icon::Done => {
+            painter.add(egui::Shape::line(vec![at(-5.5, 0.5), at(-2.0, 4.0), at(5.5, -4.5)], stroke));
+        }
+        Icon::Failed => {
+            painter.line_segment([at(-4.5, -4.5), at(4.5, 4.5)], stroke);
+            painter.line_segment([at(-4.5, 4.5), at(4.5, -4.5)], stroke);
+        }
+        Icon::Warning => {
+            painter.add(egui::Shape::closed_line(vec![at(0.0, -6.0), at(6.5, 5.5), at(-6.5, 5.5)], stroke));
+            painter.line_segment([at(0.0, -2.0), at(0.0, 1.5)], stroke);
+            painter.circle_filled(at(0.0, 3.6), 0.9, colour);
         }
         Icon::Measure => {
             // A ruler laid aslant, its ticks.
