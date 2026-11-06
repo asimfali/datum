@@ -333,12 +333,14 @@ impl Doc {
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
-                Op::Flange { radius, relief_diameter, k_factor, corner_gap, .. } => {
+                Op::Flange { radius, relief_diameter, k_factor, corner_gap, bend_relief_width, bend_relief_depth, .. } => {
                     *radius = Some(Num::Value(r));
                     *k_factor = Some(k_of(&ks, ix as NodeIx));
                     let length = |key: &str| crate::library::of_thickness(&rule.element[key], t).ok().map(Num::Value);
                     *relief_diameter = length("relief_diameter").or(relief_diameter.take());
                     *corner_gap = length("corner_gap").or(corner_gap.take());
+                    *bend_relief_width = length("bend_relief_width").or(bend_relief_width.take());
+                    *bend_relief_depth = length("bend_relief_depth").or(bend_relief_depth.take());
                 }
                 // The cut follows the neutral layer: no K, no trim.
                 Op::Trim { k_factor, .. } | Op::Saddle { k_factor } | Op::BranchHole { k_factor } => *k_factor = Some(k_of(&ks, ix as NodeIx)),

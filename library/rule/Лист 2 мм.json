@@ -7,5 +7,7 @@
   "k_factor": 0.44,
   "corner_gap": "t",
   "relief_diameter": "2 * t",
+  "bend_relief_width": "t",
+  "bend_relief_depth": "t",
   "description": "Лист 2 мм, внутренний радиус гиба равен толщине"
 }
