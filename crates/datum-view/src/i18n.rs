@@ -101,6 +101,63 @@ mod tests {
         assert_eq!(I18n::default().f("help-log", "Logged to { $path }", &[("path", "p")]), "Logged to p");
     }
 
+    /// Every text of the catalogs and the lessons is in the window's font: what it lacks shows as
+    /// a square (D119).
+    #[test]
+    fn every_text_can_be_drawn() {
+        let lessons = std::fs::read_dir(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")).unwrap();
+        let mut texts: Vec<(String, String)> = CATALOGS.iter().map(|(code, _, text)| ((*code).to_string(), (*text).to_string())).collect();
+        texts.extend(lessons.map(|f| {
+            let path = f.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            (path.display().to_string(), text)
+        }));
+        // The window's code: what is drawn as text in it, not its tests or comments.
+        let sources = [
+            ("actions.rs", include_str!("actions.rs")),
+            ("app.rs", include_str!("app.rs")),
+            ("camera.rs", include_str!("camera.rs")),
+            ("capture.rs", include_str!("capture.rs")),
+            ("constrain.rs", include_str!("constrain.rs")),
+            ("cube.rs", include_str!("cube.rs")),
+            ("dims.rs", include_str!("dims.rs")),
+            ("dock.rs", include_str!("dock.rs")),
+            ("draw.rs", include_str!("draw.rs")),
+            ("flat.rs", include_str!("flat.rs")),
+            ("i18n.rs", include_str!("i18n.rs")),
+            ("icons.rs", include_str!("icons.rs")),
+            ("lessons.rs", include_str!("lessons.rs")),
+            ("log.rs", include_str!("log.rs")),
+            ("measure.rs", include_str!("measure.rs")),
+            ("origin.rs", include_str!("origin.rs")),
+            ("pattern.rs", include_str!("pattern.rs")),
+            ("render.rs", include_str!("render.rs")),
+            ("scene.rs", include_str!("scene.rs")),
+            ("select.rs", include_str!("select.rs")),
+            ("settings.rs", include_str!("settings.rs")),
+            ("sidebar.rs", include_str!("sidebar.rs")),
+            ("sketch.rs", include_str!("sketch.rs")),
+            ("table.rs", include_str!("table.rs")),
+            ("templates.rs", include_str!("templates.rs")),
+            ("update.rs", include_str!("update.rs")),
+            ("lib.rs", include_str!("lib.rs")),
+        ];
+        for (name, source) in sources {
+            let code = source.split("#[cfg(test)]").next().unwrap();
+            let code: Vec<&str> = code.lines().filter(|l| !l.trim_start().starts_with("//")).map(|l| l.split(" // ").next().unwrap()).collect();
+            texts.push((name.to_string(), code.join("\n")));
+        }
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        let font = egui::FontId::proportional(14.0);
+        ctx.fonts_mut(|fonts| {
+            for (name, text) in &texts {
+                let missing: Vec<char> = text.chars().filter(|c| !c.is_control() && !fonts.has_glyph(&font, *c)).collect();
+                assert!(missing.is_empty(), "{name}: no glyph for {missing:?}");
+            }
+        });
+    }
+
     /// Every action says its label, and what it does, in every language.
     #[test]
     fn every_action_has_a_russian_text() {

@@ -928,9 +928,9 @@ pub fn folder(level: &str, model: Option<&Path>) -> Result<PathBuf, String> {
 
 /// Writes `element` (checked) of `level`, in place of the one named `was` (its own name if
 /// none): into the file of the library's element of that name, renamed for a new name, or else
-/// into [`folder`] of `model`'s workspace (a built-in one is so overridden). A name taken by
-/// another element is refused. Where it went.
-pub fn save(level: &str, element: &Value, was: Option<&str>, model: Option<&Path>, lib: &Library) -> Result<PathBuf, String> {
+/// into the library of `project`, or beside the program without one (a built-in one is so
+/// overridden). A name taken by another element is refused. Where it went.
+pub fn save(level: &str, element: &Value, was: Option<&str>, project: Option<&Path>, lib: &Library) -> Result<PathBuf, String> {
     check(level, element)?;
     let name = element["name"].as_str().unwrap_or_default().trim();
     let was = was.unwrap_or(name);
@@ -940,7 +940,10 @@ pub fn save(level: &str, element: &Value, was: Option<&str>, model: Option<&Path
     }
     let dir = match &old {
         Some(f) => f.parent().map(Path::to_path_buf).ok_or("no folder")?,
-        None => folder(level, model)?,
+        None => match project {
+            Some(root) => workspace::folder_in(root, "library")?.join(level),
+            None => folder(level, None)?,
+        },
     };
     let path = dir.join(file_name(name));
     if old.as_ref() != Some(&path) && path.exists() {
@@ -955,14 +958,14 @@ pub fn save(level: &str, element: &Value, was: Option<&str>, model: Option<&Path
 
 /// [`save`] kept whole with the other levels (D179): a rule's material must be in the library
 /// (`project`'s, as [`load`] reads it); a material renamed takes its rules along.
-pub fn put(level: &str, element: &Value, was: Option<&str>, model: Option<&Path>, project: Option<&Path>) -> Result<PathBuf, String> {
+pub fn put(level: &str, element: &Value, was: Option<&str>, project: Option<&Path>) -> Result<PathBuf, String> {
     if level == "rule" {
         let m = element["material"].as_str().unwrap_or_default();
         if !m.is_empty() && load("material", project).get(m).is_none() {
             return Err(format!("no material `{m}` in the library: a rule is of one"));
         }
     }
-    let path = save(level, element, was, model, &load(level, project))?;
+    let path = save(level, element, was, project, &load(level, project))?;
     let name = element["name"].as_str().unwrap_or_default().trim();
     if level == "material"
         && let Some(was) = was.filter(|w| *w != name)
