@@ -88,37 +88,75 @@ pub fn hit(squares: &[Square], origin: Vec3, dir: Vec3, half: f64) -> Option<(f6
         .min_by(|a, b| a.0.total_cmp(&b.0))
 }
 
-/// The part of convex polygon `corners` (clip coordinates: x, y, depth, w) in front of the near
-/// plane, where depth is not negative: a square the eye stands within is cut, not dropped.
-/// Lines are straight in clip space, so cutting there is exact.
+/// How far past the picture's edge what is drawn is kept, as a share of its half: the cuts there
+/// stay out of sight.
+const MARGIN: f32 = 1.25;
+
+/// The signed distances of clip point `c` from the sides of what is drawn: the near plane, then
+/// left, right, bottom and top with [`MARGIN`]. Not negative inside.
+fn sides(c: [f32; 4]) -> [f32; 5] {
+    let reach = MARGIN * c[3];
+    [c[2], reach + c[0], reach - c[0], reach + c[1], reach - c[1]]
+}
+
+/// Where segment `a`–`b`, one end on each side of side `k`, crosses it.
+fn cut(a: [f32; 4], b: [f32; 4], k: usize) -> [f32; 4] {
+    let (da, db) = (sides(a)[k], sides(b)[k]);
+    let t = da / (da - db);
+    [0, 1, 2, 3].map(|i| a[i] + (b[i] - a[i]) * t)
+}
+
+/// The part of convex polygon `corners` (clip coordinates: x, y, depth, w) in the near plane's
+/// front and about the picture: a square the eye stands within is cut, not dropped, and never
+/// reaches the screen coordinates far beyond the picture that the eye's nearness gives, past a
+/// pixel of the painter's single precision. Lines are straight in clip space, so cutting there is
+/// exact.
 fn in_front(corners: &[[f32; 4]]) -> Vec<[f32; 4]> {
-    let mut kept = Vec::with_capacity(corners.len() + 1);
-    for (k, &a) in corners.iter().enumerate() {
-        let b = corners[(k + 1) % corners.len()];
-        if a[2] >= 0.0 {
-            kept.push(a);
-        }
-        if (a[2] >= 0.0) != (b[2] >= 0.0) {
-            kept.push(cut(a, b));
+    let mut kept = corners.to_vec();
+    for k in 0..5 {
+        let from = std::mem::take(&mut kept);
+        for (j, &a) in from.iter().enumerate() {
+            let b = from[(j + 1) % from.len()];
+            let (ina, inb) = (sides(a)[k] >= 0.0, sides(b)[k] >= 0.0);
+            if ina {
+                kept.push(a);
+            }
+            if ina != inb {
+                kept.push(cut(a, b, k));
+            }
         }
     }
     kept
 }
 
-/// The part of segment `a`–`b` (clip coordinates) in front of the near plane, if any.
+/// The part of segment `a`–`b` (clip coordinates) kept as [`in_front`] keeps a polygon's, if any.
 fn segment_in_front(a: [f32; 4], b: [f32; 4]) -> Option<([f32; 4], [f32; 4])> {
-    match (a[2] >= 0.0, b[2] >= 0.0) {
-        (true, true) => Some((a, b)),
-        (true, false) => Some((a, cut(a, b))),
-        (false, true) => Some((cut(a, b), b)),
-        (false, false) => None,
+    let (mut a, mut b) = (a, b);
+    for k in 0..5 {
+        match (sides(a)[k] >= 0.0, sides(b)[k] >= 0.0) {
+            (true, true) => {}
+            (true, false) => b = cut(a, b, k),
+            (false, true) => a = cut(a, b, k),
+            (false, false) => return None,
+        }
     }
+    Some((a, b))
 }
 
-/// Where segment `a`–`b`, one end on each side, crosses the near plane.
-fn cut(a: [f32; 4], b: [f32; 4]) -> [f32; 4] {
-    let t = a[2] / (a[2] - b[2]);
-    [0, 1, 2, 3].map(|i| a[i] + (b[i] - a[i]) * t)
+/// Convex polygon `points` filled and outlined, as shapes with no corners of their own: seen nearly
+/// edge on, or cut at the near plane, a square has corners nearly folded back, and a polygon shape's
+/// outline and soft edge there reach out in proportion to how sharp they are, as wide bands that
+/// jump as the view moves.
+fn outlined(points: &[Pos2], fill: Color32, stroke: Stroke) -> Vec<egui::Shape> {
+    let mut mesh = egui::Mesh::default();
+    for &p in points {
+        mesh.colored_vertex(p, fill);
+    }
+    for k in 2..points.len() as u32 {
+        mesh.add_triangle(0, k - 1, k);
+    }
+    let edges = (0..points.len()).map(|k| egui::Shape::line_segment([points[k], points[(k + 1) % points.len()]], stroke));
+    std::iter::once(egui::Shape::mesh(mesh)).chain(edges).collect()
 }
 
 /// Draws `squares`, see-through, `lit` the one a click or Enter would take; `clip` takes a
@@ -143,7 +181,7 @@ pub fn paint(
             (false, true) => (Color32::from_rgba_unmultiplied(90, 140, 220, 30), Color32::from_rgb(80, 120, 200)),
             (false, false) => (Color32::from_rgba_unmultiplied(240, 190, 60, 30), Color32::from_rgb(200, 160, 60)),
         };
-        painter.add(egui::Shape::convex_polygon(shown, fill, Stroke::new(if lit == Some(k) { 2.0 } else { 1.0 }, line)));
+        painter.extend(outlined(&shown, fill, Stroke::new(if lit == Some(k) { 2.0 } else { 1.0 }, line)));
         painter.text(label + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, &s.name, egui::FontId::proportional(12.0), line);
     }
 }
@@ -208,6 +246,51 @@ mod tests {
                 assert!(z >= 0.0 && x.abs() <= w && y.abs() <= w, "{} at ({a}, {b})", s.name);
             }
         }
+    }
+
+    /// However near the eye comes, what is drawn of a square stays about the picture.
+    #[test]
+    fn squares_stay_about_the_picture_however_near_the_eye() {
+        let plane = SketchPlane { origin: Vec3::new(0.0, 0.0, 12.0), x_axis: Vec3::new(1.0, 0.0, 0.0), normal: Vec3::new(0.0, 0.0, 1.0) };
+        let s = square("p", &plane, Vec3::ZERO);
+        let (lo, hi) = (Vec3::new(-760.0, -760.0, -760.0), Vec3::new(760.0, 760.0, 760.0));
+        let radius = (hi - lo).dot(hi - lo).sqrt() * 0.5;
+        let mut camera = crate::camera::Camera::default();
+        camera.fit(Some((lo, hi)), 1.5);
+        let mut seen = 0;
+        for _ in 0..60 {
+            camera.zoom(0.8);
+            let (m, _) = camera.matrices(Vec3::ZERO, 1.5, radius);
+            let corners =
+                [(-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0), (1.0, 1.0)].map(|(a, b)| crate::camera::clip(&m, s.middle + (s.x * a + s.y * b) * 760.0));
+            for c in in_front(&corners) {
+                seen += 1;
+                assert!(c[3] > 0.0 && c[0].abs() <= 1.3 * c[3] && c[1].abs() <= 1.3 * c[3], "{c:?}");
+            }
+        }
+        assert!(seen > 0);
+    }
+
+    /// How far from `points` the painter's triangles of `shapes` reach, in pixels.
+    fn reach(shapes: Vec<egui::Shape>, points: &[Pos2]) -> f32 {
+        let mut t = egui::epaint::Tessellator::new(1.0, egui::epaint::TessellationOptions::default(), [1, 1], vec![]);
+        let mut mesh = egui::Mesh::default();
+        for s in shapes {
+            t.tessellate_shape(s, &mut mesh);
+        }
+        let (lo, hi) = points.iter().fold((Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN)), |(l, h), p| (l.min(*p), h.max(*p)));
+        mesh.vertices.iter().map(|v| (v.pos.x - hi.x).max(lo.x - v.pos.x).max(v.pos.y - hi.y).max(lo.y - v.pos.y)).fold(0.0, f32::max)
+    }
+
+    /// A square seen nearly edge on or cut at the near plane has a corner nearly folded back: a
+    /// polygon's outline reaches thousands of pixels out from it; what is drawn here stays on it.
+    #[test]
+    fn a_sharp_corner_makes_no_band() {
+        let tip = [Pos2::new(100.0, 300.0), Pos2::new(1500.0, 300.0), Pos2::new(1500.0, 300.25)];
+        let (fill, stroke) = (Color32::from_rgba_unmultiplied(90, 140, 220, 30), Stroke::new(1.0, Color32::BLUE));
+        assert!(reach(vec![egui::Shape::convex_polygon(tip.to_vec(), fill, stroke)], &tip) > 1000.0, "the band this avoids");
+        let ours = reach(outlined(&tip, fill, stroke), &tip);
+        assert!(ours < 3.0, "{ours}");
     }
 
     /// A square half behind the near plane keeps the half in front, cut where it crosses; one

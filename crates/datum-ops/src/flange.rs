@@ -37,6 +37,68 @@ pub struct FlangeDims {
     /// The bend flush (D229): set back so the flange's outer faces meet the sheet's at the edge,
     /// not added beyond it.
     pub flush: bool,
+    /// The planes the wall's edges go to, instead of their own place.
+    pub to: WallTo<Limit>,
+}
+
+/// What each of a flange's wall's three edges goes to (D229), none where it stays as it is: the
+/// sides at the start and the end of its width (as [`Extent`] has them) and its free edge, `top`.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(bound(deserialize = "P: Deserialize<'de>"))]
+pub struct WallTo<P> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<P>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<P>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top: Option<P>,
+}
+
+impl<P> Default for WallTo<P> {
+    fn default() -> Self {
+        Self { start: None, end: None, top: None }
+    }
+}
+
+impl<P> WallTo<P> {
+    pub fn is_empty(&self) -> bool {
+        self.start.is_none() && self.end.is_none() && self.top.is_none()
+    }
+
+    /// What there is of it, in that order.
+    pub fn iter(&self) -> impl Iterator<Item = &P> {
+        [&self.start, &self.end, &self.top].into_iter().flatten()
+    }
+
+    /// The same with each `f` of it.
+    pub fn map<Q, E>(&self, mut f: impl FnMut(&P) -> Result<Q, E>) -> Result<WallTo<Q>, E> {
+        Ok(WallTo {
+            start: self.start.as_ref().map(&mut f).transpose()?,
+            end: self.end.as_ref().map(&mut f).transpose()?,
+            top: self.top.as_ref().map(&mut f).transpose()?,
+        })
+    }
+}
+
+/// A plane an edge of a wall goes to, the wall stopping `gap` short of it on the side it comes from.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Limit {
+    pub at: Vec3,
+    pub normal: Vec3,
+    pub gap: f64,
+}
+
+impl Limit {
+    /// The bound it makes of a wall going the way `way`: none for a plane along that way.
+    fn bound(&self, way: Vec3) -> Option<Bound> {
+        let n = unit(self.normal);
+        let d = n.dot(way);
+        if d == 0.0 {
+            return None;
+        }
+        let n = if d < 0.0 { n * -1.0 } else { n };
+        Some(Bound { at: self.at - n * self.gap, normal: n })
+    }
 }
 
 /// Where a flange's bend lies against its edge (D229, as Inventor's bend position): beyond it,
@@ -205,6 +267,7 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
     if !dims.width.is_edge() || dims.flush {
         let mut body = target.clone();
         let mut middles = Vec::new();
+        let mut ways = Vec::new();
         // Each end once, by either of its long edges; by its face's ID, which stays as the ends
         // beside it are cut (their corners, flush, move).
         let mut done: Vec<TopoId> = Vec::new();
@@ -214,25 +277,55 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
                 continue;
             }
             done.push(end);
+            ways.push(start_way(target, e)?);
             body = narrowed(feature, &body, end, dims.width, dims.notch, dims.flush.then_some((dims.radius, dims.angle)))?;
         }
         // Each middle by a long edge, once all are cut: it keeps its end's ID.
         for end in done {
             let f = body.faces().binary_search_by_key(&end, |x| x.id).map_err(|_| BrepError::Invalid("flange: an end lost".into()))? as Ix;
             let ([h, _], _) = end_of(&body, f).ok_or_else(|| BrepError::Invalid("flange: an end's middle is no end".into()))?;
-            middles.push(format!("{:?}", body.edges()[body.half_edges()[h as usize].edge as usize].id));
+            middles.push(body.edges()[body.half_edges()[h as usize].edge as usize].id);
         }
-        return flanges(feature, &body, &middles, FlangeDims { width: Width::Edge, flush: false, ..dims });
+        return flanges_on(feature, &body, &middles, &ways, FlangeDims { width: Width::Edge, flush: false, ..dims });
     }
+    let ways = ids.iter().map(|&e| start_way(target, e)).collect::<Result<Vec<_>, _>>()?;
+    flanges_on(feature, target, &ids, &ways, dims)
+}
+
+/// The way from the start of the width of what edge `e` of `target` stands on to its end: the end
+/// of the sheet's first long edge with the lower vertex ID, as a width is measured from; a wall's
+/// inner edge, in the order of its IDs.
+fn start_way(target: &Body, e: TopoId) -> Result<Vec3, BrepError> {
+    let (from, to) = match end_by_edge(target, e) {
+        Ok((f, ..)) => {
+            let ([l0, _], _) = end_of(target, f).ok_or_else(|| BrepError::Invalid("flange: an end is no end".into()))?;
+            let he = |h: Ix| target.half_edges()[h as usize];
+            (he(l0).origin, he(target.next(l0)).origin)
+        }
+        Err(_) => {
+            let b = base(target, e, false, &BTreeSet::new())?;
+            (b.inner[0], b.inner[1])
+        }
+    };
+    let id = |v: Ix| target.vertices()[v as usize].id;
+    let way = target.point(to) - target.point(from);
+    Ok(if id(from) < id(to) { way } else { way * -1.0 })
+}
+
+/// Flanges on the whole of edges `ids` of `target`, one after another, the start of each width
+/// where `ways` says.
+fn flanges_on(feature: TopoId, target: &Body, ids: &[TopoId], ways: &[Vec3], dims: FlangeDims) -> Result<Body, BrepError> {
     // Each flange once, by the corners of what it stands on.
     let mut sites: Vec<(TopoId, [TopoId; 4], Base)> = Vec::new();
-    for &e in &ids {
+    let mut site_ways: Vec<Vec3> = Vec::new();
+    for (&e, &way) in ids.iter().zip(ways) {
         let base = base(target, e, dims.flip, &BTreeSet::new())?;
         let corners = [base.inner[0], base.inner[1], base.outer[0], base.outer[1]].map(|v| target.vertices()[v as usize].id);
         let mut sorted = corners;
         sorted.sort();
         if sites.iter().all(|(_, c, _)| *c != sorted) {
             sites.push((e, sorted, base));
+            site_ways.push(way);
         }
     }
     // Flanges on two ends meeting at a corner leave it open (the corner's relief): neither's side
@@ -251,14 +344,14 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
     let bounds = closed(target, &sites, dims)?;
     let taken: BTreeSet<TopoId> = sites.iter().flat_map(|(.., b)| b.gone.iter().map(|&x| target.faces()[x as usize].id)).collect();
     let mut body = target.clone();
-    for ((e, _, first), bounds) in sites.into_iter().zip(bounds) {
+    for (((e, _, first), bounds), way) in sites.into_iter().zip(bounds).zip(site_ways) {
         // The side each turns to as the sheet picked had it: flanges made before it may tip
         // which side of the sheet is its front.
         let mut base = base(&body, e, dims.flip, &taken)?;
         if base.up.dot(first.up) < 0.0 {
             base = self::base(&body, e, !dims.flip, &taken)?;
         }
-        body = grow(feature, &body, base, dims, bounds)?;
+        body = grow(feature, &body, base, dims, bounds, way)?;
     }
     match dims.round {
         Some((d, k)) if !corners.is_empty() => relieve_corners(feature, &body, &corners, 0.5 * d, k),
@@ -1000,7 +1093,7 @@ impl Shape {
             let rise = big - if cs >= 0.0 { r } else { big } * cs;
             ((dims.height - rise) / sn, rise)
         };
-        if wall.is_nan() || wall <= 0.0 {
+        if dims.to.top.is_none() && (wall.is_nan() || wall <= 0.0) {
             return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({bend:.3})", dims.height)));
         }
         // One axis for the bend's both sides, through the inner edge's start `r` up: both sides
@@ -1031,19 +1124,42 @@ struct Bound {
 
 /// The flange `base` asks for on `target`: a bend and a wall sewn to its edges; the wall's side at
 /// each end of the width square to it, or gone to `bounds` there (D229): the wall grows or is cut
-/// along the edge to the plane, the bend not, a step across the thickness between them.
-fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [Option<Bound>; 2]) -> Result<Body, BrepError> {
+/// along the edge to the plane, the bend not, a step across the thickness between them. The planes
+/// `dims.to` names take their ends' place (`way`: the width's start to its end), and its free edge
+/// goes to its own, the wall's height then that alone.
+fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [Option<Bound>; 2], way: Vec3) -> Result<Body, BrepError> {
     let shape = Shape::of(target, &base, dims)?;
     let Shape { w, axis, c_in, along, wall, t, inner_normal, .. } = shape;
-    let Base { key, inner: [i0, i1], outer: [o0, o1], gone, kept, joins, .. } = base;
+    let Base { key, inner: [i0, i1], outer: [o0, o1], up: base_up, gone, kept, joins, .. } = base;
     let (r, a) = (dims.radius, dims.angle.to_radians());
+    let along_edge = || BrepError::Unsupported("flange: a wall's side to a plane along its edge".into());
+    let mut bounds = bounds;
+    // The width's start: at the wall's first end or last, as the width runs along `w` or against.
+    let start = usize::from(way.dot(w) < 0.0);
+    if let Some(l) = &dims.to.start {
+        bounds[start] = Some(l.bound(if start == 0 { w * -1.0 } else { w }).ok_or_else(along_edge)?);
+    }
+    if let Some(l) = &dims.to.end {
+        bounds[1 - start] = Some(l.bound(if start == 0 { w } else { w * -1.0 }).ok_or_else(along_edge)?);
+    }
+    let top = match &dims.to.top {
+        // At a right angle exactly `up`: `along` has the bits of cos 90° in it, and a plane along
+        // the wall would pass for one far off.
+        Some(l) => Some(
+            l.bound(if dims.angle == 90.0 { base_up } else { along })
+                .ok_or_else(|| BrepError::Unsupported("flange: a wall's free edge to a plane along the wall".into()))?,
+        ),
+        None => None,
+    };
+    // How high a side's line is read at: the wall's height, without a plane to take it from.
+    let height = if top.is_some() { 1.0 } else { wall };
     let id = |tag: &str, k: u64| TopoId::derive(tag).id(feature).id(key).index(k).finish();
     let mut vertices: Vec<Vertex> = target.vertices().to_vec();
     // Along the edge from `p` to the plane of `b`.
     let reach = |b: &Bound, p: Vec3| -> Result<f64, BrepError> {
         let d = w.dot(b.normal);
         if d == 0.0 {
-            return Err(BrepError::Unsupported("flange: a wall's side to a plane along its edge".into()));
+            return Err(along_edge());
         }
         Ok((b.at - p).dot(b.normal) / d)
     };
@@ -1051,22 +1167,38 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
     // with a bound at that end, also where the wall's foot meets it. Cut square to the wall, as a
     // laser cuts: both faces of the wall end alike, where the first of them meets the plane. For
     // the inner face and the outer at end `s`: the vertex at the bend's end, at the wall's foot on
-    // the bound (itself when it is there), at the top.
-    let mut side = |s: usize, vi: Ix, vo: Ix| -> Result<[[TopoId; 4]; 2], BrepError> {
+    // the bound (itself when it is there), at the top. Short of the bend's end the foot lies on
+    // that end's line, the bend's end beyond it bare.
+    let mut side = |s: usize, vi: Ix, vo: Ix| -> Result<([[TopoId; 4]; 2], f64), BrepError> {
         let q = [vi, vo].map(|v| shape.turned(target.point(v)));
-        let (top, foot) = match &bounds[s] {
+        let (up_side, foot) = match &bounds[s] {
             None => (0.0, 0.0),
             Some(b) => {
                 let out = if s == 0 { -1.0 } else { 1.0 };
                 // Of the two faces' reach, the nearer the edge's end.
                 let nearer = |x: f64, y: f64| if out > 0.0 { x.min(y) } else { x.max(y) };
                 let foot = nearer(reach(b, q[0])?, reach(b, q[1])?);
-                let top = nearer(reach(b, q[0] + along * wall)?, reach(b, q[1] + along * wall)?);
-                // The bend stays as it is: a plane into it would cut it.
-                if foot * out < 0.0 {
-                    return Err(BrepError::Unsupported("flange: the corner's plane cuts into the bend: comes later".into()));
+                let top = nearer(reach(b, q[0] + along * height)?, reach(b, q[1] + along * height)?);
+                // A plane through the wall's foot (a plane through the sheet's own corner, an edge
+                // flush with one) is there, whatever bits the bend's turn and the plane's normal
+                // leave: as near as rounding reaches, no step of no width (D229).
+                let size = [q[0], q[1], b.at].iter().flat_map(|p| p.to_array()).fold(0.0, |m: f64, x| m.max(x.abs()));
+                (top, if foot.abs() <= 64.0 * f64::EPSILON * size { 0.0 } else { foot })
+            }
+        };
+        // Where the side's line meets the free edge's: along the edge and up the wall. Square to
+        // the wall, as a side is: both faces end alike, where the first meets the plane.
+        let (off, high) = match &top {
+            None => (up_side, wall),
+            Some(b) => {
+                let d = along.dot(b.normal);
+                let up = |p: Vec3| (b.at - p).dot(b.normal) / d;
+                let (g, k, m) = (up(q[0]).min(up(q[1])), -w.dot(b.normal) / d, (up_side - foot) / height);
+                let v = (g + k * foot) / (1.0 - k * m);
+                if !(v > 0.0 && v.is_finite()) {
+                    return Err(BrepError::Degenerate("flange: the plane of its free edge leaves the wall no height".into()));
                 }
-                (top, foot)
+                (foot + m * v, v)
             }
         };
         let mut layer = |l: usize, v: Ix| -> [TopoId; 4] {
@@ -1076,15 +1208,22 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
             if foot != 0.0 {
                 vertices.push(Vertex { id: vs, point: q[l] + w * foot });
             }
-            vertices.push(Vertex { id: ve, point: q[l] + along * wall + w * top });
+            vertices.push(Vertex { id: ve, point: q[l] + along * high + w * off });
             [target.vertices()[v as usize].id, vq, if foot == 0.0 { vq } else { vs }, ve]
         };
-        Ok([layer(0, vi), layer(1, vo)])
+        Ok(([layer(0, vi), layer(1, vo)], foot))
     };
     // Inner and outer, at the start and end of the width.
-    let [[ii0, ji0, fi0, ki0], [oo0, po0, fo0, qo0]] = side(0, i0, o0)?;
-    let [[ii1, ji1, fi1, ki1], [oo1, po1, fo1, qo1]] = side(1, i1, o1)?;
+    let ([[ii0, ji0, fi0, ki0], [oo0, po0, fo0, qo0]], foot0) = side(0, i0, o0)?;
+    let ([[ii1, ji1, fi1, ki1], [oo1, po1, fo1, qo1]], foot1) = side(1, i1, o1)?;
     let point = |v: TopoId| vertices.iter().find(|x| x.id == v).map_or(Vec3::ZERO, |x| x.point);
+    if (bounds[0].is_some() || bounds[1].is_some() || top.is_some())
+        && ((point(fi1) - point(fi0)).dot(w) <= 0.0 || (point(ki1) - point(ki0)).dot(w) <= 0.0)
+    {
+        return Err(BrepError::Degenerate("flange: the planes of its sides leave the wall no width".into()));
+    }
+    // Whether the wall's foot at each end stops short of the bend's end.
+    let short = [foot0 > 0.0, foot1 < 0.0];
     // A loop of `ids` turning about `outward` by the right hand; a vertex twice in a row once.
     let oriented = |mut ids: Vec<TopoId>, outward: Vec3| -> Vec<TopoId> {
         ids.dedup();
@@ -1105,27 +1244,39 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
         "flange.bend_in",
         0,
         Surface::Cylinder(Cylinder { origin: c_in, axis: w, radius: r, convex: false }),
-        oriented(vec![ii0, ii1, ji1, ji0], in_mid * -1.0),
+        oriented(bend_loop([ii0, ii1, ji1, ji0], [fi0, fi1], short), in_mid * -1.0),
     ));
     faces.push(face(
         "flange.bend_out",
         0,
         Surface::Cylinder(Cylinder { origin: c_in, axis: w, radius: r + t, convex: true }),
-        oriented(vec![oo0, oo1, po1, po0], in_mid),
+        oriented(bend_loop([oo0, oo1, po1, po0], [fo0, fo1], short), in_mid),
     ));
     faces.push(face(
         "flange.wall_in",
         0,
         Surface::Plane(Plane { origin: point(ji0), normal: inner_normal }),
-        oriented(vec![ji0, ji1, fi1, ki1, ki0, fi0], inner_normal),
+        oriented(vec![if short[0] { fi0 } else { ji0 }, if short[1] { fi1 } else { ji1 }, fi1, ki1, ki0, fi0], inner_normal),
     ));
     faces.push(face(
         "flange.wall_out",
         0,
         Surface::Plane(Plane { origin: point(po0), normal: inner_normal * -1.0 }),
-        oriented(vec![po0, po1, fo1, qo1, qo0, fo0], inner_normal * -1.0),
+        oriented(vec![if short[0] { fo0 } else { po0 }, if short[1] { fo1 } else { po1 }, fo1, qo1, qo0, fo0], inner_normal * -1.0),
     ));
-    faces.push(face("flange.end", 0, Surface::Plane(Plane { origin: point(ki0), normal: along }), oriented(vec![ki0, ki1, qo1, qo0], along)));
+    // To a plane the free edge may slant: its face square to the wall all the same.
+    let end_normal = if top.is_some() {
+        let n = unit(inner_normal.cross(point(ki1) - point(ki0)));
+        if n.dot(along) < 0.0 { n * -1.0 } else { n }
+    } else {
+        along
+    };
+    faces.push(face(
+        "flange.end",
+        0,
+        Surface::Plane(Plane { origin: point(ki0), normal: end_normal }),
+        oriented(vec![ki0, ki1, qo1, qo0], end_normal),
+    ));
     // The arcs of the bend at both sides, inner and outer, from the end face on.
     let arc = |c: Vec3, r: f64, from: TopoId, to: TopoId| {
         // Counterclockwise about `axis` from the end face.
@@ -1148,14 +1299,17 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
     for (s, (join, [ii, ji, fi, ki, qo, fo, po, oo])) in joins.iter().zip(ends).enumerate() {
         let outward = if s == 0 { w * -1.0 } else { w };
         let k = s as u64;
-        if bounds[s].is_some() {
-            faces.push(face("flange.side", k, Surface::Plane(Plane { origin: point(ii), normal: outward }), oriented(vec![ii, ji, po, oo], outward)));
+        let bounded = bounds[s].is_some();
+        if bounded {
             if (fi, fo) != (ji, po) {
+                // Under the wall grown past the bend, facing the sheet; on the bend's end the wall
+                // stopped short of, facing up.
+                let facing = if short[s] { along } else { along * -1.0 };
                 faces.push(face(
                     "flange.step",
                     k,
-                    Surface::Plane(Plane { origin: point(ji), normal: along * -1.0 }),
-                    oriented(vec![ji, fi, fo, po], along * -1.0),
+                    Surface::Plane(Plane { origin: point(ji), normal: facing }),
+                    oriented(vec![ji, fi, fo, po], facing),
                 ));
             }
             // Square to the wall, facing past the end.
@@ -1164,9 +1318,8 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
                 normal = normal * -1.0;
             }
             faces.push(face("flange.bound", k, Surface::Plane(Plane { origin: point(fi), normal }), oriented(vec![fi, ki, qo, fo], normal)));
-            continue;
         }
-        let chain = vec![ii, ji, ki, qo, po, oo];
+        let chain = if bounded { vec![ii, ji, po, oo] } else { vec![ii, ji, ki, qo, po, oo] };
         let Some(x) = *join else {
             faces.push(face("flange.side", k, Surface::Plane(Plane { origin: point(chain[0]), normal: outward }), oriented(chain, outward)));
             continue;
@@ -1190,4 +1343,19 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
     }
     faces.extend((0..target.faces().len() as Ix).filter(|x| !gone.contains(x)).map(|x| target.face_spec(x)));
     build_with_curves(vertices, faces, curves)
+}
+
+/// A bend's face `corners` (the sheet's edge along it, then the wall's end back), the wall's feet
+/// `feet` on that end's line where it stops `short` of the bend's end.
+fn bend_loop(corners: [TopoId; 4], feet: [TopoId; 2], short: [bool; 2]) -> Vec<TopoId> {
+    let [a, b, c, d] = corners;
+    let mut l = vec![a, b, c];
+    if short[1] {
+        l.push(feet[1]);
+    }
+    if short[0] {
+        l.push(feet[0]);
+    }
+    l.push(d);
+    l
 }
