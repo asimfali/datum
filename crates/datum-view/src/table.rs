@@ -673,9 +673,10 @@ pub const RULES: Records = Records {
         "relief_diameter",
         "bend_relief_width",
         "bend_relief_depth",
+        "kerf",
         "description",
     ],
-    widths: &[35.0, 25.0, 25.0, 45.0, 20.0, 40.0, 40.0, 40.0, 40.0, 50.0],
+    widths: &[35.0, 25.0, 25.0, 45.0, 20.0, 40.0, 40.0, 40.0, 40.0, 40.0, 50.0],
 };
 
 impl Records {
@@ -698,6 +699,7 @@ fn header<'a>(key: &str, i18n: &'a I18n) -> &'a str {
         "relief_diameter" => i18n.t("table-relief", "Relief Ø (mm or of t)"),
         "bend_relief_width" => i18n.t("table-bend-relief-width", "Bend relief width (mm or of t)"),
         "bend_relief_depth" => i18n.t("table-bend-relief-depth", "Bend relief depth (mm or of t)"),
+        "kerf" => i18n.t("table-kerf", "Cut width (mm or of t)"),
         _ => i18n.t("table-radius", "Bend radius (mm or of t)"),
     }
 }
@@ -753,13 +755,16 @@ fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Opti
             _ if key == "density" => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
             _ => Err(i18n.t("table-rule-thickness", "The thickness is a number above zero, in mm").to_string()),
         },
-        "radius" | "corner_gap" | "relief_diameter" | "bend_relief_width" | "bend_relief_depth" if !text.is_empty() => {
+        "radius" | "corner_gap" | "relief_diameter" | "bend_relief_width" | "bend_relief_depth" | "kerf" if !text.is_empty() => {
             let v = value_of(text);
             match datum_model::library::of_thickness(&v, 1.0) {
                 Ok(r) if r > 0.0 || (r == 0.0 && matches!(key, "radius" | "corner_gap")) => Ok(Some(v)),
                 _ if key == "corner_gap" => Err(i18n
                     .t("table-rule-corner-gap", "The corner gap is a number in mm, not below zero, or a formula of the thickness t")
                     .to_string()),
+                _ if key == "kerf" => {
+                    Err(i18n.t("table-rule-kerf", "The cut's width is a number in mm above zero, or a formula of the thickness t").to_string())
+                }
                 _ if key == "relief_diameter" => {
                     Err(i18n.t("table-rule-relief", "The relief's Ø is a number in mm above zero, or a formula of the thickness t").to_string())
                 }
@@ -1330,12 +1335,20 @@ mod tests {
         let t = records(&RULES, &rules(), &pending, &I18n::default());
         assert_eq!(t.rows().len(), 4, "header, two rules, a new one");
         assert_eq!(
-            t.copy((0, 0), (0, 9)),
+            t.copy((0, 0), (0, 10)),
             "Name\tKind\tThickness (mm)\tBend radius (mm or of t)\tK-factor\tCorner gap (mm or of t)\tRelief Ø (mm or of t)\t\
-             Bend relief width (mm or of t)\tBend relief depth (mm or of t)\tDescription"
+             Bend relief width (mm or of t)\tBend relief depth (mm or of t)\tCut width (mm or of t)\tDescription"
         );
-        assert_eq!(t.copy((1, 0), (2, 9)), "Лист 2\tSheet\t2\t1.5 * t\t0.44\tt\t2 * t\t\t\t\nДеталь\tPart\t\t\t\t\t\t\t\t");
-        assert_eq!(t.copy((3, 0), (3, 9)), "Н\tPart\t\t\t\t\t\t\t\t");
+        assert_eq!(t.copy((1, 0), (2, 10)), "Лист 2\tSheet\t2\t1.5 * t\t0.44\tt\t2 * t\t\t\t\t\nДеталь\tPart\t\t\t\t\t\t\t\t\t");
+        assert_eq!(t.copy((3, 0), (3, 10)), "Н\tPart\t\t\t\t\t\t\t\t\t");
+    }
+
+    /// The `kerf` of the rule put by the one request in `sent`.
+    fn sent_kerf(sent: &[Request]) -> Json {
+        match sent {
+            [Request::Command("put_library", p)] => p["element"]["kerf"].clone(),
+            _ => panic!("{sent:?}"),
+        }
     }
 
     #[test]
@@ -1348,6 +1361,12 @@ mod tests {
         same(&sent, &[put_library("rule", want, None)]);
         assert_eq!(error, None);
         assert!(pending.is_empty());
+        let (sent, error) = rule_edits(&[(3, 0, "Лист 4"), (3, 1, "sheet"), (3, 2, "2"), (3, 3, "t"), (3, 9, "0,2")], &mut pending);
+        let want = json!({"material": "Сталь 3", "name": "Лист 4", "kind": "sheet", "thickness": 2.0, "radius": "t", "kerf": 0.2});
+        same(&sent, &[put_library("rule", want, None)]);
+        assert_eq!(error, None);
+        let (sent, _) = rule_edits(&[(3, 0, "Лист 5"), (3, 1, "sheet"), (3, 2, "2"), (3, 3, "t"), (3, 9, "0.1 * t")], &mut pending);
+        assert_eq!(sent_kerf(&sent), json!("0.1 * t"));
         let (sent, _) = rule_edits(&[(3, 0, "Д"), (3, 1, "PART")], &mut pending);
         same(&sent, &[put_library("rule", json!({"material": "Сталь 3", "name": "Д", "kind": "part"}), None)]);
     }
@@ -1361,6 +1380,8 @@ mod tests {
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 4, "1,5")], "The K-factor is a number from 0 to 1"),
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 5, "-t")], "The corner gap is a number in mm, not below zero, or a formula of the thickness t"),
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 6, "0")], "The relief's Ø is a number in mm above zero, or a formula of the thickness t"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 9, "0")], "The cut's width is a number in mm above zero, or a formula of the thickness t"),
+            (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 9, "-t")], "The cut's width is a number in mm above zero, or a formula of the thickness t"),
             (vec![(3, 0, "Д"), (3, 2, "2")], "The kind is Sheet or Part"),
             (vec![(3, 0, "Д"), (3, 1, "tube")], "The kind is Sheet or Part"),
             (vec![(3, 0, "Д"), (3, 1, "sheet"), (3, 3, "-1")], "The bend radius is a number in mm above zero, or a formula of the thickness t"),

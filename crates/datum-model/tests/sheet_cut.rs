@@ -497,3 +497,131 @@ fn a_flange_goes_to_a_work_plane() {
     // A plane there is not.
     assert!(s.execute("edit", &json!({"name": "f", "to": {"top": {"plane": "nowhere"}}})).is_err());
 }
+
+/// A plate of 100 × 50 of the rule `Лист` (no kerf) or `Рез` (with `kerf`, when given), and the sketch
+/// `line` of one open line from (20, 25) to (80, 25) on its blank, `hole` of a circle Ø10 at (50, 12), and `both` of the two.
+fn lined_plate(name: &str, kerf: Option<Value>) -> Session {
+    let rectangle = json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 50], "d": [0, 50]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+    let mut s = project(name, rectangle);
+    let mut rule = json!({"name": "Рез", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t", "k_factor": 0.44});
+    if let Some(k) = kerf {
+        rule["kerf"] = k;
+    }
+    run(&mut s, "put_library", json!({"level": "rule", "element": rule}));
+    run(&mut s, "plate", json!({"name": "face", "sketch": "path", "rule": "Рез"}));
+    let line = json!({"points": {"p": [20, 25], "q": [80, 25]}, "lines": {"l": {"from": "p", "to": "q"}}});
+    run(&mut s, "add", json!({"name": "line", "op": "sketch", "inputs": ["face"], "flat": "front", "k_factor": 0.5, "sketch": line}));
+    let ring = json!({"points": {"c": [50, 12], "p": [20, 25], "q": [80, 25]}, "circles": {"h": {"center": "c", "diameter": 10}},
+        "lines": {"l": {"from": "p", "to": "q"}}});
+    run(&mut s, "add", json!({"name": "both", "op": "sketch", "inputs": ["face"], "flat": "front", "k_factor": 0.5, "sketch": ring}));
+    let hole = json!({"points": {"c": [50, 12]}, "circles": {"h": {"center": "c", "diameter": 10}}});
+    run(&mut s, "add", json!({"name": "hole", "op": "sketch", "inputs": ["face"], "flat": "front", "k_factor": 0.5, "sketch": hole}));
+    s
+}
+
+/// The LINE entities of a DXF text, each as its two ends in order of x then y.
+fn dxf_lines(text: &str) -> Vec<[(f64, f64); 2]> {
+    text.split("\nLINE\n")
+        .skip(1)
+        .map(|chunk| {
+            let code = |c: &str| -> f64 {
+                let at = format!("\n {c}\n");
+                chunk.split(&at).nth(1).and_then(|r| r.lines().next()).unwrap().trim().parse().unwrap()
+            };
+            let mut ends = [(code("10"), code("20")), (code("11"), code("21"))];
+            ends.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ends
+        })
+        .collect()
+}
+
+/// A rule's `kerf`, a number or a formula of `t`, goes into the cut: the part has a slot that wide, the
+/// blank (window and DXF) one line and no gap. `flats` tells its pieces and bend lines.
+#[test]
+fn a_rules_kerf_cuts_along_a_line_and_the_blank_has_one_line() {
+    for (kerf, width, name) in [(json!(1.5), 1.5, "kerf_number"), (json!("0.1 * t"), 0.2, "kerf_formula")] {
+        let mut s = lined_plate(name, Some(kerf));
+        let whole = volume(&mut s, "face");
+        assert_cut(&run(&mut s, "extrude", json!({"name": "cut", "sketch": "line", "mode": "cut", "through": true, "wall": true})));
+        let gone = whole - volume(&mut s, "cut");
+        assert!((gone - 60.0 * width * 2.0).abs() < 1e-9 * whole, "{name}: {gone} against {}", 60.0 * width * 2.0);
+        assert_eq!(pieces(&mut s, "cut"), [5, 0, 0], "{name}");
+        let flats = run(&mut s, "flats", json!({}));
+        let f = flats["flats"].as_array().unwrap().iter().find(|f| f["feature"] == "cut").unwrap();
+        assert_eq!(f["bend_lines"], 0, "{f}");
+        assert!(f.get("overlaps").is_none(), "{f}");
+        let blank = s.flat_of("cut").unwrap();
+        assert_eq!(blank.counts(), [5, 0, 0]);
+        let dxf = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.dxf"));
+        run(&mut s, "export_dxf", json!({"name": "cut", "path": dxf}));
+        let text = std::fs::read_to_string(&dxf).unwrap();
+        let lines = dxf_lines(&text);
+        assert_eq!(lines.len(), 5, "{text}");
+        // The line itself where it was drawn, 60 long, and the outline's four sides: no second line beside it.
+        let near = |l: &[(f64, f64); 2]| (l[0].1 - 25.0).abs() < 1e-6 && (l[1].1 - 25.0).abs() < 1e-6;
+        let inside: Vec<_> = lines.iter().filter(|l| near(l) && l[0].0 > 1.0 && l[1].0 < 99.0).collect();
+        assert_eq!(inside.len(), 1, "{name}: {lines:?}");
+        let [a, b] = inside[0];
+        assert!((a.0 - 20.0).abs() < 1e-6 && (b.0 - 80.0).abs() < 1e-6 && (b.1 - 25.0).abs() < 1e-6, "{name}: {inside:?}");
+    }
+}
+
+/// The feature `name`'s hash in the model.
+fn hash_of(s: &mut Session, name: &str) -> String {
+    let r = run(s, "inspect", json!({}));
+    r["features"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap()["status"]["hash"].as_str().unwrap().to_string()
+}
+
+/// The cut of `sketch` of the plate in `s`, as the command answers: Err (refused) or the reply.
+fn try_cut(s: &mut Session, name: &str, sketch: &str) -> Result<Value, String> {
+    let r = s.execute("extrude", &json!({"name": name, "sketch": sketch, "mode": "cut", "through": true, "wall": true}))?;
+    match r["failed"].as_array().and_then(|f| f.first()) {
+        Some(f) => Err(f["error"].as_str().unwrap().to_string()),
+        None => Ok(r),
+    }
+}
+
+/// A rule without `kerf`: a line is refused and the rule asked for its width; the same sketch with only
+/// closed contours is cut as ever. Contours and a line in one sketch are cut together.
+#[test]
+fn a_line_without_a_kerf_in_the_rule_is_refused() {
+    let mut s = lined_plate("kerf_none", None);
+    let err = try_cut(&mut s, "by_line", "line").unwrap_err();
+    assert!(err.contains("kerf"), "{err}");
+    run(&mut s, "remove", json!({"name": "by_line"}));
+    let err = try_cut(&mut s, "by_both", "both").unwrap_err();
+    assert!(err.contains("kerf"), "{err}");
+    run(&mut s, "remove", json!({"name": "by_both"}));
+    let whole = volume(&mut s, "face");
+    try_cut(&mut s, "cut", "hole").unwrap();
+    assert!((whole - volume(&mut s, "cut") - 25.0 * std::f64::consts::PI * 2.0).abs() < 1e-9 * whole);
+    let mut s = lined_plate("kerf_both", Some(json!(1.0)));
+    let whole = volume(&mut s, "face");
+    try_cut(&mut s, "cut", "both").unwrap();
+    let gone = whole - volume(&mut s, "cut");
+    let want = (25.0 * std::f64::consts::PI + 60.0) * 2.0;
+    assert!((gone - want).abs() < 1e-9 * whole, "{gone} against {want}");
+    assert_eq!(pieces(&mut s, "cut"), [5, 0, 1]);
+}
+
+/// A `kerf` of nothing, below it or from a formula that is neither is not a rule.
+#[test]
+fn a_rules_bad_kerf_is_refused() {
+    let mut s = lined_plate("kerf_bad", Some(json!(1.0)));
+    for kerf in [json!(0), json!(-1), json!("-t"), json!("0 * t"), json!("s")] {
+        let rule = json!({"name": "Плохой", "kind": "sheet", "material": "Сталь", "thickness": 2, "radius": "t", "kerf": kerf});
+        let err = s.execute("put_library", &json!({"level": "rule", "element": rule})).unwrap_err();
+        assert!(err.contains("`kerf`"), "{kerf}: {err}");
+    }
+}
+
+/// A rule with a `kerf` changes nothing for closed contours: the cut body is the same bit for bit.
+#[test]
+fn a_kerf_in_the_rule_leaves_a_closed_cut_as_it_was() {
+    let (mut plain, mut kerfed) = (lined_plate("kerf_hash_none", None), lined_plate("kerf_hash_some", Some(json!(1.5))));
+    try_cut(&mut plain, "cut", "hole").unwrap();
+    try_cut(&mut kerfed, "cut", "hole").unwrap();
+    assert_eq!(hash_of(&mut plain, "cut"), hash_of(&mut kerfed, "cut"));
+    assert_eq!(pieces(&mut plain, "cut"), pieces(&mut kerfed, "cut"));
+}

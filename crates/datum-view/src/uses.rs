@@ -101,7 +101,13 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
         let Ok(v) = evaluation.results[i as usize].as_ref() else { continue };
         if let Some(s) = v.sketch() {
             match picks {
-                Some(names) => u.profiles = profiles_of(node.id, s, names),
+                Some(names) => {
+                    u.profiles = profiles_of(node.id, s, names);
+                    // Its open lines: cuts along them, on sheet metal (D235).
+                    if matches!(node.op, Op::Extrude { wall: true, .. }) {
+                        u.lines.extend(curve_lines(s, datum_ops::open_curves(s).iter()));
+                    }
+                }
                 None => u.lines.extend(curve_lines(s, drawn_curves(s).iter())),
             }
         } else if v.plane().is_some() {

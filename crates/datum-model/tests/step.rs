@@ -34,6 +34,7 @@ fn reference_models_export_or_say_why_not() {
                 "rolled_holes" => &["perforated"],
                 "sheet_bend_cut" | "sheet_rims_cut" => &["punched"],
                 "sheet_window" => &["slitted"],
+                "sheet_line_cut" => &["cut"],
                 "sheet_tray" => &["relieved", "mitred"],
                 "sheet_bmt" => &["tray"],
                 "rolled_trim" => &["trimmed", "trimmed_other"],

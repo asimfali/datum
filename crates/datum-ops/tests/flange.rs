@@ -2479,3 +2479,332 @@ fn flanges_on_a_walls_end_and_cap_edges_lie_flat() {
         assert!(b.volume() > u.volume(), "{extra}");
     }
 }
+
+/// A line on a blank: its two ends.
+type Segment = ((f64, f64), (f64, f64));
+
+/// `b` cut by open lines drawn on its blank, a `kerf` wide.
+fn line_cut_on_blank(b: &Body, segments: &[Segment], kerf: f64) -> Result<Body, BrepError> {
+    let (mut points, mut lines) = (serde_json::Map::new(), serde_json::Map::new());
+    for (k, (p, q)) in segments.iter().enumerate() {
+        points.insert(format!("a{k}"), serde_json::json!([p.0, p.1]));
+        points.insert(format!("b{k}"), serde_json::json!([q.0, q.1]));
+        lines.insert(format!("l{k}"), serde_json::json!({"from": format!("a{k}"), "to": format!("b{k}")}));
+    }
+    let target = Value::Body(b.clone());
+    let sketch = op(serde_json::json!({"op": "sketch", "flat": "front", "k_factor": K, "sketch": {"points": points, "lines": lines}}))
+        .eval(id("lines"), &[&target])?;
+    let r = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true, "kerf": kerf}))
+        .eval(id(&format!("line.cut.{}", b.faces().len())), &[&target, &sketch])?
+        .body()
+        .unwrap()
+        .clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    Ok(r)
+}
+
+/// Lines on a window's corners: in the part a cut the kerf wide, as a slit that wide takes; on the
+/// blank as the DXF has it, the gap closed: one line in each corner, the free edges running to it.
+#[test]
+fn a_line_cut_has_a_gap_in_the_part_and_none_in_the_blank() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    let reach = f.overlaps[0][1].x - 50.0;
+    let over = 3.0;
+    let line = |x: f64, y: f64, sx: f64, sy: f64| ((x - sx * over, y - sy * over), (x + sx * (reach + over), y + sy * (reach + over)));
+    let segments = [line(50.0, 100.0, 1.0, 1.0), line(150.0, 100.0, -1.0, 1.0), line(50.0, 200.0, 1.0, -1.0), line(150.0, 200.0, -1.0, -1.0)];
+    let g = 1.0;
+    let cut = line_cut_on_blank(&b, &segments, g).unwrap();
+    assert!(cut.volume() < b.volume());
+    let flat = unfold_side(&cut, false, K).unwrap();
+    assert!(flat.overlaps.is_empty(), "{:?}", flat.overlaps);
+    assert_eq!(flat.bends.len(), 8);
+    // Each line in space, on the blank's frame: taken back to one line.
+    let carried: Vec<datum_ops::LineCut> = {
+        let [fo, fx, fy, fz] = f.frame.unwrap();
+        let at = |p: (f64, f64)| fo + fx * p.0 + fy * p.1;
+        segments.iter().map(|(p, q)| datum_ops::LineCut { ends: [at(*p), at(*q)], normal: fz, kerf: g }).collect()
+    };
+    let closed = flat.with_lines_closed(&carried);
+    assert!(closed.pieces.len() < flat.pieces.len(), "{} of {}", closed.pieces.len(), flat.pieces.len());
+    assert_ne!(closed.hash, flat.hash);
+    assert!(closed.dxf().contains("LINE"));
+    // Every end of a piece meets another's but the lines' ends in the plate.
+    let ends: Vec<datum_math::Vec2> =
+        closed.pieces.iter().filter_map(|p| if let datum_ops::FlatPiece::Line(a, b) = p { Some([*a, *b]) } else { None }).flatten().collect();
+    let lone = ends.iter().filter(|a| ends.iter().filter(|b| (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6).count() < 2).count();
+    // The plate's outline, the window's, and a line in each corner, its far end in the plate.
+    assert_eq!(closed.pieces.len(), 12);
+    assert_eq!(lone, 4);
+    // No kerf: asked of the rule.
+    let target = Value::Body(b.clone());
+    let sketch = op(serde_json::json!({"op": "sketch", "flat": "front", "k_factor": K, "sketch": {"points": {"a": [55, 105], "b": [60, 110]}, "lines": {"l": {"from": "a", "to": "b"}}}}))
+        .eval(id("lines"), &[&target])
+        .unwrap();
+    let err = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true})).eval(id("c"), &[&target, &sketch]).unwrap_err();
+    assert!(err.to_string().contains("kerf"), "{err}");
+}
+
+/// `b` cut by the open lines of `sketch` drawn on its blank at [`K`], the cut's own fields `extra` (the
+/// kerf among them).
+fn line_cut_sketch(b: &Body, sketch: serde_json::Value, extra: serde_json::Value) -> Result<Body, BrepError> {
+    let target = Value::Body(b.clone());
+    let drawn = op(serde_json::json!({"op": "sketch", "flat": "front", "k_factor": K, "sketch": sketch})).eval(id("lines"), &[&target])?;
+    let mut j = serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true});
+    for (k, v) in extra.as_object().unwrap() {
+        j[k] = v.clone();
+    }
+    let r = op(j).eval(id("line.cut"), &[&target, &drawn])?.body().unwrap().clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    Ok(r)
+}
+
+/// The lines of `segments` as a sketch of separate open lines.
+fn lines_sketch(segments: &[Segment]) -> serde_json::Value {
+    let (mut points, mut lines) = (serde_json::Map::new(), serde_json::Map::new());
+    for (k, (p, q)) in segments.iter().enumerate() {
+        points.insert(format!("a{k}"), serde_json::json!([p.0, p.1]));
+        points.insert(format!("b{k}"), serde_json::json!([q.0, q.1]));
+        lines.insert(format!("l{k}"), serde_json::json!({"from": format!("a{k}"), "to": format!("b{k}")}));
+    }
+    serde_json::json!({"points": points, "lines": lines})
+}
+
+/// The `segments` drawn on the blank of `before` (seen from the front at [`K`]) in space, each `kerf` wide.
+fn in_space(before: &Body, segments: &[Segment], kerf: f64) -> Vec<datum_ops::LineCut> {
+    let [fo, fx, fy, fz] = unfold_side(before, false, K).unwrap().frame.unwrap();
+    let at = |q: (f64, f64)| fo + fx * q.0 + fy * q.1;
+    segments.iter().map(|(p, q)| datum_ops::LineCut { ends: [at(*p), at(*q)], normal: fz, kerf }).collect()
+}
+
+/// The ends of the lines of `f` that no other end meets.
+fn lone_ends(f: &Flat) -> Vec<datum_math::Vec2> {
+    let ends: Vec<datum_math::Vec2> = lines_of(f).iter().flat_map(|(a, b)| [*a, *b]).collect();
+    let met = |a: &datum_math::Vec2| ends.iter().filter(|b| (a.x - b.x).abs() < 1e-6 && (a.y - b.y).abs() < 1e-6).count();
+    ends.iter().filter(|a| met(a) < 2).copied().collect()
+}
+
+/// The lines of the blank `f`.
+fn lines_of(f: &Flat) -> Vec<(datum_math::Vec2, datum_math::Vec2)> {
+    f.pieces.iter().filter_map(|p| if let FlatPiece::Line(a, b) = p { Some((*a, *b)) } else { None }).collect()
+}
+
+/// A line inside a plate's metal is a slot of length x kerf x thickness; on the blank one line and no
+/// rectangle. A line from the edge in is a notch, the outline closed but for the line.
+#[test]
+fn a_line_inside_the_metal_is_a_slot_and_one_line_on_the_blank() {
+    let p = plate();
+    let whole = unfold_side(&p, false, K).unwrap();
+    assert_eq!(whole.counts(), [4, 0, 0]);
+    // Inside, ends in the metal.
+    let seg = ((30.0, 30.0), (70.0, 30.0));
+    let slot = line_cut_sketch(&p, lines_sketch(&[seg]), serde_json::json!({"kerf": 1.5})).unwrap();
+    let want = p.volume() - 40.0 * 1.5 * T;
+    assert!(close(slot.volume(), want), "{} vs {want}", slot.volume());
+    let raw = unfold_side(&slot, false, K).unwrap();
+    assert_eq!(raw.counts()[0], 8, "the rectangle: {:?}", raw.pieces);
+    let closed = raw.with_lines_closed(&in_space(&p, &[seg], 1.5));
+    assert_eq!(closed.counts(), [5, 0, 0], "{:?}", closed.pieces);
+    // From beyond the edge in: a notch.
+    let seg = ((-5.0, 30.0), (20.0, 30.0));
+    let notch = line_cut_sketch(&p, lines_sketch(&[seg]), serde_json::json!({"kerf": 1.5})).unwrap();
+    let want = p.volume() - 20.0 * 1.5 * T;
+    assert!(close(notch.volume(), want), "{} vs {want}", notch.volume());
+    let raw = unfold_side(&notch, false, K).unwrap();
+    let closed = raw.with_lines_closed(&in_space(&p, &[seg], 1.5));
+    // Bottom, right, top, the left edge in two and the line.
+    assert_eq!(closed.counts(), [6, 0, 0], "{:?}", closed.pieces);
+    let lone = lone_ends(&closed);
+    assert_eq!(lone.len(), 1, "the outline is closed but for the line's far end: {lone:?}");
+}
+
+/// A line across a U's bend, from one wall to the next, over either of its two bends: the cut goes over
+/// the bend, the body is valid, and the blank has the line alone, its outline closed.
+#[test]
+fn a_line_across_a_bend_goes_over_it() {
+    let u = u_of(MID);
+    let f = unfold_side(&u, false, K).unwrap();
+    assert_eq!(f.bends.len(), 4);
+    for bend in [3, 0] {
+        let x = f.bends[bend][0].x;
+        let y = 0.5 * (f.bends[bend][0].y + f.bends[bend][1].y);
+        let seg = ((x - 12.0, y), (x + 12.0, y));
+        let cut = line_cut_sketch(&u, lines_sketch(&[seg]), serde_json::json!({"kerf": 1.0})).unwrap();
+        let gone = u.volume() - cut.volume();
+        // The bend's layers are longer than the blank's neutral one: more than the straight cut takes.
+        assert!(gone > 24.0 * T * 0.9 && gone < 24.0 * T * 1.5, "bend {bend}: {gone}");
+        let raw = unfold_side(&cut, false, K).unwrap();
+        assert!(raw.overlaps.is_empty() && raw.bends.len() == 4);
+        let closed = raw.with_lines_closed(&in_space(&u, &[seg], 1.0));
+        assert_eq!(closed.counts()[0], f.counts()[0] + 1, "bend {bend}: frames {:?} then {:?}: {:?}", f.frame, raw.frame, closed.pieces);
+        assert_eq!(lone_ends(&closed).len(), 2, "bend {bend}: {:?}", lone_ends(&closed));
+    }
+}
+
+/// Closed contours and lines in one sketch: both are cut; on the blank the circle stays a circle and
+/// the line a line.
+#[test]
+fn contours_and_lines_in_one_sketch_are_both_cut() {
+    let p = plate();
+    let mut sketch = lines_sketch(&[((50.0, 15.0), (80.0, 15.0))]);
+    sketch["points"]["c"] = serde_json::json!([25, 30]);
+    sketch["circles"] = serde_json::json!({"hole": {"center": "c", "diameter": 10}});
+    let cut = line_cut_sketch(&p, sketch, serde_json::json!({"kerf": 1.0})).unwrap();
+    let want = p.volume() - (25.0 * std::f64::consts::PI + 30.0 * 1.0) * T;
+    assert!(close(cut.volume(), want), "{} vs {want}", cut.volume());
+    let closed = unfold_side(&cut, false, K).unwrap().with_lines_closed(&in_space(&p, &[((50.0, 15.0), (80.0, 15.0))], 1.0));
+    assert_eq!(closed.counts(), [5, 0, 1], "{:?}", closed.pieces);
+}
+
+/// A line cut on the blank only leaves the body as it was; `blank_cut` has the cut one.
+#[test]
+fn a_line_cut_on_the_blank_only_leaves_the_part() {
+    let p = plate();
+    let seg = ((30.0, 30.0), (70.0, 30.0));
+    let only = serde_json::json!({"kerf": 1.0, "blank_only": true});
+    let same = line_cut_sketch(&p, lines_sketch(&[seg]), only.clone()).unwrap();
+    assert_eq!(same.volume(), p.volume());
+    assert_eq!(same.faces().len(), p.faces().len());
+    let target = Value::Body(p.clone());
+    let drawn = op(serde_json::json!({"op": "sketch", "flat": "front", "k_factor": K, "sketch": lines_sketch(&[seg])}))
+        .eval(id("lines"), &[&target])
+        .unwrap();
+    let cut_op = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true, "kerf": 1.0, "blank_only": true}));
+    let cut = datum_ops::blank_cut(id("line.cut"), &p, &drawn, &cut_op).unwrap();
+    assert!(close(cut.volume(), p.volume() - 40.0 * T), "{} vs {}", cut.volume(), p.volume() - 40.0 * T);
+    // No kerf: asked of the rule here too.
+    let no_kerf = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true, "blank_only": true}));
+    let err = datum_ops::blank_cut(id("line.cut"), &p, &drawn, &no_kerf).unwrap_err();
+    assert!(err.to_string().contains("kerf"), "{err}");
+}
+
+/// Lines that touch, an arc on an open chain and a kerf of nothing are refused, not
+/// cut wrong.
+#[test]
+fn a_line_cut_that_cannot_be_made_is_refused() {
+    let p = plate();
+    let kerf = serde_json::json!({"kerf": 1.0});
+    // Two lines joined at a point: their profiles would touch.
+    let joined = serde_json::json!({"points": {"a": [20, 20], "b": [50, 20], "c": [50, 40]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}});
+    let r = line_cut_sketch(&p, joined, kerf.clone());
+    assert!(matches!(r, Err(BrepError::Degenerate(_))), "{r:?}");
+    // An arc on an open chain.
+    let arc = serde_json::json!({"points": {"a": [20, 20], "b": [40, 20], "o": [30, 20]}, "arcs": {"r": {"center": "o", "from": "b", "to": "a"}}});
+    let r = line_cut_sketch(&p, arc, kerf.clone());
+    assert!(matches!(r, Err(BrepError::Unsupported(_))), "{r:?}");
+    // A kerf of nothing, or less.
+    for k in [0.0, -1.0] {
+        let r = line_cut_sketch(&p, lines_sketch(&[((30.0, 30.0), (70.0, 30.0))]), serde_json::json!({"kerf": k}));
+        assert!(matches!(r, Err(BrepError::Degenerate(_))), "{k}: {r:?}");
+    }
+}
+
+/// A window of walls of two heights cut by lines off 45 degrees: the blank lies flat, and on the closed
+/// blank the free edges end on each line.
+#[test]
+fn lines_off_45_degrees_settle_walls_of_two_heights() {
+    let w = windowed_by(140.0, 90.0);
+    let first = flange(&w, &window_edges(&w, true), serde_json::json!({"height": 20})).unwrap();
+    let b = flange(&first, &window_edges(&first, false), serde_json::json!({"height": 30})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    let (rx, ry) = (longer(20.0, 90.0), longer(30.0, 90.0));
+    let window = window_box(&f.bends);
+    let tilt = 1.25;
+    let through = (rx, ry * tilt);
+    let over = 3.0;
+    let segments: Vec<_> = window_corners(window)
+        .iter()
+        .map(|&((x, y), (sx, sy))| {
+            let l = (through.0 * through.0 + through.1 * through.1).sqrt();
+            let (ux, uy) = (through.0 / l, through.1 / l);
+            ((x - sx * ux * over, y - sy * uy * over), (x + sx * (through.0 + ux * over), y + sy * (through.1 + uy * over)))
+        })
+        .collect();
+    let cut = line_cut_sketch(&b, lines_sketch(&segments), serde_json::json!({"kerf": 1.0})).unwrap();
+    let flat = lies_flat(&cut, K, 8);
+    let closed = flat.with_lines_closed(&in_space(&b, &segments, 1.0));
+    // Where the line crosses the edge `rx` out along X, and the edge `ry` out along Y.
+    for &((x, y), (sx, sy)) in &window_corners(window) {
+        let on_x_edge = (x + sx * rx, y + sy * through.1);
+        let on_y_edge = (x + sx * ry * through.0 / through.1, y + sy * ry);
+        assert!(has_vertex(&closed, &f, on_x_edge), "{x} {y} {on_x_edge:?}");
+        assert!(has_vertex(&closed, &f, on_y_edge), "{x} {y} {on_y_edge:?}");
+    }
+    assert!(closed.pieces.len() < flat.pieces.len());
+}
+
+/// The blank of the cut window lies another way round than the blank the lines were drawn on (same plane,
+/// turned): the lines, given in space, are still found, and the blank closed has the same 12 pieces.
+#[test]
+fn lines_are_closed_on_a_blank_laid_another_way_round() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    let reach = f.overlaps[0][1].x - 50.0;
+    let over = 3.0;
+    let line = |x: f64, y: f64, sx: f64, sy: f64| ((x - sx * over, y - sy * over), (x + sx * (reach + over), y + sy * (reach + over)));
+    let segments = [line(50.0, 100.0, 1.0, 1.0), line(150.0, 100.0, -1.0, 1.0), line(50.0, 200.0, 1.0, -1.0), line(150.0, 200.0, -1.0, -1.0)];
+    let cut = line_cut_sketch(&b, lines_sketch(&segments), serde_json::json!({"kerf": 1.0})).unwrap();
+    let flat = unfold_side(&cut, false, K).unwrap();
+    let (before, after) = (f.frame.unwrap(), flat.frame.unwrap());
+    assert!(before[1].dot(after[1]) < 0.5, "the same way round: {before:?} {after:?}");
+    assert!(before[3].dot(after[3]) > 1.0 - 1e-9 && (before[0] - after[0]).dot(before[3]).abs() < 1e-9, "not one plane");
+    let closed = flat.with_lines_closed(&in_space(&b, &segments, 1.0));
+    assert_eq!(closed.pieces.len(), 12, "{} of {}", closed.pieces.len(), flat.pieces.len());
+    assert_eq!(lone_ends(&closed).len(), 4);
+}
+
+/// Corners settled by cuts one after another, not in one: each cut goes on the blank as the one
+/// before it left it, the last leaves it flat.
+#[test]
+fn a_windows_corners_are_settled_one_cut_after_another() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let mut body = b.clone();
+    for (x, y, sx, sy) in [(50.0, 100.0, 1.0, 1.0), (150.0, 100.0, -1.0, 1.0), (50.0, 200.0, 1.0, -1.0), (150.0, 200.0, -1.0, -1.0)] {
+        // In space, for the blank as it now lies.
+        let [fo, fx, fy, _] = unfold_side(&b, false, K).unwrap().frame.unwrap();
+        let reach = unfold_side(&b, false, K).unwrap().overlaps[0][1].x - 50.0;
+        let [o, ex, ey, _] = unfold_side(&body, false, K).unwrap().frame.unwrap();
+        let now = |p: (f64, f64)| {
+            let q = fo + fx * p.0 + fy * p.1;
+            ((q - o).dot(ex), (q - o).dot(ey))
+        };
+        let seg = (now((x - sx * 3.0, y - sy * 3.0)), now((x + sx * (reach + 3.0), y + sy * (reach + 3.0))));
+        body = line_cut_on_blank(&body, &[seg], 1.0).unwrap();
+    }
+    let flat = unfold_side(&body, false, K).unwrap();
+    assert!(flat.overlaps.is_empty(), "{:?}", flat.overlaps);
+    assert_eq!(flat.bends.len(), 8);
+}
+
+/// A line drawn from the corner of the bend lines, snapped to it, to the very point the free edges
+/// meet at (or past it): the cut goes through as if drawn past them; the blank has the line from
+/// point to point, no further.
+#[test]
+fn a_line_from_a_corner_to_where_the_free_edges_meet() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    let reach = f.overlaps[0][1].x - 50.0;
+    for far in [reach, reach + 5.0] {
+        let line = |x: f64, y: f64, sx: f64, sy: f64| ((x, y), (x + sx * far, y + sy * far));
+        let segments = [line(50.0, 100.0, 1.0, 1.0), line(150.0, 100.0, -1.0, 1.0), line(50.0, 200.0, 1.0, -1.0), line(150.0, 200.0, -1.0, -1.0)];
+        let cut = line_cut_on_blank(&b, &segments, 0.2).unwrap();
+        let flat = unfold_side(&cut, false, K).unwrap();
+        assert!(flat.overlaps.is_empty(), "{far}: {:?}", flat.overlaps);
+        let closed = flat.with_lines_closed(&in_space(&b, &segments, 0.2));
+        // The plate's outline, the window's and the corners' lines, ending where they meet: no end alone.
+        assert_eq!(closed.pieces.len(), 12, "{far}: {:?}", closed.pieces);
+        assert_eq!(lone_ends(&closed).len(), 4, "{far}: {:?}", lone_ends(&closed));
+        for e in lone_ends(&closed) {
+            let on_corner =
+                [(50.0, 100.0), (150.0, 100.0), (50.0, 200.0), (150.0, 200.0)].iter().any(|c| (e.x - c.0).abs() < 1e-6 && (e.y - c.1).abs() < 1e-6);
+            assert!(on_corner, "{far}: {e:?}");
+        }
+    }
+}
