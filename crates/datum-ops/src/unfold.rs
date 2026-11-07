@@ -384,12 +384,11 @@ pub fn sheet_sides(body: &Body) -> Result<[Ix; 2], BrepError> {
     Ok(if first == Some(false) { [back.2, front.2] } else { [front.2, back.2] })
 }
 
-/// The faces of both sides of sheet `body`, the flanges on its sides left out.
+/// The faces of both sides of sheet `body`: the strips of each side's tree, however it branches.
 pub(crate) fn side_faces(body: &Body) -> Result<BTreeSet<Ix>, BrepError> {
-    let skip = branches(body);
     let mut out = BTreeSet::new();
     for s in sheet_sides(body)? {
-        out.extend(chain_through(body, s, &skip)?.into_iter().flatten());
+        out.extend(side_of(body, s)?);
     }
     Ok(out)
 }

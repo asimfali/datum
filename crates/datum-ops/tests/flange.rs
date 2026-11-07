@@ -1411,3 +1411,229 @@ fn rims_keep_their_relief() {
     assert!(cut(0.0, 0.0).is_err());
     assert!(cut(3.0, 3.0).is_err());
 }
+
+/// The tray of a plate with a flange on each end, and the ID of the top of each of its walls.
+fn tray_and_caps() -> (Body, Vec<String>) {
+    let p = plate();
+    let ends = [faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T)].concat();
+    let tray = flange(&p, &ends_edges(&p, &ends), serde_json::json!({})).unwrap();
+    let caps = flange_ends(&tray).iter().map(|e| format!("{e:?}")).collect();
+    (tray, caps)
+}
+
+/// The tray and the tray with four rims picked in one flange, `extra` its fields: with `flip` and
+/// a mitre, what the flange of the BMT inlet is (D233).
+fn tray_with_rims(extra: serde_json::Value) -> (Body, Body) {
+    let (tray, tops) = tray_and_caps();
+    assert_eq!(tops.len(), 4);
+    let edges: Vec<String> = tops.iter().map(|t| long_edges(&tray, t)[0].clone()).collect();
+    let mut j = serde_json::json!({"height": 10});
+    for (k, v) in extra.as_object().unwrap() {
+        j[k] = v.clone();
+    }
+    let body = flange(&tray, &edges, j).unwrap();
+    (tray, body)
+}
+
+/// The vertices of `b` in the rims' layer (above the walls' bends).
+fn rim_vertices(b: &Body, z_above: f64) -> Vec<Vec3> {
+    (0..b.vertices().len() as u32).map(|v| b.point(v)).filter(|p| p.z > z_above).collect()
+}
+
+/// Whether the rim face with centroid `c` lies over the tray (inside the walls' outer faces, which
+/// stand 4 out from the plate of 100 x 60), not outside them.
+fn lies_inward(c: Vec3) -> bool {
+    if ((c.x - 50.0) / 50.0).abs() > ((c.y - 30.0) / 30.0).abs() { (c.x - 50.0).abs() < 54.0 } else { (c.y - 30.0).abs() < 34.0 }
+}
+
+/// The horizontal faces of the rims of `b`: two for each rim, in the rims' layer (the walls' caps
+/// are smaller).
+fn rim_planes(b: &Body) -> Vec<usize> {
+    plane_faces(b)
+        .into_iter()
+        .filter(|&(x, nz, _)| (nz.abs() - 1.0).abs() < 1e-9 && centroid(b, x).z > 17.0 && b.face_area(x as u32) > 300.0)
+        .map(|f| f.0)
+        .collect()
+}
+
+/// A tray offers the edges of all its walls, before rims and after: each wall's cap takes a flange
+/// on either edge, whatever the other walls carry.
+#[test]
+fn every_wall_of_a_tray_offers_its_edges() {
+    let (tray, caps) = tray_and_caps();
+    assert_eq!(flange_edges(&tray).len(), 24);
+    for cap in &caps {
+        assert_eq!(long_edges(&tray, cap).len(), 2);
+        for edge in long_edges(&tray, cap) {
+            flange(&tray, &[edge], serde_json::json!({"height": 10})).unwrap();
+        }
+    }
+    for (w, cap) in caps.iter().enumerate() {
+        let mut body = tray.clone();
+        for other in caps.iter().enumerate().filter(|&(n, _)| n != w).map(|(_, c)| c) {
+            body = flange(&body, &long_edges(&body, other)[..1], serde_json::json!({"height": 10})).unwrap();
+        }
+        assert!(flange_edges(&body).len() > 24, "{} edges", flange_edges(&body).len());
+        for edge in long_edges(&body, cap) {
+            flange(&body, &[edge], serde_json::json!({"height": 10})).unwrap();
+        }
+    }
+    let (_, all) = tray_with_rims(serde_json::json!({}));
+    assert!(flange_edges(&all).len() > 24, "{} edges", flange_edges(&all).len());
+}
+
+/// Four rims picked in one flange are the four rims made one by one: volume, faces, box and blank.
+#[test]
+fn four_rims_at_once_are_four_rims_one_by_one() {
+    let (tray, caps) = tray_and_caps();
+    let (_, once) = tray_with_rims(serde_json::json!({}));
+    let mut each = tray;
+    for cap in &caps {
+        each = flange(&each, &long_edges(&each, cap)[..1], serde_json::json!({"height": 10})).unwrap();
+    }
+    assert!(close(once.volume(), each.volume()), "{} {}", once.volume(), each.volume());
+    assert_eq!(once.faces().len(), each.faces().len());
+    let (a, b) = (once.bounds(), each.bounds());
+    for (p, q) in [(a.0, b.0), (a.1, b.1)] {
+        assert!((p - q).dot(p - q) < 1e-18, "{a:?} {b:?}");
+    }
+    let (sa, sb) = (unfold_side(&once, false, K).unwrap(), unfold_side(&each, false, K).unwrap());
+    assert!(close(sa.size.x, sb.size.x) && close(sa.size.y, sb.size.y), "{:?} {:?}", sa.size, sb.size);
+}
+
+/// Rims turn toward the sheet's front side (inward on a tray) unless flipped, all of them alike:
+/// picked at once or one on each wall in turn.
+#[test]
+fn rims_all_turn_the_same_way() {
+    let (tray, caps) = tray_and_caps();
+    for (flip, lo, hi) in [(false, -4.0, 104.0), (true, -12.0, 112.0)] {
+        let extra = serde_json::json!({"flip": flip});
+        let (_, all) = tray_with_rims(extra.clone());
+        let (min, max) = all.bounds();
+        let (ylo, yhi) = if flip { (-12.0, 72.0) } else { (-4.0, 64.0) };
+        assert!((min.x - lo).abs() < 1e-9 && (max.x - hi).abs() < 1e-9, "{min:?} {max:?}");
+        assert!((min.y - ylo).abs() < 1e-9 && (max.y - yhi).abs() < 1e-9, "{min:?} {max:?}");
+        let faces = rim_planes(&all);
+        assert_eq!(faces.len(), 8);
+        for x in faces {
+            assert_eq!(lies_inward(centroid(&all, x)), !flip, "{:?}", centroid(&all, x));
+        }
+        for cap in &caps {
+            let one = flange(&tray, &long_edges(&tray, cap)[..1], serde_json::json!({"height": 10, "flip": flip})).unwrap();
+            let faces = rim_planes(&one);
+            assert_eq!(faces.len(), 2);
+            for x in faces {
+                assert_eq!(lies_inward(centroid(&one, x)), !flip, "{:?}", centroid(&one, x));
+            }
+        }
+    }
+}
+
+/// The rims of a tray mitred: at each corner the two free edges end `g` apart square to a plane at
+/// 45 degrees through the corner, the blank lies out whole. The volume differs from square rims by
+/// what the mitres add at the eight ends: a flat part's profile of area A (6 x 2) at y (the wall's
+/// outer plane at -4, its end at 0) has its end at -y - g/sqrt(2) beyond the wall's end, so each
+/// end adds -(first moment of the profile in y) - A g/sqrt(2).
+#[test]
+fn mitred_rims_meet_at_45_degrees_a_gap_apart() {
+    let g = 1.0;
+    // The bends end square at the walls' ends: only the flat parts (12 square, from 0 to 6 in or
+    // 6 to 12 out) are mitred.
+    let flat = 12.0;
+    let moment = |out: bool| if out { -flat * 9.0 } else { flat * 3.0 };
+    for flip in [true, false] {
+        let (_, square) = tray_with_rims(serde_json::json!({"flip": flip}));
+        let (_, mitred) = tray_with_rims(serde_json::json!({"flip": flip, "corner": "miter", "corner_gap": g}));
+        let layer = rim_vertices(&mitred, 17.0);
+        let (lo, hi) = if flip { (-12.0, 112.0) } else { (6.0, 94.0) };
+        let (ylo, yhi) = if flip { (-12.0, 72.0) } else { (6.0, 54.0) };
+        for (cx, ex, sx) in [(-4.0, lo, true), (104.0, hi, false)] {
+            for (cy, ey, sy) in [(-4.0, ylo, true), (64.0, yhi, false)] {
+                let top = layer.iter().fold(f64::MIN, |m, p| m.max(p.z));
+                let on_top = |p: &&Vec3| (p.z - top).abs() < 1e-9;
+                // The free edge along X ends nearest the corner at `a`, the one along Y at `b`.
+                let ends_a: Vec<Vec3> = layer.iter().filter(on_top).filter(|p| (p.y - ey).abs() < 1e-9).copied().collect();
+                let ends_b: Vec<Vec3> = layer.iter().filter(on_top).filter(|p| (p.x - ex).abs() < 1e-9).copied().collect();
+                let near = |v: &[Vec3], x: bool, s: bool| {
+                    let key = |p: &Vec3| if x { p.x } else { p.y };
+                    *v.iter().min_by(|p, q| if s { key(p).total_cmp(&key(q)) } else { key(q).total_cmp(&key(p)) }).unwrap()
+                };
+                let (pa, pb) = (
+                    near(&ends_a.iter().copied().filter(|p| (p.y < 30.0) == sy).collect::<Vec<_>>(), true, sx),
+                    near(&ends_b.iter().copied().filter(|p| (p.x < 50.0) == sx).collect::<Vec<_>>(), false, sy),
+                );
+                let d = pa - pb;
+                assert!((d.dot(d).sqrt() - g).abs() < 1e-9, "flip {flip}: {pa:?} {pb:?}");
+                assert!((d.x.abs() - d.y.abs()).abs() < 1e-9 && d.z.abs() < 1e-9, "45 degrees: {d:?}");
+                // The middle between them lies on the diagonal through the walls' outer corner.
+                let m = (pa + pb) * 0.5;
+                assert!(((m.x - cx).abs() - (m.y - cy).abs()).abs() < 1e-9, "{m:?} at ({cx}, {cy})");
+            }
+        }
+        let per_end = -moment(flip) - flat * g / std::f64::consts::SQRT_2;
+        let (have, want) = (mitred.volume() - square.volume(), 8.0 * per_end);
+        assert!((have - want).abs() < 1e-6 * want.abs(), "flip {flip}: {have} against {want}");
+        let f = unfold_side(&mitred, false, K).unwrap();
+        assert!(f.overlaps.is_empty(), "{:?}", f.overlaps);
+        assert_eq!(f.bends.len(), 16);
+        let back = unfold_side(&mitred, true, K).unwrap();
+        assert!(close(f.size.x, back.size.x) && close(f.size.y, back.size.y), "{:?} {:?}", f.size, back.size);
+    }
+}
+
+/// Whether all vertices of `b` above `z_above` within 1.5 of the plate's side `x` = `side` lie on it.
+fn rim_ends_square(b: &Body, side: f64, z_above: f64) -> bool {
+    rim_vertices(b, z_above).iter().filter(|p| (p.x - side).abs() < 1.5).all(|p| (p.x - side).abs() < 1e-9)
+}
+
+/// Rims on three walls only: the ends of the rims on the missing wall's side have no neighbour and
+/// stay square, the other corners are mitred.
+#[test]
+fn a_rim_end_without_a_neighbour_stays_square() {
+    let (tray, caps) = tray_and_caps();
+    // The wall at x = 100: the one whose cap has its centre there.
+    let at = |c: &String| centroid(&tray, (0..tray.faces().len()).find(|&x| hex(&tray, x) == *c).unwrap());
+    let missing = caps.iter().position(|c| at(c).x > 90.0).unwrap();
+    let edges: Vec<String> = caps.iter().enumerate().filter(|&(n, _)| n != missing).map(|(_, c)| long_edges(&tray, c)[0].clone()).collect();
+    let b = flange(&tray, &edges, serde_json::json!({"height": 10, "corner": "miter", "corner_gap": 1})).unwrap();
+    // Every vertex of the rims within 1.5 of x = 100 lies on it: square ends, no mitre there.
+    let layer = rim_vertices(&b, 17.0);
+    assert!(layer.iter().any(|p| (p.x - 100.0).abs() < 1e-9), "{layer:?}");
+    assert!(rim_ends_square(&b, 100.0, 17.0));
+    // The corners at x = 0 are mitred: some rim vertex stands off the wall's end at x = 0.
+    assert!(layer.iter().any(|p| p.x > 0.5 && p.x < 8.0), "{layer:?}");
+}
+
+/// A tray whose wall at y < 0 is 30 high, the others 20: its rim is not in the plane of the others
+/// and stays square at both ends; the three others in one plane are mitred where they meet.
+#[test]
+fn rims_in_other_planes_stay_square() {
+    let p = plate();
+    let long = faces_of_area(&p, 100.0 * T);
+    let at = |f: &String| centroid(&p, (0..p.faces().len()).find(|&x| hex(&p, x) == *f).unwrap());
+    let front = long.iter().find(|f| at(f).y < 30.0).unwrap();
+    let ends = [long.clone(), faces_of_area(&p, 60.0 * T)].concat();
+    let rest: Vec<String> = ends.iter().filter(|f| *f != front).cloned().collect();
+    let low = flange(&p, &ends_edges(&p, &rest), serde_json::json!({})).unwrap();
+    let tray = flange(&low, &long_edges(&p, front), serde_json::json!({"height": 30})).unwrap();
+    let tops: Vec<String> = flange_ends(&tray).iter().map(|e| format!("{e:?}")).collect();
+    assert_eq!(tops.len(), 4);
+    let edges: Vec<String> = tops.iter().map(|t| long_edges(&tray, t)[0].clone()).collect();
+    let b = flange(&tray, &edges, serde_json::json!({"height": 10, "corner": "miter", "corner_gap": 1})).unwrap();
+    // The tall wall's rim, above z = 26: its ends at x = 0 and x = 100, as the square rim has.
+    let tall_rim = rim_vertices(&b, 26.0);
+    assert!(!tall_rim.is_empty());
+    assert!(tall_rim.iter().all(|p| p.x > -1e-9 && p.x < 100.0 + 1e-9), "{tall_rim:?}");
+    // The back rim, in the plane of the two side rims, ends short of the wall's end by a mitre.
+    let back: Vec<Vec3> = rim_vertices(&b, 17.0).into_iter().filter(|p| p.z < 25.0 && p.y > 30.0).collect();
+    assert!(back.iter().any(|p| p.x > 0.5 && p.x < 8.0), "{back:?}");
+}
+
+/// A mitre needs a gap, as a closed corner of walls does.
+#[test]
+fn a_mitre_of_rims_needs_a_gap() {
+    let (tray, caps) = tray_and_caps();
+    let edges: Vec<String> = caps.iter().map(|c| long_edges(&tray, c)[0].clone()).collect();
+    assert!(flange(&tray, &edges, serde_json::json!({"height": 10, "corner": "miter"})).is_err());
+    assert!(flange(&tray, &edges, serde_json::json!({"height": 10, "corner": "miter", "corner_gap": 1})).is_ok());
+}
