@@ -2933,3 +2933,91 @@ fn a_line_from_a_corner_to_where_the_free_edges_meet() {
         }
     }
 }
+
+/// A plate with walls `first` (angle, height) on its long edges, then `second` on its short ones,
+/// mitred, as `test12` is drawn.
+fn meeting(first: (f64, f64), second: (f64, f64), extra: serde_json::Value) -> Body {
+    let p = plate();
+    let long = [wall_edge(&p, 1, 0.0, T), wall_edge(&p, 1, 60.0, T)];
+    let a = flange(&p, &long, serde_json::json!({"angle": first.0, "height": first.1})).unwrap();
+    let short = [wall_edge(&a, 0, 0.0, T), wall_edge(&a, 0, 100.0, T)];
+    let mut j = serde_json::json!({"angle": second.0, "height": second.1, "corner": "miter", "corner_gap": 0.5});
+    for (k, v) in extra.as_object().unwrap() {
+        j[k] = v.clone();
+    }
+    flange(&a, &short, j).unwrap()
+}
+
+/// Where `b` reaches along X at height `z`, within the sheet's far side in Y, and the highest it goes.
+fn x_reach(b: &Body, y_past: f64, z: f64) -> f64 {
+    let tol = 1e-6;
+    b.vertices().iter().filter(|v| v.point.y >= y_past - tol && (v.point.z - z).abs() < tol).map(|v| v.point.x).fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// A wall at 90° and one at 45° meet: the steeper goes out to the other's outer face, widening as that
+/// leans away; the other stops the gap short of its inner face. Above the lower top the higher goes
+/// straight on. The blank lies flat, its area the body's.
+#[test]
+fn walls_of_two_angles_meet_along_the_line_where_they_cross() {
+    let (h90, h45) = (40.0, 20.0);
+    let b = meeting((90.0, h90), (45.0, h45), serde_json::json!({}));
+    let top = b.bounds().1.z;
+    assert!((top - h90).abs() < 1e-6, "{top}");
+    // The 45° wall's top stays where its height says, the 90° wall's goes on to its own.
+    let low = b.vertices().iter().map(|v| v.point).filter(|p| p.y > -1.6 && p.y < 61.6 && p.x > 100.0).map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+    assert!((low - h45).abs() < 1e-6, "{low}");
+    // The 90° wall, past Y = 60: as wide at its top as at the 45° wall's top, wider than at its foot.
+    let wide = x_reach(&b, 60.0, h90);
+    let at_low = x_reach(&b, 60.0, h45);
+    assert!((wide - at_low).abs() < 1e-6, "{wide} {at_low}");
+    // Out to the leaning wall's outer face, at the height of its top; it stops the gap short of the
+    // 90° wall's inner face, 2 past where that wall's bend starts.
+    assert!((wide - 121.66).abs() < 0.01, "{wide}");
+    let y45 = b.vertices().iter().map(|v| v.point).filter(|p| p.x > 110.0 && p.y < 62.0 - 1e-6).map(|p| p.y).fold(f64::NEG_INFINITY, f64::max);
+    assert!((y45 - (60.0 + R - 0.5)).abs() < 1e-9, "{y45}");
+    let f = unfold_side(&b, false, 0.5).unwrap();
+    assert_eq!(f.bends.len(), 8);
+    assert!(f.overlaps.is_empty(), "{:?}", f.overlaps);
+}
+
+/// With `level`, the lower wall goes up to the higher's top: no step above it.
+#[test]
+fn level_brings_the_lower_wall_up() {
+    let b = meeting((90.0, 40.0), (45.0, 20.0), serde_json::json!({"level_walls": true}));
+    let low = b.vertices().iter().map(|v| v.point).filter(|p| p.y > -1.6 && p.y < 61.6 && p.x > 100.0).map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+    assert!((low - 40.0).abs() < 1e-6, "{low}");
+    // Each wall ends where it meets the other, up to the top: a straight edge.
+    let wide = x_reach(&b, 60.0, 40.0);
+    assert!((wide - b.bounds().1.x).abs() < 1e-6 && (wide - 141.66).abs() < 0.01, "{wide}");
+    assert!(unfold_side(&b, false, 0.5).unwrap().overlaps.is_empty());
+}
+
+/// Any two angles, the steeper made first. Made the other way round the new wall goes to the old one's
+/// inner face and the old one stays, as a sheet's own strip beside a tab does (D238).
+#[test]
+fn the_steeper_made_first_goes_to_meet_the_other() {
+    let b = meeting((60.0, 30.0), (45.0, 30.0), serde_json::json!({}));
+    assert_eq!(unfold_side(&b, false, 0.5).unwrap().bends.len(), 8);
+    let old_first = {
+        let p = plate();
+        let long = [wall_edge(&p, 1, 0.0, T), wall_edge(&p, 1, 60.0, T)];
+        flange(&p, &long, serde_json::json!({"angle": 45.0, "height": 20.0})).unwrap()
+    };
+    let turned = meeting((45.0, 20.0), (90.0, 40.0), serde_json::json!({}));
+    // The old wall as it was: its corners at the same places along X.
+    let xs = |b: &Body| {
+        let mut v: Vec<u64> = b.vertices().iter().map(|v| v.point).filter(|p| p.y > 62.0).map(|p| p.x.to_bits()).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    };
+    let now = xs(&turned);
+    assert!(xs(&old_first).iter().all(|x| now.contains(x)));
+}
+
+/// Walls leaning in: the 90° wall's side is cut back by the leaning wall's outer face, not widened.
+#[test]
+fn a_wall_leaning_in_cuts_the_steeper_back() {
+    let b = meeting((90.0, 30.0), (120.0, 20.0), serde_json::json!({}));
+    unfold_side(&b, false, 0.5).unwrap();
+}

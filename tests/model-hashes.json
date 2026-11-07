@@ -274,6 +274,13 @@
     "outline": "f7ff532df73aa356c634ce8fa0e7af3b55fbb9abc5f8454bbc5e85c9c10eae81",
     "plate": "06309c9365e39550a825de3df7c0f9d958efdb7c407a7c5ffec743217f58475f"
   },
+  "sheet_meeting.json": {
+    "flange1": "bceef74fe15cef0ed237b62829954ffba464808d2bc46b363fad29e1f6c65da1",
+    "flange2": "2d6aa6ba7a84a71ce922b570a4f52755c9df89a31e33ef2b557a0273f59350fb",
+    "level": "1cc7b2723e0cfa4a0d6afd320929e43f730236e1e1ef02e49f18b34da34c0d72",
+    "plate1": "aaf197b9770f4ecaa0a577a8160129c2131c484f180e033d920ed5dc11fc0c1e",
+    "sketch1": "a9ad361b75dd477ec78740903050cbdbc09b4a7bf9f799ca2dacd6ae9f4f3dbc"
+  },
   "sheet_panel.json": {
     "blank": "481453e8320664b6c59cfba2bb273916c9802a07ca1b94d26d8fdef2c86d90a2",
     "fixing": "740f28f1fa5859b41ad5f1c69ed81de68ea0ccd59b1555275163db1e5b82b086",

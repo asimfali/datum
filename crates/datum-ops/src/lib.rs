@@ -189,6 +189,10 @@ pub enum Op {
         corner: Closing,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         corner_gap: Option<Num>,
+        /// In a mitre with a neighbour of another angle (D238): the lower wall goes up to the top
+        /// of the higher.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        level_walls: bool,
         /// How much of each edge a flange takes (D229): all of it by default.
         #[serde(default, skip_serializing_if = "Extent::is_edge")]
         extent: Extent<Num>,
@@ -631,6 +635,7 @@ impl Op {
                 k_factor,
                 corner,
                 corner_gap,
+                level_walls,
                 extent,
                 bend_relief,
                 bend_relief_width,
@@ -649,6 +654,7 @@ impl Op {
                 k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
                 corner: *corner,
                 corner_gap: corner_gap.as_ref().map(|n| r(n, "corner_gap")).transpose()?,
+                level_walls: *level_walls,
                 extent: extent.map(|n, field| r(n, field))?,
                 bend_relief: *bend_relief,
                 bend_relief_width: bend_relief_width.as_ref().map(|n| r(n, "bend_relief_width")).transpose()?,
@@ -872,6 +878,7 @@ impl Op {
                 k_factor,
                 corner,
                 corner_gap,
+                level_walls,
                 extent,
                 bend_relief,
                 bend_relief_width,
@@ -914,6 +921,7 @@ impl Op {
                     width: extent.map(|n, _| num(n))?,
                     flush: *bend_position == BendPosition::Flush,
                     to,
+                    level: *level_walls,
                     notch: match (bend_relief, bend_relief_width, bend_relief_depth) {
                         (BendRelief::None, ..) => None,
                         (shape, Some(w), Some(d)) => Some(Notch { round: *shape == BendRelief::Round, width: num(w)?, depth: num(d)? }),
