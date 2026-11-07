@@ -1,20 +1,21 @@
 //! The flat blank of sheet metal (M5d, M6; D69, D73): the outline and every cut of a sheet's
 //! face laid flat, as the turret press cuts them before bending and rolling, and its DXF.
 //!
-//! Nothing is unrolled geometrically. The sheet is a chain of plane and cylinder faces on one
-//! side, each joined to the next smoothly (a bend line); each is laid flat by itself: a plane
-//! as it is, a cylinder by the length of its neutral layer, at the K-factor of the thickness from
-//! the inside. Cuts keep their exact segments and arcs. The blank is seen from the side of the
-//! face it is named by: X along the sheet (`axis × normal`), Y along the bend lines (the axis),
-//! its corner at the origin.
+//! Nothing is unrolled geometrically. The sheet is a tree of strips of plane and cylinder faces on
+//! one side (D233), each going on smoothly from the one before across a bend line; each is laid by
+//! a rigid map from where that line lies: a plane as it is, a cylinder by the length of its neutral
+//! layer, at the K-factor of the thickness from the inside. Cuts keep their exact segments and arcs.
+//! The blank is seen from the side of the face it is named by, Y along the bend lines of a chain or
+//! up the face, X by the right hand, its corner at the origin. Parts of a blank may lie on one
+//! another: it is still laid, and says where ([`Flat::overlaps`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::TAU;
 use std::fmt::Write;
 use std::ops::Range;
 
-use datum_brep::{Body, BrepError, Curve, Ix, ProfileArc, Rolled, Surface, TopoId};
-use datum_math::{Vec2, Vec3};
+use datum_brep::{Body, BrepError, Curve, Cylinder, Ix, Surface, TopoId};
+use datum_math::{Sign, Vec2, Vec3, orient2d};
 
 use crate::sketch::{find_face, opposite_cylinder};
 
@@ -22,17 +23,6 @@ use crate::sketch::{find_face, opposite_cylinder};
 /// thickness from the inside.
 pub(crate) fn neutral(a: f64, b: f64, k: f64) -> f64 {
     a.min(b) + k * (a - b).abs()
-}
-
-/// The centre on a blank of the arc `pa` of rolled piece `piece`, whose development's origin lies
-/// at `origin` on the blank, and whether it turns counterclockwise there: the blank's X grows as
-/// the development's `u` turns about `along`, its Y along `up`. Lengths of a development are the
-/// blank's, so the centre is found on it, not through space (one beyond the bend would wrap round
-/// its cylinder); every arc of one development about one centre gets the same.
-pub(crate) fn rolled_center(piece: &Rolled, pa: ProfileArc, origin: Vec2, along: Vec3, up: Vec3) -> (Vec2, bool) {
-    let su = if piece.dev.axis.dot(along) > 0.0 { 1.0 } else { -1.0 };
-    let sv = if piece.dev.axis.dot(up) > 0.0 { 1.0 } else { -1.0 };
-    (Vec2::new(origin.x + su * pa.center.x, origin.y + sv * pa.center.y), pa.ccw == (su * sv > 0.0))
 }
 
 /// The wall of the piece after the one with wall `w` along a curve of a cut's profile: a curve
@@ -98,86 +88,49 @@ pub struct Flat {
     pub frame: Option<[Vec3; 4]>,
     /// The face the frame lies on, if there is one.
     pub home: Option<TopoId>,
+    /// Where the blank lies on itself, metal on metal, so it can't be cut in one piece until a corner
+    /// is cut: a box about each such place. Not in the hash: it follows from the pieces.
+    pub overlaps: Vec<[Vec2; 2]>,
     /// Of the pieces, what the DXF holds.
     pub hash: [u8; 32],
 }
 
-/// A face of the chain as it lies in the blank, from `u0` along X.
-#[derive(Clone, Copy)]
-struct Laid {
-    face: Ix,
-    u0: f64,
-    lay: Lay,
-    /// A flange on the sheet's side (D205): laid across X from its wall, whose `lay` it has.
-    branch: Option<Branch>,
+/// A strip of the sheet in the tree the blank is laid by (D233).
+struct Node {
+    faces: Vec<Ix>,
+    /// The strip it is laid from, and the half-edge of that strip's on the bend line between them.
+    parent: Option<(usize, Ix)>,
 }
 
-/// A face of a flange on the sheet's side: its Y from the line it stands on (`y0`), away from the
-/// sheet (`sign`), along its bend's neutral layer and then its wall.
-#[derive(Clone, Copy)]
-struct Branch {
-    y0: f64,
-    sign: f64,
-    part: Part,
-}
-
-#[derive(Clone, Copy)]
-enum Part {
-    /// The bend: a point of its axis, the unit axis it turns about away from the wall, the unit
-    /// direction across the axis where it starts, the radius of its neutral layer.
-    Bend { origin: Vec3, axis: Vec3, start: Vec3, neutral: f64 },
-    /// The wall: a point of its line on the bend, its unit direction away from it, and the bend's
-    /// length before it.
-    Wall { start: Vec3, dir: Vec3, offset: f64 },
-}
-
+/// How a strip lies on the blank: a rigid map, whatever way it turned from the strip before it.
 #[derive(Clone, Copy)]
 enum Lay {
-    /// A plane: a point where it starts, and its unit direction along the sheet.
-    Plane { start: Vec3, along: Vec3 },
-    /// A cylinder: a point of its axis, the unit axis it turns about along the sheet, the unit
-    /// direction across the axis where it starts, its angle and the radius of its neutral layer.
-    Bend { origin: Vec3, axis: Vec3, start: Vec3, span: f64, neutral: f64 },
+    /// A plane: `start` lies at `o`, and `ex` and `ey`, its unit directions, along the blank's X and Y.
+    Plane { o: Vec2, start: Vec3, ex: Vec3, ey: Vec3 },
+    /// A cylinder: `line`, a point of the bend line it starts from, lies at `o`; the length along
+    /// its neutral layer goes along `u` on the blank, the length along the unit `d` along `v`.
+    /// `origin` is a point of its axis, `axis` the unit axis it turns about along the sheet, `start`
+    /// the unit direction across the axis where it starts, `span` its angle, `neutral` the radius
+    /// of its neutral layer.
+    Bend { o: Vec2, line: Vec3, d: Vec3, u: Vec2, v: Vec2, origin: Vec3, axis: Vec3, start: Vec3, span: f64, neutral: f64 },
 }
 
-impl Laid {
-    /// Where `p`, a point of the face, lies on the blank, Y of the sheet's own faces being `y`.
-    fn at(&self, p: Vec3, y: impl Fn(Vec3) -> f64) -> Vec2 {
-        let Some(b) = self.branch else { return Vec2::new(self.x(p), y(p)) };
-        let away = match b.part {
-            Part::Bend { origin, axis, start, neutral } => {
+impl Lay {
+    /// Where `p`, a point of the strip (or of its neutral layer), lies on the blank.
+    fn at(&self, p: Vec3) -> Vec2 {
+        match *self {
+            Self::Plane { o, start, ex, ey } => Vec2::new(o.x + (p - start).dot(ex), o.y + (p - start).dot(ey)),
+            Self::Bend { o, line, d, u, v, origin, axis, start, span, neutral } => {
                 let w = p - origin;
                 let across = w - axis * w.dot(axis);
-                neutral * libm::atan2(axis.dot(start.cross(across)), start.dot(across))
-            }
-            Part::Wall { start, dir, offset } => offset + (p - start).dot(dir),
-        };
-        Vec2::new(self.x(p), b.y0 + b.sign * away)
-    }
-
-    /// X of `p`, a point of the face (or of its neutral layer).
-    fn x(&self, p: Vec3) -> f64 {
-        match &self.lay {
-            Lay::Plane { start, along } => self.u0 + (p - *start).dot(*along),
-            Lay::Bend { origin, axis, start, span, neutral } => {
-                let w = p - *origin;
-                let across = w - *axis * w.dot(*axis);
                 let mut theta = libm::atan2(axis.dot(start.cross(across)), start.dot(across));
                 // The turn about the axis is cut opposite the middle of the face.
                 if theta < 0.5 * span - std::f64::consts::PI {
                     theta += TAU;
                 }
-                self.u0 + neutral * theta
+                let (a, b) = (neutral * theta, (p - line).dot(d));
+                Vec2::new(o.x + u.x * a + v.x * b, o.y + u.y * a + v.y * b)
             }
-        }
-    }
-
-    fn length(&self, body: &Body) -> f64 {
-        match &self.lay {
-            Lay::Plane { start, along } => {
-                body.loop_points(body.faces()[self.face as usize].first_loop).map(|p| (p - *start).dot(*along)).fold(0.0, f64::max)
-            }
-            Lay::Bend { span, neutral, .. } => span * neutral,
         }
     }
 }
@@ -225,28 +178,34 @@ fn beside(body: &Body, s: &[Ix], skip: &BTreeSet<Ix>) -> Vec<Vec<Ix>> {
     out
 }
 
+/// The bends of `body` by the way their axes run, each class in face order, the classes in the
+/// order they are first met.
+fn bend_classes(body: &Body) -> Vec<Vec<Ix>> {
+    let axis = |x: Ix| match body.faces()[x as usize].surface {
+        Surface::Cylinder(c) => Some(c.axis),
+        _ => None,
+    };
+    let mut classes: Vec<Vec<Ix>> = Vec::new();
+    for x in 0..body.faces().len() as Ix {
+        // A bend goes on into a wall; a cut's round wall only into its other half.
+        let Some(a) = axis(x).filter(|_| smooth(body, x).iter().any(|(y, _)| matches!(body.faces()[*y as usize].surface, Surface::Plane(_)))) else {
+            continue;
+        };
+        match classes.iter_mut().find(|c| axis(c[0]).is_some_and(|b| crate::sketch::parallel(b, a))) {
+            Some(c) => c.push(x),
+            None => classes.push(vec![x]),
+        }
+    }
+    classes
+}
+
 /// The faces of flanges on the sheet's sides (D205): bends across the sheet's own bends, each with
 /// the wall beyond it, which goes on to nothing. The sheet's own bends are those all others are
 /// such flanges of; of two ways to see it, the one with more bends, then the one met first. None
 /// for a sheet with bends one way only (or none).
 pub(crate) fn branches(body: &Body) -> BTreeSet<Ix> {
     let none = BTreeSet::new();
-    let cylinders: Vec<(Ix, Vec3)> = (0..body.faces().len() as Ix)
-        .filter_map(|x| match body.faces()[x as usize].surface {
-            // A bend goes on into a wall; a cut's round wall only into its other half.
-            Surface::Cylinder(c) if smooth(body, x).iter().any(|(y, _)| matches!(body.faces()[*y as usize].surface, Surface::Plane(_))) => {
-                Some((x, c.axis))
-            }
-            _ => None,
-        })
-        .collect();
-    let mut classes: Vec<Vec<Ix>> = Vec::new();
-    for &(x, axis) in &cylinders {
-        match classes.iter_mut().find(|c| crate::sketch::parallel(cylinders.iter().find(|y| y.0 == c[0]).map_or(axis, |y| y.1), axis)) {
-            Some(c) => c.push(x),
-            None => classes.push(vec![x]),
-        }
-    }
+    let classes = bend_classes(body);
     if classes.len() < 2 {
         return none;
     }
@@ -446,6 +405,194 @@ pub fn unfold_side(body: &Body, back: bool, k: f64) -> Result<Flat, BrepError> {
     unfold_face(body, sides[usize::from(back)], k)
 }
 
+/// The tree of strips of the side of the sheet that strip `root` is on: each strip off the one it
+/// was reached from, across a bend line. A strip reached twice closes a ring: no blank lies flat.
+fn tree(body: &Body, root: Vec<Ix>) -> Result<Vec<Node>, BrepError> {
+    let mut owner: BTreeMap<Ix, usize> = root.iter().map(|&x| (x, 0)).collect();
+    let mut nodes = vec![Node { faces: root, parent: None }];
+    let mut i = 0;
+    while i < nodes.len() {
+        for x in nodes[i].faces.clone() {
+            for (y, h) in smooth(body, x) {
+                if matches!(body.faces()[y as usize].surface, Surface::Wall(_)) {
+                    continue;
+                }
+                match owner.get(&y) {
+                    Some(&j) if j == i || nodes[i].parent.is_some_and(|p| p.0 == j) || nodes[j].parent.is_some_and(|p| p.0 == i) => {}
+                    Some(_) => return Err(BrepError::Unsupported("unfold: the sheet closes on itself: a closed path comes later".into())),
+                    None => {
+                        let faces: Vec<Ix> = strip(body, y).into_iter().filter(|z| !owner.contains_key(z)).collect();
+                        owner.extend(faces.iter().map(|&z| (z, nodes.len())));
+                        nodes.push(Node { faces, parent: Some((i, h)) });
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    Ok(nodes)
+}
+
+/// The angle of bend `faces` about `turn` and where it starts: by the arc of its outline (a cap's
+/// edge) from bend line to bend line, on each of `beside`, the strips next to it. Laid from a bend
+/// line `entry`, it starts there. A bend cut across at both its sides (D202), or relieved at both
+/// its corners (D229), has no such edge left: its angle is then the turn between its bend lines.
+fn bend_span(body: &Body, faces: &[Ix], c: Cylinder, turn: Vec3, entry: Option<Vec3>, beside: &[&[Ix]]) -> Result<(f64, Vec3), BrepError> {
+    let he = |h: Ix| body.half_edges()[h as usize];
+    let on_line = |v: Ix, t: &[Ix]| t.iter().any(|&y| body.face_loops(y).flat_map(|l| body.loop_half_edges(l)).any(|g| he(g).origin == v));
+    let arc = faces.iter().flat_map(|&x| body.loop_half_edges(body.faces()[x as usize].first_loop)).find_map(|h| {
+        let e = &body.edges()[he(h).edge as usize];
+        let arc = body.edge_arc(e)?;
+        let arc = if e.half == h { arc } else { arc.reversed() };
+        let (v, w) = (he(h).origin, he(body.next(h)).origin);
+        // Each bend line there is (a rolled sheet alone has none) holds an end of it.
+        let whole = [v, w].iter().filter(|&&x| beside.iter().any(|t| on_line(x, t))).count() >= beside.len();
+        whole.then(|| (arc, body.point(v), body.point(w)))
+    });
+    if let Some((arc, p, q)) = arc {
+        return Ok((arc.sweep(p, q), entry.unwrap_or(if arc.axis.dot(turn) > 0.0 { p } else { q })));
+    }
+    let line = |t: &[Ix]| seam(body, faces, t).map(|(_, h)| body.point(he(h).origin));
+    let exit = beside.iter().filter_map(|t| line(t)).find(|&q| Some(q) != entry);
+    let (Some(from), Some(to)) = (entry, exit) else { return Err(BrepError::Unsupported("unfold: a bend without an edge across it".into())) };
+    let radial = |q: Vec3| {
+        let w = q - c.origin;
+        unit(w - c.axis * w.dot(c.axis))
+    };
+    let (u, v, t) = (radial(from), radial(to), unit(turn));
+    Ok((libm::atan2(t.dot(u.cross(v)), u.dot(v)).abs(), from))
+}
+
+/// Where strip `s` meets strip `t`: a face of `s` and its half-edge on the bend line.
+fn seam(body: &Body, s: &[Ix], t: &[Ix]) -> Option<(Ix, Ix)> {
+    s.iter().find_map(|&x| smooth(body, x).into_iter().find(|(y, _)| t.contains(y)).map(|(_, h)| (x, h)))
+}
+
+/// How node `i` of `nodes` lies, from the way its parent `from` lies: the bend line stays where it
+/// is on the blank and the strip goes on across it. A bend line along an axis of the parent keeps
+/// that axis bit for bit, so bend lines of a sheet with square turns stay exactly on the blank's
+/// axes.
+fn lay_from(body: &Body, nodes: &[Node], i: usize, from: Lay, h: Ix, k: f64) -> Result<Lay, BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
+    let he = |g: Ix| body.half_edges()[g as usize];
+    let normal = |x: Ix, p: Vec3| unit(body.faces()[x as usize].surface.normal_at(p));
+    let face_of = |g: Ix| body.loops()[he(g).loop_ix as usize].face;
+    let node = &nodes[i];
+    let sign = |x: f64| if x > 0.0 { 1.0 } else { -1.0 };
+    let chord = body.point(he(body.next(h)).origin) - body.point(he(h).origin);
+    // Along the axis of the bend on either side of the line: its ends may be where a cut crosses
+    // it, off the axis's direction by rounding. Two planes never meet at a bend line.
+    let axis = [face_of(h), face_of(he(h).twin)].iter().find_map(|&x| match body.faces()[x as usize].surface {
+        Surface::Cylinder(c) => Some(unit(c.axis)),
+        _ => None,
+    });
+    let along = axis.map(|a| a * sign(a.dot(chord))).ok_or_else(|| unsupported("a bend line off a cylinder"))?;
+    // The line's direction `d`, `v` on the blank, and `dir` as the half-edge runs; `u` across it,
+    // away from the parent: the parent lies to the left of the half-edge, seen from outside.
+    let (d, v, u, dir) = match from {
+        Lay::Plane { ex, ey, .. } => {
+            let (d, v) = if crate::sketch::parallel(along, ey) {
+                (ey, Vec2::new(0.0, 1.0))
+            } else if crate::sketch::parallel(along, ex) {
+                (ex, Vec2::new(1.0, 0.0))
+            } else {
+                let (x, y) = (along.dot(ex), along.dot(ey));
+                let n = libm::sqrt(x * x + y * y);
+                (along, Vec2::new(x / n, y / n))
+            };
+            let dir = d * sign(along.dot(d));
+            let away = dir.cross(normal(face_of(h), body.point(he(h).origin)));
+            let s = sign(away.dot(ex) * v.y - away.dot(ey) * v.x);
+            (d, v, Vec2::new(s * v.y, -s * v.x), dir)
+        }
+        Lay::Bend { d, u, v, .. } => (d, v, u, d * sign(along.dot(d))),
+    };
+    let (x, g) = seam(body, &node.faces, &nodes[node.parent.map_or(0, |p| p.0)].faces)
+        .ok_or_else(|| BrepError::Invalid("unfold: no bend line between strips of the sheet".into()))?;
+    let line = body.point(he(g).origin);
+    let o = from.at(line);
+    let on = unit(dir.cross(normal(x, line)));
+    match body.faces()[x as usize].surface {
+        Surface::Plane(_) => {
+            let (mx, my) = (on * u.x + d * v.x, on * u.y + d * v.y);
+            Ok(Lay::Plane { o, start: line, ex: mx, ey: my })
+        }
+        Surface::Cylinder(c) => {
+            let w = line - c.origin;
+            let start = unit(w - c.axis * w.dot(c.axis));
+            let axis = d * sign(start.cross(on).dot(d));
+            let beside: Vec<&[Ix]> = nodes
+                .iter()
+                .enumerate()
+                .filter(|(j, n)| Some(*j) == node.parent.map(|p| p.0) || n.parent.is_some_and(|p| p.0 == i))
+                .map(|(_, n)| &n.faces[..])
+                .collect();
+            let (span, _) = bend_span(body, &node.faces, c, axis, Some(line), &beside)?;
+            let (_, other) = opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
+            Ok(Lay::Bend { o, line, d, u, v, origin: c.origin, axis, start, span, neutral: neutral(c.radius, other.radius, k) })
+        }
+        Surface::Cone(_) => Err(unsupported("a cone joined to other faces of a sheet")),
+        Surface::Wall(_) => Err(unsupported("the wall of a cut is not a face of the sheet")),
+    }
+}
+
+/// The direction the blank's Y runs along and the strip it is laid from. A sheet that is a chain
+/// (with flanges on its sides) keeps Y along its bends. One that branches further takes Y along the
+/// class of the most bends, or up the strip as a sketch would see it if none lies along it.
+fn axes(body: &Body, f: Ix, chain: Option<Vec<Vec<Ix>>>) -> Result<(Vec3, Vec<Ix>), BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
+    let surface = |x: Ix| body.faces()[x as usize].surface;
+    let is_plane = |x: Ix| matches!(surface(x), Surface::Plane(_));
+    // Y up the face, world +Z projected onto it; +Y on a face lying flat.
+    let upright = |x: Ix| {
+        let n = unit(
+            surface(x).normal_at(body.point(body.half_edges()[body.loop_half_edges(body.faces()[x as usize].first_loop).start as usize].origin)),
+        );
+        let up = if n.cross(Vec3::new(0.0, 0.0, 1.0)) == Vec3::ZERO { Vec3::new(0.0, 1.0, 0.0) } else { Vec3::new(0.0, 0.0, 1.0) };
+        unit(up - n * (up.dot(n) / n.dot(n)))
+    };
+    let cylinder = |x: Ix| match surface(x) {
+        Surface::Cylinder(c) => Some(c.axis),
+        _ => None,
+    };
+    if let Some(mut chain) = chain {
+        let a = unit(chain.iter().flatten().find_map(|&x| cylinder(x)).unwrap_or_else(|| upright(chain[0][0])));
+        if is_plane(f) {
+            return Ok((a, strip(body, f)));
+        }
+        if let Some(wall) = chain.iter().find(|s| is_plane(s[0])) {
+            return Ok((a, wall.clone()));
+        }
+        // All rolled: laid from the end `a × n` points away from.
+        if chain.len() > 1 {
+            let he = |h: Ix| body.half_edges()[h as usize];
+            if let Some((x, h)) = seam(body, &chain[0], &chain[1]) {
+                let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
+                if (m - centroid(body, x)).dot(a.cross(surface(x).normal_at(m))) < 0.0 {
+                    chain.reverse();
+                }
+            }
+        }
+        return Ok((a, chain[0].clone()));
+    }
+    let nodes = tree(body, strip(body, f))?;
+    let root = nodes.iter().find(|n| is_plane(n.faces[0])).ok_or_else(|| unsupported("a branching sheet with no flat wall"))?.faces.clone();
+    // Y along the class of the most bends, the first of equals, as for a chain: a tray keeps its
+    // blank's way as rims go on. A class square to the strip has no direction along it.
+    let n = surface(root[0])
+        .normal_at(body.point(body.half_edges()[body.loop_half_edges(body.faces()[root[0] as usize].first_loop).start as usize].origin));
+    let mut classes = bend_classes(body);
+    classes.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    let a = classes.iter().filter_map(|c| cylinder(c[0])).find(|&a| !crate::sketch::parallel(a, n)).map_or_else(
+        || upright(root[0]),
+        |a| {
+            let n = unit(n);
+            a - n * a.dot(n)
+        },
+    );
+    Ok((unit(a), root))
+}
+
 fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
     if !(0.0..=1.0).contains(&k) {
@@ -454,191 +601,82 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let he = |h: Ix| body.half_edges()[h as usize];
     let face_of = |h: Ix| body.loops()[he(h).loop_ix as usize].face;
     let normal = |x: Ix, p: Vec3| body.faces()[x as usize].surface.normal_at(p);
-    let smooth = |x: Ix| smooth(body, x);
     let id = |x: Ix| body.faces()[x as usize].id;
-    let skip = branches(body);
-    let mut chain = chain_through(body, f, &skip)?;
-    if chain.iter().flatten().any(|&x| matches!(body.faces()[x as usize].surface, Surface::Cone(_))) {
+    let chain = chain_through(body, f, &branches(body)).ok();
+    if let Some(chain) = chain.as_ref().filter(|c| c.iter().flatten().any(|&x| matches!(body.faces()[x as usize].surface, Surface::Cone(_)))) {
         return match &chain[..] {
             [one] if one.len() == 1 => cone_blank(body, one[0], k),
             _ => Err(unsupported("a cone joined to other faces of a sheet")),
         };
     }
-
-    // Y runs along the bends' axis; a flat sheet takes the first edge of its face.
-    let axis = chain.iter().flatten().find_map(|&x| match body.faces()[x as usize].surface {
-        Surface::Cylinder(c) => Some(c.axis),
-        _ => None,
-    });
-    let first = body.faces()[chain[0][0] as usize].first_loop;
-    let corner = body.point(he(body.loop_half_edges(first).start).origin);
-    // A plate has no axis of bends: Y runs up the face as the sketch drawn on it would see it
-    // (world +Z projected onto the face; +Y on a face lying flat), so the blank looks as drawn.
-    let upright = |n: Vec3| {
-        let up = if n.cross(Vec3::new(0.0, 0.0, 1.0)) == Vec3::ZERO { Vec3::new(0.0, 1.0, 0.0) } else { Vec3::new(0.0, 0.0, 1.0) };
-        unit(up - n * (up.dot(n) / n.dot(n)))
-    };
-    let a = unit(axis.unwrap_or_else(|| upright(normal(chain[0][0], corner))));
-    // Where strip `s` meets strip `t`: a face of `s` and its half-edge on the bend line.
-    let seam = |s: &[Ix], t: &[Ix]| s.iter().find_map(|&x| smooth(x).into_iter().find(|(y, _)| t.contains(y)).map(|(_, h)| (x, h)));
-    // X along `a × n`: the chain runs from the end it points away from.
-    if chain.len() > 1
-        && let Some((x, h)) = seam(&chain[0], &chain[1])
-    {
-        let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
-        let centre = centroid(body, x);
-        if (m - centre).dot(a.cross(normal(x, m))) < 0.0 {
-            chain.reverse();
-        }
-    }
-
-    // Each strip laid from where the previous one ends, all its faces alike.
-    let mut laid: Vec<Laid> = Vec::with_capacity(chain.len());
-    let mut u0 = 0.0;
-    for (i, st) in chain.iter().enumerate() {
-        let x = st[0];
-        let outline = |x: Ix| body.faces()[x as usize].first_loop;
-        // Where it starts: the bend line with the previous strip, or for the first strip its back end.
-        let entry = (i > 0).then(|| seam(st, &chain[i - 1]).map(|(_, h)| body.point(he(h).origin))).flatten();
-        let lay = match body.faces()[x as usize].surface {
-            Surface::Plane(p) => {
-                let along = unit(a.cross(unit(p.normal)));
-                let start = entry.unwrap_or_else(|| {
-                    st.iter().flat_map(|&x| body.loop_points(outline(x))).min_by(|p, q| p.dot(along).total_cmp(&q.dot(along))).unwrap_or(corner)
-                });
-                Lay::Plane { start, along }
-            }
-            Surface::Cylinder(c) => {
-                let sigma = if c.convex { 1.0 } else { -1.0 };
-                let turn = a * sigma;
-                // The face's angle: the turn of an arc of its outline (a cap's edge) from bend
-                // line to bend line, from the end where turning about `turn` starts.
-                let on_line = |v: Ix, k: Option<usize>| {
-                    k.and_then(|k| chain.get(k))
-                        .is_some_and(|t| t.iter().any(|&y| body.face_loops(y).flat_map(|l| body.loop_half_edges(l)).any(|g| he(g).origin == v)))
-                };
-                let arc = st.iter().flat_map(|&x| body.loop_half_edges(outline(x))).find_map(|h| {
-                    let e = &body.edges()[he(h).edge as usize];
-                    let arc = body.edge_arc(e)?;
-                    let arc = if e.half == h { arc } else { arc.reversed() };
-                    let (v, w) = (he(h).origin, he(body.next(h)).origin);
-                    // Each bend line there is (a rolled sheet alone has none) holds an end of it.
-                    let ends = [i.checked_sub(1), Some(i + 1)];
-                    let lines = ends.iter().filter(|k| k.and_then(|k| chain.get(k)).is_some()).count();
-                    let whole = [v, w].iter().filter(|&&x| ends.iter().any(|&k| on_line(x, k))).count() >= lines;
-                    whole.then(|| (arc, body.point(v), body.point(w)))
-                });
-                // A bend cut across at both its sides (D202), or relieved at both its corners
-                // (D229), has no such edge left: its angle is then the turn between its two bend
-                // lines.
-                let (span, from) = match arc {
-                    Some((arc, p, q)) => (arc.sweep(p, q), entry.unwrap_or(if arc.axis.dot(turn) > 0.0 { p } else { q })),
-                    None => {
-                        let exit = chain.get(i + 1).and_then(|next| seam(st, next)).map(|(_, h)| body.point(he(h).origin));
-                        let (Some(from), Some(to)) = (entry, exit) else { return Err(unsupported("a bend without an edge across it")) };
-                        let radial = |q: Vec3| {
-                            let w = q - c.origin;
-                            unit(w - c.axis * w.dot(c.axis))
-                        };
-                        let (u, v, t) = (radial(from), radial(to), unit(turn));
-                        (libm::atan2(t.dot(u.cross(v)), u.dot(v)).abs(), from)
+    let (a, root) = axes(body, f, chain)?;
+    let nodes = tree(body, root)?;
+    let mut lays: Vec<Lay> = Vec::with_capacity(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        let lay = match node.parent {
+            Some((p, h)) => lay_from(body, &nodes, i, lays[p], h, k)?,
+            None => {
+                let x = node.faces[0];
+                let at = body.point(he(body.loop_half_edges(body.faces()[x as usize].first_loop).start).origin);
+                match body.faces()[x as usize].surface {
+                    Surface::Plane(p) => {
+                        let ex = unit(a.cross(unit(p.normal)));
+                        let points = node.faces.iter().flat_map(|&x| body.loop_points(body.faces()[x as usize].first_loop));
+                        let start = points.min_by(|p, q| p.dot(ex).total_cmp(&q.dot(ex))).unwrap_or(at);
+                        Lay::Plane { o: Vec2::new(0.0, 0.0), start, ex, ey: a }
                     }
-                };
-                let w = from - c.origin;
-                let start = unit(w - c.axis * w.dot(c.axis));
-                let (_, other) = opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-                let neutral = neutral(c.radius, other.radius, k);
-                Lay::Bend { origin: c.origin, axis: unit(turn), start, span, neutral }
+                    Surface::Cylinder(c) => {
+                        let axis = unit(a * if c.convex { 1.0 } else { -1.0 });
+                        let beside: Vec<&[Ix]> = nodes.iter().filter(|n| n.parent.is_some_and(|p| p.0 == 0)).map(|n| &n.faces[..]).collect();
+                        let (span, from) = bend_span(body, &node.faces, c, axis, None, &beside)?;
+                        let w = from - c.origin;
+                        let start = unit(w - axis * w.dot(axis));
+                        let (_, other) =
+                            opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
+                        Lay::Bend {
+                            o: Vec2::new(0.0, 0.0),
+                            line: from,
+                            d: a,
+                            u: Vec2::new(1.0, 0.0),
+                            v: Vec2::new(0.0, 1.0),
+                            origin: c.origin,
+                            axis,
+                            start,
+                            span,
+                            neutral: neutral(c.radius, other.radius, k),
+                        }
+                    }
+                    Surface::Cone(_) => return Err(unsupported("a cone in a chain of the sheet")),
+                    Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
+                }
             }
-            Surface::Cone(_) => return Err(unsupported("a cone in a chain of the sheet")),
-            Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
         };
-        let faces: Vec<Laid> = st.iter().map(|&x| Laid { face: x, u0, lay, branch: None }).collect();
-        u0 += faces.iter().map(|l| l.length(body)).fold(f64::NEG_INFINITY, f64::max);
-        laid.extend(faces);
+        lays.push(lay);
     }
-    let y = |p: Vec3| (p - corner).dot(a);
-    // Flanges on the sheet's sides (D205): each from the wall it stands on, across X; the pairs of
-    // faces their bend lines lie between.
-    let mut seams: Vec<(Ix, Ix)> = Vec::new();
-    let walls: Vec<Laid> = laid.iter().filter(|l| matches!(l.lay, Lay::Plane { .. })).copied().collect();
-    for w in walls {
-        for (b, h0) in smooth(w.face).into_iter().filter(|(b, _)| skip.contains(b)) {
-            let Surface::Cylinder(c) = body.faces()[b as usize].surface else { continue };
-            let Some((f, h1)) = smooth(b).into_iter().find(|(x, _)| *x != w.face && skip.contains(x)) else { continue };
-            let (p0, q0) = (body.point(he(h0).origin), body.point(he(h1).origin));
-            let c_axis = unit(c.axis);
-            let radial = |q: Vec3| {
-                let v = q - c.origin;
-                unit(v - c_axis * v.dot(c_axis))
-            };
-            let (start, end) = (radial(p0), radial(q0));
-            let turn = start.cross(end);
-            if turn == Vec3::ZERO {
-                return Err(unsupported("a flange bent back on itself"));
-            }
-            let axis = unit(turn);
-            let span = libm::atan2(axis.dot(start.cross(end)), start.dot(end));
-            let (_, other) = opposite_cylinder(body, b as usize).ok_or_else(|| unsupported("a flange's bend without the face across the sheet"))?;
-            let neutral = neutral(c.radius, other.radius, k);
-            let far = centroid(body, f) - q0;
-            let along = match w.lay {
-                Lay::Plane { along, .. } => along,
-                Lay::Bend { .. } => continue,
-            };
-            let dir = unit(far - along * far.dot(along));
-            let y0 = y(p0);
-            let sign = if y(centroid(body, f)) > y0 { 1.0 } else { -1.0 };
-            laid.push(Laid { face: b, branch: Some(Branch { y0, sign, part: Part::Bend { origin: c.origin, axis, start, neutral } }), ..w });
-            laid.push(Laid { face: f, branch: Some(Branch { y0, sign, part: Part::Wall { start: q0, dir, offset: neutral * span } }), ..w });
-            seams.extend([(w.face, b), (b, f)]);
-        }
-    }
-    // Every vertex where the first face of the chain that has it lays it.
+    let laid: Vec<(usize, Ix, Lay)> = nodes.iter().zip(&lays).enumerate().flat_map(|(i, (n, &l))| n.faces.iter().map(move |&x| (i, x, l))).collect();
+    // Every vertex where the first face of the tree that has it lays it.
     let mut at: BTreeMap<Ix, Vec2> = BTreeMap::new();
-    for l in &laid {
-        for lp in body.face_loops(l.face) {
+    for (_, x, l) in &laid {
+        for lp in body.face_loops(*x) {
             for h in body.loop_half_edges(lp) {
                 let v = he(h).origin;
-                at.entry(v).or_insert_with(|| l.at(body.point(v), y));
+                at.entry(v).or_insert_with(|| l.at(body.point(v)));
             }
         }
     }
-    let in_chain: BTreeSet<Ix> = laid.iter().map(|l| l.face).collect();
-    // The piece of edge `h` of face `l`, as its loop runs.
-    let piece = |l: &Laid, h: Ix| -> Result<FlatPiece, BrepError> {
+    let in_tree: BTreeSet<Ix> = laid.iter().map(|l| l.1).collect();
+    // The piece of edge `h` of face `x`, as its loop runs.
+    let piece = |x: Ix, l: &Lay, h: Ix| -> Result<FlatPiece, BrepError> {
         let (from, to) = (at[&he(h).origin], at[&he(body.next(h)).origin]);
         let e = &body.edges()[he(h).edge as usize];
         let curve = body.edge_curve(e).map(|c| if e.half == h { c } else { c.reversed() });
-        let bend = matches!(l.branch, Some(Branch { part: Part::Bend { .. }, .. }));
-        Ok(match (curve, &l.lay) {
+        Ok(match (curve, l) {
             (None, _) | (Some(Curve::Arc(_)), Lay::Bend { .. }) => FlatPiece::Line(from, to),
-            (Some(Curve::Arc(_)), _) if bend => FlatPiece::Line(from, to),
-            (Some(Curve::Rolled { piece, .. }), Lay::Plane { along, .. }) if l.branch.is_some() => {
-                let Some(Branch { sign, part: Part::Bend { axis, neutral, .. }, .. }) = l.branch else {
-                    return Err(unsupported("a rolled edge on a flange's wall"));
-                };
-                if piece.dev.neutral != neutral {
-                    return Err(unsupported("a cut was made with another K-factor"));
-                }
-                match (piece.arc, piece.trace) {
-                    (_, Some(_)) => return Err(unsupported("a traced cut across a flange's bend on the side comes later")),
-                    (None, None) => FlatPiece::Line(from, to),
-                    (Some(pa), None) => {
-                        // Across X: the development's `u` runs along Y away from the wall, its `v`
-                        // along X.
-                        let o = l.at(piece.dev.point(Vec2::new(0.0, 0.0), neutral), y);
-                        let su = sign * if piece.dev.axis.dot(axis) > 0.0 { 1.0 } else { -1.0 };
-                        let sv = if piece.dev.axis.dot(*along) > 0.0 { 1.0 } else { -1.0 };
-                        arc_piece(Vec2::new(o.x + sv * pa.center.y, o.y + su * pa.center.x), from, to, pa.ccw == (su * sv < 0.0))
-                    }
-                }
-            }
             (Some(Curve::Arc(arc)), Lay::Plane { .. }) => {
-                let n = normal(l.face, body.point(he(h).origin));
-                arc_piece(l.at(arc.center, y), from, to, arc.axis.dot(n) > 0.0)
+                let n = normal(x, body.point(he(h).origin));
+                arc_piece(l.at(arc.center), from, to, arc.axis.dot(n) > 0.0)
             }
-            (Some(Curve::Rolled { piece, .. }), Lay::Bend { neutral, .. }) => {
+            (Some(Curve::Rolled { piece, .. }), Lay::Bend { neutral, axis, d, u, v, .. }) => {
                 if piece.dev.neutral != *neutral {
                     return Err(unsupported("a cut was made with another K-factor"));
                 }
@@ -646,18 +684,20 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                     None if piece.trace.is_some() => {
                         // Chords within the deviation.
                         let n = piece.polyline(POLYLINE_DEVIATION);
-                        let inner = (1..n).map(|k| {
-                            let q = piece.dev.point(piece.at(k as f64 / n as f64).0, *neutral);
-                            Vec2::new(l.x(q), y(q))
-                        });
+                        let inner = (1..n).map(|k| l.at(piece.dev.point(piece.at(k as f64 / n as f64).0, *neutral)));
                         FlatPiece::Polyline(std::iter::once(from).chain(inner).chain([to]).collect())
                     }
                     None => FlatPiece::Line(from, to),
                     Some(pa) => {
-                        let Lay::Bend { axis, .. } = &l.lay else { unreachable!("matched a bend") };
-                        let o = piece.dev.point(Vec2::new(0.0, 0.0), *neutral);
-                        let (center, ccw) = rolled_center(&piece, pa, Vec2::new(l.x(o), y(o)), *axis, a);
-                        arc_piece(center, from, to, ccw)
+                        // Lengths of a development are the blank's, so the centre is found on it,
+                        // not through space (one beyond the bend would wrap round its cylinder).
+                        let o = l.at(piece.dev.point(Vec2::new(0.0, 0.0), *neutral));
+                        let su = if piece.dev.axis.dot(*axis) > 0.0 { 1.0 } else { -1.0 };
+                        let sv = if piece.dev.axis.dot(*d) > 0.0 { 1.0 } else { -1.0 };
+                        let (a, b) = (su * pa.center.x, sv * pa.center.y);
+                        let center = Vec2::new(o.x + u.x * a + v.x * b, o.y + u.y * a + v.y * b);
+                        let keeps = su * sv * (u.x * v.y - u.y * v.x) > 0.0;
+                        arc_piece(center, from, to, pa.ccw == keeps)
                     }
                 }
             }
@@ -668,18 +708,29 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     // run of lines along one face of the body (a cap, an end) is one line.
     let mut edges: BTreeMap<Ix, (Ix, FlatPiece, Ix)> = BTreeMap::new();
     let mut holes: Vec<(FlatPiece, TopoId)> = Vec::new();
-    for l in &laid {
-        let mut loops = body.face_loops(l.face);
-        if let Some(outer) = loops.next() {
-            for h in body.loop_half_edges(outer) {
+    // Every piece around the metal with the strip it is of and the ends its loop gives it.
+    let mut rims: Vec<(usize, FlatPiece, [Vec2; 2])> = Vec::new();
+    for &(node, x, ref l) in &laid {
+        for lp in body.face_loops(x) {
+            // A hole with a strip going on from it (a flange on its edge) is part of the outline.
+            let outline = lp == body.faces()[x as usize].first_loop || body.loop_half_edges(lp).any(|h| in_tree.contains(&face_of(he(h).twin)));
+            let mut pieces = Vec::new();
+            for h in body.loop_half_edges(lp) {
                 let beside = face_of(he(h).twin);
-                if !in_chain.contains(&beside) {
-                    edges.insert(he(h).origin, (he(body.next(h)).origin, piece(l, h)?, beside));
+                if in_tree.contains(&beside) {
+                    continue;
+                }
+                let p = piece(x, l, h)?;
+                rims.push((node, p.clone(), [at[&he(h).origin], at[&he(body.next(h)).origin]]));
+                if outline {
+                    edges.insert(he(h).origin, (he(body.next(h)).origin, p, beside));
+                } else {
+                    pieces.push((p, id(beside)));
                 }
             }
-        }
-        for lp in loops {
-            let pieces = body.loop_half_edges(lp).map(|h| Ok((piece(l, h)?, id(face_of(he(h).twin))))).collect::<Result<Vec<_>, BrepError>>()?;
+            if outline {
+                continue;
+            }
             let shapes: Vec<FlatPiece> = pieces.iter().map(|p| p.0.clone()).collect();
             match circle(&shapes) {
                 Some(c) => holes.push((c, run_name(pieces.iter().map(|p| p.1)))),
@@ -713,44 +764,182 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     };
     let outer = cycles.iter().max_by(|p, q| area(p).total_cmp(&area(q))).cloned().unwrap_or(0..0);
     let shift = |p: Vec2| Vec2::new(p.x - lo.x, p.y - lo.y);
-    // Each seam between two faces of the chain, from its lowest end to its highest: a bend line.
-    let by_y = |p: &&Vec2, q: &&Vec2| p.y.total_cmp(&q.y);
+    // Each seam between two strips, from its lowest end to its highest (along X when it runs more
+    // that way): a bend line. Named by the strips in the order X grows across it, or else from
+    // the strip it is laid off, so a name stays when the tree is rooted elsewhere. Those across X
+    // first, by X, then the others by Y.
     let first_id = |st: &[Ix]| st.iter().map(|&x| id(x)).min();
     let bend_id = |a: TopoId, b: TopoId| TopoId::derive("flat.bend").id(a).id(b).finish();
-    let (bends, bend_ids): (Vec<[Vec2; 2]>, Vec<TopoId>) = chain
-        .windows(2)
-        .filter_map(|w| {
-            let seam: Vec<Vec2> = w[1]
-                .iter()
-                .flat_map(|&x| body.loop_half_edges(body.faces()[x as usize].first_loop))
-                .filter(|&h| w[0].contains(&face_of(he(h).twin)))
-                .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
-                .collect();
-            Some(([shift(*seam.iter().min_by(by_y)?), shift(*seam.iter().max_by(by_y)?)], bend_id(first_id(&w[0])?, first_id(&w[1])?)))
-        })
-        .chain(seams.iter().filter_map(|&(x, z)| {
-            // A flange's bend line on the side runs along X.
-            let by_x = |p: &&Vec2, q: &&Vec2| p.x.total_cmp(&q.x);
-            let seam: Vec<Vec2> = body
-                .loop_half_edges(body.faces()[z as usize].first_loop)
-                .filter(|&h| face_of(he(h).twin) == x)
-                .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
-                .collect();
-            Some(([shift(*seam.iter().min_by(by_x)?), shift(*seam.iter().max_by(by_x)?)], bend_id(id(x), id(z))))
-        }))
-        .unzip();
+    let mut bend_lines: Vec<(bool, f64, [Vec2; 2], TopoId)> = Vec::new();
+    for node in &nodes {
+        let Some((p, _)) = node.parent else { continue };
+        let parent = &nodes[p].faces;
+        let seam: Vec<Vec2> = node
+            .faces
+            .iter()
+            .flat_map(|&x| body.face_loops(x))
+            .flat_map(|l| body.loop_half_edges(l))
+            .filter(|&h| parent.contains(&face_of(he(h).twin)))
+            .flat_map(|h| [at[&he(h).origin], at[&he(body.next(h)).origin]])
+            .collect();
+        let box_ = bounds(seam.iter().copied());
+        let across_x = box_.1.y - box_.0.y >= box_.1.x - box_.0.x;
+        let key = |q: &&Vec2| if across_x { q.y } else { q.x };
+        let (Some(&low), Some(&high)) = (seam.iter().min_by(|a, b| key(a).total_cmp(&key(b))), seam.iter().max_by(|a, b| key(a).total_cmp(&key(b))))
+        else {
+            continue;
+        };
+        // Which way the strip goes on from the line, on the blank.
+        let on = centroid_laid(&node.faces, &at, body);
+        let swap = across_x && on.x < low.x;
+        let (Some(first), Some(second)) = (first_id(parent), first_id(&node.faces)) else { continue };
+        let name = if swap { bend_id(second, first) } else { bend_id(first, second) };
+        bend_lines.push((!across_x, if across_x { low.x } else { low.y }, [shift(low), shift(high)], name));
+    }
+    bend_lines.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+    let (bends, bend_ids): (Vec<[Vec2; 2]>, Vec<TopoId>) = bend_lines.into_iter().map(|(_, _, line, name)| (line, name)).unzip();
+    let parents: Vec<Option<usize>> = nodes.iter().map(|n| n.parent.map(|p| p.0)).collect();
+    let overlaps = overlaps(&parents, &rims).into_iter().map(|b| b.map(shift)).collect();
     let (pieces, ids) = outline.iter().map(|(p, i, _)| (p, i)).chain(holes.iter().map(|(p, i)| (p, i))).map(|(p, i)| (p.shifted(lo), *i)).unzip();
     let ends = outline[outer.clone()].iter().map(|(.., e)| e.map(shift)).collect();
-    // The face the blank is laid from, if a plane: X of the blank is `u0 + (p - start)·along - lo.x`
-    // and Y is `(p - corner)·a - lo.y`, so a sketch frame that gives (X, Y) the same is this.
-    let home = laid.iter().find(|l| l.face == f && l.branch.is_none()).and_then(|l| match l.lay {
-        Lay::Plane { start, along } => {
-            let origin = start + along * (lo.x - l.u0) + a * (lo.y - (start - corner).dot(a));
-            Some((id(f), [origin, along, a, along.cross(a)]))
+    // The face the blank is laid from, if a plane: a point of it at (X, Y) of the blank is `start`
+    // and the offsets from where it lies, so a sketch frame that gives (X, Y) the same is this.
+    let home = (nodes[0].faces.contains(&f)).then_some(lays[0]).and_then(|l| match l {
+        Lay::Plane { o, start, ex, ey } => {
+            let origin = start + ex * (lo.x - o.x) + ey * (lo.y - o.y);
+            Some((id(f), [origin, ex, ey, ex.cross(ey)]))
         }
         Lay::Bend { .. } => None,
     });
-    Ok(Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home))
+    Ok(Flat { overlaps, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home) })
+}
+
+/// The middle of the laid vertices of the outlines of `faces`.
+fn centroid_laid(faces: &[Ix], at: &BTreeMap<Ix, Vec2>, body: &Body) -> Vec2 {
+    let (mut sum, mut n) = (Vec2::new(0.0, 0.0), 0.0);
+    for h in faces.iter().flat_map(|&x| body.loop_half_edges(body.faces()[x as usize].first_loop)) {
+        let q = at[&body.half_edges()[h as usize].origin];
+        sum = Vec2::new(sum.x + q.x, sum.y + q.y);
+        n += 1.0;
+    }
+    Vec2::new(sum.x / n, sum.y / n)
+}
+
+/// Where strips lie on one another: a box about each place, in no order but a fixed one. Strips whose
+/// boxes are apart are not looked into, so a sheet with thousands of holes pays nothing for them
+/// unless the strip holding them meets another. Whether two edges cross is an exact predicate, on
+/// chords of arcs within [`POLYLINE_DEVIATION`]; edges that only touch or run along each other leave
+/// no metal on metal.
+fn overlaps(parents: &[Option<usize>], rims: &[(usize, FlatPiece, [Vec2; 2])]) -> Vec<[Vec2; 2]> {
+    let strips = parents.len();
+    if strips < 2 {
+        return Vec::new();
+    }
+    // Each strip's box, with what an arc bulges beyond its ends.
+    let mut boxes = vec![(Vec2::new(f64::INFINITY, f64::INFINITY), Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY)); strips];
+    for (i, p, ends) in rims {
+        let reach = match *p {
+            FlatPiece::Arc { center, radius, .. } | FlatPiece::Circle { center, radius } => {
+                vec![Vec2::new(center.x - radius, center.y - radius), Vec2::new(center.x + radius, center.y + radius)]
+            }
+            FlatPiece::Polyline(ref q) => q.clone(),
+            FlatPiece::Line(..) => Vec::new(),
+        };
+        for q in ends.iter().copied().chain(reach) {
+            let b = &mut boxes[*i];
+            *b = (Vec2::new(b.0.x.min(q.x), b.0.y.min(q.y)), Vec2::new(b.1.x.max(q.x), b.1.y.max(q.y)));
+        }
+    }
+    let apart = |a: (Vec2, Vec2), b: (Vec2, Vec2)| a.1.x <= b.0.x || b.1.x <= a.0.x || a.1.y <= b.0.y || b.1.y <= a.0.y;
+    let mut pairs: Vec<(usize, usize)> = Vec::new();
+    for j in 0..strips {
+        for i in 0..j {
+            // A strip and the next lie on the two sides of their bend line.
+            if !apart(boxes[i], boxes[j]) && parents[j] != Some(i) && parents[i] != Some(j) {
+                pairs.push((i, j));
+            }
+        }
+    }
+    // Each strip's chords once, only if it is in a pair.
+    let mut chords: BTreeMap<usize, Vec<[Vec2; 2]>> = pairs.iter().flat_map(|&(i, j)| [(i, Vec::new()), (j, Vec::new())]).collect();
+    for (i, p, ends) in rims {
+        if let Some(c) = chords.get_mut(i) {
+            c.extend(chords_of(p, *ends));
+        }
+    }
+    let mut found: Vec<(Vec2, Vec2)> = Vec::new();
+    for (i, j) in pairs {
+        // Only what reaches where the two boxes meet can cross.
+        let common = (
+            Vec2::new(boxes[i].0.x.max(boxes[j].0.x), boxes[i].0.y.max(boxes[j].0.y)),
+            Vec2::new(boxes[i].1.x.min(boxes[j].1.x), boxes[i].1.y.min(boxes[j].1.y)),
+        );
+        let within = |c: &&[Vec2; 2]| {
+            let [p, q] = **c;
+            p.x.max(q.x) >= common.0.x && p.x.min(q.x) <= common.1.x && p.y.max(q.y) >= common.0.y && p.y.min(q.y) <= common.1.y
+        };
+        let a: Vec<&[Vec2; 2]> = chords[&i].iter().filter(within).collect();
+        let b: Vec<&[Vec2; 2]> = chords[&j].iter().filter(within).collect();
+        let mut place: Option<(Vec2, Vec2)> = None;
+        for &&[p, q] in &a {
+            for &&[r, s] in &b {
+                if p.x.max(q.x) < r.x.min(s.x) || r.x.max(s.x) < p.x.min(q.x) || p.y.max(q.y) < r.y.min(s.y) || r.y.max(s.y) < p.y.min(q.y) {
+                    continue;
+                }
+                let opposite = |u: Sign, v: Sign| matches!((u, v), (Sign::Positive, Sign::Negative) | (Sign::Negative, Sign::Positive));
+                if opposite(orient2d(p, q, r), orient2d(p, q, s)) && opposite(orient2d(r, s, p), orient2d(r, s, q)) {
+                    let cross = |u: Vec2, v: Vec2, w: Vec2| (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
+                    let (d0, d1) = (cross(r, s, p), cross(r, s, q));
+                    let t = d0 / (d0 - d1);
+                    let c = Vec2::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
+                    place = Some(place.map_or((c, c), |(l, h)| (Vec2::new(l.x.min(c.x), l.y.min(c.y)), Vec2::new(h.x.max(c.x), h.y.max(c.y)))));
+                }
+            }
+        }
+        found.extend(place);
+    }
+    // Boxes sharing metal are one place: a wall and its bend lying on the same neighbour.
+    let mut merged: Vec<(Vec2, Vec2)> = Vec::new();
+    for mut b in found {
+        while let Some(k) = merged.iter().position(|m| m.0.x <= b.1.x && b.0.x <= m.1.x && m.0.y <= b.1.y && b.0.y <= m.1.y) {
+            let m = merged.swap_remove(k);
+            b = (Vec2::new(m.0.x.min(b.0.x), m.0.y.min(b.0.y)), Vec2::new(m.1.x.max(b.1.x), m.1.y.max(b.1.y)));
+        }
+        merged.push(b);
+    }
+    merged.sort_by(|a, b| a.0.x.total_cmp(&b.0.x).then(a.0.y.total_cmp(&b.0.y)));
+    merged.into_iter().map(|b| [b.0, b.1]).collect()
+}
+
+/// A piece as straight segments, its ends the very vertices of its loop, so a neighbour's segment
+/// shares them bit for bit and does not cross it there.
+fn chords_of(p: &FlatPiece, [from, to]: [Vec2; 2]) -> Vec<[Vec2; 2]> {
+    let inner: Vec<Vec2> = match *p {
+        FlatPiece::Line(..) => Vec::new(),
+        FlatPiece::Polyline(ref q) => q[1..q.len() - 1].to_vec(),
+        FlatPiece::Circle { center, radius } => {
+            return chords_of(&FlatPiece::Arc { center, radius, start: 0.0, end: TAU }, [Vec2::new(center.x + radius, center.y); 2]);
+        }
+        FlatPiece::Arc { center, radius, start, end } => {
+            let sweep = (end - start).rem_euclid(TAU);
+            let sweep = if sweep == 0.0 { TAU } else { sweep };
+            // A chord over an angle `a` strays `r(1 − cos(a/2))`, about `r a²/8`.
+            let n = (sweep / libm::sqrt(8.0 * POLYLINE_DEVIATION / radius)).ceil().max(2.0) as usize;
+            let on = |k: usize| {
+                let (sn, cs) = libm::sincos(start + sweep * k as f64 / n as f64);
+                Vec2::new(center.x + radius * cs, center.y + radius * sn)
+            };
+            let mut q: Vec<Vec2> = (1..n).map(on).collect();
+            // Counterclockwise from `start`: reversed if the loop runs the other way.
+            let far = |a: Vec2, b: Vec2| (a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y);
+            if far(on(0), from) > far(on(0), to) {
+                q.reverse();
+            }
+            q
+        }
+    };
+    let points: Vec<Vec2> = std::iter::once(from).chain(inner).chain([to]).collect();
+    points.windows(2).map(|w| [w[0], w[1]]).collect()
 }
 
 /// The points that fix a piece's extent in its box: its ends, or the centre of an arc or circle.
@@ -915,6 +1104,7 @@ impl Flat {
             ends,
             frame: home.map(|h| h.1),
             home: home.map(|h| h.0),
+            overlaps: Vec::new(),
             hash: *blake3::hash(&bytes).as_bytes(),
         }
     }

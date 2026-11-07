@@ -336,19 +336,22 @@ pub fn write_dxf(flat: &datum_ops::Flat, path: &std::path::Path, approximate: bo
     let write = |p: &std::path::Path, text: &str| std::fs::write(p, text).map_err(|err| format!("{}: {err}", p.display()));
     write(path, &flat.dxf())?;
     let file = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-    if n > 0 {
-        write(
-            &note,
-            &format!(
-                "{DXF_NOTE}: {file}\n\
-                 Curves DXF has no exact entity for are written as polylines (LWPOLYLINE), within {bound} mm of the model.\n\
-                 Polylines: {n}.\n\
-                 \n\
-                 Заметка Datum к DXF: {file}\n\
-                 Кривые, у которых в DXF нет точной сущности, записаны ломаными (LWPOLYLINE), не дальше {bound} мм от модели.\n\
-                 Ломаных: {n}.\n"
-            ),
-        )?;
+    let places = flat.overlaps.len();
+    if n > 0 || places > 0 {
+        let (mut en, mut ru) = (String::new(), String::new());
+        if n > 0 {
+            en.push_str(&format!(
+                "Curves DXF has no exact entity for are written as polylines (LWPOLYLINE), within {bound} mm of the model.\nPolylines: {n}.\n"
+            ));
+            ru.push_str(&format!(
+                "Кривые, у которых в DXF нет точной сущности, записаны ломаными (LWPOLYLINE), в пределах {bound} мм от модели.\nЛоманых: {n}.\n"
+            ));
+        }
+        if places > 0 {
+            en.push_str(&format!("The blank lies on itself in {places} place(s): it can't be cut in one piece until those corners are cut.\n"));
+            ru.push_str(&format!("Заготовка налегает сама на себя в местах: {places}. Вырезать её целиком нельзя, пока эти углы не разрезаны.\n"));
+        }
+        write(&note, &format!("{DXF_NOTE}: {file}\n{en}\nЗаметка Datum к DXF: {file}\n{ru}"))?;
     } else if std::fs::read_to_string(&note).is_ok_and(|t| t.starts_with(DXF_NOTE)) {
         std::fs::remove_file(&note).map_err(|err| format!("{}: {err}", note.display()))?;
     }

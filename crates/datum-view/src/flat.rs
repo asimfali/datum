@@ -17,6 +17,7 @@ pub struct FlatView {
 const LINE: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
 /// The bend lines, guides: faint, dashed.
 const BEND: egui::Color32 = egui::Color32::from_rgb(120, 130, 150);
+const OVERLAP: egui::Color32 = egui::Color32::from_rgba_premultiplied(200, 40, 40, 110);
 const PAPER: egui::Color32 = egui::Color32::from_rgb(250, 250, 248);
 
 impl FlatView {
@@ -60,6 +61,11 @@ impl FlatView {
                 rect.center().y - ((q[1] - self.center[1]) * self.scale) as f32,
             )
         };
+        // Where the blank lies on itself: under the lines, so they stay read.
+        for [a, b] in &flat.overlaps {
+            let rect = egui::Rect::from_two_pos(screen([a.x, a.y]), screen([b.x, b.y])).expand(3.0);
+            painter.rect_filled(rect, 0.0, OVERLAP);
+        }
         paint(&painter, flat, screen, self.scale, LINE, BEND);
         painter.text(
             rect.left_bottom() + egui::vec2(8.0, -8.0),
