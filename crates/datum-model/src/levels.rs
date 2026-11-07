@@ -293,7 +293,7 @@ impl Doc {
             .enumerate()
             .filter_map(|(ix, n)| match n.op {
                 Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
-                Op::Flange { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } => {
+                Op::Flange { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } | Op::Extrude { wall: true, .. } => {
                     let begun = body_chain(g, ix as NodeIx).last()?;
                     Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
                 }
@@ -333,6 +333,7 @@ impl Doc {
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
+                Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
                 Op::Flange { radius, relief_diameter, k_factor, corner_gap, bend_relief_width, bend_relief_depth, .. } => {
                     *radius = Some(Num::Value(r));
                     *k_factor = Some(k_of(&ks, ix as NodeIx));

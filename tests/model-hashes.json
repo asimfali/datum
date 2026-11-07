@@ -260,6 +260,14 @@
     "outline": "0e986b46551fcef99375e88081ef00a597bf89b847fbef54e18815d047d2e166",
     "plate": "3130c303223acfd8fbd140d8affdfb9238ff3f9cfe3b6e43a45f5d77929345bd"
   },
+  "sheet_line_cut.json": {
+    "blank": "fd5c0145f8e2cb1f375e18e5bad98c79be5cd2f39b64dc44ed7d2e2b38ddc114",
+    "cut": "a526f7a883a304c359a15778f239946f37550c2293e9e5cc195b824d49fdd7de",
+    "frame": "c69f4ffee2966cd9175ff924e2d3b5bc9ea3bb74f725746f0b076492b5204707",
+    "lines_sketch": "a5a68c95295c17db6384f362a0e3b5f2c906808bbab96d95afd2dd1aa7e1408a",
+    "outline": "f7ff532df73aa356c634ce8fa0e7af3b55fbb9abc5f8454bbc5e85c9c10eae81",
+    "plate": "06309c9365e39550a825de3df7c0f9d958efdb7c407a7c5ffec743217f58475f"
+  },
   "sheet_panel.json": {
     "blank": "481453e8320664b6c59cfba2bb273916c9802a07ca1b94d26d8fdef2c86d90a2",
     "fixing": "740f28f1fa5859b41ad5f1c69ed81de68ea0ccd59b1555275163db1e5b82b086",

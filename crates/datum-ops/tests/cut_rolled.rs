@@ -287,3 +287,16 @@ fn patterned(mut sketch: serde_json::Value, pattern: serde_json::Value) -> serde
     }
     sketch
 }
+
+/// A line on a rolled sheet is not cut along (D235): refused as unsupported, with the kerf given.
+#[test]
+fn a_line_cut_on_a_rolled_sheet_is_refused() {
+    let s = sheet();
+    let out = side(&s, true);
+    let target = Value::Body(s);
+    let line = serde_json::json!({"points": {"a": [20, 20], "b": [60, 20]}, "lines": {"l": {"from": "a", "to": "b"}}});
+    let placed = op(serde_json::json!({"op": "sketch", "face": out, "k_factor": 0.5, "sketch": line})).eval(id("line.sketch"), &[&target]).unwrap();
+    let c = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true, "kerf": 1.0}));
+    let r = c.eval(id("line.cut"), &[&target, &placed]);
+    assert!(matches!(r, Err(BrepError::Unsupported(_))), "{r:?}");
+}

@@ -4336,9 +4336,14 @@ impl Viewer {
             };
             sk.selected.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n.clone()) } else { None }).filter(|n| keeps(n)).collect()
         });
-        let chain = self.sketch.as_ref().and_then(|sk| sheet_chain(sk, &profiles, at, self.sketch_rect));
-        let profiles = if chain.is_some() { Vec::new() } else { profiles };
+        // On a face or the blank of sheet metal a cut takes all the sketch holds, as a perforation
+        // does: closed contours and lines alike (D235). What is not to be cut is construction, or
+        // another sketch.
+        let cuts_sheet = self.sketch.as_ref().is_some_and(|sk| matches!(self.plain_kind(Some(&sk.feature)), Kind::SheetCut));
+        let chain = self.sketch.as_ref().filter(|_| !cuts_sheet).and_then(|sk| sheet_chain(sk, &profiles, at, self.sketch_rect));
+        let profiles = if chain.is_some() || cuts_sheet { Vec::new() } else { profiles };
         if profiles.is_empty()
+            && !cuts_sheet
             && chain.is_none()
             && let Some(sk) = &self.sketch
             && let Ok(p) = &sk.placed
@@ -9433,7 +9438,7 @@ mod tests {
             h.run();
             h.get_by_label("Cut through the sheet's thickness");
             assert!(h.query_by_label("Depth").is_none() && h.query_by_label("Symmetric").is_none() && h.query_by_label("Through").is_none());
-            let want = json!({"name": "extrude1", "sketch": "outline", "mode": "cut", "profiles": ["bottom"]});
+            let want = json!({"name": "extrude1", "sketch": "outline", "mode": "cut"});
             let sent: Vec<Request> = inbox.try_iter().collect();
             assert!(matches!(sent.last(), Some(Request::Preview(Some(("extrude", p)))) if *p == want), "{sent:?}");
             h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"mode": "cut", "body": "grown"}))));
@@ -10353,5 +10358,64 @@ mod tests {
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if *p == want)), "{sent:?}");
+    }
+
+    /// E in an open sketch on a face of sheet metal, with a contour and a chain in it: the form of a cut
+    /// opens at once, nothing is asked and no profile is chosen, selected curves or not (D235).
+    #[test]
+    fn e_on_a_sheet_takes_every_contour_and_line() {
+        for selected in [false, true] {
+            let (mut h, inbox) = on_a_face_of("plate", false);
+            if !selected {
+                h.state_mut().sketch.as_mut().unwrap().selected.clear();
+            }
+            h.key_press(egui::Key::E);
+            h.run();
+            assert!(h.state().contour_hint.is_none(), "selected {selected}");
+            let x = h.state().extrusion.as_ref().unwrap_or_else(|| panic!("selected {selected}: no form"));
+            assert!(x.profiles.is_empty() && matches!(x.kind, Kind::SheetCut), "selected {selected}: {:?}", x.profiles);
+            let sent: Vec<Request> = inbox.try_iter().collect();
+            assert!(
+                sent.iter().any(|r| matches!(r, Request::Preview(Some(("extrude", p))) if p["mode"] == "cut" && p.get("profiles").is_none())),
+                "selected {selected}: {sent:?}"
+            );
+        }
+    }
+
+    /// One open chain alone on a sheet's face is a cut along it, no new sheet from it.
+    #[test]
+    fn e_on_a_lone_chain_on_a_sheet_cuts_along_it() {
+        let (mut h, inbox) = on_a_face_of("plate", false);
+        let sk = h.state_mut().sketch.as_mut().unwrap();
+        sk.selected.clear();
+        let p = sk.placed.as_mut().unwrap();
+        p.lines.retain(|n, _| n == "l1" || n == "l2");
+        p.arcs.clear();
+        p.circles.clear();
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        let x = h.state().extrusion.as_ref().expect("a form");
+        assert!(matches!(x.kind, Kind::SheetCut), "a cut, not a sheet");
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(!sent.iter().any(|r| matches!(r, Request::Preview(Some(("sheet", _))))), "{sent:?}");
+        assert!(sent.iter().any(|r| matches!(r, Request::Preview(Some(("extrude", _))))), "{sent:?}");
+    }
+
+    /// On a face of an ordinary body, as off any face, E in a sketch of two regions with nothing selected
+    /// still asks which: only sheet metal takes them all.
+    #[test]
+    fn e_on_an_ordinary_face_with_two_regions_still_asks() {
+        let (mut h, inbox) = on_a_face_of("extrude", false);
+        let sk = h.state_mut().sketch.as_mut().unwrap();
+        sk.selected.clear();
+        let p = sk.placed.as_mut().unwrap();
+        p.solved.points.insert("far".into(), datum_math::Vec2::new(500.0, 500.0));
+        p.circles.insert("far_circle".into(), serde_json::from_value(json!({"center": "far", "diameter": 5})).unwrap());
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        assert!(h.state().contour_hint.is_some() && h.state().extrusion.is_none());
+        assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(_))));
     }
 }

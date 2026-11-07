@@ -196,7 +196,8 @@ fn check_material(e: &Value) -> Result<(), String> {
 /// inner bend `radius`, the `k_factor` of its bends (0 to 1, D197), the `corner_gap` between
 /// flanges meeting at a corner, the `relief_diameter` of a round corner relief, and the
 /// `bend_relief_width` and `bend_relief_depth` of a short flange's bend relief (D229).
-pub const SHEET_FIELDS: [&str; 7] = ["thickness", "radius", "k_factor", "corner_gap", "relief_diameter", "bend_relief_width", "bend_relief_depth"];
+pub const SHEET_FIELDS: [&str; 8] =
+    ["thickness", "radius", "k_factor", "corner_gap", "relief_diameter", "bend_relief_width", "bend_relief_depth", "kerf"];
 
 /// A rule (D179, D180): its `name`, `kind` (`sheet` or `part`), the `material` it is of (by
 /// name; a rule is never without one) and a `description`; a sheet rule's [`SHEET_FIELDS`]: the
@@ -228,7 +229,7 @@ fn check_rule(e: &Value) -> Result<(), String> {
     if o.get("corner_gap").is_some_and(|g| !of_thickness(g, t).is_ok_and(|g| g >= 0.0)) {
         return Err("a sheet rule's `corner_gap`: mm not below zero, or a formula of the thickness `t`".into());
     }
-    for key in ["relief_diameter", "bend_relief_width", "bend_relief_depth"] {
+    for key in ["relief_diameter", "bend_relief_width", "bend_relief_depth", "kerf"] {
         if o.get(key).is_some_and(|d| !of_thickness(d, t).is_ok_and(|d| d > 0.0)) {
             return Err(format!("a sheet rule's `{key}`: mm above zero, or a formula of the thickness `t`"));
         }

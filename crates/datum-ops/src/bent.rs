@@ -40,7 +40,51 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed, grow: bool)
     let blank = Blank::new(target, f as Ix, sketch.frame, sketch.k_factor)?;
     let Some(blank) = blank else { return within() };
     let profiles = blank.laid(feature, sketch)?;
-    cut(feature, target, &blank, profiles, grow, &within)
+    cut(feature, target, &blank, profiles, grow, Some(&within))
+}
+
+/// The closed profiles `closed` of sketch `sketch` on a face of sheet metal `target`, and its open
+/// lines `lines`, each a cut `kerf` wide along it, its ends square (D235).
+pub(crate) fn punch_lines(
+    feature: TopoId,
+    target: &Body,
+    sketch: &Placed,
+    closed: Option<&Placed>,
+    lines: &[String],
+    kerf: f64,
+) -> Result<Body, BrepError> {
+    let unsupported = |m: &str| BrepError::Unsupported(format!("a cut along a line: {m}"));
+    let id = sketch.face.ok_or_else(|| BrepError::Sketch("a cut of sheet metal takes a sketch on a face of it".into()))?;
+    let f = target.faces().binary_search_by_key(&id, |f| f.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the body")))?;
+    if sketch.developed.is_some() {
+        return Err(unsupported("on a rolled sheet comes later"));
+    }
+    let Some(blank) = Blank::new(target, f as Ix, sketch.frame, sketch.k_factor)? else {
+        return Err(unsupported("on a sheet without its blank comes later"));
+    };
+    let mut profiles = closed.map_or_else(|| Ok(Vec::new()), |c| blank.laid(feature, c))?;
+    let [_, x, y, _] = sketch.frame;
+    let turn = |p: Vec2| Vec2::new(p.x * x.dot(blank.e) + p.y * y.dot(blank.e), p.x * x.dot(blank.a) + p.y * y.dot(blank.a));
+    for name in lines {
+        let line = sketch.lines.get(name).ok_or_else(|| unsupported("along an arc comes later"))?;
+        let at = |n: &String| sketch.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
+        let (a, b) = (turn(at(&line.from)?), turn(at(&line.to)?));
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let l = libm::hypot(dx, dy);
+        if l == 0.0 {
+            return Err(BrepError::Degenerate(format!("line `{name}` has no length")));
+        }
+        let (nx, ny) = (-dy / l * 0.5 * kerf, dx / l * 0.5 * kerf);
+        let id = |tag: &str, k: u64, layer: u64| TopoId::derive(tag).id(feature).tag(name).index(k).index(layer).finish();
+        profiles.push(ProfileLoop {
+            // Counterclockwise: along the line on its right, back on its left.
+            points: vec![Vec2::new(a.x - nx, a.y - ny), Vec2::new(b.x - nx, b.y - ny), Vec2::new(b.x + nx, b.y + ny), Vec2::new(a.x + nx, a.y + ny)],
+            vertices: (0..4).map(|k| [id("cut.line.v", k, 0), id("cut.line.v", k, 1)]).collect(),
+            sides: (0..4).map(|k| id("cut.line.side", k, 0)).collect(),
+            arcs: vec![None; 4],
+        });
+    }
+    cut(feature, target, &blank, profiles, false, None)
 }
 
 /// A corner of sheet metal to relieve: the vertex's ID (the relief's IDs come from it), where it
@@ -82,7 +126,7 @@ pub(crate) fn relieve(feature: TopoId, target: &Body, home: Ix, corners: &[Corne
             }
         })
         .collect();
-    cut(feature, target, &blank, profiles, false, &|| Err(BrepError::Invalid("relief: the circle stays within a face".into())))
+    cut(feature, target, &blank, profiles, false, None)
 }
 
 /// `profiles`, on `blank` of `target`, cut through it (`grow`: added): see [`punch`]; a cut within
@@ -93,7 +137,7 @@ fn cut(
     blank: &Blank,
     profiles: Vec<ProfileLoop>,
     grow: bool,
-    within: &dyn Fn() -> Result<Body, BrepError>,
+    within: Option<&dyn Fn() -> Result<Body, BrepError>>,
 ) -> Result<Body, BrepError> {
     let later = |m: &str| BrepError::Unsupported(format!("adding to sheet metal: {m} comes later"));
     let loops = blank.outline(target)?;
@@ -111,7 +155,8 @@ fn cut(
     // Within the sketch's face, a cut as before.
     let home = &blank.strips[blank.home];
     let inside = |p: &Vec2| home.lo() < p.x && p.x < home.hi() && blank.strip(*p) == blank.home;
-    if !grow
+    if let Some(within) = within
+        && !grow
         && !open
         && profiles.iter().all(|l| l.points.iter().all(inside) && (0..l.points.len()).all(|k| l.arc(k).is_none_or(|a| arc_within(l, k, a, home))))
     {

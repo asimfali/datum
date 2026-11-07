@@ -74,6 +74,7 @@ fn a_cut_pattern_moves_into_its_sketch() {
         wall: false,
         profiles: Vec::new(),
         blank_only: false,
+        kerf: None,
     };
     assert_eq!(g.nodes()[1].op, through);
 }

@@ -37,9 +37,9 @@ use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
     Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
-    face_plane, parallel, place, profile_curves, profile_regions,
+    face_plane, open_curves, parallel, place, profile_curves, profile_regions,
 };
-pub use unfold::{Flat, FlatPiece, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
+pub use unfold::{Flat, FlatPiece, LineCut, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 
 /// In JSON the kind is the `"op"` field: `{"op": "prism", "polygon": [[0, 0], …], "z0": 0, "z1": 3}`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -131,6 +131,10 @@ pub enum Op {
         /// DXF take the cut (see [`blank_cut`]). With `wall`, `mode: cut`.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         blank_only: bool,
+        /// How wide the laser cuts, from the part's sheet rule: with `wall`, `mode: cut`, an open line
+        /// of the sketch is a cut this wide in the part and one line in the DXF (D235).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kerf: Option<Num>,
     },
     /// A work plane (D150), `offset` along its normal from the origin plane `base` (XY when not
     /// given), from the input work plane, from plane face `face` of the input body, or through
@@ -448,7 +452,8 @@ pub enum Value {
     Body(Body),
     /// Boxed: a placed sketch is much larger than the rest.
     Sketch(Box<Placed>),
-    Flat(Flat),
+    /// Boxed, as a sketch: a blank is larger than a body.
+    Flat(Box<Flat>),
     /// A work plane: its origin, X axis and normal, as a sketch plane.
     Plane(SketchPlane),
 }
@@ -571,7 +576,7 @@ impl Op {
                 flat: *flat,
                 project: project.clone(),
             },
-            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only } => Self::Extrude {
+            Self::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only, kerf } => Self::Extrude {
                 z0: r(z0, "z0")?,
                 z1: z1.as_ref().map(|z| r(z, "z1")).transpose()?,
                 symmetric: *symmetric,
@@ -580,6 +585,7 @@ impl Op {
                 wall: *wall,
                 profiles: profiles.clone(),
                 blank_only: *blank_only,
+                kerf: kerf.as_ref().map(|n| r(n, "kerf")).transpose()?,
             },
             Self::Plane { base, face, points, line, offset } => {
                 Self::Plane { base: *base, face: face.clone(), points: points.clone(), line: line.clone(), offset: r(offset, "offset")? }
@@ -804,7 +810,7 @@ impl Op {
                     names,
                 )?)));
             }
-            Self::Unfold { face, k_factor } => return Ok(Value::Flat(unfold(inputs[0], face, num(k_factor)?)?)),
+            Self::Unfold { face, k_factor } => return Ok(Value::Flat(Box::new(unfold(inputs[0], face, num(k_factor)?)?))),
             Self::Extrude { .. } => extrude(feature, values, self)?,
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
             Self::Trim { flip, k_factor } => {
@@ -1018,20 +1024,51 @@ fn through(points: &[Spot], values: &[&Value]) -> Result<SketchPlane, BrepError>
 pub fn near_bends(feature: TopoId, values: &[&Value], op: &Op) -> Result<Vec<NearBend>, BrepError> {
     let (Op::Extrude { wall: true, profiles, .. }, [target, sketch, ..]) = (op, values) else { return Ok(Vec::new()) };
     let (Some(t), Some(s)) = (target.body(), sketch.sketch()) else { return Ok(Vec::new()) };
+    if profile_curves(feature, s)?.is_empty() {
+        return Ok(Vec::new());
+    }
     bent::near_bends(feature, t, &*chosen(feature, s, profiles)?)
+}
+
+/// Sheet `target` cut by what `s` draws, if it has open lines (D235): each a cut `kerf` wide, with
+/// the closed profiles `profiles` choose. None with no open line: an ordinary cut.
+fn line_cut(feature: TopoId, target: &Body, s: &Placed, profiles: &[String], kerf: Option<f64>) -> Result<Option<Body>, BrepError> {
+    let lines = open_curves(s);
+    if lines.is_empty() {
+        return Ok(None);
+    }
+    let kerf = kerf.ok_or_else(|| BrepError::Sketch("a cut along a line takes its width from the part's sheet rule: it has no `kerf`".into()))?;
+    if !(kerf > 0.0 && kerf.is_finite()) {
+        return Err(BrepError::Degenerate(format!("a cut along a line is wider than nothing, got {kerf}")));
+    }
+    let closed = if profile_curves(feature, s)?.is_empty() { None } else { Some(chosen(feature, s, profiles)?) };
+    bent::punch_lines(feature, target, s, closed.as_deref(), &lines, kerf).map(Some)
+}
+
+/// Where the cuts along lines of `op` lie, `sketch` its sketch's value (D235): each line's ends in
+/// space and the width, for the blank to take them back to one line in its DXF.
+pub fn line_cuts(op: &Op, sketch: &Value, kerf: f64) -> Vec<LineCut> {
+    let (Op::Extrude { wall: true, .. }, Some(s)) = (op, sketch.sketch()) else { return Vec::new() };
+    let [o, x, y, normal] = s.frame;
+    let at = |n: &String| s.solved.points.get(n).map(|p| o + x * p.x + y * p.y);
+    open_curves(s).iter().filter_map(|n| s.lines.get(n)).filter_map(|l| Some(LineCut { ends: [at(&l.from)?, at(&l.to)?], normal, kerf })).collect()
 }
 
 /// Body `body` with the cut `op` makes on the blank only (an extrusion with `blank_only`, D226),
 /// `sketch` its sketch's value: as the sheet cut would make it, for the blank to be laid flat.
 pub fn blank_cut(feature: TopoId, body: &Body, sketch: &Value, op: &Op) -> Result<Body, BrepError> {
-    let Op::Extrude { blank_only: true, profiles, .. } = op else { return Err(BrepError::Invalid("not a cut on the blank only".into())) };
+    let Op::Extrude { blank_only: true, profiles, kerf, .. } = op else { return Err(BrepError::Invalid("not a cut on the blank only".into())) };
     let s = sketch.sketch().ok_or_else(|| BrepError::Sketch("a cut on the blank takes a sketch".into()))?;
+    let width = kerf.as_ref().map(num).transpose()?;
+    if let Some(made) = line_cut(feature, body, s, profiles, width)? {
+        return Ok(made);
+    }
     bent::punch(feature, body, &*chosen(feature, s, profiles)?, false)
 }
 
 /// An extrusion (see [`Op::Extrude`]), its numbers evaluated.
 fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepError> {
-    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only } = op else {
+    let Op::Extrude { z0, z1, symmetric, mode, through, wall, profiles, blank_only, kerf } = op else {
         return Err(BrepError::Invalid("not an extrusion".into()));
     };
     let (z0, z1, symmetric, mode, through) = (num(z0)?, z1.as_ref().map(num).transpose()?, *symmetric, *mode, *through);
@@ -1060,6 +1097,12 @@ fn extrude(feature: TopoId, values: &[&Value], op: &Op) -> Result<Body, BrepErro
         _ => Some(values[0].body().ok_or_else(|| BrepError::Sketch(format!("extrude `{}` takes the target body first", mode.name())))?),
     };
     let s = values[k].sketch().ok_or_else(|| BrepError::Sketch(format!("extrude takes a sketch, input {} is a body", k + 1)))?;
+    if let (Some(t), true) = (target, *wall && through && mode == Mode::Cut && s.face.is_some()) {
+        let kerf = kerf.as_ref().map(num).transpose()?;
+        if let Some(made) = line_cut(feature, t, s, profiles, kerf)? {
+            return Ok(made);
+        }
+    }
     let s = &*chosen(feature, s, profiles)?;
     let plane = values.get(k + 1).map(|v| v.plane());
     if through {

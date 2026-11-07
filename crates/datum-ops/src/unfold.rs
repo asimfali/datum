@@ -96,6 +96,116 @@ pub struct Flat {
     pub overlaps: Vec<[Vec2; 2]>,
     /// Of the pieces, what the DXF holds.
     pub hash: [u8; 32],
+    /// How each wall lies, as `frame` does for the first: what finds a line of an earlier blank on
+    /// this one, whichever face it is laid from now. Not in the hash: it follows from the laying.
+    pub planes: Vec<[Vec3; 4]>,
+}
+
+/// A cut along a line of a sketch on sheet metal (D235): its ends in space, on the plane of normal
+/// `normal` the sketch lies on, and its width.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineCut {
+    pub ends: [Vec3; 2],
+    pub normal: Vec3,
+    pub kerf: f64,
+}
+
+/// How near a corner of a cut along a line has to be to its sides to be one, in mm: the blank's
+/// pieces are laid through bends, some bits off the sketch's line (D235).
+const ON_KERF: f64 = 1e-7;
+
+impl Flat {
+    /// The blank with cuts along lines `lines` (ends in space, width; D235) as the laser cuts them:
+    /// each one line, the gap the part shows closed. The sides and ends of each cut go; the edges
+    /// running into them go on to the line; the line stands where metal met it. A curve running
+    /// into a cut stays as it is.
+    #[must_use]
+    pub fn with_lines_closed(&self, lines: &[LineCut]) -> Self {
+        if lines.is_empty() {
+            return self.clone();
+        }
+        let (mut pieces, mut ids) = (self.pieces.clone(), self.ids.clone());
+        let mut gone = vec![false; pieces.len()];
+        let mut new: Vec<(FlatPiece, TopoId)> = Vec::new();
+        for &LineCut { ends: [from, to], normal, kerf } in lines {
+            // The wall the sketch's plane is, or the one across the sheet seen from the other side.
+            let away = |f: &[Vec3; 4]| (from - f[0]).dot(f[3]).abs();
+            let wall = self.planes.iter().filter(|f| crate::sketch::nearly_parallel(f[3], normal)).min_by(|p, q| away(p).total_cmp(&away(q)));
+            let Some(&[o, x, y, _]) = wall else { continue };
+            let flat = |p: Vec3| Vec2::new((p - o).dot(x), (p - o).dot(y));
+            let (a, b) = (flat(from), flat(to));
+            let length = libm::hypot(b.x - a.x, b.y - a.y);
+            if length == 0.0 {
+                continue;
+            }
+            let (ux, uy) = ((b.x - a.x) / length, (b.y - a.y) / length);
+            let along = |p: Vec2| (p.x - a.x) * ux + (p.y - a.y) * uy;
+            let off = |p: Vec2| -(p.x - a.x) * uy + (p.y - a.y) * ux;
+            let on = |p: Vec2| off(p).abs() <= 0.5 * kerf + ON_KERF && along(p) >= -ON_KERF && along(p) <= length + ON_KERF;
+            // Edges running into the cut go on to its line, to where they cross it.
+            let mut met: Vec<(Vec2, f64)> = Vec::new();
+            for (k, piece) in pieces.iter_mut().enumerate() {
+                let FlatPiece::Line(p, q) = piece else { continue };
+                if gone[k] || on(*p) == on(*q) {
+                    continue;
+                }
+                let (end, far) = if on(*p) { (&mut *p, *q) } else { (&mut *q, *p) };
+                let was = *end;
+                let t = off(far) / (off(far) - off(was));
+                let crossing = Vec2::new(far.x + (was.x - far.x) * t, far.y + (was.y - far.y) * t);
+                *end = crossing;
+                met.push((was, along(crossing)));
+            }
+            // Its sides and ends go; where they ended at an edge, the line ends where that edge does.
+            let reach = |p: Vec2| met.iter().find(|(q, _)| (q.x - p.x).abs() <= ON_KERF && (q.y - p.y).abs() <= ON_KERF).map_or(along(p), |m| m.1);
+            let mut spans: Vec<(f64, f64, TopoId)> = Vec::new();
+            for (k, piece) in pieces.iter().enumerate() {
+                let FlatPiece::Line(p, q) = *piece else { continue };
+                if !gone[k] && on(p) && on(q) {
+                    gone[k] = true;
+                    let (s, e) = (reach(p).clamp(0.0, length), reach(q).clamp(0.0, length));
+                    spans.push((s.min(e), s.max(e), ids[k]));
+                }
+            }
+            spans.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)));
+            let at = |t: f64| Vec2::new(a.x + ux * t, a.y + uy * t);
+            let mut run: Option<(f64, f64, TopoId)> = None;
+            for (s, e, id) in spans {
+                match &mut run {
+                    Some(r) if s <= r.1 + ON_KERF => r.1 = r.1.max(e),
+                    _ => {
+                        new.extend(
+                            run.take()
+                                .filter(|r| r.1 > r.0)
+                                .map(|r| (FlatPiece::Line(at(r.0), at(r.1)), TopoId::derive("flat.cut.line").id(r.2).finish())),
+                        );
+                        run = Some((s, e, id));
+                    }
+                }
+            }
+            new.extend(run.filter(|r| r.1 > r.0).map(|r| (FlatPiece::Line(at(r.0), at(r.1)), TopoId::derive("flat.cut.line").id(r.2).finish())));
+        }
+        let outer = self.outer.clone();
+        let kept = |k: &usize| !gone[*k];
+        let ends: Vec<[Vec2; 2]> = outer.clone().filter(kept).filter_map(|k| self.ends.get(k - outer.start).copied()).collect();
+        let before = (0..outer.start).filter(kept).count();
+        let range = before..before + ends.len();
+        let mut keep = gone.iter().map(|g| !g);
+        pieces.retain(|_| keep.next().unwrap_or(true));
+        let mut keep = gone.iter().map(|g| !g);
+        ids.retain(|_| keep.next().unwrap_or(true));
+        for (p, id) in new {
+            pieces.push(p);
+            ids.push(id);
+        }
+        let home = self.home.zip(self.frame);
+        Self {
+            k_factor: self.k_factor,
+            overlaps: self.overlaps.clone(),
+            planes: self.planes.clone(),
+            ..Self::new(pieces, ids, self.size, self.bends.clone(), self.bend_ids.clone(), (range, ends), home)
+        }
+    }
 }
 
 /// A strip of the sheet in the tree the blank is laid by (D233).
@@ -837,7 +947,14 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         }
         Lay::Bend { .. } => None,
     });
-    Ok(Flat { k_factor: k, overlaps, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home) })
+    let planes = lays
+        .iter()
+        .filter_map(|l| match *l {
+            Lay::Plane { o, start, ex, ey } => Some([start + ex * (lo.x - o.x) + ey * (lo.y - o.y), ex, ey, ex.cross(ey)]),
+            Lay::Bend { .. } => None,
+        })
+        .collect();
+    Ok(Flat { k_factor: k, overlaps, planes, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home) })
 }
 
 /// The middle of the laid vertices of the outlines of `faces`.
@@ -1129,6 +1246,7 @@ impl Flat {
             k_factor: 0.5,
             overlaps: Vec::new(),
             hash: *blake3::hash(&bytes).as_bytes(),
+            planes: Vec::new(),
         }
     }
 }

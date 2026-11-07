@@ -1276,8 +1276,9 @@ impl Session {
     pub fn flat_of(&mut self, name: &str) -> Result<Arc<Flat>, String> {
         let ix = self.find(name)?;
         let value = self.last.results[ix as usize].as_ref().map_err(|e| format!("`{name}` failed: {e}"))?.clone();
+        let closed = self.line_cuts_of(ix)?;
         if let Some(f) = value.flat() {
-            return Ok(Arc::new(f.clone()));
+            return Ok(Arc::new(f.with_lines_closed(&closed)));
         }
         let body = value.body().ok_or_else(|| format!("`{name}` is no body"))?;
         let settings = self.doc.flats.get(name).cloned().unwrap_or_default();
@@ -1297,6 +1298,11 @@ impl Session {
         h.update(&value.hash());
         h.update(&[u8::from(settings.back)]);
         h.update(&k.to_bits().to_le_bytes());
+        for l in &closed {
+            for x in l.ends[0].to_array().into_iter().chain(l.ends[1].to_array()).chain(l.normal.to_array()).chain([l.kerf]) {
+                h.update(&x.to_bits().to_le_bytes());
+            }
+        }
         for (_, id, op, sketch) in &blank_only {
             h.update(&id.0.to_le_bytes());
             h.update(&serde_json::to_vec(op).unwrap_or_default());
@@ -1314,12 +1320,29 @@ impl Session {
                     Err(e) => return Arc::new(Err(format!("`{name}` on the blank: {e}"))),
                 }
             }
-            Arc::new(datum_ops::unfold_side(&cut, settings.back, k).map_err(|e| e.to_string()))
+            Arc::new(datum_ops::unfold_side(&cut, settings.back, k).map(|f| f.with_lines_closed(&closed)).map_err(|e| e.to_string()))
         });
         match made.as_ref() {
             Ok(f) => Ok(Arc::new(f.clone())),
             Err(e) => Err(e.clone()),
         }
+    }
+
+    /// The cuts along lines (D235) of the body feature `ix` is on, first to last: ends and width.
+    fn line_cuts_of(&self, ix: NodeIx) -> Result<Vec<datum_ops::LineCut>, String> {
+        let values = parameter_values(self.graph.parameters());
+        let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
+        // As it was evaluated: the rule's width in it.
+        let built = self.doc.built(&self.graph, self.active.as_deref(), self.project().as_deref());
+        let mut out = Vec::new();
+        for n in crate::levels::body_chain(&built, ix).collect::<Vec<_>>().into_iter().rev() {
+            let node = &built.nodes()[n as usize];
+            let (Op::Extrude { kerf: Some(kerf), .. }, Some(&s)) = (&node.op, node.inputs.get(1)) else { continue };
+            let Ok(sketch) = self.last.results[s as usize].as_ref() else { continue };
+            let kerf = kerf.resolve(&lookup).map_err(|e| e.to_string())?;
+            out.extend(datum_ops::line_cuts(&node.op, sketch, kerf));
+        }
+        Ok(out)
     }
 
     /// The blanks of what the level worked in makes, by feature: the bodies' (settings as saved)

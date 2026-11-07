@@ -9,5 +9,6 @@
   "relief_diameter": "2 * t",
   "bend_relief_width": "t",
   "bend_relief_depth": "t",
+  "kerf": 0.2,
   "description": "Лист 2 мм, внутренний радиус гиба равен толщине"
 }
