@@ -1330,6 +1330,10 @@ impl Session {
 
     /// The cuts along lines (D235) of the body feature `ix` is on, first to last: ends and width.
     fn line_cuts_of(&self, ix: NodeIx) -> Result<Vec<datum_ops::LineCut>, String> {
+        // Building reads the library: not for a body with no cut of sheet metal, at every model.
+        if !crate::levels::body_chain(&self.graph, ix).any(|n| matches!(self.graph.nodes()[n as usize].op, Op::Extrude { wall: true, .. })) {
+            return Ok(Vec::new());
+        }
         let values = parameter_values(self.graph.parameters());
         let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
         // As it was evaluated: the rule's width in it.
