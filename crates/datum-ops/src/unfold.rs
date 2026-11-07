@@ -906,23 +906,19 @@ fn overlaps(parents: &[Option<usize>], rims: &[(usize, FlatPiece, [Vec2; 2])]) -
         };
         let a: Vec<&[Vec2; 2]> = chords[&i].iter().filter(within).collect();
         let b: Vec<&[Vec2; 2]> = chords[&j].iter().filter(within).collect();
-        let mut place: Option<(Vec2, Vec2)> = None;
-        for &&[p, q] in &a {
-            for &&[r, s] in &b {
+        let crossing = a.iter().any(|&&[p, q]| {
+            b.iter().any(|&&[r, s]| {
                 if p.x.max(q.x) < r.x.min(s.x) || r.x.max(s.x) < p.x.min(q.x) || p.y.max(q.y) < r.y.min(s.y) || r.y.max(s.y) < p.y.min(q.y) {
-                    continue;
+                    return false;
                 }
                 let opposite = |u: Sign, v: Sign| matches!((u, v), (Sign::Positive, Sign::Negative) | (Sign::Negative, Sign::Positive));
-                if opposite(orient2d(p, q, r), orient2d(p, q, s)) && opposite(orient2d(r, s, p), orient2d(r, s, q)) {
-                    let cross = |u: Vec2, v: Vec2, w: Vec2| (v.x - u.x) * (w.y - u.y) - (v.y - u.y) * (w.x - u.x);
-                    let (d0, d1) = (cross(r, s, p), cross(r, s, q));
-                    let t = d0 / (d0 - d1);
-                    let c = Vec2::new(p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t);
-                    place = Some(place.map_or((c, c), |(l, h)| (Vec2::new(l.x.min(c.x), l.y.min(c.y)), Vec2::new(h.x.max(c.x), h.y.max(c.y)))));
-                }
-            }
+                opposite(orient2d(p, q, r), orient2d(p, q, s)) && opposite(orient2d(r, s, p), orient2d(r, s, q))
+            })
+        });
+        // The place is where the two strips meet, not only where their edges cross.
+        if crossing {
+            found.push(common);
         }
-        found.extend(place);
     }
     // Boxes sharing metal are one place: a wall and its bend lying on the same neighbour.
     let mut merged: Vec<(Vec2, Vec2)> = Vec::new();

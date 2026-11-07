@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 
 use datum_brep::{Body, BrepError, Surface, TopoId, tessellate};
 use datum_math::Vec3;
-use datum_ops::{Op, Value, flange_edges, flange_ends, unfold_side};
+use datum_ops::{Flat, FlatPiece, Op, Value, flange_edges, flange_ends, unfold_side};
 
 const K: f64 = 0.44;
 const T: f64 = 2.0;
@@ -288,9 +288,8 @@ fn flanges_round_a_plate_leave_the_corners_open() {
     let (size, counts, bends) = blank(&all);
     assert!(close(size.0, 60.0 + 2.0 * longer(20.0, 90.0)) && close(size.1, 100.0 + 2.0 * longer(20.0, 90.0)), "{size:?}");
     assert_eq!((counts, bends), ([12, 0, 0], 8));
-    // Leaning in over the plate, the walls would meet above its corner.
-    let err = flange(&p, &corner, serde_json::json!({"angle": 120})).unwrap_err();
-    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("corner")), "{err}");
+    // Leaning in over the plate, the walls meet above its corner: built all the same (D233).
+    assert!(flange(&p, &corner, serde_json::json!({"angle": 120})).is_ok());
     assert!(flange(&p, &corner, serde_json::json!({"angle": 60})).is_ok());
 }
 
@@ -376,7 +375,7 @@ fn wall_height() -> f64 {
 
 /// At an inner corner of an L-shaped plate the flanges would run into each other: refused.
 #[test]
-fn flanges_at_an_inner_corner_are_refused() {
+fn flanges_at_an_inner_corner_are_built_and_told() {
     let l = serde_json::json!({"points": {"a": [0, 0], "b": [100, 0], "c": [100, 40], "d": [40, 40], "e": [40, 100], "f": [0, 100]},
         "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"},
                   "de": {"from": "d", "to": "e"}, "ef": {"from": "e", "to": "f"}, "fa": {"from": "f", "to": "a"}}});
@@ -391,8 +390,8 @@ fn flanges_at_an_inner_corner_are_refused() {
         })
         .collect();
     assert_eq!(ends.len(), 2);
-    let err = flange(&p, &ends_edges(&p, &ends), serde_json::json!({})).unwrap_err();
-    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("inner corner")), "{err}");
+    let b = flange(&p, &ends_edges(&p, &ends), serde_json::json!({})).unwrap();
+    assert!(!unfold_side(&b, false, K).unwrap().overlaps.is_empty());
 }
 
 /// Width extents (D229, as Inventor's): the flange on part of its edge, the end's rest kept; the
@@ -690,7 +689,7 @@ fn an_end_flange_on_a_long_u() {
 
 /// A side flange along a leg and an end flange at the leg's end meet at a corner.
 #[test]
-fn a_side_flange_and_an_end_flange_at_a_corner_are_refused() {
+fn a_side_flange_and_an_end_flange_at_a_corner_are_built() {
     let u = u_of(MID);
     // The end at the origin: the one whose face lies at y = 0 and x from −2 to 0.
     let end = ends(&u)
@@ -702,8 +701,7 @@ fn a_side_flange_and_an_end_flange_at_a_corner_are_refused() {
         .unwrap();
     let mut edges = long_edges(&u, &end);
     edges.push(wall_edge(&u, 0, -2.0, 0.0));
-    let err = flange(&u, &edges, serde_json::json!({})).unwrap_err();
-    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("corner")), "{err}");
+    flange(&u, &edges, serde_json::json!({})).unwrap();
 }
 
 #[test]
@@ -2102,22 +2100,40 @@ fn a_faces_contours_are_what_a_click_takes() {
 
 /// A plate of 300 x 200 with a window of 100 x 100.
 fn windowed() -> Body {
-    let rect = serde_json::json!({"points": {"a": [0, 0], "b": [300, 0], "c": [300, 200], "d": [0, 200], "e": [100, 50], "f": [200, 50], "g": [200, 150], "h": [100, 150]},
+    windowed_by(100.0, 100.0)
+}
+
+/// A plate of 300 x 200 with a window of `wx` x `wy` from (100, 50).
+fn windowed_by(wx: f64, wy: f64) -> Body {
+    let (x1, y1) = (100.0 + wx, 50.0 + wy);
+    let rect = serde_json::json!({"points": {"a": [0, 0], "b": [300, 0], "c": [300, 200], "d": [0, 200], "e": [100, 50], "f": [x1, 50], "g": [x1, y1], "h": [100, y1]},
         "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"},
                   "ef": {"from": "e", "to": "f"}, "fg": {"from": "f", "to": "g"}, "gh": {"from": "g", "to": "h"}, "he": {"from": "h", "to": "e"}}});
     let s = op(serde_json::json!({"op": "sketch", "sketch": rect})).eval(id("w.sketch"), &[]).unwrap();
     op(serde_json::json!({"op": "extrude", "z0": 0, "z1": T})).eval(id("w"), &[&s]).unwrap().body().unwrap().clone()
 }
 
+/// The bottom edges of the window of [`windowed`], one for each wall.
+fn window_bottom(w: &Body) -> Vec<String> {
+    [window_edges(w, true), window_edges(w, false)].concat()
+}
+
+/// The bottom edges of the window of [`windowed_by`] (up to 140 x 100) that run along X, or along Y.
+fn window_edges(w: &Body, along_x: bool) -> Vec<String> {
+    let window = |x: f64, y: f64| x > 50.0 && x < 250.0 && y > 25.0 && y < 175.0;
+    flange_edges(w)
+        .into_iter()
+        .filter(|(_, e)| e.iter().all(|p| window(p.x, p.y) && p.z == 0.0) && (e[0].y == e[1].y) == along_x)
+        .map(|e| format!("{:?}", e.0))
+        .collect()
+}
+
 /// One flange on a window's edge, its side not joined to the wall beside it, which looks back along
-/// the edge: it builds, tessellates (inside `flange`) and holds its material; on all four edges
-/// the inner corners are refused as yet, not built wrong.
+/// the edge: it builds, tessellates (inside `flange`) and holds its material.
 #[test]
 fn a_flange_on_a_windows_edge() {
     let w = windowed();
-    let window = |x: f64, y: f64| x > 50.0 && x < 250.0 && y > 25.0 && y < 175.0;
-    let edges: Vec<String> =
-        flange_edges(&w).into_iter().filter(|(_, e)| e.iter().all(|p| window(p.x, p.y) && p.z == 0.0)).map(|e| format!("{:?}", e.0)).collect();
+    let edges = window_bottom(&w);
     assert_eq!(edges.len(), 4);
     for e in &edges {
         let b = flange(&w, std::slice::from_ref(e), serde_json::json!({"height": 20})).unwrap();
@@ -2126,5 +2142,340 @@ fn a_flange_on_a_windows_edge() {
         assert_eq!(f.bends.len(), 2);
         assert!(f.overlaps.is_empty(), "{:?}", f.overlaps);
     }
-    assert!(matches!(flange(&w, &edges, serde_json::json!({"height": 20})), Err(BrepError::Unsupported(m)) if m.contains("inner corner")));
+}
+
+/// `b` cut through by `sketch` drawn on its blank laid at K-factor `k`, seen from the front.
+fn cut_sketch(b: &Body, sketch: serde_json::Value, k: f64) -> Result<Body, BrepError> {
+    let target = Value::Body(b.clone());
+    let drawn = op(serde_json::json!({"op": "sketch", "flat": "front", "k_factor": k, "sketch": sketch})).eval(id("slits"), &[&target])?;
+    let r = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true}))
+        .eval(id("slit"), &[&target, &drawn])?
+        .body()
+        .unwrap()
+        .clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    Ok(r)
+}
+
+/// The sketch of closed polygons with the given corners.
+fn polygons_sketch(polygons: &[Vec<(f64, f64)>]) -> serde_json::Value {
+    let (mut points, mut lines) = (serde_json::Map::new(), serde_json::Map::new());
+    for (k, corners) in polygons.iter().enumerate() {
+        for (j, c) in corners.iter().enumerate() {
+            points.insert(format!("p{k}_{j}"), serde_json::json!([c.0, c.1]));
+            lines.insert(format!("l{k}_{j}"), serde_json::json!({"from": format!("p{k}_{j}"), "to": format!("p{k}_{}", (j + 1) % corners.len())}));
+        }
+    }
+    serde_json::json!({"points": points, "lines": lines})
+}
+
+/// `b` cut through by closed polygons drawn on its blank at [`K`], seen from the front.
+fn cut_on_blank(b: &Body, polygons: &[Vec<(f64, f64)>]) -> Result<Body, BrepError> {
+    cut_sketch(b, polygons_sketch(polygons), K)
+}
+
+/// A circle of `d` across at `at` on the blank.
+fn circle_on_blank(at: (f64, f64), d: f64) -> serde_json::Value {
+    serde_json::json!({"points": {"c": [at.0, at.1]}, "circles": {"h": {"center": "c", "diameter": d}}})
+}
+
+/// A slit `g` wide on the blank from `from` to `to`, running on `over` beyond both.
+fn slit(from: (f64, f64), to: (f64, f64), g: f64, over: f64) -> Vec<(f64, f64)> {
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let l = (dx * dx + dy * dy).sqrt();
+    let (u, n) = ((dx / l, dy / l), (-dy / l * 0.5 * g, dx / l * 0.5 * g));
+    let (a, b) = ((from.0 - u.0 * over, from.1 - u.1 * over), (to.0 + u.0 * over, to.1 + u.1 * over));
+    vec![(a.0 - n.0, a.1 - n.1), (b.0 - n.0, b.1 - n.1), (b.0 + n.0, b.1 + n.1), (a.0 + n.0, a.1 + n.1)]
+}
+
+/// The window on a blank of four walls: left, right, bottom and top of the bend lines' box.
+fn window_box(bends: &[[datum_math::Vec2; 2]]) -> [f64; 4] {
+    let at = |f: fn(&datum_math::Vec2) -> f64, pick: fn(f64, f64) -> f64, from: f64| bends.iter().flatten().map(f).fold(from, pick);
+    [
+        at(|p| p.x, f64::min, f64::INFINITY),
+        at(|p| p.x, f64::max, f64::NEG_INFINITY),
+        at(|p| p.y, f64::min, f64::INFINITY),
+        at(|p| p.y, f64::max, f64::NEG_INFINITY),
+    ]
+}
+
+/// The window's four corners with the way into the window from each.
+fn window_corners([lo, hi, bottom, top]: [f64; 4]) -> [((f64, f64), (f64, f64)); 4] {
+    [((lo, bottom), (1.0, 1.0)), ((hi, bottom), (-1.0, 1.0)), ((lo, top), (1.0, -1.0)), ((hi, top), (-1.0, -1.0))]
+}
+
+/// At each corner a slit `g` wide from the bend lines' corner through the point `(px, py)` into the window.
+fn corner_slits(window: [f64; 4], (px, py): (f64, f64), g: f64, over: f64) -> Vec<Vec<(f64, f64)>> {
+    window_corners(window).iter().map(|&((x, y), (sx, sy))| slit((x, y), (x + sx * px, y + sy * py), g, over)).collect()
+}
+
+/// Where a slit `g` wide through `(px, py)` leaves the free edges (`rx` from the bend line along X, `ry`
+/// along Y) of the walls beside the corner: the wall along X keeps the side of the slit it lies on.
+fn kept_ends((rx, ry): (f64, f64), (px, py): (f64, f64), g: f64) -> [(f64, f64); 2] {
+    let l = (px * px + py * py).sqrt();
+    [(rx, rx * py / px + g * l / (2.0 * px)), (ry * px / py + g * l / (2.0 * py), ry)]
+}
+
+/// The point `at` of the blank `before` on the blank `after`, which a cut may lay otherwise: both lie in
+/// the plane of the sheet's front, so their frames carry the point over.
+fn carry(before: &Flat, after: &Flat, at: (f64, f64)) -> (f64, f64) {
+    let (from, to) = (before.frame.unwrap(), after.frame.unwrap());
+    let p = from[0] + from[1] * at.0 + from[2] * at.1 - to[0];
+    (p.dot(to[1]), p.dot(to[2]))
+}
+
+/// Whether the pieces of `after` have a vertex at `at` on the blank `before`.
+fn has_vertex(after: &Flat, before: &Flat, at: (f64, f64)) -> bool {
+    let (x, y) = carry(before, after, at);
+    let near = |p: &datum_math::Vec2| (p.x - x).abs() < 1e-6 && (p.y - y).abs() < 1e-6;
+    after.pieces.iter().any(|p| match p {
+        FlatPiece::Line(a, b) => near(a) || near(b),
+        FlatPiece::Polyline(q) => q.iter().any(near),
+        _ => false,
+    })
+}
+
+/// `b` with slits `g` wide across the four corners of its window through the points a flange of `h`
+/// reaches to along both walls, as the blank of `b` has them.
+fn settled(b: &Body, h: f64) -> Body {
+    let window = window_box(&unfold_side(b, false, K).unwrap().bends);
+    cut_on_blank(b, &corner_slits(window, (longer(h, 90.0), longer(h, 90.0)), 1.0, 3.0)).unwrap()
+}
+
+/// How many round holes the blank has, and how many the body has of radius `r`: a hole's wall is three
+/// faces of a cylinder.
+fn holes(b: &Body, r: f64) -> (usize, usize) {
+    let circles = unfold_side(b, false, K).unwrap().pieces.iter().filter(|p| matches!(p, FlatPiece::Circle { .. })).count();
+    let faces = b.faces().iter().filter(|f| matches!(f.surface, Surface::Cylinder(c) if (c.radius - r).abs() < 1e-9)).count();
+    assert_eq!(faces % 3, 0, "{faces}");
+    (circles, faces / 3)
+}
+
+/// The blank of `b` laid at `k` from both sides: of one size, the bends all kept, nothing on itself.
+fn lies_flat(b: &Body, k: f64, bends: usize) -> Flat {
+    let flat = unfold_side(b, false, k).unwrap();
+    assert!(flat.overlaps.is_empty(), "{:?}", flat.overlaps);
+    assert_eq!(flat.bends.len(), bends);
+    let back = unfold_side(b, true, k).unwrap();
+    assert!(close(back.size.x, flat.size.x) && close(back.size.y, flat.size.y), "{:?} {:?}", back.size, flat.size);
+    flat
+}
+
+/// Flanges on all a window's edges: built, the blank telling where it lies on itself; slits across
+/// the corners drawn on the blank part the overlap off, each strip keeping its side, at whatever
+/// angle the slit goes: then the blank lies flat and the metal gone is what was doubled.
+#[test]
+fn a_windows_corners_are_settled_on_the_blank() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    assert_eq!(f.overlaps.len(), 4, "{:?}", f.overlaps);
+    assert_eq!(f.bends.len(), 8);
+    // The bend lines' corners on the blank, and how far the strips reach into the window.
+    let window = window_box(&f.bends);
+    let reach = f.overlaps[0][1].x - window[0];
+    assert!(reach > 15.0 && reach < 25.0, "{reach}");
+    // Overlap frames sit in the corners.
+    assert!((f.overlaps[0][0].x - window[0]).abs() < 6.0 && (f.overlaps[0][0].y - window[2]).abs() < 6.0, "{:?}", f.overlaps[0]);
+    for (name, tilt) in [("45", 1.0_f64), ("steeper", 1.5)] {
+        let cut = cut_on_blank(&b, &corner_slits(window, (reach, reach * tilt), 1.0, 3.0)).unwrap();
+        lies_flat(&cut, K, 8);
+        assert!(cut.volume() < b.volume(), "{name}");
+    }
+}
+
+/// The walls along one pair of edges higher than the other pair: the free edges meet off the diagonal,
+/// and a slit from the bend lines' corner through that point settles each corner.
+#[test]
+fn walls_of_two_heights_are_settled_by_a_slit_through_the_free_edges() {
+    let w = windowed_by(140.0, 90.0);
+    let first = flange(&w, &window_edges(&w, true), serde_json::json!({"height": 20})).unwrap();
+    let along_y = window_edges(&first, false);
+    assert_eq!(along_y.len(), 2);
+    let b = flange(&first, &along_y, serde_json::json!({"height": 30})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    assert_eq!((f.overlaps.len(), f.bends.len()), (4, 8), "{:?}", f.overlaps);
+    // The edges along X lie along the blank's Y, so the walls along them reach `rx` from the left and right.
+    let (rx, ry) = (longer(20.0, 90.0), longer(30.0, 90.0));
+    let window = window_box(&f.bends);
+    let (lo, bottom) = (window[0], window[2]);
+    let first_corner = f.overlaps.iter().find(|o| o[0].x < lo + 10.0 && o[0].y < bottom + 10.0).unwrap();
+    assert!(close(first_corner[1].x - lo, rx) && close(first_corner[1].y - bottom, ry), "{first_corner:?}");
+    let cut = cut_on_blank(&b, &corner_slits(window, (rx, ry), 1.0, 3.0)).unwrap();
+    let flat = lies_flat(&cut, K, 8);
+    let [left, down] = kept_ends((rx, ry), (rx, ry), 1.0);
+    for &((x, y), (sx, sy)) in &window_corners(window) {
+        assert!(has_vertex(&flat, &f, (x + sx * left.0, y + sy * left.1)), "{x} {y} {left:?}");
+        assert!(has_vertex(&flat, &f, (x + sx * down.0, y + sy * down.1)), "{x} {y} {down:?}");
+    }
+}
+
+/// Walls along one pair of edges leaning to 60 degrees, along the other square: the blank is the same
+/// kind of cross, and the slit settles it as it does at right angles.
+#[test]
+fn walls_at_two_angles_are_settled_by_a_slit() {
+    let w = windowed();
+    let first = flange(&w, &window_edges(&w, true), serde_json::json!({"height": 20, "height_along": true})).unwrap();
+    let b = flange(&first, &window_edges(&first, false), serde_json::json!({"height": 20, "height_along": true, "angle": 60})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    assert_eq!((f.overlaps.len(), f.bends.len()), (4, 8), "{:?}", f.overlaps);
+    let (rx, ry) = (longer(20.0, 90.0), longer(20.0, 60.0));
+    let window = window_box(&f.bends);
+    let cut = cut_on_blank(&b, &corner_slits(window, (rx, ry), 1.0, 3.0)).unwrap();
+    let flat = lies_flat(&cut, K, 8);
+    let [left, down] = kept_ends((rx, ry), (rx, ry), 1.0);
+    let (lo, bottom) = (window[0], window[2]);
+    assert!(has_vertex(&flat, &f, (lo + left.0, bottom + left.1)) && has_vertex(&flat, &f, (lo + down.0, bottom + down.1)));
+}
+
+/// A slit that is not at 45 degrees: each strip keeps the side of it that it lies on, so the free edges
+/// end where the line, a half gap off, crosses them.
+#[test]
+fn a_slit_off_the_diagonal_gives_each_strip_its_side() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let before = unfold_side(&b, false, K).unwrap();
+    let window = window_box(&before.bends);
+    let r = longer(20.0, 90.0);
+    for tilt in [1.5, 0.8] {
+        let through = (r, r * tilt);
+        let cut = cut_on_blank(&b, &corner_slits(window, through, 1.0, 10.0)).unwrap();
+        let flat = lies_flat(&cut, K, 8);
+        let [left, down] = kept_ends((r, r), through, 1.0);
+        for &((x, y), (sx, sy)) in &window_corners(window) {
+            assert!(has_vertex(&flat, &before, (x + sx * left.0, y + sy * left.1)), "{tilt}: {x} {y} {left:?}");
+            assert!(has_vertex(&flat, &before, (x + sx * down.0, y + sy * down.1)), "{tilt}: {x} {y} {down:?}");
+        }
+    }
+}
+
+/// A flange's reach on the blank at K = 0.5, where the neutral layer lies mid-thickness.
+fn reach_mid(h: f64) -> f64 {
+    h - (R + T) + std::f64::consts::FRAC_PI_2 * (R + 0.5 * T)
+}
+
+/// At K = 0.5 the metal gone is the area gone times the thickness: for a 45 degree slit `g` wide the
+/// triangle of each strip below or above it, and the notch in the plate; a wide cut over the corner takes
+/// the square of both strips and no part falls off.
+#[test]
+fn what_a_slit_and_a_wide_cut_take_off_is_known_at_a_half() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let window = window_box(&unfold_side(&b, false, 0.5).unwrap().bends);
+    let (g, over) = (1.0_f64, 3.0);
+    let r = reach_mid(20.0);
+    let slits = cut_sketch(&b, polygons_sketch(&corner_slits(window, (r, r), g, over)), 0.5).unwrap();
+    // Per corner: the part of each strip beside the slit, and the notch in the plate.
+    let c = g / 2.0_f64.sqrt();
+    let gone = 4.0 * T * (2.0 * (r * r / 2.0 + c * r) + over * g + g * g / 4.0);
+    assert!(close(b.volume() - slits.volume(), gone), "{} {gone}", b.volume() - slits.volume());
+    lies_flat(&slits, 0.5, 8);
+    // A triangle with legs `l` from `m` outside the corner on both sides, its hypotenuse past the strips' square.
+    let (m, margin) = (3.0, 4.0);
+    let s = 2.0 * r + margin;
+    let triangles: Vec<Vec<(f64, f64)>> = window_corners(window)
+        .iter()
+        .map(|&((x, y), (sx, sy))| {
+            let l = s + 2.0 * m;
+            vec![(x - sx * m, y - sy * m), (x + sx * (l - m), y - sy * m), (x - sx * m, y + sy * (l - m))]
+        })
+        .collect();
+    let wide = cut_sketch(&b, polygons_sketch(&triangles), 0.5).unwrap();
+    let strips = 2.0 * (s * r - r * r / 2.0);
+    let plate = m * (2.0 * s + 2.0 * m);
+    assert!(close(b.volume() - wide.volume(), 4.0 * T * (strips + plate)), "{} ", b.volume() - wide.volume());
+    lies_flat(&wide, 0.5, 8);
+    assert!(wide.volume() < slits.volume());
+}
+
+/// Holes on a blank lying on itself: one in the plate by a corner is one hole, before the slits and after;
+/// one in the walls where they lie on one another goes through both, and when the slits part one of the
+/// strips off, its hole goes with it.
+#[test]
+fn holes_by_a_windows_corners_are_made_once_and_through_all_strips() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    // 1.5 across: the bends' inner radius is another.
+    let (d, r) = (3.0, 1.5);
+    let lower_left = |b: &Body| {
+        let window = window_box(&unfold_side(b, false, K).unwrap().bends);
+        (window[0], window[2])
+    };
+    let at = |b: &Body, (dx, dy): (f64, f64)| {
+        let (x, y) = lower_left(b);
+        circle_on_blank((x + dx, y + dy), d)
+    };
+    // In the plate, off the diagonal the slit runs along.
+    let plate_hole = cut_sketch(&b, at(&b, (-6.0, -14.0)), K).unwrap();
+    assert_eq!(holes(&plate_hole, r), (1, 1));
+    assert_eq!(unfold_side(&plate_hole, false, K).unwrap().overlaps.len(), 4);
+    assert_eq!(holes(&settled(&plate_hole, 20.0), r), (1, 1));
+    let slits_first = settled(&b, 20.0);
+    let hole_after = cut_sketch(&slits_first, at(&slits_first, (-6.0, -14.0)), K).unwrap();
+    assert_eq!(holes(&hole_after, r), (1, 1));
+    lies_flat(&hole_after, K, 8);
+    // In the walls where they lie on one another, below the diagonal: through both strips.
+    let both = cut_sketch(&b, at(&b, (16.0, 8.0)), K).unwrap();
+    assert_eq!(holes(&both, r), (2, 2));
+    let parted = settled(&both, 20.0);
+    lies_flat(&parted, K, 8);
+    assert_eq!(holes(&parted, r), (1, 1));
+}
+
+/// Which corners are told: a frame at each corner of an unsettled window, its far corner where the free
+/// edges meet; slits across two corners leave the other two told.
+#[test]
+fn a_window_settled_at_two_corners_tells_the_other_two() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let before = unfold_side(&b, false, K).unwrap();
+    let window = window_box(&before.bends);
+    let r = longer(20.0, 90.0);
+    let meets: Vec<(f64, f64)> = window_corners(window).iter().map(|&((x, y), (sx, sy))| (x + sx * r, y + sy * r)).collect();
+    // A frame is a box with the meeting point at a corner and the rest between there and the window's corner.
+    let told = |flat: &Flat, corner: (f64, f64), meet: (f64, f64)| {
+        let (c, m) = (carry(&before, flat, corner), carry(&before, flat, meet));
+        let eq = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        flat.overlaps.iter().any(|o| {
+            let (lo, hi) = ((o[0].x.min(o[1].x), o[0].y.min(o[1].y)), (o[0].x.max(o[1].x), o[0].y.max(o[1].y)));
+            let at_meet = (eq(m.0, lo.0) || eq(m.0, hi.0)) && (eq(m.1, lo.1) || eq(m.1, hi.1));
+            let within = lo.0 >= c.0.min(m.0) - 1e-9 && hi.0 <= c.0.max(m.0) + 1e-9 && lo.1 >= c.1.min(m.1) - 1e-9 && hi.1 <= c.1.max(m.1) + 1e-9;
+            at_meet && within && hi.0 > lo.0 && hi.1 > lo.1
+        })
+    };
+    let corners: Vec<(f64, f64)> = window_corners(window).iter().map(|c| c.0).collect();
+    for (&c, &m) in corners.iter().zip(&meets) {
+        assert!(told(&before, c, m), "{c:?} {:?}", before.overlaps);
+    }
+    let two = cut_on_blank(&b, &corner_slits(window, (r, r), 1.0, 3.0)[..2]).unwrap();
+    let half = unfold_side(&two, false, K).unwrap();
+    assert_eq!((half.overlaps.len(), half.bends.len()), (2, 8), "{:?}", half.overlaps);
+    for k in 0..4 {
+        assert_eq!(told(&half, corners[k], meets[k]), k >= 2, "corner {k}: {:?}", half.overlaps);
+    }
+}
+
+/// A flange on a wall's end and flanges on both its cap edges, in one operation (a corner of two strips
+/// beside each other, not on one another): built, unfolded with every bend, and nothing told on itself,
+/// whichever way and as far as they lean.
+#[test]
+fn flanges_on_a_walls_end_and_cap_edges_lie_flat() {
+    let u = u_of(MID);
+    let end = ends(&u)
+        .into_iter()
+        .find(|f| {
+            let x = (0..u.faces().len()).find(|&x| hex(&u, x) == *f).unwrap();
+            centroid(&u, x).x < 1.0
+        })
+        .unwrap();
+    let mut edges = vec![long_edges(&u, &end)[0].clone()];
+    edges.push(wall_edge(&u, 0, -2.0, 0.0));
+    edges.push(wall_edge(&u, 0, -2.0, WIDTH));
+    for extra in [serde_json::json!({}), serde_json::json!({"angle": 120}), serde_json::json!({"angle": 60}), serde_json::json!({"flip": true})] {
+        let b = flange(&u, &edges, extra.clone()).unwrap();
+        // The U's two bends and the three flanges'.
+        lies_flat(&b, K, 10);
+        assert!(b.volume() > u.volume(), "{extra}");
+    }
 }

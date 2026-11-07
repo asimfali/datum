@@ -21,6 +21,7 @@ use datum_brep::{
 use datum_math::{Sign, Vec2, Vec3, inside_circle, orient2d};
 
 use crate::cut::{Reach, from_face};
+use crate::sketch::within_rounding;
 use crate::sketch::{Placed, opposite_cylinder, profile_loops};
 use crate::unfold::{chain_through, next_piece};
 
@@ -134,7 +135,9 @@ fn cut(
         }
     }
     // The metal: inside the outline, outside every earlier cut.
-    let metal = |p: Vec2| (0..loops.len()).all(|o| (loops[o].ring.winding(p) != 0) == (o == outer));
+    let metal = |p: Vec2| {
+        if blank.layered { !blank.strips_at(p).is_empty() } else { (0..loops.len()).all(|o| (loops[o].ring.winding(p) != 0) == (o == outer)) }
+    };
     if grow {
         if profiles.iter().any(|l| loops.iter().all(|o| !l.touches(&o.ring))) {
             return Err(BrepError::Sketch("adding to sheet metal: a profile goes on from an edge of the blank, and meets none".into()));
@@ -266,6 +269,20 @@ fn cut(
     rebuilt.extend(gone);
     curves.extend(split);
     faces.extend((0..target.faces().len() as Ix).filter(|x| !rebuilt.contains(x)).map(|x| target.face_spec(x)));
+    // On a blank lying on itself what a cut parts from the sheet falls off, as it does on the laser:
+    // that is how the overlap is settled (D233), the part with the sketch's face stays. Elsewhere
+    // a sheet in two parts is no one part.
+    let mut parts = connected(&faces);
+    if parts.len() > 1 {
+        if cuts.grow || !blank.layered {
+            return Err(unsupported("the cut divides the sheet into two parts: comes later"));
+        }
+        let home = target.faces()[blank.strips[blank.home].faces[0][0] as usize].id;
+        let most = (0..parts.len()).max_by_key(|&k| parts[k].len()).unwrap_or(0);
+        let stays = parts.iter().position(|part| part.iter().any(|&x| faces[x].id == home)).unwrap_or(most);
+        let kept: BTreeSet<usize> = parts.swap_remove(stays).into_iter().collect();
+        faces = faces.into_iter().enumerate().filter(|(x, _)| kept.contains(x)).map(|(_, f)| f).collect();
+    }
     if cuts.open {
         // What a profile took whole: its vertices and curves go with it.
         let mut used: BTreeSet<TopoId> = BTreeSet::new();
@@ -279,9 +296,6 @@ fn cut(
         }
         vertices.retain(|v| used.contains(&v.id));
         curves.retain(|c| edges.contains(&(c.from.min(c.to), c.from.max(c.to))));
-    }
-    if !whole(&faces) {
-        return Err(unsupported("the cut divides the sheet into two parts: comes later"));
     }
     build_with_curves(vertices, faces, curves)
 }
@@ -384,6 +398,10 @@ struct Parts {
     seams: Vec<Vec<(Vec2, [TopoId; 2])>>,
     rims: Vec<Vec<Crossings>>,
 }
+
+/// A point a profile stops at on the blank: where it is, and the vertices of the metal there, each
+/// with the strips they are of.
+type StopOn = (Vec2, Vec<(Vec<usize>, [TopoId; 2])>);
 
 /// A line a profile is cut at: a bend line, or an edge of the blank's outline.
 #[derive(Clone, Copy)]
@@ -685,6 +703,8 @@ struct Strip {
     faces: [Vec<Ix>; 2],
     span: Option<(f64, f64)>,
     region: Vec<ProfileLoop>,
+    /// The holes in `region`, on a blank that lies on itself (see `Blank::layered`).
+    holes: Vec<ProfileLoop>,
     lay: Lay,
 }
 
@@ -782,6 +802,10 @@ struct Blank {
     strips: Vec<Strip>,
     seams: Vec<Seam>,
     home: usize,
+    /// Strips not joined may lie on one another (flanges into a window, or meeting at a corner):
+    /// every strip then goes by its faces' outlines alone, none by a span, and one point of the
+    /// blank may be on several. A cut goes through all of them, as a laser through what is stacked.
+    layered: bool,
 }
 
 impl Blank {
@@ -910,7 +934,7 @@ impl Blank {
                     Lay::Bend { dev, map, near: 0.5 * n * span, radii: [c.radius, other.radius], neutral: k.map(|_| n) }
                 }
             };
-            strips.push(Strip { faces: [nodes[i].faces.clone(), back[i].clone()], span: spans[i], region: Vec::new(), lay });
+            strips.push(Strip { faces: [nodes[i].faces.clone(), back[i].clone()], span: spans[i], region: Vec::new(), holes: Vec::new(), lay });
         }
         let he = |h: Ix| target.half_edges()[h as usize];
         let face_of = |h: Ix| target.loops()[he(h).loop_ix as usize].face;
@@ -921,7 +945,7 @@ impl Blank {
                 Lay::Plane { .. } => None,
             })
             .unwrap_or(0.0);
-        let mut blank = Self { a, e, thickness, strips, seams: Vec::new(), home: index(0) };
+        let mut blank = Self { a, e, thickness, strips, seams: Vec::new(), home: index(0), layered: false };
         // The bend lines: along an axis, as far along it as the faces meet.
         for (i, node) in nodes.iter().enumerate() {
             let Some((p, _)) = node.parent else { continue };
@@ -944,16 +968,43 @@ impl Blank {
             let (a, b) = if across_x { (Vec2::new(at.x, lo), Vec2::new(at.x, hi)) } else { (Vec2::new(lo, at.y), Vec2::new(hi, at.y)) };
             blank.seams.push(Seam { a, b, strips: [index(p), index(i)] });
         }
-        // Where the strips off the chain's faces lie on the blank, to find what lies there.
+        // Where each strip's faces lie on the blank. Those of the chain go by their span, unless
+        // strips not joined may lie on one another: their boxes overlap.
+        let mut outlines = Vec::with_capacity(blank.strips.len());
         for i in 0..blank.strips.len() {
-            if blank.strips[i].span.is_some() {
-                continue;
+            let faces = blank.strips[i].faces[0].clone();
+            let region = faces.iter().map(|&x| blank.region(target, i, target.faces()[x as usize].first_loop)).collect::<Result<Vec<_>, _>>()?;
+            outlines.push(region);
+        }
+        let boxes: Vec<(Vec2, Vec2)> = outlines
+            .iter()
+            .map(|r| {
+                let points = || r.iter().flat_map(|l| l.points.iter());
+                let lo = points().fold(Vec2::new(f64::INFINITY, f64::INFINITY), |m, p| Vec2::new(m.x.min(p.x), m.y.min(p.y)));
+                let hi = points().fold(Vec2::new(f64::NEG_INFINITY, f64::NEG_INFINITY), |m, p| Vec2::new(m.x.max(p.x), m.y.max(p.y)));
+                (lo, hi)
+            })
+            .collect();
+        let joined = |i: usize, j: usize| blank.seams.iter().any(|sm| sm.strips.contains(&i) && sm.strips.contains(&j));
+        let size = boxes.iter().flat_map(|b| [b.0.x, b.0.y, b.1.x, b.1.y]).fold(1.0, |m: f64, x| m.max(x.abs()));
+        let apart = |a: f64, b: f64| a - b <= 64.0 * f64::EPSILON * size;
+        blank.layered = (0..boxes.len()).any(|i| {
+            (i + 1..boxes.len()).any(|j| {
+                let (p, q) = (boxes[i], boxes[j]);
+                !joined(i, j) && !apart(p.1.x, q.0.x) && !apart(q.1.x, p.0.x) && !apart(p.1.y, q.0.y) && !apart(q.1.y, p.0.y)
+            })
+        });
+        for (i, region) in outlines.into_iter().enumerate() {
+            if blank.layered {
+                let faces = blank.strips[i].faces[0].clone();
+                let inner = faces.iter().flat_map(|&x| target.face_loops(x).skip(1)).map(|l| blank.region(target, i, l));
+                let holes = inner.collect::<Result<Vec<_>, _>>()?;
+                blank.strips[i].holes = holes;
+                blank.strips[i].span = None;
             }
-            let region = blank.strips[i].faces[0]
-                .iter()
-                .map(|&x| blank.region(target, i, target.faces()[x as usize].first_loop))
-                .collect::<Result<Vec<_>, _>>()?;
-            blank.strips[i].region = region;
+            if blank.strips[i].span.is_none() {
+                blank.strips[i].region = region;
+            }
         }
         Ok(Some(blank))
     }
@@ -973,9 +1024,10 @@ impl Blank {
             faces: [home.clone(), back],
             span: Some((f64::NEG_INFINITY, f64::INFINITY)),
             region: Vec::new(),
+            holes: Vec::new(),
             lay: Lay::Plane { n: z, ex: x, ey: y, base: o, at: Vec2::new(0.0, 0.0) },
         };
-        Ok(Some(Self { a: y, e: x, thickness: (p.origin - q.origin).dot(n), strips: vec![strip], seams: Vec::new(), home: 0 }))
+        Ok(Some(Self { a: y, e: x, thickness: (p.origin - q.origin).dot(n), strips: vec![strip], seams: Vec::new(), home: 0, layered: false }))
     }
 
     /// The profiles of `sketch` on the blank, counterclockwise.
@@ -1040,6 +1092,12 @@ impl Blank {
         across.unwrap_or_else(|| self.strips.iter().take_while(|st| st.span.is_some()).filter(|st| st.span.is_some_and(|s| s.1 < p.x)).count())
     }
 
+    /// Every strip point `p` lies on, of a blank that lies on itself.
+    fn strips_at(&self, p: Vec2) -> Vec<usize> {
+        let on = |st: &Strip| st.region.iter().any(|r| r.winding(p) != 0) && st.holes.iter().all(|h| h.winding(p) == 0);
+        (0..self.strips.len()).filter(|&i| on(&self.strips[i])).collect()
+    }
+
     /// The edges of the blank on the sketch's side as closed loops: its outline and every cut in
     /// it, the bend lines left out.
     fn outline(&self, target: &Body) -> Result<Vec<Outline>, BrepError> {
@@ -1087,6 +1145,15 @@ impl Blank {
         // Corners of the profile on an edge of the sheet, and whether each segment's first and
         // last pieces are on the sheet.
         let corners: Vec<Option<(usize, usize)>> = l.points.iter().map(|&a| on_edge(a, loops)).collect::<Result<_, _>>()?;
+        // The strips a point's own IDs are for: on a blank lying on itself another strip there has
+        // IDs of its own, from these.
+        let owners: Vec<Vec<usize>> = (0..n)
+            .map(|k| match corners[k] {
+                Some((o, e)) => vec![loops[o].edges[e].1],
+                None if self.layered => self.strips_at(l.points[k]).into_iter().take(1).collect(),
+                None => Vec::new(),
+            })
+            .collect();
         let mut ends: Vec<[bool; 2]> = Vec::with_capacity(n);
         for k in 0..n {
             let mut on_sheet = [false; 2];
@@ -1124,21 +1191,38 @@ impl Blank {
                 }
             }
             cuts.sort_by(|x, y| x.0.total_cmp(&y.0));
-            let cross = |m: usize| [0, 1].map(|layer| TopoId::derive("cut.cross").id(feature).id(l.sides[k]).index(m as u64).index(layer).finish());
-            let mut points = vec![(a, l.vertices[k])];
+            let cross =
+                |m: usize| [0, 1].map(|layer| TopoId::derive("cut.cross").id(feature).id(l.sides[k]).index(m as u64).index(layer as u64).finish());
+            // Each point: where it is, and whose vertices are which. Where two lines lie at one point
+            // of the blank (a flange's end on the bend line of the one beside it) they are one
+            // point there, but different metal: each keeps vertices of its own.
+            let corner = |k: usize| (l.points[k], vec![(owners[k].clone(), l.vertices[k])]);
+            let mut points = vec![corner(k)];
             for (m, &(_, p, line)) in cuts.iter().enumerate() {
-                points.push((p, cross(m)));
-                match line {
-                    Line::Bend(j) => seams[j].push((p, cross(m))),
-                    Line::Rim(o, e) => rims[o][e].push((p, cross(m))),
+                let on_line = match line {
+                    Line::Bend(j) => {
+                        seams[j].push((p, cross(m)));
+                        self.seams[j].strips.to_vec()
+                    }
+                    Line::Rim(o, e) => {
+                        rims[o][e].push((p, cross(m)));
+                        vec![loops[o].edges[e].1]
+                    }
+                };
+                let at = points[points.len() - 1].0;
+                match points.last_mut() {
+                    Some(last) if self.layered && within_rounding(dist(at, p), at.x.abs().max(at.y.abs()).max(1.0)) => {
+                        last.1.push((on_line, cross(m)))
+                    }
+                    _ => points.push((p, vec![(on_line, cross(m))])),
                 }
             }
-            points.push((b, l.vertices[(k + 1) % n]));
+            points.push(corner((k + 1) % n));
             // A circle's next arc goes on as its first did.
             let goes_on = k > 0 && matches!((l.arc(k - 1), arc), (Some(p), Some(q)) if p == q);
             let count = points.len() - 1;
             for (i, w) in points.windows(2).enumerate() {
-                let ((from, v), (to, u)) = (w[0], w[1]);
+                let (from, to) = (w[0].0, w[1].0);
                 let middle = halfway(from, to, arc);
                 let wall = match last {
                     Some(prev) if i > 0 || goes_on => next_piece(prev),
@@ -1156,7 +1240,17 @@ impl Blank {
                 if !on {
                     continue;
                 }
-                pieces.push(Piece { from, to, middle, arc, radius, strip: self.strip(middle), ends: [v, u], wall });
+                let layers = if self.layered { self.strips_at(middle) } else { Vec::new() };
+                if layers.is_empty() {
+                    pieces.push(Piece { from, to, middle, arc, radius, strip: self.strip(middle), ends: [w[0].1[0].1, w[1].1[0].1], wall });
+                    continue;
+                }
+                let layer_id = |id: TopoId, s: usize| TopoId::derive("cut.layer").id(id).index(s as u64).finish();
+                for (j, &s) in layers.iter().enumerate() {
+                    let mine = |p: &StopOn| p.1.iter().find(|g| g.0.contains(&s)).map_or_else(|| p.1[0].1.map(|id| layer_id(id, s)), |g| g.1);
+                    let wall = if j == 0 { wall } else { layer_id(wall, s) };
+                    pieces.push(Piece { from, to, middle, arc, radius, strip: s, ends: [mine(&w[0]), mine(&w[1])], wall });
+                }
             }
             ends.push(on_sheet);
         }
@@ -1202,10 +1296,29 @@ impl Blank {
             // The outline and every earlier cut a profile crosses go edge by edge; a cut a profile
             // holds goes whole; the others stay as they are (D203).
             let taken = |p: Vec2| profiles.iter().any(|l| covers(l, p));
+            // The bend line half-edge `h` lies on, if any.
+            let line_of = |h: Ix| {
+                let beside = target.loops()[he(he(h).twin).loop_ix as usize].face;
+                self.seams
+                    .iter()
+                    .position(|sm| sm.strips.contains(&i) && sm.strips.iter().any(|&k| k != i && self.strips[k].faces[side].contains(&beside)))
+            };
+            // Whether a profile crosses the bend line of `h` on it (a flange on a window's edge).
+            let seam_crossed = |h: Ix| {
+                line_of(h).is_some_and(|j| {
+                    let (pu, pv) = (at(he(h).origin), at(he(target.next(h)).origin));
+                    let d = Vec2::new(pv.x - pu.x, pv.y - pu.y);
+                    seams[j].iter().any(|c| {
+                        let t = ((c.0.x - pu.x) * d.x + (c.0.y - pu.y) * d.y) / (d.x * d.x + d.y * d.y);
+                        0.0 < t && t < 1.0
+                    })
+                })
+            };
             let mut edges: Vec<Ix> = Vec::new();
             let mut kept: Vec<Vec<TopoId>> = Vec::new();
             for (k, l) in target.face_loops(x).enumerate() {
-                let crossed = k > 0 && *open && target.loop_half_edges(l).any(|h| !self.on_rim(target, rims, i, side, h).is_empty());
+                let crossed =
+                    k > 0 && target.loop_half_edges(l).any(|h| seam_crossed(h) || (*open && !self.on_rim(target, rims, i, side, h).is_empty()));
                 if k == 0 || crossed {
                     edges.extend(target.loop_half_edges(l));
                 } else if !(*open && taken(at(he(target.loop_half_edges(l).start).origin))) {
@@ -1214,11 +1327,7 @@ impl Blank {
             }
             for h in edges {
                 let (u, v) = (he(h).origin, he(target.next(h)).origin);
-                let beside = target.loops()[he(he(h).twin).loop_ix as usize].face;
-                let line = self
-                    .seams
-                    .iter()
-                    .position(|sm| sm.strips.contains(&i) && sm.strips.iter().any(|&k| k != i && self.strips[k].faces[side].contains(&beside)));
+                let line = line_of(h);
                 let Some(j) = line else {
                     // An edge of the sheet, broken where profiles cross it (D202): the stretches
                     // outside them.
@@ -1290,6 +1399,7 @@ impl Blank {
                 }
             }
             let first: Vec<TopoId> = spec.loops[0].clone();
+            let round = self.region(target, i, target.faces()[x as usize].first_loop)?.area();
             let starts: Vec<TopoId> = first.iter().copied().chain(next.keys().copied()).collect();
             let (mut outers, mut holes) = (Vec::new(), Vec::new());
             for v0 in starts {
@@ -1308,7 +1418,10 @@ impl Blank {
                 if v != v0 {
                     return Err(BrepError::Invalid("cut across a bend: a face's outline does not close".into()));
                 }
-                if cycle.iter().any(|v| first.contains(v)) { outers.push((cycle, ring)) } else { holes.push((cycle, ring)) }
+                // A piece runs round as the face's outline does, with or without a corner of it (a
+                // wall whose corners a cut parted off); a hole the other way.
+                let as_outline = ring.area() * round > 0.0;
+                if cycle.iter().any(|v| first.contains(v)) || as_outline { outers.push((cycle, ring)) } else { holes.push((cycle, ring)) }
             }
             // Every corner of the outline cut away (reliefs at all its corners): the largest is it.
             if outers.is_empty()
@@ -1502,8 +1615,9 @@ impl Blank {
     }
 }
 
-/// Whether every face is reached from the first across the edges they share: one piece.
-fn whole(faces: &[FaceSpec]) -> bool {
+/// The faces in parts: each reached from the others across the edges they share. In order of
+/// their least face.
+fn connected(faces: &[FaceSpec]) -> Vec<Vec<usize>> {
     let mut by_edge: BTreeMap<(TopoId, TopoId), Vec<usize>> = BTreeMap::new();
     for (x, f) in faces.iter().enumerate() {
         for l in &f.loops {
@@ -1514,22 +1628,29 @@ fn whole(faces: &[FaceSpec]) -> bool {
         }
     }
     let mut seen = vec![false; faces.len()];
-    let mut todo = vec![0];
-    seen[0] = !faces.is_empty();
-    while let Some(x) = todo.pop() {
-        for l in &faces[x].loops {
-            for (k, &v) in l.iter().enumerate() {
-                let w = l[(k + 1) % l.len()];
-                for &y in &by_edge[&(v.min(w), v.max(w))] {
-                    if !seen[y] {
-                        seen[y] = true;
-                        todo.push(y);
+    let mut parts = Vec::new();
+    for start in 0..faces.len() {
+        if std::mem::replace(&mut seen[start], true) {
+            continue;
+        }
+        let mut part = vec![start];
+        let mut todo = vec![start];
+        while let Some(x) = todo.pop() {
+            for l in &faces[x].loops {
+                for (k, &v) in l.iter().enumerate() {
+                    let w = l[(k + 1) % l.len()];
+                    for &y in &by_edge[&(v.min(w), v.max(w))] {
+                        if !std::mem::replace(&mut seen[y], true) {
+                            part.push(y);
+                            todo.push(y);
+                        }
                     }
                 }
             }
         }
+        parts.push(part);
     }
-    seen.into_iter().all(|s| s)
+    parts
 }
 
 fn unit(v: Vec3) -> Vec3 {
