@@ -351,15 +351,18 @@ fn flanges_on(feature: TopoId, target: &Body, picks: &[(TopoId, Vec3, Vec3)], di
             site_ways.push(way);
         }
     }
-    // Flanges on two ends meeting at a corner leave it open (the corner's relief): neither's side
-    // goes into the other's end. Each corner: its two vertices, the way away from the sheet there.
+    // Flanges meeting at a corner are built whatever the corner: what they overlap the blank shows,
+    // and a cut on the blank settles it (D233). A convex corner of two ends can take a round relief:
+    // its two vertices, the way away from the sheet there.
     let mut corners: Vec<([TopoId; 2], Vec3)> = Vec::new();
     for (k, (_, c, a)) in sites.iter().enumerate() {
         for (_, d, b) in &sites[k + 1..] {
-            if c.iter().any(|v| d.contains(v)) {
-                open_corner(target, a, b, dims.angle)?;
-                let shared: Vec<TopoId> = c.iter().copied().filter(|v| d.contains(v)).collect();
-                let [v, w] = shared[..] else { return Err(BrepError::Invalid("flange: a corner of more than one edge".into())) };
+            let shared: Vec<TopoId> = c.iter().copied().filter(|v| d.contains(v)).collect();
+            if let [v, w] = shared[..]
+                && a.end
+                && b.end
+                && convex_corner(target, a, b)
+            {
                 corners.push(([v, w], a.out + b.out));
             }
         }
@@ -591,29 +594,15 @@ fn solve(rows: [Vec3; 3], rhs: [f64; 3]) -> Option<Vec3> {
     Some((b.cross(c) * rhs[0] + c.cross(a) * rhs[1] + a.cross(b) * rhs[2]) * (1.0 / det))
 }
 
-/// Whether flanges `a` and `b` of `target` may meet at a corner, left
-/// open: both on ends, the corner convex, neither leaning in over the sheet past a right angle
-/// (each then stays off the other's way, beyond its own edge).
-fn open_corner(target: &Body, a: &Base, b: &Base, angle: f64) -> Result<(), BrepError> {
-    let later = |m: &str| Err(BrepError::Unsupported(format!("flanges meeting at a corner: {m} come later")));
-    if !(a.end && b.end) {
-        return later("a flange along a wall and one on an end");
-    }
-    if angle > 90.0 {
-        return later("flanges turning past a right angle");
-    }
-    // Convex: `b`'s far corner lies on the sheet's side of `a`'s end, the side away from where `a`
-    // leaves the sheet.
+/// Whether flanges `a` and `b` of `target` meet at a convex corner: `b`'s far corner lies on the
+/// sheet's side of `a`'s end, the side away from where `a` leaves the sheet.
+fn convex_corner(target: &Body, a: &Base, b: &Base) -> bool {
     let p = |v: Ix| target.point(v);
     let plane = (p(a.inner[0]), p(a.inner[1]), p(a.outer[0]));
     let side = |q: Vec3| orient3d_coords(plane.0, plane.1, plane.2, q);
     let shared = |v: Ix| [a.inner, a.outer].iter().flatten().any(|&w| w == v);
     let far = [b.inner, b.outer].into_iter().flatten().find(|&v| !shared(v));
-    let inside = far.map(|v| side(p(v)));
-    if inside.is_none_or(|s| s == Sign::Zero || s == side(plane.0 + a.out)) {
-        return later("flanges at an inner corner");
-    }
-    Ok(())
+    far.map(|v| side(p(v))).is_some_and(|s| s != Sign::Zero && s != side(plane.0 + a.out))
 }
 
 /// The end whose long edge is `e`: the face, `e`'s half-edge on it, and its two long half-edges.
