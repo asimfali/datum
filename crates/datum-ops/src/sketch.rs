@@ -1257,6 +1257,40 @@ pub fn open_curves(s: &Placed) -> Vec<String> {
     found.paths.iter().flatten().map(|st| st.curve.to_string()).collect()
 }
 
+/// A curve of an open chain, as it is walked: an arc if it has its centre and way round.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ChainPiece {
+    pub from: Vec2,
+    pub to: Vec2,
+    pub arc: Option<ProfileArc>,
+}
+
+/// The open chains of the profile curves of `s` (D237): each named by its first curve, walked the
+/// way that curve is drawn.
+pub(crate) fn open_chains(s: &Placed) -> Result<Vec<(String, Vec<ChainPiece>)>, BrepError> {
+    let keep = |_: &str, construction: bool| !construction;
+    let found = contours(&s.lines, &s.arcs, &keep);
+    let at = |n: &str| s.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
+    found
+        .paths
+        .iter()
+        .map(|path| {
+            let turned;
+            let path = if path[0].forward {
+                path
+            } else {
+                turned = datum_sketch::reversed(path);
+                &turned
+            };
+            let pieces = path.iter().map(|st| {
+                let arc = s.arcs.get(st.curve).map(|a| Ok::<_, BrepError>(ProfileArc { center: at(&a.center)?, ccw: st.forward })).transpose()?;
+                Ok(ChainPiece { from: at(st.from)?, to: at(st.to)?, arc })
+            });
+            Ok((path[0].curve.to_string(), pieces.collect::<Result<_, BrepError>>()?))
+        })
+        .collect()
+}
+
 /// The curves of each closed profile of `s`, by name: what `profiles` picks a profile by.
 pub fn profile_curves(feature: TopoId, s: &Placed) -> Result<Vec<Vec<String>>, BrepError> {
     let (.., curves) = named_loops(feature, s)?;

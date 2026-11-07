@@ -234,6 +234,12 @@
     "rims": "3217e9911cba37baa56a66859bd57bcc4dacfae6bc513175947f4bcc154f7794",
     "tray": "ebe399ab4ce7da3f68f6401d7b9e026019f3bb1f0fbafa6c82cf393dfb632fe8"
   },
+  "sheet_chain_cut.json": {
+    "cut": "7b5813f4c375adffb382712c3ebb3140a050fb2420c5f658938eb779b20a35de",
+    "outline": "8aa62bef920030acf122fbc534d71fa54b012299764ac69bd458457222ca55b2",
+    "plate": "335d3181c62cb1adf87360bba62c1582ba180b77fdd8206e2f18b39165a4f496",
+    "wire_tab": "e5d079153768b45e0a2e4208cb00e62e2b9627e254a67906a960021b3447cdfc"
+  },
   "sheet_cut_inclined.json": {
     "hole_sketch": "469a4ce1c9d0d56f608fdb2e4f3aeadf6b81dbaab4aa1038c6051ad15f87e98e",
     "path": "aa5b0104f2d58edb5fdde36df035daf9675c50399325de7060b2eafe90e0048a",

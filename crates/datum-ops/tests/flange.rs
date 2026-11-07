@@ -2525,7 +2525,7 @@ fn a_line_cut_has_a_gap_in_the_part_and_none_in_the_blank() {
     let carried: Vec<datum_ops::LineCut> = {
         let [fo, fx, fy, fz] = f.frame.unwrap();
         let at = |p: (f64, f64)| fo + fx * p.0 + fy * p.1;
-        segments.iter().map(|(p, q)| datum_ops::LineCut { ends: [at(*p), at(*q)], normal: fz, kerf: g }).collect()
+        segments.iter().map(|(p, q)| datum_ops::LineCut { ends: [at(*p), at(*q)], normal: fz, kerf: g, arc: None }).collect()
     };
     let closed = flat.with_lines_closed(&carried);
     assert!(closed.pieces.len() < flat.pieces.len(), "{} of {}", closed.pieces.len(), flat.pieces.len());
@@ -2577,7 +2577,7 @@ fn lines_sketch(segments: &[Segment]) -> serde_json::Value {
 fn in_space(before: &Body, segments: &[Segment], kerf: f64) -> Vec<datum_ops::LineCut> {
     let [fo, fx, fy, fz] = unfold_side(before, false, K).unwrap().frame.unwrap();
     let at = |q: (f64, f64)| fo + fx * q.0 + fy * q.1;
-    segments.iter().map(|(p, q)| datum_ops::LineCut { ends: [at(*p), at(*q)], normal: fz, kerf }).collect()
+    segments.iter().map(|(p, q)| datum_ops::LineCut { ends: [at(*p), at(*q)], normal: fz, kerf, arc: None }).collect()
 }
 
 /// The ends of the lines of `f` that no other end meets.
@@ -2644,6 +2644,29 @@ fn a_line_across_a_bend_goes_over_it() {
     }
 }
 
+/// A chain over a bend, its arc on the bend line: the gap goes over the bend, on the blank one pass,
+/// the arc whole though the cut's walls are in pieces on either side of the line.
+#[test]
+fn a_chain_goes_over_a_bend() {
+    let u = u_of(MID);
+    let f = unfold_side(&u, false, K).unwrap();
+    let [o, x, y, z] = f.frame.unwrap();
+    let (bx, my) = (f.bends[3][0].x, 0.5 * (f.bends[3][0].y + f.bends[3][1].y));
+    let (a, b, c, d) = ((bx - 10.0, my - 6.0), (bx - 10.0, my), (bx - 10.0 + 20.0, my), (bx - 10.0 + 20.0, my - 6.0));
+    let tab = serde_json::json!({"points": {"p1": [a.0, a.1], "p2": [b.0, b.1], "p3": [c.0, c.1], "p4": [bx, my], "p5": [d.0, d.1]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p3", "to": "p5"}},
+        "arcs": {"a1": {"center": "p4", "from": "p3", "to": "p2"}}});
+    let cut = line_cut_sketch(&u, tab, serde_json::json!({"kerf": 0.5})).unwrap();
+    assert!(cut.volume() < u.volume());
+    let at = |q: (f64, f64)| o + x * q.0 + y * q.1;
+    let piece = |p: (f64, f64), q: (f64, f64), arc| datum_ops::LineCut { ends: [at(p), at(q)], normal: z, kerf: 0.5, arc };
+    let lines = [piece(a, b, None), piece(b, c, Some((at((bx, my)), false))), piece(c, d, None)];
+    let closed = unfold_side(&cut, false, K).unwrap().with_lines_closed(&lines);
+    let [plain, curved, _] = f.counts();
+    assert_eq!(closed.counts()[0], plain + 2, "{:?}", closed.pieces);
+    assert_eq!(closed.counts()[1], curved + 1, "{:?}", closed.pieces);
+}
+
 /// Closed contours and lines in one sketch: both are cut; on the blank the circle stays a circle and
 /// the line a line.
 #[test]
@@ -2681,26 +2704,128 @@ fn a_line_cut_on_the_blank_only_leaves_the_part() {
     assert!(err.to_string().contains("kerf"), "{err}");
 }
 
-/// Lines that touch, an arc on an open chain and a kerf of nothing are refused, not
-/// cut wrong.
+/// A kerf of nothing, one too wide for a curve of the chain, and an arc ending on an edge are refused,
+/// not cut wrong.
 #[test]
 fn a_line_cut_that_cannot_be_made_is_refused() {
     let p = plate();
     let kerf = serde_json::json!({"kerf": 1.0});
-    // Two lines joined at a point: their profiles would touch.
-    let joined = serde_json::json!({"points": {"a": [20, 20], "b": [50, 20], "c": [50, 40]},
-        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}});
-    let r = line_cut_sketch(&p, joined, kerf.clone());
-    assert!(matches!(r, Err(BrepError::Degenerate(_))), "{r:?}");
-    // An arc on an open chain.
-    let arc = serde_json::json!({"points": {"a": [20, 20], "b": [40, 20], "o": [30, 20]}, "arcs": {"r": {"center": "o", "from": "b", "to": "a"}}});
+    // An arc whose end lies on the plate's edge: its way past the edge is not made yet.
+    let arc = serde_json::json!({"points": {"a": [30, 0], "b": [50, 0], "o": [40, 0]}, "arcs": {"r": {"center": "o", "from": "b", "to": "a"}}});
     let r = line_cut_sketch(&p, arc, kerf.clone());
     assert!(matches!(r, Err(BrepError::Unsupported(_))), "{r:?}");
+    // Wider than an arc allows, or than a line is long.
+    let r = line_cut_sketch(&p, u_tab((40.0, 20.0), 1.0, 8.0), serde_json::json!({"kerf": 3.0}));
+    assert!(matches!(r, Err(BrepError::Degenerate(_))), "{r:?}");
+    let short = serde_json::json!({"points": {"a": [20, 20], "b": [50, 20], "c": [50, 20.5], "d": [20, 20.5]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}}});
+    let r = line_cut_sketch(&p, short, serde_json::json!({"kerf": 2.0}));
+    assert!(matches!(r, Err(BrepError::Degenerate(_))), "{r:?}");
     // A kerf of nothing, or less.
     for k in [0.0, -1.0] {
         let r = line_cut_sketch(&p, lines_sketch(&[((30.0, 30.0), (70.0, 30.0))]), serde_json::json!({"kerf": k}));
         assert!(matches!(r, Err(BrepError::Degenerate(_))), "{k}: {r:?}");
     }
+}
+
+/// A wire's tab (D237): up a line from `at`, round an arc of `radius`, down a line as long: a chain
+/// tangent throughout, open at the bottom.
+fn u_tab(at: (f64, f64), radius: f64, height: f64) -> serde_json::Value {
+    let (x, y) = at;
+    let (right, top) = (x + 2.0 * radius, y + height);
+    serde_json::json!({"points": {"p1": [x, y], "p2": [x, top], "p3": [right, top], "p4": [x + radius, top], "p5": [right, y]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p3", "to": "p5"}},
+        "arcs": {"a1": {"center": "p4", "from": "p3", "to": "p2"}}})
+}
+
+/// The pieces the cut added: those of `cut`'s blank not in `whole`'s.
+fn new_pieces<'a>(cut: &'a Flat, whole: &Flat) -> Vec<&'a FlatPiece> {
+    cut.pieces.iter().filter(|p| !whole.pieces.contains(p)).collect()
+}
+
+/// One pass of the laser round a wire's tab: in the part a gap the kerf wide, on the blank one line,
+/// one arc, one line, ending where the sketch's curves do, with no sides or ends of the gap.
+#[test]
+fn a_chain_with_an_arc_is_one_cut_and_one_line_in_the_blank() {
+    let (p, kerf, radius, height) = (plate(), 0.5, 5.0, 12.0);
+    let whole = unfold_side(&p, false, K).unwrap();
+    let cut = line_cut_sketch(&p, u_tab((40.0, 15.0), radius, height), serde_json::json!({"kerf": kerf})).unwrap();
+    let t = p.bounds().1.z - p.bounds().0.z;
+    let length = 2.0 * height + std::f64::consts::PI * radius;
+    let squares = kerf * length * t;
+    assert!((p.volume() - cut.volume() - squares).abs() < 1e-9 * p.volume().max(1.0) + 1e-6, "{} vs {}", p.volume() - cut.volume(), squares);
+    let a = |x: f64, y: f64| datum_math::Vec2::new(x, y);
+    let lines = [
+        datum_ops::LineCut { ends: [(40.0, 15.0), (40.0, 27.0)].map(|q| at_blank(&p, q)), normal: normal_of(&p), kerf, arc: None },
+        datum_ops::LineCut {
+            ends: [(40.0, 27.0), (50.0, 27.0)].map(|q| at_blank(&p, q)),
+            normal: normal_of(&p),
+            kerf,
+            arc: Some((at_blank(&p, (45.0, 27.0)), false)),
+        },
+        datum_ops::LineCut { ends: [(50.0, 27.0), (50.0, 15.0)].map(|q| at_blank(&p, q)), normal: normal_of(&p), kerf, arc: None },
+    ];
+    let closed = unfold_side(&cut, false, K).unwrap().with_lines_closed(&lines);
+    let more = new_pieces(&closed, &whole);
+    assert_eq!(more.len(), 3, "{more:?}");
+    let close = |p: datum_math::Vec2, q: datum_math::Vec2| (p.x - q.x).abs() < 1e-9 && (p.y - q.y).abs() < 1e-9;
+    let straight: Vec<_> = more.iter().filter_map(|p| if let FlatPiece::Line(a, b) = p { Some((*a, *b)) } else { None }).collect();
+    assert_eq!(straight.len(), 2);
+    assert!(close(straight[0].0, a(40.0, 15.0)) && close(straight[0].1, a(40.0, 27.0)), "{straight:?}");
+    assert!(close(straight[1].0, a(50.0, 27.0)) && close(straight[1].1, a(50.0, 15.0)), "{straight:?}");
+    let arcs: Vec<_> = more
+        .iter()
+        .filter_map(|p| if let FlatPiece::Arc { center, radius, start, end } = p { Some((*center, *radius, *start, *end)) } else { None })
+        .collect();
+    assert_eq!(arcs.len(), 1, "{more:?}");
+    assert!(close(arcs[0].0, a(45.0, 27.0)) && (arcs[0].1 - radius).abs() < 1e-9, "{arcs:?}");
+    // Over the top: from the right round to the left.
+    assert!(arcs[0].2.abs() < 1e-9 && (arcs[0].3 - std::f64::consts::PI).abs() < 1e-9, "{arcs:?}");
+}
+
+/// A point of plate `p`'s blank, seen from the front, in space.
+fn at_blank(p: &Body, q: (f64, f64)) -> datum_math::Vec3 {
+    let [o, x, y, _] = unfold_side(p, false, K).unwrap().frame.unwrap();
+    o + x * q.0 + y * q.1
+}
+
+fn normal_of(p: &Body) -> datum_math::Vec3 {
+    unfold_side(p, false, K).unwrap().frame.unwrap()[3]
+}
+
+/// Corners, not only tangents: two lines at a right angle, a line into an arc at an angle, the gap
+/// the kerf wide all along, whatever way the chain is drawn.
+#[test]
+fn a_chain_turns_a_corner() {
+    let (p, kerf) = (plate(), 1.0);
+    let t = p.bounds().1.z - p.bounds().0.z;
+    let elbow = |from: &str, to: &str| {
+        serde_json::json!({"points": {"a": [20, 20], "b": [50, 20], "c": [50, 40]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": from, "to": to}}})
+    };
+    for sketch in [elbow("b", "c"), elbow("c", "b")] {
+        let cut = line_cut_sketch(&p, sketch, serde_json::json!({"kerf": kerf})).unwrap();
+        // Each line's strip, ending square at the corner's middle: together the area as if unfolded.
+        let area = kerf * (30.0 + 20.0);
+        assert!((p.volume() - cut.volume() - area * t).abs() < 1e-6, "{}", p.volume() - cut.volume());
+    }
+    // A line meeting an arc's end square to its tangent, on either side of it.
+    let kinked = serde_json::json!({"points": {"a": [20, 30], "b": [40, 30], "c": [60, 30], "o": [50, 30]},
+        "lines": {"ab": {"from": "a", "to": "b"}}, "arcs": {"r": {"center": "o", "from": "c", "to": "b"}}});
+    let cut = line_cut_sketch(&p, kinked, serde_json::json!({"kerf": 0.5})).unwrap();
+    assert!(cut.volume() < p.volume());
+}
+
+/// A chain drawn from a point snapped to the plate's edge: its line goes on past the edge, and the
+/// other end, in the metal, leaves the tab joined to the plate.
+#[test]
+fn a_chain_snapped_to_the_edge_opens_it() {
+    let p = plate();
+    let one_end = serde_json::json!({"points": {"p1": [40, 0], "p2": [40, 12], "p3": [50, 12], "p4": [45, 12], "p5": [50, 5]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p3", "to": "p5"}},
+        "arcs": {"a1": {"center": "p4", "from": "p3", "to": "p2"}}});
+    let cut = line_cut_sketch(&p, one_end, serde_json::json!({"kerf": 0.5})).unwrap();
+    assert!(cut.volume() < p.volume());
 }
 
 /// A window of walls of two heights cut by lines off 45 degrees: the blank lies flat, and on the closed

@@ -1033,8 +1033,8 @@ pub fn near_bends(feature: TopoId, values: &[&Value], op: &Op) -> Result<Vec<Nea
 /// Sheet `target` cut by what `s` draws, if it has open lines (D235): each a cut `kerf` wide, with
 /// the closed profiles `profiles` choose. None with no open line: an ordinary cut.
 fn line_cut(feature: TopoId, target: &Body, s: &Placed, profiles: &[String], kerf: Option<f64>) -> Result<Option<Body>, BrepError> {
-    let lines = open_curves(s);
-    if lines.is_empty() {
+    let chains = sketch::open_chains(s)?;
+    if chains.is_empty() {
         return Ok(None);
     }
     let kerf = kerf.ok_or_else(|| BrepError::Sketch("a cut along a line takes its width from the part's sheet rule: it has no `kerf`".into()))?;
@@ -1042,16 +1042,21 @@ fn line_cut(feature: TopoId, target: &Body, s: &Placed, profiles: &[String], ker
         return Err(BrepError::Degenerate(format!("a cut along a line is wider than nothing, got {kerf}")));
     }
     let closed = if profile_curves(feature, s)?.is_empty() { None } else { Some(chosen(feature, s, profiles)?) };
-    bent::punch_lines(feature, target, s, closed.as_deref(), &lines, kerf).map(Some)
+    bent::punch_lines(feature, target, s, closed.as_deref(), &chains, kerf).map(Some)
 }
 
-/// Where the cuts along lines of `op` lie, `sketch` its sketch's value (D235): each line's ends in
-/// space and the width, for the blank to take them back to one line in its DXF.
+/// Where the cuts along lines of `op` lie, `sketch` its sketch's value (D235, D237): each curve's ends
+/// in space and the width, for the blank to take them back to one line in its DXF.
 pub fn line_cuts(op: &Op, sketch: &Value, kerf: f64) -> Vec<LineCut> {
     let (Op::Extrude { wall: true, .. }, Some(s)) = (op, sketch.sketch()) else { return Vec::new() };
     let [o, x, y, normal] = s.frame;
-    let at = |n: &String| s.solved.points.get(n).map(|p| o + x * p.x + y * p.y);
-    open_curves(s).iter().filter_map(|n| s.lines.get(n)).filter_map(|l| Some(LineCut { ends: [at(&l.from)?, at(&l.to)?], normal, kerf })).collect()
+    let at = |p: Vec2| o + x * p.x + y * p.y;
+    let chains = sketch::open_chains(s).unwrap_or_default();
+    chains
+        .iter()
+        .flat_map(|(_, pieces)| pieces)
+        .map(|c| LineCut { ends: [at(c.from), at(c.to)], normal, kerf, arc: c.arc.map(|a| (at(a.center), a.ccw)) })
+        .collect()
 }
 
 /// Body `body` with the cut `op` makes on the blank only (an extrusion with `blank_only`, D226),
