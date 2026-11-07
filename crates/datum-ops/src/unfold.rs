@@ -88,6 +88,9 @@ pub struct Flat {
     pub frame: Option<[Vec3; 4]>,
     /// The face the frame lies on, if there is one.
     pub home: Option<TopoId>,
+    /// The K-factor it is laid at: what a sketch on it has to lay its bends at, or else its cuts
+    /// across bends, made at this K, do not lie on the sketch's blank.
+    pub k_factor: f64,
     /// Where the blank lies on itself, metal on metal, so it can't be cut in one piece until a corner
     /// is cut: a box about each such place. Not in the hash: it follows from the pieces.
     pub overlaps: Vec<[Vec2; 2]>,
@@ -811,7 +814,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
         }
         Lay::Bend { .. } => None,
     });
-    Ok(Flat { overlaps, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home) })
+    Ok(Flat { k_factor: k, overlaps, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home) })
 }
 
 /// The middle of the laid vertices of the outlines of `faces`.
@@ -1061,7 +1064,7 @@ fn cone_blank(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     }
     let pieces: Vec<FlatPiece> = pieces.iter().map(|p| p.shifted(lo)).collect();
     let outer = (0..pieces.len(), Vec::new());
-    Ok(Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), Vec::new(), Vec::new(), outer, None))
+    Ok(Flat { k_factor: k, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), Vec::new(), Vec::new(), outer, None) })
 }
 
 impl Flat {
@@ -1104,6 +1107,7 @@ impl Flat {
             ends,
             frame: home.map(|h| h.1),
             home: home.map(|h| h.0),
+            k_factor: 0.5,
             overlaps: Vec::new(),
             hash: *blake3::hash(&bytes).as_bytes(),
         }
