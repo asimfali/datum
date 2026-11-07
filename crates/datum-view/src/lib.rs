@@ -27,5 +27,6 @@ mod sketch;
 mod table;
 mod templates;
 mod update;
+mod uses;
 
 pub use app::run;

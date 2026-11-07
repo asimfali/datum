@@ -130,6 +130,8 @@ pub(crate) enum Request {
     Command(&'static str, Json),
     /// The sketch feature edited in the window, if any: its context comes with every model.
     Editing(Option<String>),
+    /// The feature whose form is open on it, if any: what it stands on comes with every model.
+    Using(Option<String>),
     /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
     /// model until `None`.
     Preview(Option<(&'static str, Json)>),
@@ -315,6 +317,8 @@ struct Model {
     lines: Vec<PlaneLine>,
     /// The faces of the bodies shown a flange may stand on (D205).
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
+    /// What the feature whose form is open stands on.
+    uses: Option<crate::uses::Uses>,
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -329,6 +333,7 @@ struct Picture {
     spots: Vec<(Json, datum_math::Vec3)>,
     lines: Vec<PlaneLine>,
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
+    uses: Option<crate::uses::Uses>,
 }
 
 /// A line of a sketch a work plane goes through: the sketch feature, the line's name, its ends.
@@ -369,6 +374,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut session = Session::default();
     let mut meshes = MeshCache::default();
     let mut editing: Option<String> = None;
+    let mut using: Option<String> = None;
     let mut previewing: Option<(&'static str, Json)> = None;
     let mut mark = None;
     while let Ok(first) = requests.recv() {
@@ -415,6 +421,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                     }
                 },
                 Request::Editing(name) => editing = name,
+                Request::Using(name) => using = name,
                 Request::Preview(p) => previewing = p,
                 Request::Mark => mark = Some(session.checkpoint()),
                 Request::Back => {
@@ -433,7 +440,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let rebuild_ms = start.elapsed().as_secs_f64() * 1e3;
         let start = std::time::Instant::now();
         let flats = session.flats();
-        let picture = |session: &Session, meshes: &mut MeshCache| picture(session, editing.as_deref(), meshes);
+        let picture = |session: &Session, meshes: &mut MeshCache| picture(session, editing.as_deref(), using.as_deref(), meshes);
         let (picture, preview) = match &previewing {
             None => (picture(&session, &mut meshes), None),
             Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
@@ -442,7 +449,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends } = picture;
+        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses } = picture;
         if models
             .send(Model {
                 inspect,
@@ -462,6 +469,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 spots,
                 lines,
                 ends,
+                uses,
             })
             .is_err()
         {
@@ -547,7 +555,7 @@ fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
 }
 
 /// The picture of the model `session` holds, sketch `editing` drawn by the window.
-fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> Picture {
+fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes: &mut MeshCache) -> Picture {
     let (graph, evaluation) = (session.graph(), session.evaluation());
     // In a variant, its part alone, the other parts as the product has them faded around it;
     // in the base, the product whole: every part in its chosen variant (D160, D169). The
@@ -627,7 +635,8 @@ fn picture(session: &Session, editing: Option<&str>, meshes: &mut MeshCache) -> 
         .enumerate()
         .flat_map(|(k, b)| datum_ops::flange_edges(b).into_iter().map(move |(f, e)| (k, f, e)))
         .collect();
-    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends }
+    let uses = using.and_then(|name| crate::uses::uses(graph, evaluation, name, meshes));
+    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -645,6 +654,16 @@ fn shown(graph: &datum_graph::Graph, evaluation: &datum_graph::Evaluation, editi
         v.dedup_by_key(|p| p.0);
     }
     v
+}
+
+/// What a form says of the feature it changes, and how a click changes that (see `uses_note`).
+fn uses_note(ui: &mut egui::Ui, note: Option<&(String, Option<String>)>) {
+    let Some((text, hint)) = note else { return };
+    ui.label(egui::RichText::new(text).color(egui::Color32::from_rgb(235, 110, 20)));
+    if let Some(hint) = hint {
+        ui.small(hint);
+    }
+    ui.separator();
 }
 
 /// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
@@ -849,6 +868,10 @@ struct Viewer {
     plane_points: Vec<(Json, datum_math::Vec3)>,
     /// The ends of sheet metal picked for a flange (D205): the body's feature and the face.
     flange_edges: Vec<(String, datum_brep::TopoId)>,
+    /// The feature the model was last told a form is open on.
+    using: Option<String>,
+    /// What a click with Shift or Ctrl would change, under the cursor.
+    toggling: Option<crate::uses::Toggle>,
     /// A flange being asked for: its form.
     flange: Option<FlangeForm>,
     /// A revolution being asked for: its form.
@@ -912,6 +935,8 @@ struct FlangeForm {
     sent: Option<Json>,
     /// Changing feature `name`, opened from the tree (D217): its edges stay.
     editing: bool,
+    /// Its edges once changed in the picture (D234).
+    edges: Option<Vec<String>>,
 }
 
 impl FlangeForm {
@@ -1051,6 +1076,8 @@ struct RevolveForm {
     side: datum_ops::Side,
     /// Changing feature `name`, opened from the tree: its rule stays the part's.
     editing: bool,
+    /// Its profiles once changed in the picture (D234).
+    picked: Option<Vec<String>>,
     /// The first field is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -1061,7 +1088,13 @@ impl RevolveForm {
     fn params(&self, rule: Option<&str>) -> Option<(&'static str, Json)> {
         if self.editing {
             return Some(match self.turned {
-                Turned::Revolve => ("edit", json!({"name": self.name, "axis": self.axis, "angle": value_of(&self.angle)})),
+                Turned::Revolve => {
+                    let mut p = json!({"name": self.name, "axis": self.axis, "angle": value_of(&self.angle)});
+                    if let Some(picked) = &self.picked {
+                        p["profiles"] = json!(picked);
+                    }
+                    ("edit", p)
+                }
                 Turned::Rolled => {
                     let mut p = json!({"name": self.name, "axis": self.axis, "side": self.side, "angle": value_of(&self.angle)});
                     if self.whole() {
@@ -1144,6 +1177,8 @@ struct Extrusion {
     selected: bool,
     /// Changing feature `name`, opened from the tree (D217): its sketch and target stay.
     editing: bool,
+    /// Its profiles once changed in the picture (D234).
+    picked: Option<Vec<String>>,
     /// A cut of sheet metal on its blank only (D226): in the DXF, not in the part.
     blank_only: bool,
 }
@@ -1153,6 +1188,9 @@ impl Extrusion {
     /// holds. A body of its own stays one, a change of another body stays a change of it.
     fn changes(&self, depth: Json) -> (&'static str, Json) {
         let mut p = json!({"name": self.name});
+        if let Some(picked) = &self.picked {
+            p["profiles"] = json!(picked);
+        }
         match self.kind {
             Kind::Extrusion => {
                 let mode = self.mode.unwrap_or("new");
@@ -1466,6 +1504,8 @@ impl Viewer {
             plane_draft: None,
             plane_points: Vec::new(),
             flange_edges: Vec::new(),
+            using: None,
+            toggling: None,
             flange: None,
             revolve: None,
             trim: None,
@@ -3792,6 +3832,42 @@ impl Viewer {
                 }
             }
         }
+        if !sketched && let Some(u) = &m.uses {
+            let used = egui::Color32::from_rgb(235, 110, 20);
+            let free = egui::Color32::from_rgb(70, 120, 210);
+            let draw = |l: &[datum_math::Vec3; 2], stroke: egui::Stroke| {
+                if let (Some(a), Some(b)) = (on_screen(&view_projection, l[0] - anchor, rect), on_screen(&view_projection, l[1] - anchor, rect)) {
+                    painter.line_segment([a, b], stroke);
+                }
+            };
+            for l in &u.lines {
+                draw(l, egui::Stroke::new(2.0, used));
+            }
+            let picked = self.flange.as_ref().and_then(|f| f.edges.as_ref());
+            for (ends, id) in &u.edges {
+                let on = picked.map_or_else(|| u.used_edges.contains(id), |p| p.contains(&format!("{id:?}")));
+                let lit = self.toggling == Some(crate::uses::Toggle::Edge(*id));
+                if on || lit {
+                    draw(ends, egui::Stroke::new(if lit { 4.0 } else { 3.0 }, if on { used } else { free }));
+                }
+            }
+            for (k, p) in u.profiles.iter().enumerate() {
+                let lit = self.toggling == Some(crate::uses::Toggle::Profile(k));
+                let width = if lit {
+                    4.0
+                } else if p.used {
+                    3.0
+                } else {
+                    1.5
+                };
+                for l in &p.lines {
+                    draw(l, egui::Stroke::new(width, if p.used { used } else { free }));
+                }
+            }
+            for (_, square) in self.work_planes().iter().filter(|(n, _)| u.planes.contains(n)) {
+                crate::origin::paint(&painter, clip, screen, std::slice::from_ref(square), size, Some(0), true);
+            }
+        }
         if (self.picking.is_some() || self.waits_for_sketch())
             && let Some(Under::Face(f)) = self.under
         {
@@ -3881,6 +3957,7 @@ impl Viewer {
     /// click takes it; Esc gives up.
     fn pick_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        self.toggle_uses(ui, rect, r, offset, aspect);
         let mut chosen = None;
         let work = self.work_planes();
         // The extrusion's wait for a sketch also takes an end of sheet metal clicked: a flange.
@@ -4263,6 +4340,7 @@ impl Viewer {
             sent: None,
             selected: false,
             editing: false,
+            picked: None,
             blank_only: false,
         });
     }
@@ -4339,6 +4417,7 @@ impl Viewer {
             gap: "2".into(),
             side: datum_ops::Side::Left,
             editing: false,
+            picked: None,
             fresh: true,
             sent: None,
         });
@@ -4371,6 +4450,7 @@ impl Viewer {
                     gap: if f["gap"].is_null() { "2".into() } else { definition(&f["gap"]) },
                     side: serde_json::from_value(f["side"].clone()).unwrap_or(datum_ops::Side::Left),
                     editing: true,
+                    picked: None,
                     fresh: true,
                     sent: None,
                 });
@@ -4411,6 +4491,7 @@ impl Viewer {
                     fresh: true,
                     sent: None,
                     editing: true,
+                    edges: None,
                 });
             }
             Some(op @ ("extrude" | "sheet" | "plate")) => {
@@ -4447,11 +4528,81 @@ impl Viewer {
                     sent: None,
                     selected: false,
                     editing: true,
+                    picked: None,
                     blank_only: f["blank_only"] == true,
                 });
             }
             _ => {}
         }
+    }
+
+    /// The feature an open form changes.
+    fn edited_feature(&self) -> Option<String> {
+        let flange = self.flange.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let revolve = self.revolve.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let trim = self.trim.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let extrusion = self.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        flange.or(revolve).or(trim).or(extrusion).cloned()
+    }
+
+    /// With a form changing a feature, Shift or Ctrl held: what is under the cursor of what the
+    /// feature may stand on is lit, and a click takes it in or out (D234).
+    fn toggle_uses(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>, aspect: f64) {
+        self.toggling = None;
+        let adding = crate::select::adding(&ui.input(|i| i.modifiers));
+        let (Some(m), Some((x, y)), true, true) = (&self.model, offset, adding, self.edited_feature().is_some()) else { return };
+        let Some(u) = &m.uses else { return };
+        let (anchor, radius) = sphere(&m.scene);
+        let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+        let cursor = rect.center() + egui::vec2(x as f32, y as f32);
+        let distance = |[a, b]: [datum_math::Vec3; 2]| {
+            let (a, b) = (on_screen(&vp, a - anchor, rect)?, on_screen(&vp, b - anchor, rect)?);
+            let d = b - a;
+            let t = ((cursor - a).dot(d) / d.length_sq().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+            Some((a + d * t).distance(cursor))
+        };
+        self.toggling = u.nearest(distance, 6.0);
+        if !r.clicked() {
+            return;
+        }
+        match self.toggling {
+            Some(crate::uses::Toggle::Edge(id)) => {
+                let now =
+                    self.flange.as_ref().and_then(|f| f.edges.clone()).unwrap_or_else(|| u.used_edges.iter().map(|e| format!("{e:?}")).collect());
+                if let (Some(next), Some(f)) = (crate::uses::toggled_edge(&now, id), &mut self.flange) {
+                    f.edges = Some(next);
+                }
+            }
+            Some(crate::uses::Toggle::Profile(k)) => {
+                let next = u.toggled_profile(k);
+                if let Some(x) = self.extrusion.as_mut().filter(|_| next.is_some()) {
+                    x.picked.clone_from(&next);
+                } else if let Some(f) = self.revolve.as_mut().filter(|_| next.is_some()) {
+                    f.picked.clone_from(&next);
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// What a form says of the feature it changes: what it is made of, how much of it, and how to
+    /// change that if a click can.
+    fn uses_note(&self) -> Option<(String, Option<String>)> {
+        let u = self.model.as_ref()?.uses.as_ref()?;
+        let mut note = self.i18n.f("uses-inputs", "Uses: { $names }", &[("names", &u.inputs.join(", "))]);
+        let edges = self.flange.as_ref().and_then(|f| f.edges.as_ref()).map_or(u.used_edges.len(), Vec::len);
+        if !u.edges.is_empty() {
+            note += " · ";
+            note += &self.i18n.f("uses-edges", "edges: { $count }", &[("count", &edges.to_string())]);
+        }
+        if !u.profiles.is_empty() {
+            let used = u.profiles.iter().filter(|p| p.used).count().to_string();
+            note += " · ";
+            note += &self.i18n.f("uses-profiles", "profiles: { $used } of { $all }", &[("used", &used), ("all", &u.profiles.len().to_string())]);
+        }
+        let hint =
+            (!u.edges.is_empty() || u.profiles.len() > 1).then(|| self.i18n.t("uses-hint", "Shift or Ctrl and a click: add or remove").to_string());
+        Some((note, hint))
     }
 
     /// Drops the revolution form, and the preview it made.
@@ -4468,6 +4619,7 @@ impl Viewer {
     /// the preview of what it says now is not refused, Esc or Cancel drops it.
     fn revolve_window(&mut self, ctx: &egui::Context) {
         let rule = self.sheet_rule();
+        let note = self.uses_note();
         let Some(f) = &mut self.revolve else { return };
         let shown = f.params(rule.as_deref());
         let preview = shown.as_ref().and_then(|(_, params)| self.model.as_ref()?.preview.as_ref().filter(|(p, _)| p == params).map(|(_, r)| r));
@@ -4478,6 +4630,7 @@ impl Viewer {
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
             .show(ctx, |ui| {
+                uses_note(ui, note.as_ref());
                 let construction = self.i18n.t("revolve-construction", "construction");
                 let show = |n: &str, c: bool| if c { format!("{n} ({construction})") } else { n.to_string() };
                 ui.horizontal(|ui| {
@@ -4650,6 +4803,7 @@ impl Viewer {
     /// Enter or OK makes it once the preview of what it says now is not refused, Esc or Cancel
     /// drops it.
     fn trim_window(&mut self, ctx: &egui::Context) {
+        let note = self.uses_note();
         let Some(f) = &mut self.trim else { return };
         let (command, params) = f.params();
         let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
@@ -4660,6 +4814,7 @@ impl Viewer {
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
             .show(ctx, |ui| {
+                uses_note(ui, note.as_ref());
                 ui.label(format!("{}: {}", self.i18n.t("trim-plane", "Plane"), f.plane));
                 ui.label(format!("{}: {}", self.i18n.t("trim-sheet", "Sheet"), f.body));
                 if flip_tile(ui, self.i18n.t("trim-flip", "Other side"), f.flip).clicked() {
@@ -4713,6 +4868,7 @@ impl Viewer {
             fresh: true,
             sent: None,
             editing: false,
+            edges: None,
         });
     }
 
@@ -4727,10 +4883,17 @@ impl Viewer {
                 features.into_iter().flatten().take_while(|g| self.flange.as_ref().is_none_or(|f| !f.editing || g["name"] != f.name.as_str()));
             before.filter(|g| g["op"] == "plane").filter_map(|g| g["name"].as_str().map(String::from)).collect()
         };
+        let note = self.uses_note();
         let Some(f) = &mut self.flange else { return };
         let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
         let (command, params) = match self.flange_edges.first() {
-            _ if f.editing => ("edit", f.fields()),
+            _ if f.editing => {
+                let mut fields = f.fields();
+                if let Some(edges) = &f.edges {
+                    fields["edges"] = json!(edges);
+                }
+                ("edit", fields)
+            }
             Some((body, _)) => ("add", f.params(body, &edges)),
             None => {
                 self.flange = None;
@@ -4746,6 +4909,7 @@ impl Viewer {
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
             .show(ctx, |ui| {
+                uses_note(ui, note.as_ref());
                 ui.horizontal(|ui| {
                     ui.label(self.i18n.t("flange-height", "Height"));
                     // The free edge at a plane, that is the height.
@@ -4911,6 +5075,7 @@ impl Viewer {
         // Sheet metal is made by a sheet rule: without one the form only says so. A change keeps
         // the part's rule.
         let refused = (sheet || face) && next_rule.is_none() && !x.editing;
+        let note = self.uses_note();
         let Some(x) = &mut self.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         let Some(sketch) = x.sketch.clone() else {
@@ -4933,6 +5098,7 @@ impl Viewer {
         let (mut add, mut cancel) = (false, false);
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
+                uses_note(ui, note.as_ref());
                 let through = x.through && shown == "cut";
                 if cut {
                     let adds = shown == "join";
@@ -6808,6 +6974,11 @@ impl Viewer {
         }
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
+        let using = self.edited_feature();
+        if using != self.using {
+            self.using.clone_from(&using);
+            self.send(Request::Using(using));
+        }
         self.flange_window(ui.ctx());
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
@@ -6868,6 +7039,7 @@ mod tests {
                 spots: Vec::new(),
                 lines: Vec::new(),
                 ends: Vec::new(),
+                uses: None,
             }),
             busy: false,
             camera: Camera::default(),
@@ -6934,6 +7106,8 @@ mod tests {
             plane_draft: None,
             plane_points: Vec::new(),
             flange_edges: Vec::new(),
+            using: None,
+            toggling: None,
             flange: None,
             revolve: None,
             trim: None,
@@ -9057,6 +9231,7 @@ mod tests {
             fresh: false,
             sent: None,
             editing: false,
+            edges: None,
         };
         assert_eq!(
             form.params("sheet1", &faces),
@@ -9308,7 +9483,7 @@ mod tests {
             "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}});
         s.execute("add", &json!({"name": "skeleton", "op": "sketch", "sketch": skeleton})).unwrap();
         s.execute("add", &json!({"name": "s2", "op": "sketch", "sketch": {"points": {}}})).unwrap();
-        let p = picture(&s, Some("s2"), &mut MeshCache::default());
+        let p = picture(&s, Some("s2"), None, &mut MeshCache::default());
         let (_, context) = p.editing.clone().unwrap();
         let feature = p.inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == "s2").unwrap().clone();
         let sk = SketchEdit::new("s2".into(), context, feature, BTreeMap::new(), None);
@@ -9327,18 +9502,18 @@ mod tests {
             "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
         s.execute("add", &json!({"name": "outline", "op": "sketch", "sketch": square})).unwrap();
         s.execute("extrude", &json!({"name": "plate", "sketch": "outline", "mode": "new", "z1": 10})).unwrap();
-        let p = picture(&s, None, &mut MeshCache::default());
+        let p = picture(&s, None, None, &mut MeshCache::default());
         assert_eq!(p.bodies, ["plate"]);
         let down = datum_math::Vec3::new(0.0, 0.0, -1.0);
         let hit = p.scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).expect("the top face");
         assert_eq!((hit.distance, p.bodies[hit.body].as_str()), (90.0, "plate"));
         // A body grown by another feature is named by it, its part still by the first.
         s.execute("add", &json!({"name": "moved", "op": "transform", "inputs": ["plate"], "translate": [0, 0, 5]})).unwrap();
-        let p = picture(&s, None, &mut MeshCache::default());
+        let p = picture(&s, None, None, &mut MeshCache::default());
         assert_eq!((p.bodies.as_slice(), p.begun.as_slice()), (["moved".to_string()].as_slice(), ["plate".to_string()].as_slice()));
         // Hidden, it is neither drawn nor picked.
         s.execute("show", &json!({"part": "plate", "visible": false})).unwrap();
-        assert!(picture(&s, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
+        assert!(picture(&s, None, None, &mut MeshCache::default()).scene.pick(datum_math::Vec3::new(20.0, 15.0, 100.0), down).is_none());
     }
 
     /// Through, offered in a cut, sends no depth and takes no symmetry.
@@ -9499,6 +9674,7 @@ mod tests {
             sent: None,
             selected: false,
             editing: false,
+            picked: None,
             blank_only: false,
         };
         assert_eq!(x(Some("join")).params("s", true, None).1["mode"], "join");
@@ -9595,6 +9771,7 @@ mod tests {
             sent: None,
             selected: false,
             editing: false,
+            picked: None,
             blank_only: false,
         };
         let rule = h.state().part_rule();
@@ -9852,7 +10029,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/branch_tee.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         let mut meshes = crate::scene::MeshCache::default();
-        let pic = picture(&session, None, &mut meshes);
+        let pic = picture(&session, None, None, &mut meshes);
         {
             let m = v.model.as_mut().unwrap();
             m.scene = pic.scene;
@@ -9905,8 +10082,217 @@ mod tests {
             .execute("add", &json!({"name": "on_blank", "op": "sketch", "inputs": [body], "flat": "front", "k_factor": 0.5, "sketch": circle}))
             .unwrap();
         let mut meshes = crate::scene::MeshCache::default();
-        assert!(picture(&session, None, &mut meshes).scene.sketch_lines.is_empty());
+        assert!(picture(&session, None, None, &mut meshes).scene.sketch_lines.is_empty());
         session.execute("add", &json!({"name": "on_plane", "op": "sketch", "sketch": circle})).unwrap();
-        assert!(!picture(&session, None, &mut meshes).scene.sketch_lines.is_empty());
+        assert!(!picture(&session, None, None, &mut meshes).scene.sketch_lines.is_empty());
+    }
+
+    /// The requests that say what a form stands on, in order.
+    fn usings(inbox: &std::sync::mpsc::Receiver<Request>) -> Vec<Option<String>> {
+        inbox.try_iter().filter_map(|r| if let Request::Using(u) = r { Some(u) } else { None }).collect()
+    }
+
+    /// A form opened from the tree asks once, however many frames it stays, what it stands on;
+    /// closed, it says it needs nothing.
+    #[test]
+    fn a_form_from_the_tree_asks_what_it_stands_on_once() {
+        let (v, inbox) = viewer("sheet_rims.json");
+        let mut h = egui_kittest::Harness::builder().with_size([1280.0, 800.0]).build_ui_state(|ui, v: &mut Viewer| v.window(ui, None), v);
+        h.run();
+        assert!(usings(&inbox).is_empty());
+        h.state_mut().reedit("tray");
+        h.run();
+        h.run();
+        h.run();
+        assert!(h.state().flange.as_ref().is_some_and(|f| f.editing));
+        assert_eq!(usings(&inbox), [Some("tray".to_string())]);
+        h.run();
+        assert!(usings(&inbox).is_empty());
+        h.key_press(egui::Key::Escape);
+        h.run();
+        h.run();
+        assert!(h.state().flange.is_none());
+        assert_eq!(usings(&inbox), [None]);
+    }
+
+    /// The view of the harness below: what a 600 by 400 window leaves of it.
+    const USING_VIEW: [f32; 4] = [8.0, 8.0, 592.0, 392.0];
+
+    /// A harness for a click in the view of a feature changed from the tree: the view alone, with
+    /// no form over it to take the pointer.
+    fn using_harness(v: Viewer) -> egui_kittest::Harness<'static, Viewer> {
+        egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                assert_eq!(rect, egui::Rect::from_min_max(egui::pos2(USING_VIEW[0], USING_VIEW[1]), egui::pos2(USING_VIEW[2], USING_VIEW[3])));
+                let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.toggle_uses(ui, rect, &r, offset, f64::from(rect.width() / rect.height()));
+            },
+            v,
+        )
+    }
+
+    /// A harness for the form of a feature changed from the tree, as the window shows it.
+    fn form_harness(v: Viewer) -> egui_kittest::Harness<'static, Viewer> {
+        egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.flange_window(ui.ctx());
+                v.extrusion_form(ui.ctx());
+            },
+            v,
+        )
+    }
+
+    /// Where world point `q` is in the view of `using_harness` with the camera the viewer holds.
+    fn screen_of(v: &Viewer, q: datum_math::Vec3) -> egui::Pos2 {
+        let rect = egui::Rect::from_min_max(egui::pos2(USING_VIEW[0], USING_VIEW[1]), egui::pos2(USING_VIEW[2], USING_VIEW[3]));
+        let (anchor, radius) = sphere(&v.model.as_ref().unwrap().scene);
+        let (vp, _) = v.camera.matrices(anchor, f64::from(rect.width() / rect.height()), radius);
+        on_screen(&vp, q - anchor, rect).expect("in front of the eye")
+    }
+
+    /// A click on `at` with `modifiers` held, as the pointer makes it.
+    fn click_with(h: &mut egui_kittest::Harness<'static, Viewer>, at: egui::Pos2, modifiers: egui::Modifiers) {
+        h.event(egui::Event::ModifiersChanged(modifiers));
+        h.hover_at(at);
+        h.run();
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers });
+            h.step();
+        }
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run();
+    }
+
+    /// Two segments of the plane z = 0, far from each other on the screen:
+    /// the world line, and the middle of it on the screen.
+    fn two_lines(v: &Viewer) -> [([datum_math::Vec3; 2], egui::Pos2); 2] {
+        let line = |x: f64| {
+            let ends = [datum_math::Vec3::new(x, -1.0, 0.0), datum_math::Vec3::new(x, 1.0, 0.0)];
+            let (a, b) = (screen_of(v, ends[0]), screen_of(v, ends[1]));
+            (ends, a + (b - a) * 0.5)
+        };
+        [line(-3.0), line(3.0)]
+    }
+
+    /// A flange changed from the tree: Ctrl or Shift and a click takes an edge in and out, the
+    /// last one stays, a click without them or far from an edge changes nothing; the `edit` sent
+    /// holds the edges only once they were changed.
+    #[test]
+    fn a_click_with_ctrl_or_shift_changes_a_flanges_edges() {
+        let (mut v, inbox) = viewer("sheet_rims.json");
+        v.reedit("rim_back");
+        let [(a, at_a), (b, at_b)] = two_lines(&v);
+        let (id_a, id_b) = (datum_brep::TopoId(1), datum_brep::TopoId(2));
+        v.model.as_mut().unwrap().uses = Some(crate::uses::Uses {
+            inputs: vec!["rim_back".into()],
+            edges: vec![(a, id_a), (b, id_b)],
+            used_edges: vec![id_a],
+            ..crate::uses::Uses::default()
+        });
+        let mut h = using_harness(v);
+        h.run();
+        assert!(h.state().flange.as_ref().is_some_and(|f| f.editing && f.edges.is_none()));
+        let edges = |h: &egui_kittest::Harness<'static, Viewer>| h.state().flange.as_ref().unwrap().edges.clone();
+        let (name_a, name_b) = (format!("{id_a:?}"), format!("{id_b:?}"));
+        // Nothing held, a click far from every edge, a modifier with a click far away: no change.
+        click_with(&mut h, at_b, egui::Modifiers::NONE);
+        assert_eq!(edges(&h), None);
+        click_with(&mut h, egui::pos2(300.0, 390.0), egui::Modifiers::CTRL);
+        assert_eq!(edges(&h), None);
+        assert_eq!(h.state().toggling, None);
+        // Ctrl adds, the edge under the cursor was lit before the click.
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::CTRL));
+        h.hover_at(at_b);
+        h.run();
+        assert_eq!(h.state().toggling, Some(crate::uses::Toggle::Edge(id_b)));
+        h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+        h.run();
+        click_with(&mut h, at_b, egui::Modifiers::CTRL);
+        assert_eq!(edges(&h), Some(vec![name_a.clone(), name_b.clone()]));
+        // A second click takes it out, Shift as well as Ctrl; the last one stays.
+        click_with(&mut h, at_b, egui::Modifiers::SHIFT);
+        assert_eq!(edges(&h), Some(vec![name_a.clone()]));
+        click_with(&mut h, at_a, egui::Modifiers::CTRL);
+        assert_eq!(edges(&h), Some(vec![name_a.clone()]));
+        click_with(&mut h, at_b, egui::Modifiers::SHIFT);
+        assert_eq!(edges(&h), Some(vec![name_a.clone(), name_b.clone()]));
+        // The edit holds them, once its preview came.
+        let mut h = form_harness(h.into_state());
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let Some(Request::Preview(Some(("edit", want)))) = sent.iter().rev().find(|r| matches!(r, Request::Preview(Some(_)))) else {
+            panic!("{sent:?}")
+        };
+        assert_eq!(want["edges"], json!([name_a, name_b]));
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)), "{sent:?}");
+    }
+
+    /// A flange form nothing was clicked on sends an `edit` without `edges`, and keeps its own.
+    #[test]
+    fn a_flange_form_never_toggled_sends_no_edges() {
+        let (mut v, inbox) = viewer("sheet_rims.json");
+        v.reedit("rim_back");
+        v.model.as_mut().unwrap().uses = Some(crate::uses::Uses::default());
+        let mut h = form_harness(v);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        let Some(Request::Preview(Some(("edit", want)))) = sent.iter().rev().find(|r| matches!(r, Request::Preview(Some(_)))) else {
+            panic!("{sent:?}")
+        };
+        assert!(want.get("edges").is_none(), "{want}");
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)), "{sent:?}");
+    }
+
+    /// An extrusion changed from the tree: a click with Ctrl on a profile takes it out, and the
+    /// `edit` holds the profiles left; one never toggled sends no `profiles`.
+    #[test]
+    fn a_click_with_ctrl_changes_an_extrusions_profiles() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.reedit("plate");
+        v.extrusion.as_mut().unwrap().at = egui::pos2(10.0, 10.0);
+        let [(a, _), (b, at_b)] = two_lines(&v);
+        let profile = |name: &str, line| crate::uses::Profile { curves: vec![name.into()], lines: vec![line], used: true };
+        v.model.as_mut().unwrap().uses = Some(crate::uses::Uses {
+            inputs: vec!["outline".into()],
+            profiles: vec![profile("p", a), profile("q", b)],
+            ..crate::uses::Uses::default()
+        });
+        let mut h = form_harness(v);
+        h.run();
+        let changes = |inbox: &std::sync::mpsc::Receiver<Request>| -> Json {
+            let sent: Vec<Request> = inbox.try_iter().collect();
+            match sent.iter().rev().find(|r| matches!(r, Request::Preview(Some(_)))) {
+                Some(Request::Preview(Some(("edit", p)))) => p.clone(),
+                _ => panic!("{sent:?}"),
+            }
+        };
+        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.editing && x.picked.is_none()));
+        let first = changes(&inbox);
+        assert!(first.get("profiles").is_none(), "{first}");
+        let mut h = using_harness(h.into_state());
+        // A click without a modifier changes nothing.
+        click_with(&mut h, at_b, egui::Modifiers::NONE);
+        assert_eq!(h.state().extrusion.as_ref().unwrap().picked, None);
+        click_with(&mut h, at_b, egui::Modifiers::CTRL);
+        assert_eq!(h.state().extrusion.as_ref().unwrap().picked, Some(vec!["p".to_string()]));
+        let mut h = form_harness(h.into_state());
+        h.run();
+        let want = changes(&inbox);
+        assert_eq!(want["profiles"], json!(["p"]));
+        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        let sent: Vec<Request> = inbox.try_iter().collect();
+        assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if *p == want)), "{sent:?}");
     }
 }

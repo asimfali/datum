@@ -1250,6 +1250,12 @@ pub fn chosen<'s>(feature: TopoId, s: &'s Placed, names: &[String]) -> Result<Co
 /// the curves of each; a branch is an error.
 type Named<'s> = (datum_sketch::Contours<'s>, Vec<Found>, Vec<Vec<&'s str>>);
 
+/// The curves of each closed profile of `s`, by name: what `profiles` picks a profile by.
+pub fn profile_curves(feature: TopoId, s: &Placed) -> Result<Vec<Vec<String>>, BrepError> {
+    let (.., curves) = named_loops(feature, s)?;
+    Ok(curves.iter().map(|c| c.iter().map(|n| n.to_string()).collect()).collect())
+}
+
 fn named_loops(feature: TopoId, s: &Placed) -> Result<Named<'_>, BrepError> {
     no_ellipse(s, &|_| true)?;
     let keep = |_: &str, construction: bool| !construction;

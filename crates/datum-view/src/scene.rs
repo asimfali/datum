@@ -70,6 +70,25 @@ impl BodyMesh {
     }
 }
 
+/// The chords of a curve of sketch `p` through `pts`, in place: in the sketch's plane, or on its
+/// cylinder face, where each bends with the face: 64 chords a turn.
+pub fn chords(p: &datum_ops::Placed, pts: Vec<[f64; 2]>, out: &mut Vec<[Vec3; 2]>) {
+    let [o, x, y, _] = p.frame;
+    let place = |q: Vec2| match &p.developed {
+        None => o + x * q.x + y * q.y,
+        Some(d) => d.point(q, d.radius),
+    };
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let n = p.developed.as_ref().map_or(1, |d| ((b[0] - a[0]).abs() / d.dev.neutral / TAU * 64.0).ceil().max(1.0) as usize);
+        let at = |k: usize| {
+            let t = k as f64 / n as f64;
+            place(Vec2::new(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+        };
+        out.extend((0..n).map(|k| [at(k), at(k + 1)]));
+    }
+}
+
 /// Meshes of bodies by content hash (lookups only: the map's order never shows).
 #[derive(Default)]
 pub struct MeshCache(HashMap<[u8; 32], Arc<BodyMesh>>);
@@ -109,33 +128,15 @@ impl Scene {
                 // Work planes are drawn over the picture, from the model's inspection.
                 Value::Flat(_) | Value::Plane(_) => {}
                 Value::Sketch(p) => {
-                    let [o, x, y, _] = p.frame;
-                    // In the sketch's plane, or on its cylinder face.
-                    let place = |q: Vec2| match &p.developed {
-                        None => o + x * q.x + y * q.y,
-                        Some(d) => d.point(q, d.radius),
-                    };
-                    // Each chord of a curve; on a cylinder face it bends with the face: 64 chords a turn.
-                    let mut chords = |pts: Vec<[f64; 2]>| {
-                        for w in pts.windows(2) {
-                            let (a, b) = (w[0], w[1]);
-                            let n = p.developed.as_ref().map_or(1, |d| ((b[0] - a[0]).abs() / d.dev.neutral / TAU * 64.0).ceil().max(1.0) as usize);
-                            let at = |k: usize| {
-                                let t = k as f64 / n as f64;
-                                place(Vec2::new(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
-                            };
-                            s.sketch_lines.extend((0..n).map(|k| [at(k), at(k + 1)]));
-                        }
-                    };
                     let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()).chain(p.ellipses.keys());
                     for pts in curves.filter_map(|n| SketchEdit::curve_points(p, n)) {
-                        chords(pts);
+                        chords(p, pts, &mut s.sketch_lines);
                     }
                     // The copies of patterns, as the profiles they make (the cell itself is drawn above).
                     for c in &p.patterns {
                         for (k, at) in &c.at {
                             if !(c.source && *k == [0, 0]) {
-                                SketchEdit::copy_outline(p, c, at).into_iter().for_each(&mut chords);
+                                SketchEdit::copy_outline(p, c, at).into_iter().for_each(|pts| chords(p, pts, &mut s.sketch_lines));
                             }
                         }
                     }

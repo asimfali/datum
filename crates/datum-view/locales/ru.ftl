@@ -502,3 +502,7 @@ toolbar-material-hint = Материал активной детали; без �
 toolbar-rule = Правило
 toolbar-rule-hint = Правило активной детали: материал, а у листа толщина и радиус гиба; без детали — для следующей новой (E)
 toolbar-no-rules = Правил этого материала нет: добавьте в меню «Вид», пункт «Правила»
+uses-inputs = Использует: { $names }
+uses-edges = рёбер: { $count }
+uses-profiles = контуров: { $used } из { $all }
+uses-hint = Shift или Ctrl и щелчок: добавить или убрать
