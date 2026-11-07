@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
 pub use sketch::{
     Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
-    face_plane, parallel, place, profile_regions,
+    face_plane, parallel, place, profile_curves, profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 
