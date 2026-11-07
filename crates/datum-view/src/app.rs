@@ -924,6 +924,8 @@ struct FlangeForm {
     flip: bool,
     round: bool,
     corner: &'static str,
+    /// In a mitre with a wall of another angle (D238): the lower goes up to the top of the higher.
+    level: bool,
     /// The bend flush with the edge (D229), not beyond it.
     flush: bool,
     /// The height along the flange, not square to the sheet.
@@ -965,7 +967,7 @@ impl FlangeForm {
             }
         }
         json!({"name": self.name, "height": value_of(&self.height), "height_along": self.along, "angle": value_of(&self.angle), "flip": self.flip,
-            "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "extent": extent, "bend_relief": self.bend,
+            "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "level_walls": self.level, "extent": extent, "bend_relief": self.bend,
             "bend_position": if self.flush { "flush" } else { "outside" }, "to": to})
     }
 
@@ -4504,6 +4506,7 @@ impl Viewer {
                     flush: f["bend_position"] == "flush",
                     corner: CORNERS.into_iter().find(|c| f["corner"] == *c).unwrap_or("open"),
                     along: f["height_along"] == true,
+                    level: f["level_walls"] == true,
                     extent: EXTENTS.into_iter().find(|e| f["extent"]["kind"] == *e).unwrap_or("edge"),
                     a: definition(match f["extent"]["kind"].as_str() {
                         Some("center") => &f["extent"]["width"],
@@ -4908,6 +4911,7 @@ impl Viewer {
             flush: false,
             corner: "open",
             along: false,
+            level: false,
             extent: "edge",
             a: String::new(),
             b: String::new(),
@@ -5063,6 +5067,11 @@ impl Viewer {
                         }
                     });
                 });
+                if f.corner == "miter" {
+                    ui.checkbox(&mut f.level, self.i18n.t("flange-level", "Level the heights")).on_hover_text(
+                        self.i18n.t("flange-level-hint", "A wall of another angle meeting in a mitre: the lower goes up to the top of the higher"),
+                    );
+                }
                 if let Some(Err(why)) = preview {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
@@ -9286,6 +9295,7 @@ mod tests {
             flush: true,
             corner: "miter",
             along: false,
+            level: false,
             extent: "center",
             a: "30".into(),
             b: String::new(),
@@ -9299,7 +9309,7 @@ mod tests {
         };
         assert_eq!(
             form.params("sheet1", &faces),
-            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1", "joint"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "angle": "h + 5",
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet1", "joint"], "edges": ["ab", "cd"], "height": 20.0, "height_along": false, "level_walls": false, "angle": "h + 5",
                 "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}, "bend_relief": "round", "bend_position": "flush",
                 "to": {"end": {"plane": "joint", "gap": 1.0}, "top": {"plane": "joint", "gap": 0.0}}})
         );

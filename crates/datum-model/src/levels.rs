@@ -252,8 +252,12 @@ impl Doc {
     }
 
     /// The parts: the root's bodies (by the feature that began each), but those marked as none.
+    /// Bodies branching from one beginning are one part, listed once.
     pub fn parts(&self) -> Vec<String> {
-        bodies(&self.root).into_iter().map(|(begun, _)| begun).filter(|b| !matches!(self.parts.get(b), Some(None))).collect()
+        let mut parts: Vec<String> =
+            bodies(&self.root).into_iter().map(|(begun, _)| begun).filter(|b| !matches!(self.parts.get(b), Some(None))).collect();
+        parts.dedup();
+        parts
     }
 
     /// Part `part`'s name: as given, else the feature that began it.
