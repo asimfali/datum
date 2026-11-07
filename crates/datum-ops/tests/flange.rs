@@ -2781,3 +2781,30 @@ fn a_windows_corners_are_settled_one_cut_after_another() {
     assert!(flat.overlaps.is_empty(), "{:?}", flat.overlaps);
     assert_eq!(flat.bends.len(), 8);
 }
+
+/// A line drawn from the corner of the bend lines, snapped to it, to the very point the free edges
+/// meet at (or past it): the cut goes through as if drawn past them; the blank has the line from
+/// point to point, no further.
+#[test]
+fn a_line_from_a_corner_to_where_the_free_edges_meet() {
+    let w = windowed();
+    let b = flange(&w, &window_bottom(&w), serde_json::json!({"height": 20})).unwrap();
+    let f = unfold_side(&b, false, K).unwrap();
+    let reach = f.overlaps[0][1].x - 50.0;
+    for far in [reach, reach + 5.0] {
+        let line = |x: f64, y: f64, sx: f64, sy: f64| ((x, y), (x + sx * far, y + sy * far));
+        let segments = [line(50.0, 100.0, 1.0, 1.0), line(150.0, 100.0, -1.0, 1.0), line(50.0, 200.0, 1.0, -1.0), line(150.0, 200.0, -1.0, -1.0)];
+        let cut = line_cut_on_blank(&b, &segments, 0.2).unwrap();
+        let flat = unfold_side(&cut, false, K).unwrap();
+        assert!(flat.overlaps.is_empty(), "{far}: {:?}", flat.overlaps);
+        let closed = flat.with_lines_closed(&in_space(&b, &segments, 0.2));
+        // The plate's outline, the window's and the corners' lines, ending where they meet: no end alone.
+        assert_eq!(closed.pieces.len(), 12, "{far}: {:?}", closed.pieces);
+        assert_eq!(lone_ends(&closed).len(), 4, "{far}: {:?}", lone_ends(&closed));
+        for e in lone_ends(&closed) {
+            let on_corner =
+                [(50.0, 100.0), (150.0, 100.0), (50.0, 200.0), (150.0, 200.0)].iter().any(|c| (e.x - c.0).abs() < 1e-6 && (e.y - c.1).abs() < 1e-6);
+            assert!(on_corner, "{far}: {e:?}");
+        }
+    }
+}

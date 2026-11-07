@@ -65,6 +65,12 @@ pub(crate) fn punch_lines(
     let mut profiles = closed.map_or_else(|| Ok(Vec::new()), |c| blank.laid(feature, c))?;
     let [_, x, y, _] = sketch.frame;
     let turn = |p: Vec2| Vec2::new(p.x * x.dot(blank.e) + p.y * y.dot(blank.e), p.x * x.dot(blank.a) + p.y * y.dot(blank.a));
+    // Everything a line's end may lie on: the bend lines and the blank's edges.
+    let mut edges: Vec<[Vec2; 2]> = blank.seams.iter().map(|sm| [sm.a, sm.b]).collect();
+    for o in blank.outline(target)? {
+        let m = o.ring.points.len();
+        edges.extend((0..m).filter(|&e| o.ring.arc(e).is_none()).map(|e| [o.ring.points[e], o.ring.points[(e + 1) % m]]));
+    }
     for name in lines {
         let line = sketch.lines.get(name).ok_or_else(|| unsupported("along an arc comes later"))?;
         let at = |n: &String| sketch.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
@@ -74,7 +80,12 @@ pub(crate) fn punch_lines(
         if l == 0.0 {
             return Err(BrepError::Degenerate(format!("line `{name}` has no length")));
         }
-        let (nx, ny) = (-dy / l * 0.5 * kerf, dx / l * 0.5 * kerf);
+        let (ux, uy) = (dx / l, dy / l);
+        let (nx, ny) = (-uy * 0.5 * kerf, ux * 0.5 * kerf);
+        // An end on an edge of the blank or a bend line (a line drawn from a corner) goes on past it,
+        // as the laser's beam does: a cut's end square on a corner would only touch it.
+        let (past_a, past_b) = (past_edges(a, (ux, uy), &edges, kerf), past_edges(b, (ux, uy), &edges, kerf));
+        let (a, b) = (Vec2::new(a.x - ux * past_a, a.y - uy * past_a), Vec2::new(b.x + ux * past_b, b.y + uy * past_b));
         let id = |tag: &str, k: u64, layer: u64| TopoId::derive(tag).id(feature).tag(name).index(k).index(layer).finish();
         profiles.push(ProfileLoop {
             // Counterclockwise: along the line on its right, back on its left.
@@ -85,6 +96,26 @@ pub(crate) fn punch_lines(
         });
     }
     cut(feature, target, &blank, profiles, false, None)
+}
+
+/// How far a cut along a line, `kerf` wide and going the unit way `u`, runs on past its end `p`: past
+/// every one of `edges` `p` lies on, so that both its sides cross them. None off them: it ends there.
+/// At most [`crate::unfold::KERF_PAST`] kerfs: along an edge no way past it is near.
+fn past_edges(p: Vec2, u: (f64, f64), edges: &[[Vec2; 2]], kerf: f64) -> f64 {
+    let mut past: f64 = 0.0;
+    for [a, b] in edges {
+        let (dx, dy) = (b.x - a.x, b.y - a.y);
+        let l2 = dx * dx + dy * dy;
+        let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / l2).clamp(0.0, 1.0);
+        if dist(p, Vec2::new(a.x + dx * t, a.y + dy * t)) > crate::unfold::ON_KERF {
+            continue;
+        }
+        let l = l2.sqrt();
+        let (sin, cos) = (((u.0 * dy - u.1 * dx) / l).abs(), ((u.0 * dx + u.1 * dy) / l).abs());
+        // A side crosses the edge this far along, a half kerf off the line; and a bit more.
+        past = past.max(0.5 * kerf * (1.0 + cos / sin.max(f64::MIN_POSITIVE)));
+    }
+    past.min(crate::unfold::KERF_PAST * kerf)
 }
 
 /// A corner of sheet metal to relieve: the vertex's ID (the relief's IDs come from it), where it

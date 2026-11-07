@@ -112,7 +112,9 @@ pub struct LineCut {
 
 /// How near a corner of a cut along a line has to be to its sides to be one, in mm: the blank's
 /// pieces are laid through bends, some bits off the sketch's line (D235).
-const ON_KERF: f64 = 1e-7;
+pub(crate) const ON_KERF: f64 = 1e-7;
+/// How far past a line's end its cut may run where the end lies on an edge, in kerfs.
+pub(crate) const KERF_PAST: f64 = 4.0;
 
 impl Flat {
     /// The blank with cuts along lines `lines` (ends in space, width; D235) as the laser cuts them:
@@ -141,7 +143,8 @@ impl Flat {
             let (ux, uy) = ((b.x - a.x) / length, (b.y - a.y) / length);
             let along = |p: Vec2| (p.x - a.x) * ux + (p.y - a.y) * uy;
             let off = |p: Vec2| -(p.x - a.x) * uy + (p.y - a.y) * ux;
-            let on = |p: Vec2| off(p).abs() <= 0.5 * kerf + ON_KERF && along(p) >= -ON_KERF && along(p) <= length + ON_KERF;
+            let past = KERF_PAST * kerf + ON_KERF;
+            let on = |p: Vec2| off(p).abs() <= 0.5 * kerf + ON_KERF && along(p) >= -past && along(p) <= length + past;
             // Edges running into the cut go on to its line, to where they cross it.
             let mut met: Vec<(Vec2, f64)> = Vec::new();
             for (k, piece) in pieces.iter_mut().enumerate() {
