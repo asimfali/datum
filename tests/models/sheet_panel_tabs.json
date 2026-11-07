@@ -1,0 +1,110 @@
+{
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [],
+        "lines": {
+          "l1": {
+            "from": "p0",
+            "to": "p1"
+          },
+          "l2": {
+            "from": "p1",
+            "to": "p2"
+          }
+        },
+        "points": {
+          "p0": [
+            0.0,
+            200.0
+          ],
+          "p1": [
+            0.0,
+            0.0
+          ],
+          "p2": [
+            200.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "path"
+      ],
+      "name": "panel",
+      "op": "sheet",
+      "radius": 1.5,
+      "side": "left",
+      "thickness": 1.5,
+      "z0": 0,
+      "z1": 800
+    },
+    {
+      "edges": [
+        "11ccf6d24fa90e75d43da398b0de5457",
+        "d5fa39508a9486cbbe56c60c35c8400d"
+      ],
+      "extent": {
+        "end": 0,
+        "kind": "between",
+        "start": 30
+      },
+      "flip": true,
+      "height": 30,
+      "inputs": [
+        "panel"
+      ],
+      "k_factor": 0.5,
+      "name": "tabs_free_end",
+      "op": "flange",
+      "radius": 1.5
+    },
+    {
+      "edges": [
+        "605b2636fcb5d7f242c0a4ec9ed95381",
+        "13c3a108e2f695ede95d54a0b93402c0"
+      ],
+      "extent": {
+        "end": 30,
+        "kind": "between",
+        "start": 0
+      },
+      "flip": true,
+      "height": 30,
+      "inputs": [
+        "tabs_free_end"
+      ],
+      "k_factor": 0.5,
+      "name": "tabs_far_end",
+      "op": "flange",
+      "radius": 1.5
+    },
+    {
+      "edges": [
+        "1e67a8304a358bb77f5283760b0dc766"
+      ],
+      "height": 12,
+      "inputs": [
+        "tabs_far_end"
+      ],
+      "k_factor": 0.5,
+      "name": "lip",
+      "op": "flange",
+      "radius": 1.5
+    },
+    {
+      "face": "bf599b1610013c70c92e57f0e7a3642b",
+      "inputs": [
+        "lip"
+      ],
+      "k_factor": 0.5,
+      "name": "blank",
+      "op": "unfold"
+    }
+  ],
+  "format": "datum/1"
+}

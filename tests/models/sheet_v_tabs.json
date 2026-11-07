@@ -1,0 +1,75 @@
+{
+  "features": [
+    {
+      "name": "path",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [],
+        "lines": {
+          "l1": {
+            "from": "p0",
+            "to": "p1"
+          },
+          "l2": {
+            "from": "p1",
+            "to": "p2"
+          }
+        },
+        "points": {
+          "p0": [
+            0.0,
+            60.0
+          ],
+          "p1": [
+            0.0,
+            0.0
+          ],
+          "p2": [
+            60.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "path"
+      ],
+      "name": "sheet",
+      "op": "sheet",
+      "radius": 1.5,
+      "side": "left",
+      "thickness": 1.5,
+      "z0": 0,
+      "z1": 800
+    },
+    {
+      "corner": "miter",
+      "corner_gap": 1,
+      "edges": [
+        "26f2265ecd12a9242405d2951e47826a",
+        "9e97e4e2a265a0af8f36b0f29470f15a",
+        "9947eebacc49ec02b1858989e766d789",
+        "97a8d133c44e3332947ecfed686c62d3"
+      ],
+      "height": 30,
+      "inputs": [
+        "sheet"
+      ],
+      "k_factor": 0.5,
+      "name": "tabs",
+      "op": "flange",
+      "radius": 1.5
+    },
+    {
+      "face": "f0d48022db035ef3f5754daf8b695160",
+      "inputs": [
+        "tabs"
+      ],
+      "k_factor": 0.5,
+      "name": "blank",
+      "op": "unfold"
+    }
+  ],
+  "format": "datum/1"
+}

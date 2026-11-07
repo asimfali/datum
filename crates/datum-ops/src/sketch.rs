@@ -372,6 +372,20 @@ pub fn parallel(a: Vec3, b: Vec3) -> bool {
     [minor(0, 1), minor(1, 2), minor(0, 2)] == [Sign::Zero; 3]
 }
 
+/// Whether `x`, worked out from coordinates up to `size`, is no more than the bits a bend's turn
+/// and a plane's normal leave (D229).
+pub(crate) fn within_rounding(x: f64, size: f64) -> bool {
+    x.abs() <= 64.0 * f64::EPSILON * size
+}
+
+/// Whether `a` and `b` lie along one line but for those bits: the two faces of a wall not along the
+/// axes, or bends turned one after another, are not parallel exactly (D233).
+pub(crate) fn nearly_parallel(a: Vec3, b: Vec3) -> bool {
+    let (a, b) = (a * (1.0 / a.dot(a).sqrt()), b * (1.0 / b.dot(b).sqrt()));
+    let c = a.cross(b);
+    within_rounding(c.dot(c).sqrt(), 1.0)
+}
+
 /// `sketch` with the geometry `project` names projected onto its plane (D87, D214), each entry's
 /// from the input `source` gives for its `from`. A vertex or point becomes a fixed point of the
 /// entry's name; an edge or line, a line of that name between fixed points `<name>.start` (a

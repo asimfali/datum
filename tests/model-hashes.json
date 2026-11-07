@@ -269,6 +269,20 @@
     "path": "597078fca8517c14a23ae6e4505cbce0ff5dba136fd89630e0044709c2327669",
     "perforated": "702309a166907479e0ac96e11cf0d651fe72a9931c9b85a44aab54fa595d3844"
   },
+  "sheet_panel_tabs.json": {
+    "blank": "db633767f77e0f294f26710ddf1f09e14dea6d42550ea52956ab8b3e9d69fd9a",
+    "lip": "60ffefd526293f7c32d93a103f0385ba984169bc18e14aa4dc214d19a42afbe5",
+    "panel": "d32019453800c82fbd24699bb2a56c48e88794fbae768fe1d99bde50c7d44d6a",
+    "path": "1f05ec93c9538d693d5fe376cd28acf761a52a7e633e3825d8004aae788b3c99",
+    "tabs_far_end": "a3d3323eff0041936150694aefdc4d86b75167e6558d005875f2057badaf313c",
+    "tabs_free_end": "41dd3a4488b6e0deff61361a7678a4e98d79acd6301b3d0661764461cbf13315"
+  },
+  "sheet_profile_tabs.json": {
+    "blank": "403e3d31d6662ca9051adaca8dd34c5a77f46d9b94e112e349d98b94255cedfc",
+    "path": "aba22dc5ddfb28fe2de63966635300f6ad21933e42584e686e7b0f6beb9f184d",
+    "profile": "572753f945cb9f23249e158efb3ad7ebace14946b6b32c5bd536974995f76d1f",
+    "tabs": "4a4f86fd418358c49c2ff1440add1ad6fed2b66f7d22cccfeddcd69ec1243ffa"
+  },
   "sheet_rims.json": {
     "outline": "150b164e60feb4c05e8dd243a9fb2bfc3be0614798fb4662560b74254cae4d7d",
     "plate": "91d45b9defc8a875a7fe6ce28f1c58c1e750cd1ecb252ec250f531ba81e34981",
@@ -326,6 +340,12 @@
     "sides": "570c65692d675cee34edb9e5edbef8e2679708b291ef38d61bc9dd49bab42ed3",
     "slotted": "20f1af3208e1d45a1e0069a81a51403efaf0daeb0a60160c6559485576d93798",
     "tray": "2c0746f1296cc6c80b6f9beb6985044a307bcc26f7e7eb5cdfa764de318f58de"
+  },
+  "sheet_v_tabs.json": {
+    "blank": "c310984285f55fe07c9bb747827da1d90074596295b17ddc4aa03dc60367f5f9",
+    "path": "91e69dcac5736a17da58637b7880f0cba4f564d1984b25cab15e7a91f1f87767",
+    "sheet": "8eb2f2c9737dc3c516d4a152df90329c5b9f0c1b9a435b9a8031112701511a5c",
+    "tabs": "07a5409905dec40383a753ffb6377330db3f81bd15c0bf748da196088ab882f2"
   },
   "sketch_plate.json": {
     "base": "bc0240d91308ec8390b59d730aacd5db534e6e28dcf31bd5d246b470cb1b7fd9",
