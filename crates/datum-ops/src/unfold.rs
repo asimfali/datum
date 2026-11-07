@@ -99,15 +99,15 @@ pub struct Flat {
 }
 
 /// A strip of the sheet in the tree the blank is laid by (D233).
-struct Node {
-    faces: Vec<Ix>,
+pub(crate) struct Node {
+    pub(crate) faces: Vec<Ix>,
     /// The strip it is laid from, and the half-edge of that strip's on the bend line between them.
-    parent: Option<(usize, Ix)>,
+    pub(crate) parent: Option<(usize, Ix)>,
 }
 
 /// How a strip lies on the blank: a rigid map, whatever way it turned from the strip before it.
 #[derive(Clone, Copy)]
-enum Lay {
+pub(crate) enum Lay {
     /// A plane: `start` lies at `o`, and `ex` and `ey`, its unit directions, along the blank's X and Y.
     Plane { o: Vec2, start: Vec3, ex: Vec3, ey: Vec3 },
     /// A cylinder: `line`, a point of the bend line it starts from, lies at `o`; the length along
@@ -410,7 +410,7 @@ pub fn unfold_side(body: &Body, back: bool, k: f64) -> Result<Flat, BrepError> {
 
 /// The tree of strips of the side of the sheet that strip `root` is on: each strip off the one it
 /// was reached from, across a bend line. A strip reached twice closes a ring: no blank lies flat.
-fn tree(body: &Body, root: Vec<Ix>) -> Result<Vec<Node>, BrepError> {
+pub(crate) fn tree(body: &Body, root: Vec<Ix>) -> Result<Vec<Node>, BrepError> {
     let mut owner: BTreeMap<Ix, usize> = root.iter().map(|&x| (x, 0)).collect();
     let mut nodes = vec![Node { faces: root, parent: None }];
     let mut i = 0;
@@ -471,11 +471,12 @@ fn seam(body: &Body, s: &[Ix], t: &[Ix]) -> Option<(Ix, Ix)> {
     s.iter().find_map(|&x| smooth(body, x).into_iter().find(|(y, _)| t.contains(y)).map(|(_, h)| (x, h)))
 }
 
-/// How node `i` of `nodes` lies, from the way its parent `from` lies: the bend line stays where it
+/// How node `i` of `nodes` lies, and the way it goes on from its bend line, from the way its parent
+/// `from` lies: the bend line stays where it
 /// is on the blank and the strip goes on across it. A bend line along an axis of the parent keeps
 /// that axis bit for bit, so bend lines of a sheet with square turns stay exactly on the blank's
 /// axes.
-fn lay_from(body: &Body, nodes: &[Node], i: usize, from: Lay, h: Ix, k: f64) -> Result<Lay, BrepError> {
+fn lay_from(body: &Body, nodes: &[Node], i: usize, from: Lay, h: Ix, k: f64) -> Result<(Lay, Vec2), BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
     let he = |g: Ix| body.half_edges()[g as usize];
     let normal = |x: Ix, p: Vec3| unit(body.faces()[x as usize].surface.normal_at(p));
@@ -518,7 +519,7 @@ fn lay_from(body: &Body, nodes: &[Node], i: usize, from: Lay, h: Ix, k: f64) -> 
     match body.faces()[x as usize].surface {
         Surface::Plane(_) => {
             let (mx, my) = (on * u.x + d * v.x, on * u.y + d * v.y);
-            Ok(Lay::Plane { o, start: line, ex: mx, ey: my })
+            Ok((Lay::Plane { o, start: line, ex: mx, ey: my }, u))
         }
         Surface::Cylinder(c) => {
             let w = line - c.origin;
@@ -532,17 +533,35 @@ fn lay_from(body: &Body, nodes: &[Node], i: usize, from: Lay, h: Ix, k: f64) -> 
                 .collect();
             let (span, _) = bend_span(body, &node.faces, c, axis, Some(line), &beside)?;
             let (_, other) = opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-            Ok(Lay::Bend { o, line, d, u, v, origin: c.origin, axis, start, span, neutral: neutral(c.radius, other.radius, k) })
+            Ok((Lay::Bend { o, line, d, u, v, origin: c.origin, axis, start, span, neutral: neutral(c.radius, other.radius, k) }, u))
         }
         Surface::Cone(_) => Err(unsupported("a cone joined to other faces of a sheet")),
         Surface::Wall(_) => Err(unsupported("the wall of a cut is not a face of the sheet")),
     }
 }
 
+/// How each of `nodes` lies, the first as `root`, each other from its parent; with the way each goes
+/// on across its bend line on the blank.
+pub(crate) fn lay_tree(body: &Body, nodes: &[Node], root: Lay, k: f64) -> Result<Vec<(Lay, Vec2)>, BrepError> {
+    let mut lays: Vec<(Lay, Vec2)> = Vec::with_capacity(nodes.len());
+    for (i, node) in nodes.iter().enumerate() {
+        lays.push(match node.parent {
+            Some((p, h)) => lay_from(body, nodes, i, lays[p].0, h, k)?,
+            None => (root, Vec2::new(0.0, 0.0)),
+        });
+    }
+    Ok(lays)
+}
+
+/// The faces of the side of sheet `body` that face `f` is on: the strips of its tree.
+pub(crate) fn side_of(body: &Body, f: Ix) -> Result<BTreeSet<Ix>, BrepError> {
+    Ok(tree(body, strip(body, f))?.into_iter().flat_map(|n| n.faces).collect())
+}
+
 /// The direction the blank's Y runs along and the strip it is laid from. A sheet that is a chain
 /// (with flanges on its sides) keeps Y along its bends. One that branches further takes Y along the
 /// class of the most bends, or up the strip as a sketch would see it if none lies along it.
-fn axes(body: &Body, f: Ix, chain: Option<Vec<Vec<Ix>>>) -> Result<(Vec3, Vec<Ix>), BrepError> {
+pub(crate) fn axes(body: &Body, f: Ix, chain: Option<Vec<Vec<Ix>>>) -> Result<(Vec3, Vec<Ix>), BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("unfold: {m}"));
     let surface = |x: Ix| body.faces()[x as usize].surface;
     let is_plane = |x: Ix| matches!(surface(x), Surface::Plane(_));
@@ -559,7 +578,8 @@ fn axes(body: &Body, f: Ix, chain: Option<Vec<Vec<Ix>>>) -> Result<(Vec3, Vec<Ix
         _ => None,
     };
     if let Some(mut chain) = chain {
-        let a = unit(chain.iter().flatten().find_map(|&x| cylinder(x)).unwrap_or_else(|| upright(chain[0][0])));
+        let beside = |x: Ix| smooth(body, x).into_iter().find_map(|(y, _)| cylinder(y));
+        let a = unit(chain.iter().flatten().find_map(|&x| cylinder(x)).or_else(|| beside(f)).unwrap_or_else(|| upright(chain[0][0])));
         if is_plane(f) {
             return Ok((a, strip(body, f)));
         }
@@ -614,48 +634,42 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     }
     let (a, root) = axes(body, f, chain)?;
     let nodes = tree(body, root)?;
-    let mut lays: Vec<Lay> = Vec::with_capacity(nodes.len());
-    for (i, node) in nodes.iter().enumerate() {
-        let lay = match node.parent {
-            Some((p, h)) => lay_from(body, &nodes, i, lays[p], h, k)?,
-            None => {
-                let x = node.faces[0];
-                let at = body.point(he(body.loop_half_edges(body.faces()[x as usize].first_loop).start).origin);
-                match body.faces()[x as usize].surface {
-                    Surface::Plane(p) => {
-                        let ex = unit(a.cross(unit(p.normal)));
-                        let points = node.faces.iter().flat_map(|&x| body.loop_points(body.faces()[x as usize].first_loop));
-                        let start = points.min_by(|p, q| p.dot(ex).total_cmp(&q.dot(ex))).unwrap_or(at);
-                        Lay::Plane { o: Vec2::new(0.0, 0.0), start, ex, ey: a }
-                    }
-                    Surface::Cylinder(c) => {
-                        let axis = unit(a * if c.convex { 1.0 } else { -1.0 });
-                        let beside: Vec<&[Ix]> = nodes.iter().filter(|n| n.parent.is_some_and(|p| p.0 == 0)).map(|n| &n.faces[..]).collect();
-                        let (span, from) = bend_span(body, &node.faces, c, axis, None, &beside)?;
-                        let w = from - c.origin;
-                        let start = unit(w - axis * w.dot(axis));
-                        let (_, other) =
-                            opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-                        Lay::Bend {
-                            o: Vec2::new(0.0, 0.0),
-                            line: from,
-                            d: a,
-                            u: Vec2::new(1.0, 0.0),
-                            v: Vec2::new(0.0, 1.0),
-                            origin: c.origin,
-                            axis,
-                            start,
-                            span,
-                            neutral: neutral(c.radius, other.radius, k),
-                        }
-                    }
-                    Surface::Cone(_) => return Err(unsupported("a cone in a chain of the sheet")),
-                    Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
+    let root_lay = {
+        let node = &nodes[0];
+        let x = node.faces[0];
+        let at = body.point(he(body.loop_half_edges(body.faces()[x as usize].first_loop).start).origin);
+        match body.faces()[x as usize].surface {
+            Surface::Plane(p) => {
+                let ex = unit(a.cross(unit(p.normal)));
+                let points = node.faces.iter().flat_map(|&x| body.loop_points(body.faces()[x as usize].first_loop));
+                let start = points.min_by(|p, q| p.dot(ex).total_cmp(&q.dot(ex))).unwrap_or(at);
+                Lay::Plane { o: Vec2::new(0.0, 0.0), start, ex, ey: a }
+            }
+            Surface::Cylinder(c) => {
+                let axis = unit(a * if c.convex { 1.0 } else { -1.0 });
+                let beside: Vec<&[Ix]> = nodes.iter().filter(|n| n.parent.is_some_and(|p| p.0 == 0)).map(|n| &n.faces[..]).collect();
+                let (span, from) = bend_span(body, &node.faces, c, axis, None, &beside)?;
+                let w = from - c.origin;
+                let start = unit(w - axis * w.dot(axis));
+                let (_, other) = opposite_cylinder(body, x as usize).ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
+                Lay::Bend {
+                    o: Vec2::new(0.0, 0.0),
+                    line: from,
+                    d: a,
+                    u: Vec2::new(1.0, 0.0),
+                    v: Vec2::new(0.0, 1.0),
+                    origin: c.origin,
+                    axis,
+                    start,
+                    span,
+                    neutral: neutral(c.radius, other.radius, k),
                 }
             }
-        };
-        lays.push(lay);
-    }
+            Surface::Cone(_) => return Err(unsupported("a cone in a chain of the sheet")),
+            Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
+        }
+    };
+    let lays: Vec<Lay> = lay_tree(body, &nodes, root_lay, k)?.into_iter().map(|l| l.0).collect();
     let laid: Vec<(usize, Ix, Lay)> = nodes.iter().zip(&lays).enumerate().flat_map(|(i, (n, &l))| n.faces.iter().map(move |&x| (i, x, l))).collect();
     // Every vertex where the first face of the tree that has it lays it.
     let mut at: BTreeMap<Ix, Vec2> = BTreeMap::new();

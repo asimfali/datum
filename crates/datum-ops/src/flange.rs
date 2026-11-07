@@ -366,8 +366,7 @@ fn relieve_corners(feature: TopoId, body: &Body, corners: &[([TopoId; 2], Vec3)]
         return Err(BrepError::Degenerate(format!("a relief's diameter is above zero, got {}", 2.0 * radius)));
     }
     let sides = crate::unfold::sheet_sides(body)?;
-    let skip = crate::unfold::branches(body);
-    let front: BTreeSet<Ix> = crate::unfold::chain_through(body, sides[0], &skip)?.into_iter().flatten().collect();
+    let front = crate::unfold::side_of(body, sides[0])?;
     let vertex = |id: TopoId| body.vertices().binary_search_by_key(&id, |v| v.id).map(|v| v as Ix).ok();
     // Each corner by the flat face of the front side it lies on (by its ID: faces are numbered
     // anew after a cut), the faces each in turn.

@@ -1207,3 +1207,207 @@ fn a_blank_from_either_side_is_as_large() {
         }
     }
 }
+
+/// The plate of 100 x 60 with a flange of 20 on each end and a rim of 10 on the first long edge of
+/// each wall's top. Returns the tray without rims too.
+fn rimmed() -> Body {
+    rimmed_with(serde_json::json!({}))
+}
+
+/// [`rimmed`] with `extra` fields on the flanges round the plate.
+fn rimmed_with(extra: serde_json::Value) -> Body {
+    let p = plate();
+    let ends = [faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T)].concat();
+    let tray = flange(&p, &ends_edges(&p, &ends), extra).unwrap();
+    let tops: Vec<String> = flange_ends(&tray).iter().map(|e| format!("{e:?}")).collect();
+    assert_eq!(tops.len(), 4);
+    let mut body = tray;
+    for top in &tops {
+        let edge = long_edges(&body, top)[..1].to_vec();
+        body = flange(&body, &edge, serde_json::json!({"height": 10})).unwrap();
+    }
+    body
+}
+
+/// The planes of `b`'s faces as (index, normal z, area).
+fn plane_faces(b: &Body) -> Vec<(usize, f64, f64)> {
+    (0..b.faces().len())
+        .filter_map(|x| match b.faces()[x].surface {
+            Surface::Plane(p) => Some((x, p.normal.z, b.face_area(x as u32))),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The corners of face `x`.
+fn corners(b: &Body, x: usize) -> Vec<Vec3> {
+    b.loop_half_edges(b.faces()[x].first_loop).map(|h| b.point(b.half_edges()[h as usize].origin)).collect()
+}
+
+/// A wall of the rimmed tray `b` on the long side (y < 0) and its outer face.
+fn long_wall_face(b: &Body) -> usize {
+    let found: Vec<usize> =
+        plane_faces(b).into_iter().filter(|&(x, nz, a)| nz.abs() < 1e-9 && close(a, 100.0 * 16.0) && centroid(b, x).y < 0.0).map(|f| f.0).collect();
+    assert_eq!(found.len(), 2, "the two faces of the wall at y < 0");
+    // The outer one is the further from the plate's middle.
+    *found.iter().min_by(|&&p, &&q| centroid(b, p).y.total_cmp(&centroid(b, q).y)).unwrap()
+}
+
+/// The faces of the rim on that wall: horizontal, 6 wide, over the wall.
+fn rim_faces(b: &Body) -> Vec<usize> {
+    let found: Vec<usize> = plane_faces(b)
+        .into_iter()
+        .filter(|&(x, nz, a)| (nz.abs() - 1.0).abs() < 1e-9 && close(a, 100.0 * 6.0) && centroid(b, x).y < 10.0 && centroid(b, x).z > 10.0)
+        .map(|f| f.0)
+        .collect();
+    assert_eq!(found.len(), 2, "the two faces of the rim at y < 0");
+    found
+}
+
+/// A circle of diameter `d` cut through `b` from face `face`, centred at the world point `q` of its
+/// plane; the body and where the circle lies on the blank, if it does.
+fn cut_at(b: &Body, face: usize, q: Vec3, d: f64) -> Body {
+    let target = Value::Body(b.clone());
+    let at = |sk: serde_json::Value| {
+        op(serde_json::json!({"op": "sketch", "face": hex(b, face), "k_factor": 0.5, "sketch": sk})).eval(id("s"), &[&target]).unwrap()
+    };
+    let frame = at(serde_json::json!({"points": {"h": [0, 0]}})).sketch().unwrap().frame;
+    let [o, ex, ey, _] = frame;
+    let sk = serde_json::json!({"points": {"h": [(q - o).dot(ex), (q - o).dot(ey)]}, "circles": {"c": {"center": "h", "diameter": d}}});
+    let placed = at(sk);
+    let r = op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true})).eval(id("c"), &[&target, &placed]).unwrap();
+    let r = r.body().unwrap().clone();
+    r.validate().unwrap();
+    tessellate(&r).unwrap();
+    r
+}
+
+/// The centre of the only circle of the blank of `b` (K 0.5).
+fn circle_centre(b: &Body) -> datum_math::Vec2 {
+    let f = unfold_side(b, false, 0.5).unwrap();
+    let c: Vec<datum_math::Vec2> = f
+        .pieces
+        .iter()
+        .filter_map(|p| match p {
+            datum_ops::FlatPiece::Circle { center, .. } => Some(*center),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(c.len(), 1);
+    c[0]
+}
+
+/// A hole of diameter 6 (r = 3) cut from `cut` and `before`: it removes pi r^2 t and adds one circle
+/// to the blank, whose size and lines stay.
+fn assert_whole_hole(before: &Body, cut: &Body) {
+    let (a, b) = (unfold_side(before, false, 0.5).unwrap(), unfold_side(cut, false, 0.5).unwrap());
+    let lost = before.volume() - cut.volume();
+    assert!((lost - std::f64::consts::PI * 9.0 * T).abs() < 1e-3, "lost {lost}");
+    assert!(close(a.size.x, b.size.x) && close(a.size.y, b.size.y), "{:?} {:?}", a.size, b.size);
+    assert_eq!(b.counts()[2], a.counts()[2] + 1);
+    assert_eq!(b.counts()[0], a.counts()[0]);
+}
+
+/// The point of the wall face `w` of the rimmed tray `b` 1 below the wall's top.
+fn wall_spot(b: &Body, w: usize) -> Vec3 {
+    let zmax = corners(b, w).iter().fold(f64::MIN, |m, p| m.max(p.z));
+    let c = centroid(b, w);
+    Vec3::new(c.x, c.y, zmax - 1.0)
+}
+
+/// A hole of diameter 6 sketched on a wall's outer face, reaching 2 across the bend to the rim.
+#[test]
+fn a_hole_across_a_rims_bend_from_the_wall() {
+    let b = rimmed();
+    let w = long_wall_face(&b);
+    let cut = cut_at(&b, w, wall_spot(&b, w), 6.0);
+    assert_whole_hole(&b, &cut);
+}
+
+/// The same bend from the rim's face, the circle at the same spot of the blank.
+#[test]
+fn a_hole_across_a_rims_bend_from_the_rim() {
+    let b = rimmed();
+    let w = long_wall_face(&b);
+    let from_wall = circle_centre(&cut_at(&b, w, wall_spot(&b, w), 6.0));
+    for r in rim_faces(&b) {
+        // The rim's sketch reaches over its bend: about 3.7 back from the rim's start (the wall's
+        // 1 short of its top). Along the rim the blank follows 1 for 1: two probes find the spot.
+        let (c, z) = (centroid(&b, r), centroid(&b, r).z);
+        let c = Vec3::new(c.x, c.y - 6.7, c.z);
+        let probe = |dy: f64| circle_centre(&cut_at(&b, r, Vec3::new(c.x, c.y + dy, z), 6.0));
+        let (p0, p1) = (probe(0.0), probe(0.5));
+        let (step, to) = ((p1.x - p0.x, p1.y - p0.y), (from_wall.x - p0.x, from_wall.y - p0.y));
+        let s = 0.5 * (to.0 * step.0 + to.1 * step.1) / (step.0 * step.0 + step.1 * step.1);
+        let cut = cut_at(&b, r, Vec3::new(c.x, c.y + s, z), 6.0);
+        assert_whole_hole(&b, &cut);
+        let here = circle_centre(&cut);
+        assert!((here.x - from_wall.x).abs() < 1e-9 && (here.y - from_wall.y).abs() < 1e-9, "{here:?} {from_wall:?} (s {s})");
+    }
+}
+
+/// On the plate's side face, 1 short of a wall's bend.
+#[test]
+fn a_hole_on_the_plate_across_a_walls_bend_of_a_rimmed_tray() {
+    let b = rimmed();
+    let plate_face = plane_faces(&b).into_iter().filter(|f| (f.1.abs() - 1.0).abs() < 1e-9).max_by(|p, q| p.2.total_cmp(&q.2)).unwrap().0;
+    let xmax = corners(&b, plate_face).iter().fold(f64::MIN, |m, p| m.max(p.x));
+    let c = centroid(&b, plate_face);
+    let cut = cut_at(&b, plate_face, Vec3::new(xmax - 1.0, c.y, c.z), 6.0);
+    assert_whole_hole(&b, &cut);
+}
+
+/// A circle on a rim's face over its free edge: a notch.
+#[test]
+fn a_notch_at_a_rims_free_edge() {
+    let b = rimmed();
+    let r = rim_faces(&b)[0];
+    let c = centroid(&b, r);
+    let ymax = corners(&b, r).iter().fold(f64::MIN, |m, p| m.max(p.y));
+    let cut = cut_at(&b, r, Vec3::new(c.x, ymax - 1.0, c.z), 6.0);
+    let (a, n) = (unfold_side(&b, false, 0.5).unwrap(), unfold_side(&cut, false, 0.5).unwrap());
+    let lost = b.volume() - cut.volume();
+    assert!(lost > 0.0 && lost < std::f64::consts::PI * 9.0 * T, "lost {lost}");
+    assert!(n.counts()[0] + n.counts()[1] > a.counts()[0] + a.counts()[1], "{:?} {:?}", a.counts(), n.counts());
+    assert_eq!(n.counts()[2], a.counts()[2]);
+    assert!(close(a.size.x, n.size.x) && close(a.size.y, n.size.y), "{:?} {:?}", a.size, n.size);
+}
+
+/// Rims on a tray with a round relief at each corner: a hole centred on a relief still cuts.
+#[test]
+fn rims_keep_their_relief() {
+    let b = rimmed_with(serde_json::json!({"relief": "round", "relief_diameter": 4, "k_factor": 0.5}));
+    let f = plane_faces(&b).into_iter().filter(|f| (f.1.abs() - 1.0).abs() < 1e-9).max_by(|p, q| p.2.total_cmp(&q.2)).unwrap().0;
+    let z = centroid(&b, f).z;
+    let before = unfold_side(&b, false, 0.5).unwrap();
+    let cut = |x: f64, y: f64| {
+        let target = Value::Body(b.clone());
+        let at = |sk: serde_json::Value| {
+            op(serde_json::json!({"op": "sketch", "face": hex(&b, f), "k_factor": 0.5, "sketch": sk})).eval(id("s"), &[&target]).unwrap()
+        };
+        let [o, ex, ey, _] = at(serde_json::json!({"points": {"h": [0, 0]}})).sketch().unwrap().frame;
+        let q = Vec3::new(x, y, z);
+        let sk = serde_json::json!({"points": {"h": [(q - o).dot(ex), (q - o).dot(ey)]}, "circles": {"c": {"center": "h", "diameter": 3}}});
+        let placed = at(sk);
+        op(serde_json::json!({"op": "extrude", "mode": "cut", "through": true, "wall": true})).eval(id("c"), &[&target, &placed])
+    };
+    // Beside the relief: a whole hole, the relief's arcs stay.
+    for (x, y) in [(4.0, 4.0), (6.0, 1.0)] {
+        let c = cut(x, y).unwrap().body().unwrap().clone();
+        c.validate().unwrap();
+        let after = unfold_side(&c, false, 0.5).unwrap();
+        assert!((b.volume() - c.volume() - std::f64::consts::PI * 2.25 * T).abs() < 1e-3);
+        assert_eq!(after.counts(), [before.counts()[0], before.counts()[1], 1]);
+        assert!(close(after.size.x, before.size.x) && close(after.size.y, before.size.y));
+    }
+    // Reaching into the relief: the circle opens into it, the blank keeps its size and its arcs.
+    let c = cut(2.0, 2.0).unwrap().body().unwrap().clone();
+    c.validate().unwrap();
+    let after = unfold_side(&c, false, 0.5).unwrap();
+    assert!(b.volume() - c.volume() > 0.0 && b.volume() - c.volume() < std::f64::consts::PI * 2.25 * T);
+    assert!(after.counts()[1] > before.counts()[1] && after.counts()[2] == 0, "{:?} {:?}", before.counts(), after.counts());
+    assert!(close(after.size.x, before.size.x) && close(after.size.y, before.size.y));
+    // Off the sheet or a hair from a face: refused, not guessed.
+    assert!(cut(0.0, 0.0).is_err());
+    assert!(cut(3.0, 3.0).is_err());
+}
