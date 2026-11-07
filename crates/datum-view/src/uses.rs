@@ -29,6 +29,8 @@ pub struct Uses {
     /// A flange's edges: all it may stand on, those it stands on among them.
     pub edges: Vec<([Vec3; 2], TopoId)>,
     pub used_edges: Vec<TopoId>,
+    /// The contours those edges go round, what a click on a face takes.
+    pub contours: Vec<datum_ops::FlangeLoop>,
     /// The profiles of its sketch, if it picks among them.
     pub profiles: Vec<Profile>,
 }
@@ -38,6 +40,20 @@ pub struct Uses {
 pub enum Toggle {
     Edge(TopoId),
     Profile(usize),
+}
+
+/// Whether feature `ix` of `graph` is sheet metal: a sheet, a face of it or a rolled one, or what
+/// is made on one of those. A click on a face takes its contour for such a body alone: for an
+/// ordinary part it will mean something else.
+pub fn sheet_metal(graph: &Graph, ix: usize) -> bool {
+    let node = &graph.nodes()[ix];
+    match node.op {
+        Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => true,
+        Op::Flange { .. } | Op::Extrude { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } => {
+            node.inputs.first().is_some_and(|&i| sheet_metal(graph, i as usize))
+        }
+        _ => false,
+    }
 }
 
 /// The lines of curves `names` of sketch `s`.
@@ -99,6 +115,9 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
         Op::Flange { edges, .. } => {
             let b = input(0).and_then(|v| v.body())?;
             u.edges = datum_ops::flange_edges(b).into_iter().map(|(id, ends)| (ends, id)).collect();
+            if node.inputs.first().is_some_and(|&i| sheet_metal(graph, i as usize)) {
+                u.contours = datum_ops::flange_loops(b);
+            }
             u.used_edges = edges.iter().filter_map(|e| u128::from_str_radix(e, 16).ok().map(TopoId)).collect();
             for &id in &u.used_edges {
                 if !u.edges.iter().any(|e| e.1 == id)
@@ -142,6 +161,26 @@ impl Uses {
     }
 }
 
+/// Of `contours`, those of face `face`, the one nearest point `at`: where a click on a face falls.
+pub fn nearest_contour<'a>(contours: impl Iterator<Item = &'a datum_ops::FlangeLoop>, face: TopoId, at: Vec3) -> Option<&'a datum_ops::FlangeLoop> {
+    let from = |[a, b]: [Vec3; 2]| {
+        let d = b - a;
+        let t = ((at - a).dot(d) / d.dot(d)).clamp(0.0, 1.0);
+        let off = a + d * t - at;
+        off.dot(off)
+    };
+    let away = |c: &datum_ops::FlangeLoop| c.edges.iter().map(|e| from(e.1)).fold(f64::INFINITY, f64::min);
+    contours.filter(|c| c.face == face).min_by(|p, q| away(p).total_cmp(&away(q)))
+}
+
+/// `edges` with all of `group`, a contour's, taken in, or taken out if it holds them all already;
+/// none if that leaves nothing: a flange stands on something.
+pub fn toggled_contour(edges: &[String], group: &datum_ops::FlangeLoop) -> Option<Vec<String>> {
+    let mut next = edges.to_vec();
+    crate::select::click(&mut next, group.edges.iter().map(|e| format!("{:?}", e.0)).collect(), true);
+    (!next.is_empty()).then_some(next)
+}
+
 /// `edges` with `id` taken in or out; none if it is the last one: a flange stands on something.
 pub fn toggled_edge(edges: &[String], id: TopoId) -> Option<Vec<String>> {
     let name = format!("{id:?}");
@@ -163,6 +202,32 @@ mod tests {
 
     fn square(used: bool, name: &str) -> Profile {
         Profile { curves: vec![name.into()], lines: Vec::new(), used }
+    }
+
+    #[test]
+    fn a_contour_goes_in_and_out_whole_and_the_nearest_is_taken() {
+        let square = |o: f64, s: f64| {
+            let c = [(o, o), (o + s, o), (o + s, o + s), (o, o + s)].map(|(x, y)| Vec3::new(x, y, 0.0));
+            (0..4).map(|k| [c[k], c[(k + 1) % 4]]).collect::<Vec<_>>()
+        };
+        let contour = |face: u128, first: u128, lines: Vec<[Vec3; 2]>| datum_ops::FlangeLoop {
+            face: id(face),
+            edges: lines.into_iter().enumerate().map(|(k, l)| (id(first + k as u128), l)).collect(),
+        };
+        let (outer, window) = (contour(1, 10, square(0.0, 100.0)), contour(1, 20, square(40.0, 20.0)));
+        let other = contour(2, 30, square(45.0, 1.0));
+        let all = [outer.clone(), window.clone(), other];
+        // Near the window, of the face asked: the window's; further out, the outer one.
+        assert_eq!(nearest_contour(all.iter(), id(1), Vec3::new(38.0, 50.0, 0.0)), Some(&window));
+        assert_eq!(nearest_contour(all.iter(), id(1), Vec3::new(5.0, 50.0, 0.0)), Some(&outer));
+        assert_eq!(nearest_contour(all.iter(), id(9), Vec3::new(5.0, 50.0, 0.0)), None);
+        // In whole, out whole; a contour alone stays.
+        let one = toggled_contour(&[], &window).unwrap();
+        assert_eq!(one.len(), 4);
+        let both = toggled_contour(&one, &outer).unwrap();
+        assert_eq!(both.len(), 8);
+        assert_eq!(toggled_contour(&both, &outer).unwrap(), one);
+        assert!(toggled_contour(&one, &window).is_none());
     }
 
     #[test]

@@ -319,6 +319,8 @@ struct Model {
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
     /// What the feature whose form is open stands on.
     uses: Option<crate::uses::Uses>,
+    /// The contours of the bodies shown a click on a face takes for a flange, by the body's place.
+    contours: Vec<(usize, datum_ops::FlangeLoop)>,
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -334,6 +336,7 @@ struct Picture {
     lines: Vec<PlaneLine>,
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
     uses: Option<crate::uses::Uses>,
+    contours: Vec<(usize, datum_ops::FlangeLoop)>,
 }
 
 /// A line of a sketch a work plane goes through: the sketch feature, the line's name, its ends.
@@ -449,7 +452,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses } = picture;
+        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses, contours } = picture;
         if models
             .send(Model {
                 inspect,
@@ -470,6 +473,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 lines,
                 ends,
                 uses,
+                contours,
             })
             .is_err()
         {
@@ -628,15 +632,18 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
             spots.extend(points.map(|(n, p)| (json!({"of": name, "point": n}), o + x * p.x + y * p.y)));
         }
     }
-    // The ends a flange may stand on, by their long edges: the body's place among the bodies shown.
-    let ends = shown
-        .iter()
-        .filter_map(|(_, v)| v.body())
-        .enumerate()
-        .flat_map(|(k, b)| datum_ops::flange_edges(b).into_iter().map(move |(f, e)| (k, f, e)))
+    // The edges a flange may stand on, and of sheet metal their contours: the body's place among
+    // the bodies shown.
+    let bodies_shown = || shown.iter().filter_map(|(n, v)| Some((*n, v.body()?))).enumerate();
+    let is_sheet = |n: &str| graph.find(n).is_some_and(|i| crate::uses::sheet_metal(graph, i as usize));
+    let contours: Vec<(usize, datum_ops::FlangeLoop)> = bodies_shown()
+        .filter(|(_, (n, _))| is_sheet(n))
+        .flat_map(|(k, (_, b))| datum_ops::flange_loops(b).into_iter().map(move |l| (k, l)))
         .collect();
+    let ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])> =
+        bodies_shown().flat_map(|(k, (_, b))| datum_ops::flange_edges(b).into_iter().map(move |(f, e)| (k, f, e))).collect();
     let uses = using.and_then(|name| crate::uses::uses(graph, evaluation, name, meshes));
-    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses }
+    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses, contours }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -870,6 +877,8 @@ struct Viewer {
     flange_edges: Vec<(String, datum_brep::TopoId)>,
     /// The feature the model was last told a form is open on.
     using: Option<String>,
+    /// The contour of the face under the cursor while edges are picked for a flange.
+    contour: Vec<datum_brep::TopoId>,
     /// What a click with Shift or Ctrl would change, under the cursor.
     toggling: Option<crate::uses::Toggle>,
     /// A flange being asked for: its form.
@@ -1505,6 +1514,7 @@ impl Viewer {
             plane_points: Vec::new(),
             flange_edges: Vec::new(),
             using: None,
+            contour: Vec::new(),
             toggling: None,
             flange: None,
             revolve: None,
@@ -3832,6 +3842,11 @@ impl Viewer {
                 }
             }
         }
+        if let Some(Under::Face(f)) = self.under.filter(|_| !sketched) {
+            for &edge in &self.contour {
+                tint(edge, f.body, 110);
+            }
+        }
         if !sketched && let Some(u) = &m.uses {
             let used = egui::Color32::from_rgb(235, 110, 20);
             let free = egui::Color32::from_rgb(70, 120, 210);
@@ -3907,7 +3922,10 @@ impl Viewer {
             let hint = match purpose {
                 Purpose::Sketch => "Click a plane or a plane face to sketch on · Enter or a right click: XY · Esc: cancel",
                 Purpose::Look => "Click a face or a plane to look straight at · Esc: cancel",
-                Purpose::Flange => "Click edges of the sheet for flanges · Shift or Ctrl adds · Enter: the flange · Esc: cancel",
+                Purpose::Flange => self.i18n.t(
+                    "flange-pick",
+                    "Click edges of the sheet for flanges, or a face for all its contour · Shift or Ctrl adds or removes · Enter: the flange · Esc: cancel",
+                ),
                 Purpose::Trim => "Click the work plane to trim the sheet by · Esc: cancel",
                 Purpose::Branch => {
                     branch_hint = match &self.branch_main {
@@ -4035,7 +4053,8 @@ impl Viewer {
                     if let Some((body, face, _)) = near {
                         return Some(Under::Face(crate::scene::Hit { distance: 0.0, body, face, normal: datum_math::Vec3::ZERO }));
                     }
-                    return m.scene.pick(origin, dir).filter(|f| m.ends.iter().any(|e| e.1 == f.face)).map(Under::Face);
+                    // Else a face with a contour to take.
+                    return m.scene.pick(origin, dir).filter(|f| m.contours.iter().any(|(k, c)| *k == f.body && c.face == f.face)).map(Under::Face);
                 }
                 // Trimming takes a work plane only: the nearest along the ray.
                 if purpose == Purpose::Trim {
@@ -4054,6 +4073,17 @@ impl Viewer {
                 let (first, planes) = (first.map(|(t, k)| (t, Under::Origin(k))), planes.map(|(t, k)| (t, Under::Work(k))));
                 [first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
             });
+            // A face under the cursor (an edge has no normal): the contour of it nearest the cursor.
+            self.contour = match (purpose, self.under, offset) {
+                (Purpose::Flange, Some(Under::Face(f)), Some((x, y))) if f.normal != datum_math::Vec3::ZERO => {
+                    let (anchor, radius) = sphere(&m.scene);
+                    let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
+                    let on_body = m.contours.iter().filter(|(k, _)| *k == f.body).map(|(_, c)| c);
+                    crate::uses::nearest_contour(on_body, f.face, origin + dir * f.distance)
+                        .map_or_else(Vec::new, |c| c.edges.iter().map(|e| e.0).collect())
+                }
+                _ => Vec::new(),
+            };
             if r.clicked() {
                 chosen = self.under.map(|u| (purpose, u));
             } else if purpose == Purpose::Sketch && (r.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter))) {
@@ -4124,15 +4154,15 @@ impl Viewer {
                     self.flange_edges.clear();
                 }
                 self.picking = Some(Purpose::Flange);
-                let pick = (feature, f.face);
-                let same_body = self.flange_edges.first().is_none_or(|(b, _)| *b == pick.0);
-                if !crate::select::adding(&ui.input(|i| i.modifiers)) || !same_body {
-                    self.flange_edges = vec![pick];
-                } else if let Some(k) = self.flange_edges.iter().position(|p| *p == pick) {
-                    self.flange_edges.remove(k);
+                // An edge, or all the contour of the face under the cursor.
+                let picks: Vec<(String, datum_brep::TopoId)> = if self.contour.is_empty() {
+                    vec![(feature.clone(), f.face)]
                 } else {
-                    self.flange_edges.push(pick);
-                }
+                    self.contour.iter().map(|&e| (feature.clone(), e)).collect()
+                };
+                let same_body = self.flange_edges.first().is_none_or(|(b, _)| *b == feature);
+                let adding = crate::select::adding(&ui.input(|i| i.modifiers)) && same_body;
+                crate::select::click(&mut self.flange_edges, picks, adding);
             }
             Some((Purpose::Flange, _)) => {}
             Some((Purpose::Trim, Under::Work(k))) => self.open_trim(work[k].0.clone()),
@@ -4563,6 +4593,20 @@ impl Viewer {
         };
         self.toggling = u.nearest(distance, 6.0);
         if !r.clicked() {
+            return;
+        }
+        // No edge there: the contour of the face clicked, if the flange may stand on it.
+        if self.toggling.is_none()
+            && let Some(f) = self.flange.as_mut()
+        {
+            let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
+            let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
+            let Some(hit) = m.scene.pick(origin, dir) else { return };
+            let Some(contour) = crate::uses::nearest_contour(u.contours.iter(), hit.face, origin + dir * hit.distance) else { return };
+            let now = f.edges.clone().unwrap_or_else(|| u.used_edges.iter().map(|e| format!("{e:?}")).collect());
+            if let Some(next) = crate::uses::toggled_contour(&now, contour) {
+                f.edges = Some(next);
+            }
             return;
         }
         match self.toggling {
@@ -7040,6 +7084,7 @@ mod tests {
                 lines: Vec::new(),
                 ends: Vec::new(),
                 uses: None,
+                contours: Vec::new(),
             }),
             busy: false,
             camera: Camera::default(),
@@ -7107,6 +7152,7 @@ mod tests {
             plane_points: Vec::new(),
             flange_edges: Vec::new(),
             using: None,
+            contour: Vec::new(),
             toggling: None,
             flange: None,
             revolve: None,
@@ -8462,6 +8508,19 @@ mod tests {
 
     /// The plate's sketch in the window: the `button` of a constraint, then a click on each
     /// hole. `DATUM_CONSTRAIN_SHOT=file.png` saves a picture of the panel.
+    /// A click on a face takes its contour on sheet metal alone: an ordinary part offers none.
+    #[test]
+    fn only_sheet_metal_has_contours_to_click() {
+        let contours = |model: &str| {
+            let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models");
+            let mut s = Session::default();
+            s.execute("open", &json!({"path": dir.join(model).display().to_string()})).unwrap();
+            picture(&s, None, None, &mut MeshCache::default()).contours
+        };
+        assert!(!contours("sheet_rims.json").is_empty());
+        assert!(contours("drilled_plate.json").is_empty());
+    }
+
     /// A viewer editing the sketch of the symmetric plate.
     fn sketching() -> (Viewer, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");

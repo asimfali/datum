@@ -2076,3 +2076,30 @@ fn tabs_on_both_ends_of_a_profile() {
         assert!(f.overlaps.is_empty(), "{name}: {:?}", f.overlaps);
     }
 }
+
+/// A flat face's contours: a plate's four ends at once, and a window's edges apart from them; every
+/// edge of a contour is one `flange_edges` offers, and the plate's flanged from it builds.
+#[test]
+fn a_faces_contours_are_what_a_click_takes() {
+    let p = plate();
+    let loops = datum_ops::flange_loops(&p);
+    // Each of the two big faces: four ends.
+    assert_eq!(loops.iter().map(|l| l.edges.len()).collect::<Vec<_>>(), [4, 4]);
+    let offered: BTreeSet<TopoId> = flange_edges(&p).into_iter().map(|e| e.0).collect();
+    assert_eq!(offered.len(), 8);
+    assert!(loops.iter().flat_map(|l| &l.edges).all(|e| offered.contains(&e.0)));
+    let picked: Vec<String> = loops[0].edges.iter().map(|e| format!("{:?}", e.0)).collect();
+    let tray = flange(&p, &picked, serde_json::json!({})).unwrap();
+    let plain = flange(&p, &ends_edges(&p, &[faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T)].concat()), serde_json::json!({})).unwrap();
+    assert!(close(tray.volume(), plain.volume()));
+    // A window: a second contour of the face, of its own four edges.
+    let rect = serde_json::json!({"points": {"a": [0, 0], "b": [300, 0], "c": [300, 200], "d": [0, 200], "e": [100, 50], "f": [200, 50], "g": [200, 150], "h": [100, 150]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"},
+                  "ef": {"from": "e", "to": "f"}, "fg": {"from": "f", "to": "g"}, "gh": {"from": "g", "to": "h"}, "he": {"from": "h", "to": "e"}}});
+    let s = op(serde_json::json!({"op": "sketch", "sketch": rect})).eval(id("w.sketch"), &[]).unwrap();
+    let w = op(serde_json::json!({"op": "extrude", "z0": 0, "z1": T})).eval(id("w"), &[&s]).unwrap().body().unwrap().clone();
+    let loops = datum_ops::flange_loops(&w);
+    assert_eq!(loops.iter().map(|l| l.edges.len()).collect::<Vec<_>>(), [4, 4, 4, 4]);
+    assert_eq!(flange_edges(&w).len(), 16);
+    assert_eq!(loops[0].face, loops[1].face);
+}

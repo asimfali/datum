@@ -506,3 +506,4 @@ uses-inputs = Использует: { $names }
 uses-edges = рёбер: { $count }
 uses-profiles = контуров: { $used } из { $all }
 uses-hint = Shift или Ctrl и щелчок: добавить или убрать
+flange-pick = Щёлкните кромки листа для фланцев или грань: возьмётся весь её контур · Shift или Ctrl: добавить или убрать · Enter: фланец · Esc: отмена

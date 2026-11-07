@@ -1046,27 +1046,47 @@ pub fn flange_ends(body: &Body) -> Vec<TopoId> {
     (0..body.faces().len() as Ix).filter(|x| !on_sides.contains(x) && end_of(body, *x).is_some()).map(|x| body.faces()[x as usize].id).collect()
 }
 
-/// The edges a flange is picked by, as in Inventor (D205): each end's two long edges, and each
-/// flat wall's edges on the sheet's flat side faces; each with its ID and its ends.
-pub fn flange_edges(body: &Body) -> Vec<(TopoId, [Vec3; 2])> {
+/// The edges a flange may be picked by that go round one face of a sheet's side: one contour of
+/// it, the outer or a window's. A click on the face takes them at once.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlangeLoop {
+    pub face: TopoId,
+    pub edges: Vec<(TopoId, [Vec3; 2])>,
+}
+
+/// The contours of the flat faces of sheet metal `body`'s sides, as far as a flange may stand on
+/// them: each end's long edge, each flat wall's edge on a flat side face (D205); a window's as well
+/// as the outer one. A contour with no such edge is left out.
+pub fn flange_loops(body: &Body) -> Vec<FlangeLoop> {
     let he = |h: Ix| body.half_edges()[h as usize];
     let Ok(on_sides) = crate::unfold::side_faces(body) else { return Vec::new() };
     let flat = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_));
-    let mut out: Vec<(TopoId, [Vec3; 2])> = Vec::new();
+    let mut out = Vec::new();
     for &x in on_sides.iter().filter(|&&x| flat(x)) {
-        for h in body.loop_half_edges(body.faces()[x as usize].first_loop) {
-            let y = body.loops()[he(he(h).twin).loop_ix as usize].face;
-            if on_sides.contains(&y) || !flat(y) {
-                continue;
+        for l in body.face_loops(x) {
+            let mut edges = Vec::new();
+            for h in body.loop_half_edges(l) {
+                let y = body.loops()[he(he(h).twin).loop_ix as usize].face;
+                if on_sides.contains(&y) || !flat(y) {
+                    continue;
+                }
+                // A side face's edge along a wall, or an end's long edge.
+                let end = end_of(body, y).is_some_and(|(long, _)| long.contains(&he(h).twin));
+                if end || side_face(body, y, &on_sides) {
+                    edges.push((body.edges()[he(h).edge as usize].id, [body.point(he(h).origin), body.point(he(body.next(h)).origin)]));
+                }
             }
-            let e = &body.edges()[he(h).edge as usize];
-            // A side face's edge along a wall, or an end's long edge.
-            let end = end_of(body, y).is_some_and(|(long, _)| long.contains(&he(h).twin));
-            if end || side_face(body, y, &on_sides) {
-                out.push((e.id, [body.point(he(h).origin), body.point(he(body.next(h)).origin)]));
+            if !edges.is_empty() {
+                out.push(FlangeLoop { face: body.faces()[x as usize].id, edges });
             }
         }
     }
+    out
+}
+
+/// The edges a flange is picked by, as in Inventor (D205): each with its ID and its ends.
+pub fn flange_edges(body: &Body) -> Vec<(TopoId, [Vec3; 2])> {
+    let mut out: Vec<(TopoId, [Vec3; 2])> = flange_loops(body).into_iter().flat_map(|l| l.edges).collect();
     out.sort_by_key(|e| e.0);
     out.dedup_by_key(|e| e.0);
     out
