@@ -139,23 +139,6 @@
       "op": "flange",
       "radius": 2,
       "corner_gap": 0.5
-    },
-    {
-      "angle": 45.0,
-      "corner": "miter",
-      "edges": [
-        "ff9e217f2618fde5d524684e9d29ebeb",
-        "4476a147a8a78ebe34faa3097a23700b"
-      ],
-      "height": 20.0,
-      "inputs": [
-        "flange1"
-      ],
-      "name": "level",
-      "op": "flange",
-      "radius": 2,
-      "corner_gap": 0.5,
-      "level_walls": true
     }
   ]
 }

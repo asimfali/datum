@@ -277,7 +277,12 @@
   "sheet_meeting.json": {
     "flange1": "bceef74fe15cef0ed237b62829954ffba464808d2bc46b363fad29e1f6c65da1",
     "flange2": "2d6aa6ba7a84a71ce922b570a4f52755c9df89a31e33ef2b557a0273f59350fb",
-    "level": "1cc7b2723e0cfa4a0d6afd320929e43f730236e1e1ef02e49f18b34da34c0d72",
+    "plate1": "aaf197b9770f4ecaa0a577a8160129c2131c484f180e033d920ed5dc11fc0c1e",
+    "sketch1": "a9ad361b75dd477ec78740903050cbdbc09b4a7bf9f799ca2dacd6ae9f4f3dbc"
+  },
+  "sheet_meeting_level.json": {
+    "flange1": "bceef74fe15cef0ed237b62829954ffba464808d2bc46b363fad29e1f6c65da1",
+    "flange2": "9c63fee4b6f3296deeb3e42ad9f800c22f3e0fc7e2ff823b472f037b12ba5c48",
     "plate1": "aaf197b9770f4ecaa0a577a8160129c2131c484f180e033d920ed5dc11fc0c1e",
     "sketch1": "a9ad361b75dd477ec78740903050cbdbc09b4a7bf9f799ca2dacd6ae9f4f3dbc"
   },

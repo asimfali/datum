@@ -1,0 +1,145 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "sketch1",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "points": [
+              "p5",
+              "origin"
+            ],
+            "type": "coincident"
+          },
+          {
+            "line": "l1",
+            "type": "horizontal"
+          },
+          {
+            "line": "l5",
+            "type": "vertical"
+          },
+          {
+            "line": "l6",
+            "type": "horizontal"
+          },
+          {
+            "line": "l3",
+            "type": "vertical"
+          },
+          {
+            "line": "l2",
+            "point": "p5",
+            "type": "midpoint"
+          },
+          {
+            "line": "l4",
+            "point": "p5",
+            "type": "midpoint"
+          },
+          {
+            "line": "l6",
+            "type": "length",
+            "value": 100.0
+          },
+          {
+            "line": "l3",
+            "type": "length",
+            "value": 200.0
+          }
+        ],
+        "lines": {
+          "l1": {
+            "from": "p1",
+            "to": "p2"
+          },
+          "l2": {
+            "construction": true,
+            "from": "p1",
+            "to": "p3"
+          },
+          "l3": {
+            "from": "p4",
+            "to": "p1"
+          },
+          "l4": {
+            "construction": true,
+            "from": "p2",
+            "to": "p4"
+          },
+          "l5": {
+            "from": "p2",
+            "to": "p3"
+          },
+          "l6": {
+            "from": "p3",
+            "to": "p4"
+          }
+        },
+        "points": {
+          "p1": [
+            -6.837349397590361,
+            -6.144578313253012
+          ],
+          "p2": [
+            6.837349397590361,
+            -6.144578313253012
+          ],
+          "p3": [
+            6.837349397590361,
+            6.144578313253012
+          ],
+          "p4": [
+            -6.837349397590361,
+            6.144578313253012
+          ],
+          "p5": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "inputs": [
+        "sketch1"
+      ],
+      "name": "plate1",
+      "op": "plate",
+      "thickness": 2
+    },
+    {
+      "angle": 90.0,
+      "edges": [
+        "ade80246bc9e45654a35bb542083aa5e",
+        "8a04bf8c008097bff07b34722ea237e6"
+      ],
+      "height": 40.0,
+      "inputs": [
+        "plate1"
+      ],
+      "name": "flange1",
+      "op": "flange",
+      "radius": 2
+    },
+    {
+      "angle": 45.0,
+      "corner": "miter",
+      "edges": [
+        "ff9e217f2618fde5d524684e9d29ebeb",
+        "4476a147a8a78ebe34faa3097a23700b"
+      ],
+      "height": 20.0,
+      "inputs": [
+        "flange1"
+      ],
+      "name": "flange2",
+      "op": "flange",
+      "radius": 2,
+      "corner_gap": 0.5,
+      "level_walls": true
+    }
+  ]
+}

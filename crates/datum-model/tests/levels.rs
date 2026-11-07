@@ -425,3 +425,25 @@ fn a_level_changes_a_title() {
     run(&mut s, "set_title", json!({"name": "plate", "title": null, "level": "long"}));
     assert_eq!(title(&mut s, json!("long")), Value::Null);
 }
+
+/// Bodies branching from one beginning are one part: listed once, its bodies not doubled. Its picker
+/// in the window has one ID.
+#[test]
+fn a_part_with_two_ends_is_listed_once() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/sheet_tray.json");
+    let mut s = datum_model::Session::default();
+    s.execute("open", &serde_json::json!({"path": path})).unwrap();
+    let parts = s.execute("levels", &serde_json::json!({})).unwrap()["parts"].as_array().unwrap().clone();
+    let mut names: Vec<&str> = parts.iter().map(|p| p["part"].as_str().unwrap()).collect();
+    let all = names.len();
+    names.dedup();
+    assert_eq!(names.len(), all, "{names:?}");
+    let product = s.product();
+    assert_eq!(product.len(), all);
+    let bodies = product[0].2.as_ref().unwrap();
+    let mut seen: Vec<&str> = bodies.iter().map(|(n, _)| n.as_str()).collect();
+    seen.sort_unstable();
+    let many = seen.len();
+    seen.dedup();
+    assert_eq!(seen.len(), many, "{seen:?}");
+}
