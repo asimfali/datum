@@ -22,7 +22,7 @@ use datum_math::{Sign, Vec2, Vec3, inside_circle, orient2d};
 
 use crate::cut::{Reach, from_face};
 use crate::sketch::within_rounding;
-use crate::sketch::{Placed, opposite_cylinder, profile_loops};
+use crate::sketch::{ChainPiece, Placed, opposite_cylinder, profile_loops};
 use crate::unfold::{chain_through, next_piece};
 
 /// The profiles of `sketch`, which lies on a face of sheet metal `target`, cut through the sheet:
@@ -50,7 +50,7 @@ pub(crate) fn punch_lines(
     target: &Body,
     sketch: &Placed,
     closed: Option<&Placed>,
-    lines: &[String],
+    chains: &[(String, Vec<ChainPiece>)],
     kerf: f64,
 ) -> Result<Body, BrepError> {
     let unsupported = |m: &str| BrepError::Unsupported(format!("a cut along a line: {m}"));
@@ -71,31 +71,153 @@ pub(crate) fn punch_lines(
         let m = o.ring.points.len();
         edges.extend((0..m).filter(|&e| o.ring.arc(e).is_none()).map(|e| [o.ring.points[e], o.ring.points[(e + 1) % m]]));
     }
-    for name in lines {
-        let line = sketch.lines.get(name).ok_or_else(|| unsupported("along an arc comes later"))?;
-        let at = |n: &String| sketch.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
-        let (a, b) = (turn(at(&line.from)?), turn(at(&line.to)?));
-        let (dx, dy) = (b.x - a.x, b.y - a.y);
-        let l = libm::hypot(dx, dy);
-        if l == 0.0 {
-            return Err(BrepError::Degenerate(format!("line `{name}` has no length")));
-        }
-        let (ux, uy) = (dx / l, dy / l);
-        let (nx, ny) = (-uy * 0.5 * kerf, ux * 0.5 * kerf);
-        // An end on an edge of the blank or a bend line (a line drawn from a corner) goes on past it,
-        // as the laser's beam does: a cut's end square on a corner would only touch it.
-        let (past_a, past_b) = (past_edges(a, (ux, uy), &edges, kerf), past_edges(b, (ux, uy), &edges, kerf));
-        let (a, b) = (Vec2::new(a.x - ux * past_a, a.y - uy * past_a), Vec2::new(b.x + ux * past_b, b.y + uy * past_b));
-        let id = |tag: &str, k: u64, layer: u64| TopoId::derive(tag).id(feature).tag(name).index(k).index(layer).finish();
-        profiles.push(ProfileLoop {
-            // Counterclockwise: along the line on its right, back on its left.
-            points: vec![Vec2::new(a.x - nx, a.y - ny), Vec2::new(b.x - nx, b.y - ny), Vec2::new(b.x + nx, b.y + ny), Vec2::new(a.x + nx, a.y + ny)],
-            vertices: (0..4).map(|k| [id("cut.line.v", k, 0), id("cut.line.v", k, 1)]).collect(),
-            sides: (0..4).map(|k| id("cut.line.side", k, 0)).collect(),
-            arcs: vec![None; 4],
-        });
+    for (name, pieces) in chains {
+        let pieces: Vec<ChainPiece> = pieces
+            .iter()
+            .map(|c| ChainPiece { from: turn(c.from), to: turn(c.to), arc: c.arc.map(|a| ProfileArc { center: turn(a.center), ccw: a.ccw }) })
+            .collect();
+        profiles.push(slot(feature, name, pieces, kerf, &edges)?);
     }
     cut(feature, target, &blank, profiles, false, None)
+}
+
+/// How far from square two curves of a chain may meet and still be tangent, as a sine: what a
+/// sketch's tangency holds to (its solver's accuracy).
+const TANGENT: f64 = 1e-7;
+
+/// The way a piece runs at its start or end, unit.
+fn way(c: &ChainPiece, at_end: bool) -> Result<(f64, f64), BrepError> {
+    let p = if at_end { c.to } else { c.from };
+    let (x, y) = match c.arc {
+        None => (c.to.x - c.from.x, c.to.y - c.from.y),
+        Some(a) if a.ccw => (a.center.y - p.y, p.x - a.center.x),
+        Some(a) => (p.y - a.center.y, a.center.x - p.x),
+    };
+    let l = libm::hypot(x, y);
+    if l == 0.0 {
+        return Err(BrepError::Degenerate("a curve of a cut along a line has no length".into()));
+    }
+    Ok((x / l, y / l))
+}
+
+/// The curve `c` `s` half kerfs to its left (`s` is ±1) meets the one of `d`, nearest the point they
+/// meet at. A corner of the cut, as two walls of its width meet.
+fn side_corner(c: &ChainPiece, d: &ChainPiece, s: f64, half: f64) -> Result<Vec2, BrepError> {
+    let v = c.to;
+    let ((ux, uy), (wx, wy)) = (way(c, true)?, way(d, false)?);
+    let sine = ux * wy - uy * wx;
+    let dot = ux * wx + uy * wy;
+    if dot < 0.0 && sine.abs() <= TANGENT {
+        return Err(BrepError::Degenerate("a cut along a line turns right back on itself".into()));
+    }
+    if sine.abs() <= TANGENT {
+        return Ok(Vec2::new(v.x - s * uy * half, v.y + s * ux * half));
+    }
+    // A line through a point along a way, or a circle.
+    let line = |p: Vec2, (x, y): (f64, f64)| (Vec2::new(p.x - s * y * half, p.y + s * x * half), (x, y));
+    let radius = |a: &ProfileArc, on: Vec2| {
+        let r = libm::hypot(on.x - a.center.x, on.y - a.center.y) - if a.ccw { s * half } else { -s * half };
+        if r > 0.0 { Ok(r) } else { Err(BrepError::Degenerate("a cut along an arc is wider than its radius allows".into())) }
+    };
+    let nearest = |points: &[Vec2]| {
+        let d2 = |p: &Vec2| (p.x - v.x) * (p.x - v.x) + (p.y - v.y) * (p.y - v.y);
+        points.iter().copied().min_by(|p, q| d2(p).total_cmp(&d2(q)))
+    };
+    let hit = match (c.arc, d.arc) {
+        (None, None) => {
+            let ((p, _), (q, _)) = (line(v, (ux, uy)), line(v, (wx, wy)));
+            let t = ((q.x - p.x) * wy - (q.y - p.y) * wx) / sine;
+            Some(Vec2::new(p.x + ux * t, p.y + uy * t))
+        }
+        (None, Some(a)) => nearest(&line_circle(line(v, (ux, uy)), a.center, radius(&a, v)?)),
+        (Some(a), None) => nearest(&line_circle(line(v, (wx, wy)), a.center, radius(&a, v)?)),
+        (Some(a), Some(b)) => {
+            let (ra, rb) = (radius(&a, v)?, radius(&b, v)?);
+            nearest(&circle_circle(a.center, ra, b.center, rb))
+        }
+    };
+    hit.ok_or_else(|| BrepError::Degenerate("a corner of a cut along a line cannot be made at that width".into()))
+}
+
+fn line_circle((p, (x, y)): (Vec2, (f64, f64)), center: Vec2, r: f64) -> Vec<Vec2> {
+    let (fx, fy) = (p.x - center.x, p.y - center.y);
+    let b = fx * x + fy * y;
+    let disc = b * b - (fx * fx + fy * fy - r * r);
+    if disc < 0.0 {
+        return Vec::new();
+    }
+    let root = disc.sqrt();
+    [-b - root, -b + root].iter().map(|t| Vec2::new(p.x + x * t, p.y + y * t)).collect()
+}
+
+fn circle_circle(a: Vec2, ra: f64, b: Vec2, rb: f64) -> Vec<Vec2> {
+    let (dx, dy) = (b.x - a.x, b.y - a.y);
+    let d = libm::hypot(dx, dy);
+    if d == 0.0 {
+        return Vec::new();
+    }
+    let t = (d * d + ra * ra - rb * rb) / (2.0 * d);
+    let h2 = ra * ra - t * t;
+    if h2 < 0.0 {
+        return Vec::new();
+    }
+    let (ux, uy, h) = (dx / d, dy / d, h2.sqrt());
+    [h, -h].iter().map(|h| Vec2::new(a.x + ux * t - uy * h, a.y + uy * t + ux * h)).collect()
+}
+
+/// The profile of the cut along chain `name`, `kerf` wide (D235, D237): counterclockwise, along the
+/// chain on its right, across its end, back on its left, across its start. An end on one of `edges`
+/// goes on past it, as the laser's beam does: a cut's end square on a corner would only touch it.
+fn slot(feature: TopoId, name: &str, pieces: Vec<ChainPiece>, kerf: f64, edges: &[[Vec2; 2]]) -> Result<ProfileLoop, BrepError> {
+    let half = 0.5 * kerf;
+    let n = pieces.len();
+    let (first, last) = (way(&pieces[0], false)?, way(&pieces[n - 1], true)?);
+    let (past_a, past_b) = (past_edges(pieces[0].from, first, edges, kerf), past_edges(pieces[n - 1].to, last, edges, kerf));
+    if (past_a > 0.0 && pieces[0].arc.is_some()) || (past_b > 0.0 && pieces[n - 1].arc.is_some()) {
+        return Err(BrepError::Unsupported("a cut along a line: an arc ending on an edge comes later: end the chain with a line".into()));
+    }
+    let start = Vec2::new(pieces[0].from.x - first.0 * past_a, pieces[0].from.y - first.1 * past_a);
+    let end = Vec2::new(pieces[n - 1].to.x + last.0 * past_b, pieces[n - 1].to.y + last.1 * past_b);
+    // The corners on one side, start to end.
+    let corners = |s: f64| -> Result<Vec<Vec2>, BrepError> {
+        let mut out = Vec::with_capacity(n + 1);
+        out.push(Vec2::new(start.x - s * first.1 * half, start.y + s * first.0 * half));
+        for w in pieces.windows(2) {
+            out.push(side_corner(&w[0], &w[1], s, half)?);
+        }
+        out.push(Vec2::new(end.x - s * last.1 * half, end.y + s * last.0 * half));
+        Ok(out)
+    };
+    let (right, left) = (corners(-1.0)?, corners(1.0)?);
+    // A side that came out the wrong way: the cut is wider than a curve of it is long.
+    for (k, c) in pieces.iter().enumerate() {
+        let w = way(c, false)?;
+        for side in [&right, &left] {
+            if c.arc.is_none() && (side[k + 1].x - side[k].x) * w.0 + (side[k + 1].y - side[k].y) * w.1 <= 0.0 {
+                return Err(BrepError::Degenerate(format!("a cut along `{name}` is wider than one of its lines is long")));
+            }
+        }
+        if let Some(a) = c.arc {
+            let r = libm::hypot(c.from.x - a.center.x, c.from.y - a.center.y);
+            if r <= half {
+                return Err(BrepError::Degenerate(format!("a cut along `{name}` is wider than one of its arcs allows")));
+            }
+        }
+    }
+    let mut points = right.clone();
+    points.extend(left.iter().rev().copied());
+    let mut arcs: Vec<Option<ProfileArc>> = pieces.iter().map(|c| c.arc).collect();
+    arcs.push(None);
+    arcs.extend(pieces.iter().rev().map(|c| c.arc.map(|a| ProfileArc { center: a.center, ccw: !a.ccw })));
+    arcs.push(None);
+    let m = points.len() as u64;
+    let id = |tag: &str, k: u64, layer: u64| TopoId::derive(tag).id(feature).tag(name).index(k).index(layer).finish();
+    Ok(ProfileLoop {
+        points,
+        vertices: (0..m).map(|k| [id("cut.line.v", k, 0), id("cut.line.v", k, 1)]).collect(),
+        sides: (0..m).map(|k| id("cut.line.side", k, 0)).collect(),
+        arcs,
+    })
 }
 
 /// How far a cut along a line, `kerf` wide and going the unit way `u`, runs on past its end `p`: past

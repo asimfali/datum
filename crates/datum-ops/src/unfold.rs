@@ -108,6 +108,99 @@ pub struct LineCut {
     pub ends: [Vec3; 2],
     pub normal: Vec3,
     pub kerf: f64,
+    /// A curve of the chain that is an arc (D237): its centre, and whether it runs counterclockwise
+    /// seen from the side `normal` points to.
+    pub arc: Option<(Vec3, bool)>,
+}
+
+/// The line a cut's gap closes to on the blank, as a length along it and a distance off it.
+#[derive(Clone, Copy)]
+enum Centre {
+    Line { a: Vec2, b: Vec2, ux: f64, uy: f64, length: f64 },
+    Arc { a: Vec2, b: Vec2, center: Vec2, radius: f64, ccw: bool, length: f64 },
+}
+
+impl Centre {
+    fn new(a: Vec2, b: Vec2, arc: Option<(Vec2, bool)>) -> Option<Self> {
+        if let Some((center, ccw)) = arc {
+            let radius = libm::hypot(a.x - center.x, a.y - center.y);
+            let turn = datum_brep::ProfileArc { center, ccw }.turn(a, b).abs();
+            return (radius > 0.0).then_some(Self::Arc { a, b, center, radius, ccw, length: radius * turn });
+        }
+        let length = libm::hypot(b.x - a.x, b.y - a.y);
+        (length > 0.0).then(|| Self::Line { a, b, ux: (b.x - a.x) / length, uy: (b.y - a.y) / length, length })
+    }
+
+    fn length(self) -> f64 {
+        match self {
+            Self::Line { length, .. } | Self::Arc { length, .. } => length,
+        }
+    }
+
+    /// How far along it `p` lies, from its start; out of its range past its ends.
+    fn along(self, p: Vec2) -> f64 {
+        match self {
+            Self::Line { a, ux, uy, .. } => (p.x - a.x) * ux + (p.y - a.y) * uy,
+            Self::Arc { a, center, radius, ccw, length, .. } => {
+                // From the middle, so that what lies past an end is not taken for the other end.
+                let half = 0.5 * length / radius * if ccw { 1.0 } else { -1.0 };
+                let (s, c) = libm::sincos(half);
+                let (ax, ay) = (a.x - center.x, a.y - center.y);
+                let (mx, my) = (ax * c - ay * s, ax * s + ay * c);
+                let (px, py) = (p.x - center.x, p.y - center.y);
+                let t = libm::atan2(mx * py - my * px, mx * px + my * py);
+                0.5 * length + radius * if ccw { t } else { -t }
+            }
+        }
+    }
+
+    /// How far off it `p` lies, either way by sign.
+    fn off(self, p: Vec2) -> f64 {
+        match self {
+            Self::Line { a, ux, uy, .. } => -(p.x - a.x) * uy + (p.y - a.y) * ux,
+            Self::Arc { center, radius, .. } => libm::hypot(p.x - center.x, p.y - center.y) - radius,
+        }
+    }
+
+    /// The point of it at length `t`: its very ends at its ends, where the next curve starts.
+    fn at(self, t: f64) -> Vec2 {
+        match self {
+            Self::Line { a, .. } | Self::Arc { a, .. } if t <= 0.0 => a,
+            Self::Line { b, length, .. } | Self::Arc { b, length, .. } if t >= length => b,
+            Self::Line { a, ux, uy, .. } => Vec2::new(a.x + ux * t, a.y + uy * t),
+            Self::Arc { a, center, radius, ccw, .. } => {
+                let (s, c) = libm::sincos(t / radius * if ccw { 1.0 } else { -1.0 });
+                let (ax, ay) = (a.x - center.x, a.y - center.y);
+                Vec2::new(center.x + ax * c - ay * s, center.y + ax * s + ay * c)
+            }
+        }
+    }
+
+    /// Where the line from `far` to `was`, which ends in the cut, crosses it.
+    fn crossing(self, far: Vec2, was: Vec2) -> Vec2 {
+        match self {
+            Self::Line { .. } => {
+                let t = self.off(far) / (self.off(far) - self.off(was));
+                Vec2::new(far.x + (was.x - far.x) * t, far.y + (was.y - far.y) * t)
+            }
+            Self::Arc { center, radius, .. } => {
+                let (dx, dy, fx, fy) = (was.x - far.x, was.y - far.y, far.x - center.x, far.y - center.y);
+                let (a, b, c) = (dx * dx + dy * dy, fx * dx + fy * dy, fx * fx + fy * fy - radius * radius);
+                let root = (b * b - a * c).max(0.0).sqrt();
+                // The root nearer the end that lies in the cut.
+                let t = [(-b - root) / a, (-b + root) / a].into_iter().min_by(|p, q| (p - 1.0).abs().total_cmp(&(q - 1.0).abs())).unwrap_or(1.0);
+                Vec2::new(far.x + dx * t, far.y + dy * t)
+            }
+        }
+    }
+
+    /// The piece of it from length `s` to `e`.
+    fn piece(self, s: f64, e: f64) -> FlatPiece {
+        match self {
+            Self::Line { .. } => FlatPiece::Line(self.at(s), self.at(e)),
+            Self::Arc { center, ccw, .. } => arc_piece(center, self.at(s), self.at(e), ccw),
+        }
+    }
 }
 
 /// How near a corner of a cut along a line has to be to its sides to be one, in mm: the blank's
@@ -129,64 +222,91 @@ impl Flat {
         let (mut pieces, mut ids) = (self.pieces.clone(), self.ids.clone());
         let mut gone = vec![false; pieces.len()];
         let mut new: Vec<(FlatPiece, TopoId)> = Vec::new();
-        for &LineCut { ends: [from, to], normal, kerf } in lines {
-            // The wall the sketch's plane is, or the one across the sheet seen from the other side.
-            let away = |f: &[Vec3; 4]| (from - f[0]).dot(f[3]).abs();
-            let wall = self.planes.iter().filter(|f| crate::sketch::nearly_parallel(f[3], normal)).min_by(|p, q| away(p).total_cmp(&away(q)));
-            let Some(&[o, x, y, _]) = wall else { continue };
-            let flat = |p: Vec3| Vec2::new((p - o).dot(x), (p - o).dot(y));
-            let (a, b) = (flat(from), flat(to));
-            let length = libm::hypot(b.x - a.x, b.y - a.y);
-            if length == 0.0 {
-                continue;
-            }
-            let (ux, uy) = ((b.x - a.x) / length, (b.y - a.y) / length);
-            let along = |p: Vec2| (p.x - a.x) * ux + (p.y - a.y) * uy;
-            let off = |p: Vec2| -(p.x - a.x) * uy + (p.y - a.y) * ux;
+        // Each cut's line on the blank; none if it lies on no wall.
+        let centres: Vec<Option<(Centre, f64)>> = lines
+            .iter()
+            .map(|&LineCut { ends: [from, to], normal, kerf, arc }| {
+                // The wall the sketch's plane is, or the one across the sheet seen from the other side.
+                let away = |f: &[Vec3; 4]| (from - f[0]).dot(f[3]).abs();
+                let wall = self.planes.iter().filter(|f| crate::sketch::nearly_parallel(f[3], normal)).min_by(|p, q| away(p).total_cmp(&away(q)));
+                let &[o, x, y, z] = wall?;
+                let flat = |p: Vec3| Vec2::new((p - o).dot(x), (p - o).dot(y));
+                let arc = arc.map(|(c, ccw)| (flat(c), ccw == (normal.dot(z) > 0.0)));
+                Some((Centre::new(flat(from), flat(to), arc)?, kerf))
+            })
+            .collect();
+        let on = |c: Centre, kerf: f64, p: Vec2| {
             let past = KERF_PAST * kerf + ON_KERF;
-            let on = |p: Vec2| off(p).abs() <= 0.5 * kerf + ON_KERF && along(p) >= -past && along(p) <= length + past;
-            // Edges running into the cut go on to its line, to where they cross it.
-            let mut met: Vec<(Vec2, f64)> = Vec::new();
+            c.off(p).abs() <= 0.5 * kerf + ON_KERF && c.along(p) >= -past && c.along(p) <= c.length() + past
+        };
+        // The sides and ends of the cuts, each with its own: a chain's next curve runs out of this
+        // one's reach, and is no edge running into it.
+        let mut side: Vec<Option<usize>> = vec![None; pieces.len()];
+        for (l, (c, kerf)) in centres.iter().enumerate().filter_map(|(l, c)| Some((l, (*c)?))) {
+            for (k, piece) in pieces.iter().enumerate() {
+                let ends = match *piece {
+                    FlatPiece::Line(p, q) => [p, q],
+                    FlatPiece::Arc { center, radius, start, end } => match c {
+                        // Only a wall of the cut itself: round the same centre.
+                        Centre::Arc { center: m, .. } if libm::hypot(center.x - m.x, center.y - m.y) <= ON_KERF => {
+                            let point = |t: f64| Vec2::new(center.x + radius * libm::cos(t), center.y + radius * libm::sin(t));
+                            [point(start), point(end)]
+                        }
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if side[k].is_none() && on(c, kerf, ends[0]) && on(c, kerf, ends[1]) {
+                    side[k] = Some(l);
+                }
+            }
+        }
+        // Edges running into a cut go on to its line, to where they cross it.
+        let mut met: Vec<Vec<(Vec2, f64)>> = vec![Vec::new(); lines.len()];
+        for (l, (c, kerf)) in centres.iter().enumerate().filter_map(|(l, c)| Some((l, (*c)?))) {
             for (k, piece) in pieces.iter_mut().enumerate() {
                 let FlatPiece::Line(p, q) = piece else { continue };
-                if gone[k] || on(*p) == on(*q) {
+                if side[k].is_some() || on(c, kerf, *p) == on(c, kerf, *q) {
                     continue;
                 }
-                let (end, far) = if on(*p) { (&mut *p, *q) } else { (&mut *q, *p) };
+                let (end, far) = if on(c, kerf, *p) { (&mut *p, *q) } else { (&mut *q, *p) };
                 let was = *end;
-                let t = off(far) / (off(far) - off(was));
-                let crossing = Vec2::new(far.x + (was.x - far.x) * t, far.y + (was.y - far.y) * t);
+                let crossing = c.crossing(far, was);
                 *end = crossing;
-                met.push((was, along(crossing)));
+                met[l].push((was, c.along(crossing)));
             }
-            // Its sides and ends go; where they ended at an edge, the line ends where that edge does.
-            let reach = |p: Vec2| met.iter().find(|(q, _)| (q.x - p.x).abs() <= ON_KERF && (q.y - p.y).abs() <= ON_KERF).map_or(along(p), |m| m.1);
+        }
+        // Where a side ended at an edge, the line ends where that edge does.
+        for (l, (c, _)) in centres.iter().enumerate().filter_map(|(l, c)| Some((l, (*c)?))) {
+            let length = c.length();
+            let reach =
+                |p: Vec2| met[l].iter().find(|(q, _)| (q.x - p.x).abs() <= ON_KERF && (q.y - p.y).abs() <= ON_KERF).map_or(c.along(p), |m| m.1);
             let mut spans: Vec<(f64, f64, TopoId)> = Vec::new();
-            for (k, piece) in pieces.iter().enumerate() {
-                let FlatPiece::Line(p, q) = *piece else { continue };
-                if !gone[k] && on(p) && on(q) {
-                    gone[k] = true;
-                    let (s, e) = (reach(p).clamp(0.0, length), reach(q).clamp(0.0, length));
-                    spans.push((s.min(e), s.max(e), ids[k]));
-                }
+            for k in (0..pieces.len()).filter(|&k| side[k] == Some(l)) {
+                gone[k] = true;
+                let [p, q] = match pieces[k] {
+                    FlatPiece::Line(p, q) => [p, q],
+                    FlatPiece::Arc { center, radius, start, end } => {
+                        [start, end].map(|t| Vec2::new(center.x + radius * libm::cos(t), center.y + radius * libm::sin(t)))
+                    }
+                    _ => continue,
+                };
+                let (s, e) = (reach(p).clamp(0.0, length), reach(q).clamp(0.0, length));
+                spans.push((s.min(e), s.max(e), ids[k]));
             }
             spans.sort_by(|p, q| p.0.total_cmp(&q.0).then(p.1.total_cmp(&q.1)));
-            let at = |t: f64| Vec2::new(a.x + ux * t, a.y + uy * t);
             let mut run: Option<(f64, f64, TopoId)> = None;
+            let line = |r: (f64, f64, TopoId)| (c.piece(r.0, r.1), TopoId::derive("flat.cut.line").id(r.2).finish());
             for (s, e, id) in spans {
                 match &mut run {
                     Some(r) if s <= r.1 + ON_KERF => r.1 = r.1.max(e),
                     _ => {
-                        new.extend(
-                            run.take()
-                                .filter(|r| r.1 > r.0)
-                                .map(|r| (FlatPiece::Line(at(r.0), at(r.1)), TopoId::derive("flat.cut.line").id(r.2).finish())),
-                        );
+                        new.extend(run.take().filter(|r| r.1 > r.0).map(line));
                         run = Some((s, e, id));
                     }
                 }
             }
-            new.extend(run.filter(|r| r.1 > r.0).map(|r| (FlatPiece::Line(at(r.0), at(r.1)), TopoId::derive("flat.cut.line").id(r.2).finish())));
+            new.extend(run.filter(|r| r.1 > r.0).map(line));
         }
         let outer = self.outer.clone();
         let kept = |k: &usize| !gone[*k];

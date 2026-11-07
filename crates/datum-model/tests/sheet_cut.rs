@@ -567,6 +567,28 @@ fn a_rules_kerf_cuts_along_a_line_and_the_blank_has_one_line() {
     }
 }
 
+/// A wire's tab (D237): one cut along a line, an arc and a line, tangent throughout. In the part a gap
+/// the kerf wide, in the blank and its DXF the curves as drawn, one pass of the laser.
+#[test]
+fn a_chain_with_an_arc_is_one_pass_in_the_dxf() {
+    let mut s = lined_plate("kerf_chain", Some(json!(0.5)));
+    let whole = volume(&mut s, "face");
+    let tab = json!({"points": {"p1": [40, 10], "p2": [40, 25], "p3": [52, 25], "p4": [46, 25], "p5": [52, 10]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p3", "to": "p5"}},
+        "arcs": {"a1": {"center": "p4", "from": "p3", "to": "p2"}}});
+    run(&mut s, "add", json!({"name": "tab", "op": "sketch", "inputs": ["face"], "flat": "front", "k_factor": 0.5, "sketch": tab}));
+    assert_cut(&run(&mut s, "extrude", json!({"name": "cut", "sketch": "tab", "mode": "cut", "through": true, "wall": true})));
+    let length = 2.0 * 15.0 + std::f64::consts::PI * 6.0;
+    let gone = whole - volume(&mut s, "cut");
+    assert!((gone - length * 0.5 * 2.0).abs() < 1e-6, "{gone}");
+    assert_eq!(s.flat_of("cut").unwrap().counts(), [6, 1, 0]);
+    let dxf = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("kerf_chain.dxf");
+    run(&mut s, "export_dxf", json!({"name": "cut", "path": dxf}));
+    let text = std::fs::read_to_string(&dxf).unwrap();
+    assert_eq!(dxf_lines(&text).len(), 6, "{text}");
+    assert_eq!(text.matches("\nARC\n").count(), 1, "{text}");
+}
+
 /// The feature `name`'s hash in the model.
 fn hash_of(s: &mut Session, name: &str) -> String {
     let r = run(s, "inspect", json!({}));
