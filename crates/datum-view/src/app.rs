@@ -6601,8 +6601,10 @@ impl Viewer {
     /// the model reports for it (the sheet rule's overrides it there), its outline and bend lines
     /// projected.
     fn sketch_on_blank(&mut self, body: &str, back: bool) {
-        let k = self.model.as_ref().map_or(Json::Null, |m| m.inspect["flats"][body]["k_factor"].clone());
-        let k = if k.is_null() { json!(0.5) } else { k };
+        // The K the blank shown is laid at: saved, from its rule or as its features were made.
+        let flat = self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| n == body));
+        let Some((_, Ok(flat))) = flat else { return };
+        let k = flat.k_factor;
         self.new_sketch(json!({
             "inputs": [body],
             "flat": if back { "back" } else { "front" },
@@ -9419,17 +9421,35 @@ mod tests {
         assert!(on_sheet(&features, "k"));
     }
 
-    /// A sketch on the blank is made from the Flat pane with the K-factor the model reports, the
-    /// blank's outline and bend lines projected; E on it cuts through the sheet.
+    /// A sketch on the blank is made from the Flat pane at the K-factor the blank is laid at, which
+    /// no saved setting need hold: a relief's, here. At another K the relief's cut across the bend
+    /// would not lie on the sketch's blank and the sketch would fail. Its outline and bend lines
+    /// are projected; E on it cuts through the sheet.
     #[test]
     fn a_sketch_on_the_blank() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/sheet_tray.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let flat = session.flat_of("relieved").unwrap();
+        assert_eq!(flat.k_factor, 0.44);
         let m = v.model.as_mut().unwrap();
-        m.inspect["flats"] = json!({"sheet1": {"back": true, "k_factor": 0.4}});
+        m.flats = vec![("sheet1".into(), Ok(flat))];
         v.sketch_on_blank("sheet1", true);
+        let on_blank =
+            json!({"name": "on_blank", "op": "sketch", "inputs": ["relieved"], "flat": "front", "k_factor": 0.44, "sketch": {"points": {}}});
+        session.execute("add", &on_blank).unwrap();
+        let failed = |s: &mut Session| {
+            s.execute("inspect", &json!({})).unwrap()["features"].as_array().unwrap().iter().filter(|f| f.get("error").is_some()).count()
+        };
+        assert_eq!(failed(&mut session), 0);
+        // At another K it can't: what the window once sent for a body with no saved setting.
+        let wrong = json!({"name": "wrong", "op": "sketch", "inputs": ["relieved"], "flat": "front", "k_factor": 0.5, "sketch": {"points": {}}});
+        session.execute("add", &wrong).unwrap();
+        assert_eq!(failed(&mut session), 1);
         let sent: Vec<Request> = inbox.try_iter().collect();
         let want = json!({
-            "name": "sketch1", "op": "sketch", "sketch": {"points": {}}, "inputs": ["sheet1"], "flat": "back", "k_factor": 0.4,
+            "name": "sketch1", "op": "sketch", "sketch": {"points": {}}, "inputs": ["sheet1"], "flat": "back", "k_factor": 0.44,
             "project": {"blank": {"blank": "outline"}, "bends": {"blank": "bends"}},
         });
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add", p) if *p == want)), "{sent:?}");
