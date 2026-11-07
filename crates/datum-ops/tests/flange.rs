@@ -2076,3 +2076,55 @@ fn tabs_on_both_ends_of_a_profile() {
         assert!(f.overlaps.is_empty(), "{name}: {:?}", f.overlaps);
     }
 }
+
+/// A flat face's contours: a plate's four ends at once, and a window's edges apart from them; every
+/// edge of a contour is one `flange_edges` offers, and the plate's flanged from it builds.
+#[test]
+fn a_faces_contours_are_what_a_click_takes() {
+    let p = plate();
+    let loops = datum_ops::flange_loops(&p);
+    // Each of the two big faces: four ends.
+    assert_eq!(loops.iter().map(|l| l.edges.len()).collect::<Vec<_>>(), [4, 4]);
+    let offered: BTreeSet<TopoId> = flange_edges(&p).into_iter().map(|e| e.0).collect();
+    assert_eq!(offered.len(), 8);
+    assert!(loops.iter().flat_map(|l| &l.edges).all(|e| offered.contains(&e.0)));
+    let picked: Vec<String> = loops[0].edges.iter().map(|e| format!("{:?}", e.0)).collect();
+    let tray = flange(&p, &picked, serde_json::json!({})).unwrap();
+    let plain = flange(&p, &ends_edges(&p, &[faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T)].concat()), serde_json::json!({})).unwrap();
+    assert!(close(tray.volume(), plain.volume()));
+    // A window: a second contour of the face, of its own four edges.
+    let w = windowed();
+    let loops = datum_ops::flange_loops(&w);
+    assert_eq!(loops.iter().map(|l| l.edges.len()).collect::<Vec<_>>(), [4, 4, 4, 4]);
+    assert_eq!(flange_edges(&w).len(), 16);
+    assert_eq!(loops[0].face, loops[1].face);
+}
+
+/// A plate of 300 x 200 with a window of 100 x 100.
+fn windowed() -> Body {
+    let rect = serde_json::json!({"points": {"a": [0, 0], "b": [300, 0], "c": [300, 200], "d": [0, 200], "e": [100, 50], "f": [200, 50], "g": [200, 150], "h": [100, 150]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"},
+                  "ef": {"from": "e", "to": "f"}, "fg": {"from": "f", "to": "g"}, "gh": {"from": "g", "to": "h"}, "he": {"from": "h", "to": "e"}}});
+    let s = op(serde_json::json!({"op": "sketch", "sketch": rect})).eval(id("w.sketch"), &[]).unwrap();
+    op(serde_json::json!({"op": "extrude", "z0": 0, "z1": T})).eval(id("w"), &[&s]).unwrap().body().unwrap().clone()
+}
+
+/// One flange on a window's edge, its side not joined to the wall beside it, which looks back along
+/// the edge: it builds, tessellates (inside `flange`) and holds its material; on all four edges
+/// the inner corners are refused as yet, not built wrong.
+#[test]
+fn a_flange_on_a_windows_edge() {
+    let w = windowed();
+    let window = |x: f64, y: f64| x > 50.0 && x < 250.0 && y > 25.0 && y < 175.0;
+    let edges: Vec<String> =
+        flange_edges(&w).into_iter().filter(|(_, e)| e.iter().all(|p| window(p.x, p.y) && p.z == 0.0)).map(|e| format!("{:?}", e.0)).collect();
+    assert_eq!(edges.len(), 4);
+    for e in &edges {
+        let b = flange(&w, std::slice::from_ref(e), serde_json::json!({"height": 20})).unwrap();
+        assert!(close(b.volume() - w.volume(), added(1.0, 100.0, 20.0, 90.0)), "{}", b.volume() - w.volume());
+        let f = unfold_side(&b, false, K).unwrap();
+        assert_eq!(f.bends.len(), 2);
+        assert!(f.overlaps.is_empty(), "{:?}", f.overlaps);
+    }
+    assert!(matches!(flange(&w, &edges, serde_json::json!({"height": 20})), Err(BrepError::Unsupported(m)) if m.contains("inner corner")));
+}
