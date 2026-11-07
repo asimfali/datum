@@ -450,6 +450,9 @@ fn closed(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], dims: FlangeDims
             bounds[b][end(b)] = Some(bb);
         }
     }
+    if dims.corner == Closing::Miter {
+        mitres_in_plane(target, sites, &shapes, g, &mut bounds);
+    }
     // A wall of a flange made before beside an end's corner (D229): the new wall goes to its inner
     // face, the gap short of it; that wall stays as it is.
     for ((.., base), ends) in sites.iter().zip(&mut bounds) {
@@ -465,6 +468,53 @@ fn closed(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], dims: FlangeDims
         }
     }
     Ok(bounds)
+}
+
+/// Mitres between walls of `sites` lying in one plane (rims on a tray's walls, D233): they share no
+/// vertex, and are neighbours by geometry. Two walls not parallel meet where the lines of their
+/// feet do, at the end of each nearer to it; each end takes its nearest neighbour. The mitre runs
+/// through where their feet meet and where their free edges do, square to the plane, `g` apart.
+fn mitres_in_plane(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], shapes: &[Shape], g: f64, bounds: &mut [[Option<Bound>; 2]]) {
+    let feet = |k: usize| sites[k].2.inner.map(|v| shapes[k].turned(target.point(v)));
+    // How far from the corner, the two walls and their ends there, the plane each goes to.
+    type Corner = (f64, [(usize, usize); 2], [Bound; 2]);
+    let mut found: Vec<Corner> = Vec::new();
+    for a in 0..sites.len() {
+        for b in a + 1..sites.len() {
+            let ([a0, a1], [b0, b1]) = (feet(a), feet(b));
+            let (sa, sb) = (&shapes[a], &shapes[b]);
+            let n = sa.inner_normal;
+            let size = [a0, a1, b0, b1].iter().flat_map(|p| p.to_array()).fold(1.0, |m: f64, x| m.max(x.abs()));
+            let turned_apart = n.cross(sb.inner_normal);
+            let one_plane = within_rounding(turned_apart.dot(turned_apart).sqrt(), 1.0) && within_rounding((b0 - a0).dot(n), size);
+            let across = sa.w.cross(sb.w);
+            if !one_plane || within_rounding(across.dot(across).sqrt(), 1.0) {
+                continue;
+            }
+            let (na, nb) = (n.cross(sa.w), n.cross(sb.w));
+            let meet = |p: Vec3, q: Vec3| solve([n, na, nb], [p.dot(n), p.dot(na), q.dot(nb)]);
+            let (Some(foot), Some(free)) = (meet(a0, b0), meet(a0 + sa.along * sa.wall, b0 + sb.along * sb.wall)) else { continue };
+            let nearer = |[p, q]: [Vec3; 2]| {
+                let (dp, dq) = (foot - p, foot - q);
+                if dq.dot(dq) < dp.dot(dp) { (1, dq.dot(dq)) } else { (0, dp.dot(dp)) }
+            };
+            let ((ea, da), (eb, db)) = (nearer([a0, a1]), nearer([b0, b1]));
+            let mut mu = unit(n.cross(free - foot));
+            // `a`'s foot lies on its side of the plane.
+            if ((a0 + a1) * 0.5 - foot).dot(mu) > 0.0 {
+                mu = mu * -1.0;
+            }
+            let at = [Bound { at: free - mu * (0.5 * g), normal: mu }, Bound { at: free + mu * (0.5 * g), normal: mu * -1.0 }];
+            found.push((da.max(db), [(a, ea), (b, eb)], at));
+        }
+    }
+    found.sort_by(|x, y| x.0.total_cmp(&y.0));
+    for (_, [(a, ea), (b, eb)], [ba, bb]) in found {
+        if bounds[a][ea].is_none() && bounds[b][eb].is_none() {
+            bounds[a][ea] = Some(ba);
+            bounds[b][eb] = Some(bb);
+        }
+    }
 }
 
 /// The inner face of the wall of a flange whose side is face `x`, beyond the end `s` of the
@@ -796,7 +846,6 @@ fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<
         Surface::Plane(p) => Some(p),
         _ => None,
     };
-    let skip = crate::unfold::branches(body);
     let sides = crate::unfold::side_faces(body).unwrap_or_default();
     // An end's long edge: a flange on that end (a face across the thickness, not of the sheet's
     // sides, which a wall is).
@@ -842,8 +891,7 @@ fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<
     // Inward, the way the walls beside it stand (D229, was outward in D205): toward the side of
     // the wall its bends turn to (the inner, concave one); a wall with no bend, toward the side
     // picked.
-    let convex = |x: Ix| crate::unfold::chain_through(body, x, &skip).is_ok() && smooth_convex(body, x);
-    let inward = !matches!((convex(wall), convex(face_of(he(across).twin))), (true, _));
+    let inward = !smooth_convex(body, wall);
     let toward_wall = inward != flip;
     let (inner, outer) = if toward_wall { ([a1, a0], [b1, b0]) } else { ([b1, b0], [a1, a0]) };
     // The same whichever edge of the wall is picked: its ends in the order of their IDs.
@@ -935,9 +983,8 @@ fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool, taken
         _ => None,
     };
     let Surface::Plane(end) = body.faces()[f as usize].surface else { return Err(unsupported("it stands on a flat end face")) };
-    let skip = crate::unfold::branches(body);
-    let front = crate::unfold::sheet_sides(body).ok().map(|s| crate::unfold::chain_through(body, s[0], &skip)).and_then(Result::ok);
-    let on_front = |x: Ix| front.as_ref().is_some_and(|c| c.iter().flatten().any(|&y| y == x));
+    let front = crate::unfold::sheet_sides(body).and_then(|s| crate::unfold::side_of(body, s[0])).unwrap_or_default();
+    let on_front = |x: Ix| front.contains(&x);
     let k = usize::from(!on_front(beside(long[0])) == !flip);
     let (hi, ho) = (long[k], long[1 - k]);
     let up = unit(plane(beside(hi)).ok_or_else(|| unsupported("the sheet's sides at the end are flat"))?.normal);
@@ -975,14 +1022,13 @@ pub fn flange_ends(body: &Body) -> Vec<TopoId> {
 /// flat wall's edges on the sheet's flat side faces; each with its ID and its ends.
 pub fn flange_edges(body: &Body) -> Vec<(TopoId, [Vec3; 2])> {
     let he = |h: Ix| body.half_edges()[h as usize];
-    let skip = crate::unfold::branches(body);
     let Ok(on_sides) = crate::unfold::side_faces(body) else { return Vec::new() };
     let flat = |x: Ix| matches!(body.faces()[x as usize].surface, Surface::Plane(_));
     let mut out: Vec<(TopoId, [Vec3; 2])> = Vec::new();
     for &x in on_sides.iter().filter(|&&x| flat(x)) {
         for h in body.loop_half_edges(body.faces()[x as usize].first_loop) {
             let y = body.loops()[he(he(h).twin).loop_ix as usize].face;
-            if on_sides.contains(&y) || skip.contains(&y) || !flat(y) {
+            if on_sides.contains(&y) || !flat(y) {
                 continue;
             }
             let e = &body.edges()[he(h).edge as usize];
@@ -1021,6 +1067,12 @@ fn end_of(body: &Body, f: Ix) -> Option<([Ix; 2], [Ix; 2])> {
         _ => None,
     };
     parallel(plane(long[0])?, plane(long[1])?).then_some((long, short))
+}
+
+/// Whether `x`, worked out from coordinates up to `size`, is no more than the bits a bend's turn
+/// and a plane's normal leave (D229).
+fn within_rounding(x: f64, size: f64) -> bool {
+    x.abs() <= 64.0 * f64::EPSILON * size
 }
 
 fn unit(v: Vec3) -> Vec3 {
@@ -1164,7 +1216,7 @@ fn grow(feature: TopoId, target: &Body, base: Base, dims: FlangeDims, bounds: [O
                 // flush with one) is there, whatever bits the bend's turn and the plane's normal
                 // leave: as near as rounding reaches, no step of no width (D229).
                 let size = [q[0], q[1], b.at].iter().flat_map(|p| p.to_array()).fold(0.0, |m: f64, x| m.max(x.abs()));
-                (top, if foot.abs() <= 64.0 * f64::EPSILON * size { 0.0 } else { foot })
+                (top, if within_rounding(foot, size) { 0.0 } else { foot })
             }
         };
         // Where the side's line meets the free edge's: along the edge and up the wall. Square to
