@@ -1022,8 +1022,13 @@ fn end_base(body: &Body, f: Ix, long: [Ix; 2], short: [Ix; 2], flip: bool, taken
     let w = body.point(i1) - body.point(i0);
     let starts = |h: Ix| he(h).origin == i0 || he(body.next(h)).origin == i0;
     let short = if starts(short[0]) { short } else { [short[1], short[0]] };
-    let joins =
-        short.map(|h| Some(beside(h)).filter(|&x| plane(x).is_some_and(|p| parallel(p.normal, w)) && !taken.contains(&body.faces()[x as usize].id)));
+    // A side joins the face beside it only at a convex corner, where that face looks away from the
+    // edge: at a window's corner it looks back along the edge, across the flange's way.
+    let joins = [0, 1].map(|s: usize| {
+        let past = if s == 0 { w * -1.0 } else { w };
+        Some(beside(short[s]))
+            .filter(|&x| plane(x).is_some_and(|p| parallel(p.normal, w) && p.normal.dot(past) > 0.0) && !taken.contains(&body.faces()[x as usize].id))
+    });
     Ok(Base {
         key: body.faces()[f as usize].id,
         inner: [i0, i1],
