@@ -152,7 +152,9 @@ pub(crate) fn smooth(body: &Body, x: Ix) -> Vec<(Ix, Ix)> {
         .flat_map(|l| body.loop_half_edges(l))
         .filter_map(|h| {
             let y = face_of(he(h).twin);
-            let m = (body.point(he(h).origin) + body.point(he(body.next(h)).origin)) * 0.5;
+            // At a vertex, on both surfaces: the chord of a half circle (a round relief's edge)
+            // has its middle on the cylinder's axis, where the normal is rounding alone.
+            let m = body.point(he(h).origin);
             let planes = [x, y].iter().all(|&f| matches!(body.faces()[f as usize].surface, Surface::Plane(_)));
             (y != x && !planes && normal(x, m).dot(normal(y, m)) > 0.5).then_some((y, h))
         })
@@ -190,11 +192,13 @@ fn bend_classes(body: &Body) -> Vec<Vec<Ix>> {
     };
     let mut classes: Vec<Vec<Ix>> = Vec::new();
     for x in 0..body.faces().len() as Ix {
-        // A bend goes on into a wall; a cut's round wall only into its other half.
-        let Some(a) = axis(x).filter(|_| smooth(body, x).iter().any(|(y, _)| matches!(body.faces()[*y as usize].surface, Surface::Plane(_)))) else {
+        // A bend goes on into a wall and has a face across the sheet; a cut's round wall goes only
+        // into its other half, a round relief's has nothing across it.
+        let goes_on = smooth(body, x).iter().any(|(y, _)| matches!(body.faces()[*y as usize].surface, Surface::Plane(_)));
+        let Some(a) = axis(x).filter(|_| goes_on && crate::sketch::opposite_cylinder(body, x as usize).is_some()) else {
             continue;
         };
-        match classes.iter_mut().find(|c| axis(c[0]).is_some_and(|b| crate::sketch::parallel(b, a))) {
+        match classes.iter_mut().find(|c| axis(c[0]).is_some_and(|b| crate::sketch::nearly_parallel(b, a))) {
             Some(c) => c.push(x),
             None => classes.push(vec![x]),
         }
@@ -576,7 +580,13 @@ pub(crate) fn axes(body: &Body, f: Ix, chain: Option<Vec<Vec<Ix>>>) -> Result<(V
         Surface::Cylinder(c) => Some(c.axis),
         _ => None,
     };
-    if let Some(mut chain) = chain {
+    // A chain keeps Y along its bends only if they all run one way: a tab's bend on a wall's end,
+    // not along the wall's plane, is no axis of the blank (D233).
+    let one_way = |c: &Vec<Vec<Ix>>| {
+        let mut bends = c.iter().flatten().filter_map(|&x| cylinder(x));
+        bends.next().is_none_or(|first| bends.all(|a| crate::sketch::nearly_parallel(first, a)))
+    };
+    if let Some(mut chain) = chain.filter(one_way) {
         let beside = |x: Ix| smooth(body, x).into_iter().find_map(|(y, _)| cylinder(y));
         let a = unit(chain.iter().flatten().find_map(|&x| cylinder(x)).or_else(|| beside(f)).unwrap_or_else(|| upright(chain[0][0])));
         if is_plane(f) {

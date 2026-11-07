@@ -1637,3 +1637,442 @@ fn a_mitre_of_rims_needs_a_gap() {
     assert!(flange(&tray, &edges, serde_json::json!({"height": 10, "corner": "miter"})).is_err());
     assert!(flange(&tray, &edges, serde_json::json!({"height": 10, "corner": "miter", "corner_gap": 1})).is_ok());
 }
+
+// ---- Tabs on a profile's end (D233) ----
+
+/// Width of the profiles below, along Z.
+const LONG: f64 = 300.0;
+
+/// A sheet along the path through `pts`, on its left, `LONG` wide.
+fn profile(pts: &[[f64; 2]]) -> Body {
+    let names: Vec<String> = (0..pts.len()).map(|i| format!("p{i}")).collect();
+    let points: serde_json::Map<String, serde_json::Value> = names.iter().zip(pts).map(|(n, p)| (n.clone(), serde_json::json!(p))).collect();
+    let lines: serde_json::Map<String, serde_json::Value> =
+        (1..pts.len()).map(|i| (format!("l{i}"), serde_json::json!({"from": names[i - 1], "to": names[i]}))).collect();
+    let path = op(serde_json::json!({"op": "sketch", "sketch": {"points": points, "lines": lines}})).eval(id("path"), &[]).unwrap();
+    let s = op(serde_json::json!({"op": "sheet", "thickness": T, "radius": R, "side": "left", "z0": 0, "z1": LONG}));
+    s.eval(id("sheet"), &[&path]).unwrap().body().unwrap().clone()
+}
+
+/// The edges the sheet offers on wall `wall` of the path `pts` at its end `z`: the wall's outer and
+/// inner edge, each with its ID and ends.
+fn cap_edges(b: &Body, pts: &[[f64; 2]], wall: usize, z: f64) -> Vec<(String, [Vec3; 2])> {
+    let (a, c) = (pts[wall], pts[wall + 1]);
+    let len = ((c[0] - a[0]).powi(2) + (c[1] - a[1]).powi(2)).sqrt();
+    let (dx, dy) = ((c[0] - a[0]) / len, (c[1] - a[1]) / len);
+    let found: Vec<(String, [Vec3; 2])> = flange_edges(b)
+        .into_iter()
+        .filter(|(_, e)| e.iter().all(|p| (p.z - z).abs() < 1e-9))
+        .filter(|(_, e)| {
+            let m = (e[0] + e[1]) * 0.5;
+            let (rx, ry) = (m.x - a[0], m.y - a[1]);
+            let (t, n) = (rx * dx + ry * dy, dx * ry - dy * rx);
+            t > 0.0 && t < len && n > -1e-6 && n < T + 1e-6
+        })
+        .map(|(e, p)| (format!("{e:?}"), p))
+        .collect();
+    assert_eq!(found.len(), 2, "wall {wall} at z {z}");
+    found
+}
+
+/// The unit direction of wall `wall` of the path `pts`.
+fn wall_dir(pts: &[[f64; 2]], wall: usize) -> Vec3 {
+    let d = Vec3::new(pts[wall + 1][0] - pts[wall][0], pts[wall + 1][1] - pts[wall][1], 0.0);
+    d * (1.0 / d.dot(d).sqrt())
+}
+
+/// The start of the edge `e` of `b` (its end with the lower vertex ID), the unit way to its other
+/// end and its length.
+fn along(b: &Body, e: [Vec3; 2]) -> (Vec3, Vec3, f64) {
+    let vertex = |p: Vec3| b.vertices().iter().find(|v| (v.point - p).dot(v.point - p) < 1e-18).unwrap().id;
+    let (from, to) = if vertex(e[0]) < vertex(e[1]) { (e[0], e[1]) } else { (e[1], e[0]) };
+    let d = to - from;
+    let len = d.dot(d).sqrt();
+    (from, d * (1.0 / len), len)
+}
+
+fn edge_length(e: [Vec3; 2]) -> f64 {
+    let d = e[1] - e[0];
+    d.dot(d).sqrt()
+}
+
+/// The vertices of the tab on the end z = 0, beyond the sheet.
+fn tab_vertices(b: &Body) -> Vec<Vec3> {
+    (0..b.vertices().len() as u32).map(|v| b.point(v)).filter(|p| p.z < -1e-9).collect()
+}
+
+/// Where the tab of `b` on the edge `e` (of the sheet before it) lies along the edge, from its
+/// start: the least and the greatest distance.
+fn tab_span(before: &Body, b: &Body, e: [Vec3; 2]) -> (f64, f64) {
+    let (from, way, _) = along(before, e);
+    let t: Vec<f64> = tab_vertices(b).iter().map(|p| (*p - from).dot(way)).collect();
+    (t.iter().copied().fold(f64::INFINITY, f64::min), t.iter().copied().fold(f64::NEG_INFINITY, f64::max))
+}
+
+/// Which side of the wall (of direction `d`, through `e`) the tab of `b` lies: positive on its left.
+fn tab_side(b: &Body, e: [Vec3; 2], d: Vec3) -> f64 {
+    let v = tab_vertices(b);
+    let mean = v.iter().fold(Vec3::ZERO, |s, p| s + *p) * (1.0 / v.len() as f64);
+    let m = (e[0] + e[1]) * 0.5;
+    (mean.x - m.x) * -d.y + (mean.y - m.y) * d.x
+}
+
+fn tab(width: f64) -> serde_json::Value {
+    serde_json::json!({"extent": {"kind": "center", "width": width}})
+}
+
+const PROFILES: [(&str, &[[f64; 2]]); 2] =
+    [("V", &[[0.0, 60.0], [0.0, 0.0], [60.0, 0.0]]), ("C", &[[-40.0, 40.0], [0.0, 0.0], [60.0, 0.0], [100.0, 40.0]])];
+
+/// A tab of 20 on a wall's edge at the sheet's end, on every wall of a V and of a C (45 degree
+/// walls too): the volume that of a flange 20 wide (the full flange's by the edge's length), the
+/// blank the full flange's in size and bends, laid whole from either side.
+#[test]
+fn a_tab_on_a_walls_cap_edge_is_a_narrow_flange() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        let base = unfold_side(&b, false, K).unwrap();
+        for wall in 0..pts.len() - 1 {
+            for (edge, e) in cap_edges(&b, pts, wall, 0.0) {
+                let what = format!("{name} wall {wall}");
+                let full = flange(&b, std::slice::from_ref(&edge), serde_json::json!({})).unwrap();
+                let narrow = flange(&b, &[edge], tab(20.0)).unwrap();
+                assert!(close(full.volume() - b.volume(), added(1.0, edge_length(e), 20.0, 90.0)), "{what}: {}", full.volume() - b.volume());
+                assert!(close(narrow.volume() - b.volume(), added(1.0, 20.0, 20.0, 90.0)), "{what}: {}", narrow.volume() - b.volume());
+                let (f, n) = (unfold_side(&full, false, K).unwrap(), unfold_side(&narrow, false, K).unwrap());
+                assert!(close(n.size.x, f.size.x) && close(n.size.y, f.size.y), "{what}: {:?} {:?}", n.size, f.size);
+                assert!(close(n.size.y, LONG + longer(20.0, 90.0)) && close(n.size.x, base.size.x), "{what}: {:?}", n.size);
+                assert_eq!(f.bends.len(), base.bends.len() + 2, "{what}");
+                assert_eq!(n.bends.len(), f.bends.len(), "{what}");
+                assert!(n.overlaps.is_empty(), "{what}: {:?}", n.overlaps);
+                let back = unfold_side(&narrow, true, K).unwrap();
+                assert!(close(back.size.x, n.size.x) && close(back.size.y, n.size.y), "{what}: {:?} {:?}", back.size, n.size);
+                assert_eq!(back.bends.len(), n.bends.len(), "{what}");
+            }
+        }
+    }
+}
+
+/// The width's place along a wall's edge, from the edge's start: in the middle, `offset` off the
+/// start or off the end, or all but `start` and `end`; a width that does not fit is refused.
+#[test]
+fn a_tabs_width_lies_where_the_extent_says() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        for wall in 0..pts.len() - 1 {
+            let (edge, e) = cap_edges(&b, pts, wall, 0.0).remove(0);
+            let len = along(&b, e).2;
+            for (extent, want) in [
+                (serde_json::json!({"kind": "center", "width": 20}), (len / 2.0 - 10.0, len / 2.0 + 10.0)),
+                (serde_json::json!({"kind": "offset", "offset": 5, "width": 20}), (5.0, 25.0)),
+                (serde_json::json!({"kind": "offset", "offset": 5, "width": 20, "from_end": true}), (len - 25.0, len - 5.0)),
+                (serde_json::json!({"kind": "between", "start": 8, "end": 11}), (8.0, len - 11.0)),
+            ] {
+                let t = flange(&b, std::slice::from_ref(&edge), serde_json::json!({"extent": extent})).unwrap();
+                let (lo, hi) = tab_span(&b, &t, e);
+                assert!((lo - want.0).abs() < 1e-7 && (hi - want.1).abs() < 1e-7, "{name} wall {wall} {extent}: {lo} {hi}, wanted {want:?}");
+            }
+            for extent in [
+                serde_json::json!({"kind": "center", "width": len + 4.0}),
+                serde_json::json!({"kind": "offset", "offset": len - 10.0, "width": 20}),
+                serde_json::json!({"kind": "between", "start": len / 2.0 + 1.0, "end": len / 2.0 + 1.0}),
+            ] {
+                let r = flange(&b, std::slice::from_ref(&edge), serde_json::json!({"extent": extent}));
+                assert!(matches!(r, Err(BrepError::Degenerate(_))), "{name} wall {wall} {extent}: {r:?}");
+            }
+        }
+    }
+}
+
+/// The inner and the outer edge of a wall make the same tab, and both together make one.
+#[test]
+fn both_edges_of_a_walls_cap_make_one_tab() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        for wall in 0..pts.len() - 1 {
+            let edges = cap_edges(&b, pts, wall, 0.0);
+            let extra = serde_json::json!({"extent": {"kind": "offset", "offset": 5, "width": 20}});
+            let one = flange(&b, &[edges[0].0.clone()], extra.clone()).unwrap();
+            let other = flange(&b, &[edges[1].0.clone()], extra.clone()).unwrap();
+            let both = flange(&b, &[edges[0].0.clone(), edges[1].0.clone()], extra).unwrap();
+            let what = format!("{name} wall {wall}");
+            assert!(close(one.volume(), other.volume()) && close(one.volume(), both.volume()), "{what}");
+            assert_eq!(sorted_ids(&one), sorted_ids(&other), "{what}");
+            assert_eq!(sorted_ids(&one), sorted_ids(&both), "{what}");
+            let spans: Vec<(f64, f64)> = [&one, &other, &both].iter().map(|t| tab_span(&b, t, edges[0].1)).collect();
+            assert!(spans.iter().all(|s| (s.0 - spans[0].0).abs() < 1e-7 && (s.1 - spans[0].1).abs() < 1e-7), "{what}: {spans:?}");
+        }
+    }
+}
+
+/// A narrow tab turns the way a tab on the whole wall does, flipped or not, and `flip` turns it
+/// the other way.
+#[test]
+fn a_narrow_tab_turns_as_a_full_one() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        for wall in 0..pts.len() - 1 {
+            let d = wall_dir(pts, wall);
+            for (edge, e) in cap_edges(&b, pts, wall, 0.0) {
+                let mut sides = Vec::new();
+                for flip in [false, true] {
+                    let full = flange(&b, std::slice::from_ref(&edge), serde_json::json!({"flip": flip})).unwrap();
+                    let mut j = tab(20.0);
+                    j["flip"] = serde_json::json!(flip);
+                    let narrow = flange(&b, std::slice::from_ref(&edge), j).unwrap();
+                    let (f, n) = (tab_side(&full, e, d), tab_side(&narrow, e, d));
+                    assert!(f * n > 4.0, "{name} wall {wall} flip {flip}: full {f}, narrow {n}");
+                    sides.push(f);
+                }
+                assert!(sides[0] * sides[1] < 0.0, "{name} wall {wall}: {sides:?}");
+            }
+        }
+    }
+}
+
+/// A bend relief beside a tab, square or round: the blank is as large from either side and not
+/// turned against the one without relief, with as many bends; the slots take their material.
+#[test]
+fn a_bend_relief_beside_a_tab_keeps_the_blank() {
+    let (w, d) = (2.0, 3.0);
+    let half_disc = std::f64::consts::PI * 0.125 * w * w;
+    let mut wrong = Vec::new();
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        for wall in 0..pts.len() - 1 {
+            let (edge, _) = cap_edges(&b, pts, wall, 0.0).remove(0);
+            let plain = flange(&b, std::slice::from_ref(&edge), tab(20.0)).unwrap();
+            let (p, p_back) = (unfold_side(&plain, false, K).unwrap(), unfold_side(&plain, true, K).unwrap());
+            for (shape, slot) in [("square", w * d), ("round", w * (d - 0.5 * w) + half_disc)] {
+                let what = format!("{name} wall {wall} {shape}");
+                let mut j = tab(20.0);
+                j["bend_relief"] = serde_json::json!(shape);
+                j["bend_relief_width"] = serde_json::json!(w);
+                j["bend_relief_depth"] = serde_json::json!(d);
+                let r = flange(&b, std::slice::from_ref(&edge), j).unwrap();
+                assert!(close(plain.volume() - r.volume(), 2.0 * slot * T), "{what}: {}", plain.volume() - r.volume());
+                let (front, back) = (unfold_side(&r, false, K).unwrap(), unfold_side(&r, true, K).unwrap());
+                let same = |a: &datum_ops::Flat, b: &datum_ops::Flat| close(a.size.x, b.size.x) && close(a.size.y, b.size.y);
+                if !same(&front, &back) {
+                    wrong.push(format!("{what}: front {:?}, back {:?}", front.size, back.size));
+                }
+                if !same(&front, &p) {
+                    wrong.push(format!("{what}: front {:?}, without relief {:?}", front.size, p.size));
+                }
+                if !same(&back, &p_back) {
+                    wrong.push(format!("{what}: back {:?}, without relief {:?}", back.size, p_back.size));
+                }
+                if front.bends.len() != p.bends.len() || back.bends.len() != p_back.bends.len() {
+                    wrong.push(format!(
+                        "{what}: bends {} {}, without relief {} {}",
+                        front.bends.len(),
+                        back.bends.len(),
+                        p.bends.len(),
+                        p_back.bends.len()
+                    ));
+                }
+                if !front.overlaps.is_empty() {
+                    wrong.push(format!("{what}: overlaps {:?}", front.overlaps));
+                }
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
+
+/// The corners of the tabs' outer faces (horizontal, at the lowest z of `b`), one polygon per tab.
+fn tab_faces(b: &Body) -> Vec<Vec<Vec3>> {
+    let low = b.bounds().0.z;
+    plane_faces(b)
+        .into_iter()
+        .filter(|&(x, nz, _)| nz.abs() > 1.0 - 1e-9 && corners(b, x).iter().all(|p| (p.z - low).abs() < 1e-9))
+        .map(|f| corners(b, f.0))
+        .collect()
+}
+
+/// The wall of the path `pts` nearest to the point `p`.
+fn nearest_wall(pts: &[[f64; 2]], p: Vec3) -> usize {
+    let distance = |i: usize| {
+        let (a, d) = (Vec3::new(pts[i][0], pts[i][1], 0.0), wall_dir(pts, i));
+        let len = Vec3::new(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1], 0.0);
+        let t = (p - a).dot(d).clamp(0.0, len.dot(d));
+        let q = a + d * t - p;
+        libm::hypot(q.x, q.y)
+    };
+    (0..pts.len() - 1).min_by(|&i, &j| distance(i).total_cmp(&distance(j))).unwrap()
+}
+
+/// The edges of the tab faces of `b` on each wall of `pts` that are neither along the wall nor
+/// square to it: its mitres.
+fn mitre_edges(b: &Body, pts: &[[f64; 2]]) -> Vec<Vec<(Vec3, Vec3)>> {
+    let mut found = vec![Vec::new(); pts.len() - 1];
+    for face in tab_faces(b) {
+        let c = face.iter().fold(Vec3::ZERO, |s, p| s + *p) * (1.0 / face.len() as f64);
+        let wall = nearest_wall(pts, c);
+        let d = wall_dir(pts, wall);
+        for (i, &p) in face.iter().enumerate() {
+            let q = face[(i + 1) % face.len()];
+            let u = q - p;
+            let u = u * (1.0 / u.dot(u).sqrt());
+            if u.dot(d).abs() > 1e-6 && u.dot(d).abs() < 1.0 - 1e-6 {
+                found[wall].push((p, q));
+            }
+        }
+    }
+    found
+}
+
+/// The distance between the mitre edges `a` and `b` square to them, if they are parallel.
+fn mitre_gap(a: (Vec3, Vec3), b: (Vec3, Vec3)) -> f64 {
+    let u = a.1 - a.0;
+    let u = u * (1.0 / u.dot(u).sqrt());
+    let v = b.1 - b.0;
+    let v = v * (1.0 / v.dot(v).sqrt());
+    assert!(u.cross(v).dot(u.cross(v)) < 1e-18, "mitres not parallel: {u:?} {v:?}");
+    let r = b.0 - a.0;
+    r.cross(u).dot(r.cross(u)).sqrt()
+}
+
+/// The mitre edge of `edges` nearest to the corner of the path at `p`.
+fn nearest_to(edges: &[(Vec3, Vec3)], p: [f64; 2]) -> (Vec3, Vec3) {
+    let at = Vec3::new(p[0], p[1], 0.0);
+    let d = |e: &(Vec3, Vec3)| {
+        let m = (e.0 + e.1) * 0.5 - at;
+        libm::hypot(m.x, m.y)
+    };
+    *edges.iter().min_by(|a, b| d(a).total_cmp(&d(b))).unwrap()
+}
+
+/// Tabs on all walls of a V and of a C picked together, turned inward, mitred: at each corner the
+/// two mitres are parallel, `g` apart square to them, wherever the walls turn; the blank is laid
+/// whole, the same from either side.
+#[test]
+fn mitred_tabs_on_a_profile_are_a_gap_apart() {
+    let g = 1.0;
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        let edges: Vec<String> = (0..pts.len() - 1).map(|w| cap_edges(&b, pts, w, 0.0).remove(0).0).collect();
+        let t = flange(&b, &edges, serde_json::json!({"corner": "miter", "corner_gap": g})).unwrap();
+        let square = flange(&b, &edges, serde_json::json!({})).unwrap();
+        assert_eq!(tab_faces(&t).len(), pts.len() - 1, "{name}");
+        let mitres = mitre_edges(&t, pts);
+        for corner in 1..pts.len() - 1 {
+            let (a, c) = (nearest_to(&mitres[corner - 1], pts[corner]), nearest_to(&mitres[corner], pts[corner]));
+            let gap = mitre_gap(a, c);
+            assert!((gap - g).abs() < 1e-7, "{name} corner {corner}: gap {gap}");
+        }
+        // One mitre at each end of the tabs between corners, none at the path's ends.
+        let counts: Vec<usize> = mitres.iter().map(Vec::len).collect();
+        let want: Vec<usize> = (0..pts.len() - 1).map(|w| usize::from(w > 0) + usize::from(w < pts.len() - 2)).collect();
+        assert_eq!(counts, want, "{name}");
+        assert!(t.volume() != square.volume());
+        let (f, back) = (unfold_side(&t, false, K).unwrap(), unfold_side(&t, true, K).unwrap());
+        assert!(f.overlaps.is_empty(), "{name}: {:?}", f.overlaps);
+        assert!(close(f.size.x, back.size.x) && close(f.size.y, back.size.y), "{name}: {:?} {:?}", f.size, back.size);
+        assert_eq!(f.bends.len(), unfold_side(&b, false, K).unwrap().bends.len() + 2 * (pts.len() - 1), "{name}");
+    }
+}
+
+/// Tabs on the first two walls of a C, each 20 long from their corner: the end at the corner is
+/// mitred a gap from the other tab's, the end with the rest of its wall beside it stays square, at
+/// the tab's width.
+#[test]
+fn a_tab_end_beside_its_wall_stays_square() {
+    let g = 1.0;
+    let (_, pts) = PROFILES[1];
+    let b = profile(pts);
+    let corner = Vec3::new(pts[1][0], pts[1][1], 0.0);
+    let near = |p: Vec3| (p - corner).dot(p - corner) < 100.0;
+    // A width is measured from the start of the wall's first edge: both walls start away from the
+    // corner here, so `from_end` puts both tabs at it.
+    let walls: Vec<(String, [Vec3; 2])> = (0..2).map(|wall| cap_edges(&b, pts, wall, 0.0).remove(0)).collect();
+    assert!(walls.iter().all(|(_, e)| !near(along(&b, *e).0)));
+    let edges: Vec<String> = walls.iter().map(|w| w.0.clone()).collect();
+    let extent = serde_json::json!({"kind": "offset", "offset": 0, "width": 20, "from_end": true});
+    let t = flange(&b, &edges, serde_json::json!({"extent": extent, "corner": "miter", "corner_gap": g})).unwrap();
+    let faces = tab_faces(&t);
+    assert_eq!(faces.len(), 2);
+    for face in &faces {
+        let c = face.iter().fold(Vec3::ZERO, |s, p| s + *p) * (1.0 / face.len() as f64);
+        let wall = nearest_wall(pts, c);
+        // The tab's length from the end of its edge at the corner, along the wall.
+        let e = walls[wall].1;
+        let (at, other) = if near(e[0]) { (e[0], e[1]) } else { (e[1], e[0]) };
+        let away = (other - at) * (1.0 / edge_length(e));
+        let s: Vec<f64> = face.iter().map(|p| (*p - at).dot(away)).collect();
+        let far = s.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        assert!((far - 20.0).abs() < 1e-7, "wall {wall}: the square end at the width, not {far}");
+        assert_eq!(s.iter().filter(|x| (**x - far).abs() < 1e-9).count(), 2, "wall {wall}: a square end in {face:?}");
+    }
+    let mitres = mitre_edges(&t, pts);
+    assert_eq!(mitres.iter().map(Vec::len).collect::<Vec<_>>(), [1, 1, 0]);
+    let gap = mitre_gap(mitres[0][0], mitres[1][0]);
+    assert!((gap - g).abs() < 1e-7, "gap {gap}");
+    let f = unfold_side(&t, false, K).unwrap();
+    assert!(f.overlaps.is_empty(), "{:?}", f.overlaps);
+    let back = unfold_side(&t, true, K).unwrap();
+    assert!(close(f.size.x, back.size.x) && close(f.size.y, back.size.y), "{:?} {:?}", f.size, back.size);
+}
+
+/// Tabs in the middle of their walls touch no corner: a mitre asked for changes nothing.
+#[test]
+fn tabs_in_the_middle_have_no_mitre() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        let edges: Vec<String> = (0..pts.len() - 1).map(|w| cap_edges(&b, pts, w, 0.0).remove(0).0).collect();
+        let plain = flange(&b, &edges, tab(20.0)).unwrap();
+        let mut j = tab(20.0);
+        j["corner"] = serde_json::json!("miter");
+        j["corner_gap"] = serde_json::json!(1);
+        let mitred = flange(&b, &edges, j).unwrap();
+        assert!(close(plain.volume(), mitred.volume()), "{name}");
+        assert_eq!(plain.faces().len(), mitred.faces().len(), "{name}");
+        assert!(mitre_edges(&mitred, pts).iter().all(Vec::is_empty), "{name}");
+    }
+}
+
+/// A flange on the free end of a narrow tab: the blank grows by its strip, whole.
+#[test]
+fn a_tab_on_a_tab() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        let (edge, _) = cap_edges(&b, pts, 0, 0.0).remove(0);
+        let first = flange(&b, &[edge], tab(20.0)).unwrap();
+        let before: BTreeSet<TopoId> = flange_ends(&b).into_iter().collect();
+        // The tab's free end: 20 wide and as thick as the sheet; the other new ends are the cap's
+        // pieces beside the tab (16 or 18 long).
+        let area = |e: TopoId| first.face_area(first.faces().iter().position(|f| f.id == e).unwrap() as u32);
+        let tips: Vec<String> =
+            flange_ends(&first).into_iter().filter(|e| !before.contains(e) && close(area(*e), 20.0 * T)).map(|e| format!("{e:?}")).collect();
+        assert_eq!(tips.len(), 1, "{name}");
+        let second = flange(&first, &long_edges(&first, &tips[0])[..1], serde_json::json!({"height": 10})).unwrap();
+        let (one, two) = (unfold_side(&first, false, K).unwrap(), unfold_side(&second, false, K).unwrap());
+        assert_eq!(two.bends.len(), one.bends.len() + 2, "{name}");
+        // Which way the blank lies is not asked: its long side grows by the second strip.
+        let dims = |f: &datum_ops::Flat| if f.size.x > f.size.y { (f.size.x, f.size.y) } else { (f.size.y, f.size.x) };
+        assert!(close(dims(&two).0, dims(&one).0 + longer(10.0, 90.0)) && close(dims(&two).1, dims(&one).1), "{name}: {:?} {:?}", two.size, one.size);
+        assert!(two.overlaps.is_empty(), "{name}: {:?}", two.overlaps);
+        let back = unfold_side(&second, true, K).unwrap();
+        assert!(close(back.size.x, two.size.x) && close(back.size.y, two.size.y), "{name}: {:?} {:?}", back.size, two.size);
+    }
+}
+
+/// A tab on each end of the profile (z = 0 and z = 300): both build, the blank grows both ways.
+#[test]
+fn tabs_on_both_ends_of_a_profile() {
+    for (name, pts) in PROFILES {
+        let b = profile(pts);
+        let base = unfold_side(&b, false, K).unwrap();
+        let (low, _) = cap_edges(&b, pts, 0, 0.0).remove(0);
+        let (high, _) = cap_edges(&b, pts, 0, LONG).remove(0);
+        let t = flange(&b, &[low, high], tab(20.0)).unwrap();
+        assert!(close(t.volume() - b.volume(), added(2.0, 20.0, 20.0, 90.0)), "{name}: {}", t.volume() - b.volume());
+        let f = unfold_side(&t, false, K).unwrap();
+        // Both ways: the blank's long side is the sheet's width and the two tabs' strips (which
+        // way it lies is not asked).
+        let (long, short) = if f.size.x > f.size.y { (f.size.x, f.size.y) } else { (f.size.y, f.size.x) };
+        assert!(close(long, LONG + 2.0 * longer(20.0, 90.0)) && close(short, base.size.x), "{name}: {:?}", f.size);
+        assert_eq!(f.bends.len(), base.bends.len() + 4, "{name}");
+        assert!(f.overlaps.is_empty(), "{name}: {:?}", f.overlaps);
+    }
+}

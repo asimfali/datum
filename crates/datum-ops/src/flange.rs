@@ -13,7 +13,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::bent::Corner;
-use crate::sketch::parallel;
+use crate::sketch::{nearly_parallel, parallel, within_rounding};
 
 /// What a flange is: its height from the outer surface of the sheet, square to it up to the
 /// flange's highest point (`along`: for another angle than a right one, along the flange from where
@@ -263,33 +263,53 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         .iter()
         .map(|e| u128::from_str_radix(e, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{e}` is not an edge ID"))))
         .collect::<Result<_, _>>()?;
-    // Narrower than its edge: the end divided first, the flange on its middle (D229).
+    let empty = BTreeSet::new();
+    // Each flange by its edge: the way its width runs and the side it turns to, as the sheet has
+    // them before any of it is divided.
+    let firsts = ids.iter().map(|&e| Ok((start_way(target, e)?, base(target, e, dims.flip, &empty)?))).collect::<Result<Vec<_>, BrepError>>()?;
+    // Narrower than its edge: the end divided first, the flange on its middle (D229). A wall's
+    // strip of the side face is made an end of its own first (D233).
     if !dims.width.is_edge() || dims.flush {
         let mut body = target.clone();
-        let mut middles = Vec::new();
-        let mut ways = Vec::new();
         // Each end once, by either of its long edges; by its face's ID, which stays as the ends
         // beside it are cut (their corners, flush, move).
-        let mut done: Vec<TopoId> = Vec::new();
-        for &e in &ids {
-            let end = end_face(target, e)?;
-            if done.contains(&end) {
+        let mut done: Vec<(TopoId, Vec3, Vec3)> = Vec::new();
+        for (&e, (way, first)) in ids.iter().zip(&firsts) {
+            if done.iter().any(|d| d.0 == first.key) {
                 continue;
             }
-            done.push(end);
-            ways.push(start_way(target, e)?);
-            body = narrowed(feature, &body, end, dims.width, dims.notch, dims.flush.then_some((dims.radius, dims.angle)))?;
+            done.push((first.key, *way, first.up));
+            if !first.end {
+                body = strip_as_end(&body, e)?;
+            }
+            body = narrowed(feature, &body, first.key, dims.width, dims.notch, dims.flush.then_some((dims.radius, dims.angle)))?;
         }
         // Each middle by a long edge, once all are cut: it keeps its end's ID.
-        for end in done {
+        let mut picks = Vec::new();
+        for (end, way, up) in done {
             let f = body.faces().binary_search_by_key(&end, |x| x.id).map_err(|_| BrepError::Invalid("flange: an end lost".into()))? as Ix;
             let ([h, _], _) = end_of(&body, f).ok_or_else(|| BrepError::Invalid("flange: an end's middle is no end".into()))?;
-            middles.push(body.edges()[body.half_edges()[h as usize].edge as usize].id);
+            picks.push((body.edges()[body.half_edges()[h as usize].edge as usize].id, way, up));
         }
-        return flanges_on(feature, &body, &middles, &ways, FlangeDims { width: Width::Edge, flush: false, ..dims });
+        return flanges_on(feature, &body, &picks, FlangeDims { width: Width::Edge, flush: false, ..dims });
     }
-    let ways = ids.iter().map(|&e| start_way(target, e)).collect::<Result<Vec<_>, _>>()?;
-    flanges_on(feature, target, &ids, &ways, dims)
+    let picks: Vec<(TopoId, Vec3, Vec3)> = ids.iter().zip(&firsts).map(|(&e, (way, first))| (e, *way, first.up)).collect();
+    flanges_on(feature, target, &picks, dims)
+}
+
+/// `body` with the strip of the side face over the wall of edge `e` a face of its own, an end a
+/// width can be taken on: the side face left as what stays of it, as a flange on all of the wall
+/// leaves it.
+fn strip_as_end(body: &Body, e: TopoId) -> Result<Body, BrepError> {
+    let Base { key, inner: [i0, i1], outer: [o0, o1], out, gone, kept, .. } = base(body, e, false, &BTreeSet::new())?;
+    let surface = body.faces()[gone[0] as usize].surface;
+    let id = |v: Ix| body.vertices()[v as usize].id;
+    let normal = (body.point(i1) - body.point(i0)).cross(body.point(o1) - body.point(i0));
+    let round = if normal.dot(out) > 0.0 { vec![id(i0), id(i1), id(o1), id(o0)] } else { vec![id(i1), id(i0), id(o0), id(o1)] };
+    let mut faces = kept;
+    faces.push(FaceSpec { id: key, surface, loops: vec![round] });
+    faces.extend((0..body.faces().len() as Ix).filter(|x| !gone.contains(x)).map(|x| body.face_spec(x)));
+    build_with_curves(body.vertices().to_vec(), faces, body.curve_specs())
 }
 
 /// The way from the start of the width of what edge `e` of `target` stands on to its end: the end
@@ -312,14 +332,17 @@ fn start_way(target: &Body, e: TopoId) -> Result<Vec3, BrepError> {
     Ok(if id(from) < id(to) { way } else { way * -1.0 })
 }
 
-/// Flanges on the whole of edges `ids` of `target`, one after another, the start of each width
-/// where `ways` says.
-fn flanges_on(feature: TopoId, target: &Body, ids: &[TopoId], ways: &[Vec3], dims: FlangeDims) -> Result<Body, BrepError> {
+/// Flanges on the whole of `picks` of `target`, one after another: each by its edge, with the way
+/// from its width's start to its end and the side it turns to.
+fn flanges_on(feature: TopoId, target: &Body, picks: &[(TopoId, Vec3, Vec3)], dims: FlangeDims) -> Result<Body, BrepError> {
     // Each flange once, by the corners of what it stands on.
     let mut sites: Vec<(TopoId, [TopoId; 4], Base)> = Vec::new();
     let mut site_ways: Vec<Vec3> = Vec::new();
-    for (&e, &way) in ids.iter().zip(ways) {
-        let base = base(target, e, dims.flip, &BTreeSet::new())?;
+    for &(e, way, up) in picks {
+        let mut base = base(target, e, dims.flip, &BTreeSet::new())?;
+        if base.up.dot(up) < 0.0 {
+            base = self::base(target, e, !dims.flip, &BTreeSet::new())?;
+        }
         let corners = [base.inner[0], base.inner[1], base.outer[0], base.outer[1]].map(|v| target.vertices()[v as usize].id);
         let mut sorted = corners;
         sorted.sort();
@@ -476,6 +499,15 @@ fn closed(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], dims: FlangeDims
 /// through where their feet meet and where their free edges do, square to the plane, `g` apart.
 fn mitres_in_plane(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], shapes: &[Shape], g: f64, bounds: &mut [[Option<Bound>; 2]]) {
     let feet = |k: usize| sites[k].2.inner.map(|v| shapes[k].turned(target.point(v)));
+    let sides = crate::unfold::side_faces(target).unwrap_or_default();
+    // An end of a narrowed flange with the rest of its end beside it stays where it is: it is no
+    // corner of the sheet. The side face over a bend beside it, as beside a whole wall, is.
+    let free_end = |k: usize, s: usize| {
+        let base = &sites[k].2;
+        !base.end
+            || base.beside[s]
+                .is_none_or(|x| target.faces()[x as usize].surface != target.faces()[base.gone[0] as usize].surface || side_face(target, x, &sides))
+    };
     // How far from the corner, the two walls and their ends there, the plane each goes to.
     type Corner = (f64, [(usize, usize); 2], [Bound; 2]);
     let mut found: Vec<Corner> = Vec::new();
@@ -485,10 +517,8 @@ fn mitres_in_plane(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], shapes:
             let (sa, sb) = (&shapes[a], &shapes[b]);
             let n = sa.inner_normal;
             let size = [a0, a1, b0, b1].iter().flat_map(|p| p.to_array()).fold(1.0, |m: f64, x| m.max(x.abs()));
-            let turned_apart = n.cross(sb.inner_normal);
-            let one_plane = within_rounding(turned_apart.dot(turned_apart).sqrt(), 1.0) && within_rounding((b0 - a0).dot(n), size);
-            let across = sa.w.cross(sb.w);
-            if !one_plane || within_rounding(across.dot(across).sqrt(), 1.0) {
+            let one_plane = nearly_parallel(n, sb.inner_normal) && within_rounding((b0 - a0).dot(n), size);
+            if !one_plane || nearly_parallel(sa.w, sb.w) {
                 continue;
             }
             let (na, nb) = (n.cross(sa.w), n.cross(sb.w));
@@ -499,6 +529,9 @@ fn mitres_in_plane(target: &Body, sites: &[(TopoId, [TopoId; 4], Base)], shapes:
                 if dq.dot(dq) < dp.dot(dp) { (1, dq.dot(dq)) } else { (0, dp.dot(dp)) }
             };
             let ((ea, da), (eb, db)) = (nearer([a0, a1]), nearer([b0, b1]));
+            if !free_end(a, ea) || !free_end(b, eb) {
+                continue;
+            }
             let mut mu = unit(n.cross(free - foot));
             // `a`'s foot lies on its side of the plane.
             if ((a0 + a1) * 0.5 - foot).dot(mu) > 0.0 {
@@ -596,11 +629,6 @@ fn end_by_edge(target: &Body, e: TopoId) -> Result<(Ix, Ix, [Ix; 2]), BrepError>
         .filter(|&g| !sides.contains(&face_of(g)))
         .find_map(|g| end_of(target, face_of(g)).filter(|(long, _)| long.contains(&g)).map(|(long, _)| (face_of(g), g, long)))
         .ok_or_else(|| BrepError::Unsupported("flange: a width on a wall's edge along the sheet's side comes later".into()))
-}
-
-/// The ID of the end whose long edge is `e`.
-fn end_face(target: &Body, e: TopoId) -> Result<TopoId, BrepError> {
-    end_by_edge(target, e).map(|(f, ..)| target.faces()[f as usize].id)
 }
 
 /// `target` with the end `end_id` divided across at the flange's width `width`: a
@@ -877,7 +905,7 @@ fn base(body: &Body, e: TopoId, flip: bool, taken: &BTreeSet<TopoId>) -> Result<
         .filter_map(|g| {
             let x = face_of(he(g).twin);
             let p = plane(x)?;
-            (x != wall && sides.contains(&x) && parallel(p.normal, pw.normal)).then(|| (g, (p.origin - pw.origin).dot(unit(pw.normal)).abs()))
+            (x != wall && sides.contains(&x) && nearly_parallel(p.normal, pw.normal)).then(|| (g, (p.origin - pw.origin).dot(unit(pw.normal)).abs()))
         })
         .filter(|(_, d)| *d > 0.0)
         .min_by(|a, b| a.1.total_cmp(&b.1))
@@ -1066,13 +1094,7 @@ fn end_of(body: &Body, f: Ix) -> Option<([Ix; 2], [Ix; 2])> {
         Surface::Plane(p) => Some(p.normal),
         _ => None,
     };
-    parallel(plane(long[0])?, plane(long[1])?).then_some((long, short))
-}
-
-/// Whether `x`, worked out from coordinates up to `size`, is no more than the bits a bend's turn
-/// and a plane's normal leave (D229).
-fn within_rounding(x: f64, size: f64) -> bool {
-    x.abs() <= 64.0 * f64::EPSILON * size
+    nearly_parallel(plane(long[0])?, plane(long[1])?).then_some((long, short))
 }
 
 fn unit(v: Vec3) -> Vec3 {
