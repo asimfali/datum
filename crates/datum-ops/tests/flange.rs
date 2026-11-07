@@ -1117,29 +1117,93 @@ fn a_plane_through_a_walls_end_leaves_no_step() {
     }
 }
 
-/// Rims on two neighbouring walls of a tray: the sheet branches past flanges on its sides. Not laid
-/// out yet, so refused: the rim's own chain used to pass for the sheet, a blank of 100 × 2 (D233).
-/// Rims on two opposite walls still lie out, along the chain through the plate.
+/// A rim on the top of each of the four walls of a tray: the blank is a tree of strips, a cross
+/// with a rim on each arm, however many rims there are.
 #[test]
-fn rims_on_neighbouring_walls_get_no_wrong_blank() {
+fn rims_on_all_four_walls_lie_out_on_the_tree() {
     let p = plate();
     let ends = [faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T)].concat();
     let tray = flange(&p, &ends_edges(&p, &ends), serde_json::json!({})).unwrap();
+    // The tops, before any rim: a rimmed body has no ends left to ask for.
     let tops: Vec<String> = flange_ends(&tray).iter().map(|e| format!("{e:?}")).collect();
+    assert_eq!(tops.len(), 4);
+    let grow = 2.0 * (longer(20.0, 90.0) + longer(10.0, 90.0));
+    let (long_side, short_side) = (100.0 + grow, 60.0 + grow);
     let rim = |b: &Body, top: &str| flange(b, &long_edges(b, top)[..1], serde_json::json!({"height": 10})).unwrap();
-    // The wall across the plate from the first is the one as long.
-    let area = |face: &str| tray.face_area((0..tray.faces().len()).find(|&x| hex(&tray, x) == face).unwrap() as u32);
-    let far = tops[1..].iter().find(|t| close(area(t), area(&tops[0]))).unwrap();
-    let near = tops[1..].iter().find(|t| *t != far).unwrap();
-    let one = rim(&tray, &tops[0]);
-    let opposite = rim(&one, far);
-    let size = unfold_side(&opposite, false, K).unwrap().size;
-    let across = 160.0 - area(&tops[0]) / T + 2.0 * (longer(20.0, 90.0) + longer(10.0, 90.0));
-    assert!(close(size.x, across) || close(size.y, across), "{size:?}, {across}");
-    let beside = rim(&opposite, near);
-    let err = unfold_side(&beside, false, K).unwrap_err();
-    assert!(matches!(err, BrepError::Unsupported(ref m) if m.contains("branches")), "{err}");
-    // The plate stays the sheet's side, however far the rims reach.
-    let sides = datum_ops::sheet_sides(&beside).unwrap();
-    assert!(close(beside.face_area(sides[0]), 100.0 * 60.0), "{}", beside.face_area(sides[0]));
+    let mut body = tray.clone();
+    let (mut along_x, mut along_y) = (0.0, 0.0);
+    for (n, top) in tops.iter().enumerate() {
+        body = rim(&body, top);
+        let size = unfold_side(&body, false, K).unwrap().size;
+        // A wall as wide as the plate's long side stands on a long end and reaches along Y.
+        let wide = (0..tray.faces().len()).find(|&x| hex(&tray, x) == *top).map(|x| tray.face_area(x as u32) / T).unwrap();
+        if close(wide, 100.0) {
+            along_y += 1.0
+        } else {
+            along_x += 1.0
+        }
+        let (x, y) =
+            (100.0 + 2.0 * longer(20.0, 90.0) + along_x * longer(10.0, 90.0), 60.0 + 2.0 * longer(20.0, 90.0) + along_y * longer(10.0, 90.0));
+        // A rim on the walls of one class alone makes that class the one Y runs along.
+        assert!((close(size.x, x) && close(size.y, y)) || (close(size.x, y) && close(size.y, x)), "{} rims: {size:?}, {x} x {y}", n + 1);
+    }
+    let f = unfold_side(&body, false, K).unwrap();
+    // Rims on all walls: the blank lies the way the tray's does.
+    assert!(close(f.size.x, short_side) && close(f.size.y, long_side), "{:?}, {short_side} x {long_side}", f.size);
+    let plain = unfold_side(&tray, false, K).unwrap().size;
+    assert!(plain.x < plain.y, "{plain:?}");
+    assert_eq!(f.bends.len(), 16);
+    let ids: BTreeSet<TopoId> = f.bend_ids.iter().copied().collect();
+    assert_eq!(ids.len(), f.bend_ids.len());
+    assert!(f.overlaps.is_empty(), "{:?}", f.overlaps);
+}
+
+/// Two walls on neighbouring ends of a plate, each grown by `to` past the plate's corner, away from
+/// the plate (D229): on the blank the strip of one wall lies over the strip of the other at the
+/// corner. The plate's corner at the origin, one wall of 100 along X grown to x = -30, one of 60
+/// along Y grown to y = -30. Without the growing, the blank has no overlap.
+#[test]
+fn a_blank_lying_on_itself_is_laid_and_says_where() {
+    let p = plate();
+    let (long, short) = (faces_of_area(&p, 100.0 * T), faces_of_area(&p, 60.0 * T));
+    let at = |f: &String| centroid(&p, (0..p.faces().len()).find(|&x| hex(&p, x) == *f).unwrap());
+    let along_x = long_edges(&p, long.iter().find(|f| at(f).y < 30.0).unwrap());
+    let along_y = long_edges(&p, short.iter().find(|f| at(f).x < 50.0).unwrap());
+    let plain = flange(&flange(&p, &along_x[..1], serde_json::json!({})).unwrap(), &along_y[..1], serde_json::json!({})).unwrap();
+    let flat = unfold_side(&plain, false, K).unwrap();
+    assert!(flat.overlaps.is_empty(), "{:?}", flat.overlaps);
+    let past_x = [("x", work_plane([-30.0, 0.0, 0.0], [1.0, 0.0, 0.0]))];
+    let past_y = [("y", work_plane([0.0, -30.0, 0.0], [0.0, 1.0, 0.0]))];
+    let first = flange_to(&p, &along_x[..1], &past_x, serde_json::json!({"start": {"plane": "x"}}), serde_json::json!({})).unwrap();
+    let both = flange_to(&first, &along_y[..1], &past_y, serde_json::json!({"end": {"plane": "y"}}), serde_json::json!({})).unwrap();
+    let flat = unfold_side(&both, false, K).unwrap();
+    // The plate lies 30 in from each side of the blank; each wall strip reaches `longer` out from the
+    // plate, its straight part (the wall, 20 less the bend's set-back) the outer 16 of it.
+    assert!(close(flat.size.x, 60.0 + 30.0) && close(flat.size.y, 100.0 + 30.0), "{:?}", flat.size);
+    assert_eq!(flat.overlaps.len(), 1, "{:?}", flat.overlaps);
+    let [lo, hi] = flat.overlaps[0];
+    assert!(lo.x >= 0.0 && lo.y >= 0.0 && hi.x <= flat.size.x && hi.y <= flat.size.y, "{lo:?} {hi:?}");
+    let wall = 20.0 - (R + T);
+    assert!(close(hi.x - lo.x, wall) && close(hi.y - lo.y, wall), "{lo:?} {hi:?}");
+    // Across the corner, the walls' ends reach the same way out from the plate.
+    let out = 30.0 - longer(20.0, 90.0);
+    assert!(close(lo.x, out), "{lo:?}");
+    let middle = out + wall / 2.0;
+    assert!(lo.x < middle && middle < hi.x && lo.y < flat.size.y - middle && flat.size.y - middle < hi.y, "{lo:?} {hi:?}");
+}
+
+/// A short flush flange with a round relief: the blank is as large seen from either side. (The back
+/// side once came out 4 larger.)
+#[test]
+fn a_blank_from_either_side_is_as_large() {
+    let p = plate();
+    for face in faces_of_area(&p, 100.0 * T) {
+        for edge in long_edges(&p, &face) {
+            let extra = serde_json::json!({"bend_position": "flush", "extent": {"kind": "center", "width": 40},
+                "bend_relief": "round", "bend_relief_width": 2, "bend_relief_depth": 2});
+            let b = flange(&p, &[edge], extra).unwrap();
+            let (front, back) = (unfold_side(&b, false, K).unwrap().size, unfold_side(&b, true, K).unwrap().size);
+            assert!(close(front.x, back.x) && close(front.y, back.y), "{front:?} {back:?}");
+        }
+    }
 }

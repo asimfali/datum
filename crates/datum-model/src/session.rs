@@ -1347,6 +1347,10 @@ impl Session {
                         v["height"] = json!(f.size.y);
                         v["pieces"] = json!({"lines": lines, "arcs": arcs, "circles": circles});
                         v["bend_lines"] = json!(f.bends.len());
+                        if !f.overlaps.is_empty() {
+                            let places: Vec<Value> = f.overlaps.iter().map(|[a, b]| json!([[a.x, a.y], [b.x, b.y]])).collect();
+                            v["overlaps"] = json!(places);
+                        }
                     }
                     Err(e) => v["error"] = json!(e),
                 }

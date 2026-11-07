@@ -6705,7 +6705,18 @@ impl Viewer {
         }
         let Some(m) = &self.model else { return };
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
-            Some(Ok(f)) => self.flat.show(ui, f),
+            Some(Ok(f)) => {
+                if !f.overlaps.is_empty() {
+                    let places = f.overlaps.len().to_string();
+                    let text = self.i18n.f(
+                        "flat-overlap",
+                        "The blank lies on itself in { $places } place(s), marked in red: metal on metal, it can't be cut in one piece until those corners are cut (a corner joint or a relief).",
+                        &[("places", &places)],
+                    );
+                    ui.colored_label(ui.visuals().warn_fg_color, text);
+                }
+                self.flat.show(ui, f);
+            }
             Some(Err(e)) => {
                 ui.colored_label(
                     ui.visuals().error_fg_color,
