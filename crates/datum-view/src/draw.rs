@@ -1156,11 +1156,11 @@ impl Draft {
         if self.tool == Tool::Offset && edit.field.is_none() {
             let text = match (&self.offset, self.midline, &self.wall) {
                 (_, true, None) => i18n.t("midline-first", "Middle line: click one wall (Tab: offset)").into(),
-                (_, true, Some(_)) => i18n.t("midline-second", "Middle line: click the other wall, of the same width all along").into(),
+                (_, true, Some(_)) => i18n.t("midline-second", "Middle line: click the other wall").into(),
                 (Some((_, v)), false, _) => {
                     i18n.f("offset-size", "Offset { $v } (Shift: both sides; Tab: middle line)", &[("v", &short(*v).to_string())])
                 }
-                (None, false, _) => i18n.t("offset-type-size", "Type the offset").into(),
+                (None, false, _) => i18n.t("offset-type-size", "Type the offset (Tab: middle line)").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }

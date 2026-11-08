@@ -56,8 +56,9 @@ pub fn plan(edit: &SketchEdit, dx: f64, dy: f64, height: f64, size: &(Json, f64)
     Some(Plan { patch: patch.done()?, gone: Vec::new(), added })
 }
 
-/// The middle line of a channel of one width (D245): between wall `wall`, picked first, and
-/// the chain under pixel offset `(dx, dy)`, as construction geometry (it bounds no region).
+/// The middle line (D245) between wall `wall`, picked first, and the chain under pixel offset
+/// `(dx, dy)`, as construction geometry (it bounds no region). Two lines alone: the axis one
+/// mirrors onto the other, parallel or closing in (`between_lines`). Chains: of one width.
 /// Each piece of the first wall moved by the width must lie on the other's (parallel lines,
 /// concentric arcs, as near as the sketch can tell, D228); two concentric circles make a circle.
 /// It is the first wall's offset by half the width, each straight piece held as the axis of
@@ -92,6 +93,12 @@ pub fn midline(edit: &SketchEdit, wall: &str, dx: f64, dy: f64, height: f64) -> 
         return Some(Plan { patch: patch.done()?, gone: Vec::new(), added });
     }
     let (a, b) = (chain(&sk, wall)?, chain(&sk, &other)?);
+    if let ([x], [y]) = (&a[..], &b[..])
+        && x.key == "lines"
+        && y.key == "lines"
+    {
+        return between_lines(&sk, &mut patch, x, y).and_then(|added| Some(Plan { patch: patch.done()?, gone: Vec::new(), added }));
+    }
     let shapes = |c: &[Step]| c.iter().map(|s| Shape::of(p, &s.curve)).collect::<Option<Vec<_>>>();
     let (sa, sb) = (shapes(&a)?, shapes(&b)?);
     // How far apart a piece of the first wall and one of the other are, if they run alike.
@@ -132,6 +139,61 @@ pub fn midline(edit: &SketchEdit, wall: &str, dx: f64, dy: f64, height: f64) -> 
         patch.constrain(json!({"type": "symmetric", "points": [a[k].start, q], "line": copies[k]}));
     }
     Some(Plan { patch: patch.done()?, gone: Vec::new(), added })
+}
+
+/// The middle line of two lines alone: the axis one mirrors onto the other, parallel or not (the
+/// bisector between them where they meet), as construction, over the stretch both share along it
+/// (or both, if they share none). Held as the axis of symmetry of each end of the first and its
+/// mirror, held on the second: it stays the axis however either moves.
+fn between_lines(sk: &Sketch, patch: &mut Patch, x: &Step, y: &Step) -> Option<Polylines> {
+    let (Shape::Line(a0, a1), Shape::Line(b0, b1)) = (Shape::of(sk.p, &x.curve)?, Shape::of(sk.p, &y.curve)?) else { return None };
+    let unit = |u: [f64; 2]| {
+        let l = libm::hypot(u[0], u[1]);
+        [u[0] / l, u[1] / l]
+    };
+    let (ua, mut ub) = (unit(sub(a1, a0)), unit(sub(b1, b0)));
+    if dot(ua, ub) < 0.0 {
+        ub = [-ub[0], -ub[1]];
+    }
+    let d = unit([ua[0] + ub[0], ua[1] + ub[1]]);
+    // A point of the axis: where the lines meet, or, parallel, halfway across.
+    let n = cross(ua, ub);
+    let o = if n == 0.0 {
+        let t = dot(sub(b0, a0), ua);
+        let foot = [a0[0] + ua[0] * t, a0[1] + ua[1] * t];
+        [(b0[0] + foot[0]) * 0.5, (b0[1] + foot[1]) * 0.5]
+    } else {
+        let t = cross(sub(b0, a0), ub) / n;
+        [a0[0] + ua[0] * t, a0[1] + ua[1] * t]
+    };
+    // The axis that mirrors the first line onto the second, of the two through `o`.
+    let mirror = |q: [f64; 2]| {
+        let t = dot(sub(q, o), d);
+        [2.0 * (o[0] + d[0] * t) - q[0], 2.0 * (o[1] + d[1] * t) - q[1]]
+    };
+    let along = |q: [f64; 2]| dot(sub(q, o), d);
+    let (sa, sb) = ([along(a0), along(a1)], [along(b0), along(b1)]);
+    let (lo, hi) = (sa[0].min(sa[1]).max(sb[0].min(sb[1])), sa[0].max(sa[1]).min(sb[0].max(sb[1])));
+    let (lo, hi) = if lo < hi { (lo, hi) } else { (sa[0].min(sa[1]).min(sb[0].min(sb[1])), sa[0].max(sa[1]).max(sb[0].max(sb[1]))) };
+    let ends = [[o[0] + d[0] * lo, o[1] + d[1] * lo], [o[0] + d[0] * hi, o[1] + d[1] * hi]];
+    let names: Vec<String> = ends
+        .iter()
+        .map(|e| {
+            let q = patch.fresh("p");
+            patch.set("points", &q, json!(e));
+            q
+        })
+        .collect();
+    let m = patch.fresh("l");
+    patch.set("lines", &m, json!({"from": names[0], "to": names[1], "construction": true}));
+    let (fa, ta) = (sk.json()["lines"][&x.curve]["from"].as_str()?.to_string(), sk.json()["lines"][&x.curve]["to"].as_str()?.to_string());
+    for (end, at) in [(fa, a0), (ta, a1)] {
+        let q = patch.fresh("p");
+        patch.set("points", &q, json!(mirror(at)));
+        patch.constrain(json!({"type": "on", "point": q, "curve": y.curve}));
+        patch.constrain(json!({"type": "symmetric", "points": [end, q], "line": m}));
+    }
+    Some(vec![ends.to_vec()])
 }
 
 /// A value as an expression's operand: a number, or an expression in brackets.
@@ -575,19 +637,63 @@ mod tests {
         assert_eq!(line(&e, "l2"), [[17.0, 10.0], [17.0, 20.0]]);
     }
 
-    /// Walls that are not of one width (they close in): no middle line of lines and arcs, nothing
-    /// made.
+    /// A wall that turns a corner against a straight one: not of one width, no middle line of
+    /// lines and arcs, nothing made.
     #[test]
     fn no_middle_line_where_the_width_changes() {
         let mut e = editor(
-            json!({"points": {"a": [0, 0], "b": [20, 0], "c": [0, 6], "d": [20, 3]},
-                   "lines": {"low": {"from": "a", "to": "b"}, "high": {"from": "c", "to": "d"}}}),
+            json!({"points": {"a": [0, 0], "b": [10, 0], "f": [20, 5], "c": [0, 6], "d": [20, 6]},
+                   "lines": {"low1": {"from": "a", "to": "b"}, "low2": {"from": "b", "to": "f"}, "high": {"from": "c", "to": "d"}}}),
             false,
         );
         e.draft.tool = Tool::Offset;
         e.draft.midline = true;
-        click_at(&mut e, [10.0, 0.0], false);
-        assert!(click_at(&mut e, [10.0, 4.5], false).is_none());
+        click_at(&mut e, [5.0, 0.0], false);
+        assert!(click_at(&mut e, [10.0, 6.0], false).is_none());
         assert!(e.json["sketch"]["lines"].get("l1").is_none());
+    }
+
+    /// Two lines closing in (sketch_test6): the middle line is the bisector between them,
+    /// construction, each end of the first mirrored onto the second across it; moved, the second
+    /// line keeps it the bisector.
+    #[test]
+    fn two_lines_closing_in_have_their_bisector() {
+        let mut e = editor(
+            json!({"points": {"a": [0, 0], "b": [0, 20], "c": [10, 0], "d": [6, 20]},
+                   "lines": {"left": {"from": "a", "to": "b"}, "right": {"from": "c", "to": "d"}},
+                   "constraints": [{"type": "fix", "point": "a"}, {"type": "fix", "point": "b"}, {"type": "fix", "point": "c"}]}),
+            false,
+        );
+        e.draft.tool = Tool::Offset;
+        e.draft.midline = true;
+        click_at(&mut e, [0.0, 10.0], false);
+        let patch = click_at(&mut e, [8.0, 10.0], false).unwrap();
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+        let m = patch["lines"].as_object().unwrap().keys().next().unwrap().clone();
+        assert_eq!(patch["lines"][&m]["construction"], json!(true));
+        let bisects = |e: &crate::sketch::SketchEdit| {
+            let p = e.placed.as_ref().unwrap();
+            let q = |n: &str| p.solved.points[n];
+            let l = &p.lines[&m];
+            let (m0, m1) = (q(&l.from), q(&l.to));
+            // Its middle as far from one wall as from the other.
+            let off = |x: datum_math::Vec2, p0: datum_math::Vec2, p1: datum_math::Vec2| {
+                ((p1.x - p0.x) * (x.y - p0.y) - (p1.y - p0.y) * (x.x - p0.x)).abs() / libm::hypot(p1.x - p0.x, p1.y - p0.y)
+            };
+            let mid = datum_math::Vec2::new(0.5 * (m0.x + m1.x), 0.5 * (m0.y + m1.y));
+            let apart = (off(mid, q("a"), q("b")) - off(mid, q("c"), q("d"))).abs();
+            // The angle it makes with each wall.
+            let angle = |p0: datum_math::Vec2, p1: datum_math::Vec2| {
+                let (u, v) = ([p1.x - p0.x, p1.y - p0.y], [m1.x - m0.x, m1.y - m0.y]);
+                ((u[0] * v[0] + u[1] * v[1]) / (libm::hypot(u[0], u[1]) * libm::hypot(v[0], v[1]))).abs()
+            };
+            (apart, (angle(q("a"), q("b")) - angle(q("c"), q("d"))).abs())
+        };
+        let (d, t) = bisects(&e);
+        assert!(d < 1e-9 && t < 1e-9, "{d} {t}");
+        // The free end of the second wall moved: still the bisector.
+        e.apply(serde_json::from_value(json!({"points": {"d": [9, 20]}})).unwrap());
+        let (d, t) = bisects(&e);
+        assert!(d < 1e-9 && t < 1e-9, "{d} {t}");
     }
 }
