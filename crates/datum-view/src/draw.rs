@@ -1072,6 +1072,14 @@ impl Draft {
         if self.tool == Tool::Dimension && !self.picks.is_empty() && edit.field.is_none() {
             let text = match edit.dimension(&self.picks, spot.at, self.axis) {
                 Some((c, _, now)) => {
+                    // Its dimension line as it will stand (D243): which kind the click makes.
+                    if let Ok(p) = &edit.placed
+                        && let Some((_, segments)) = edit.place(p, &c)
+                    {
+                        for [a, b] in segments {
+                            dashed(painter, &[screen(a), screen(b)], egui::Stroke::new(1.4, DRAFT), 5.0, 3.0);
+                        }
+                    }
                     let kind = match c["type"].as_str() {
                         Some("horizontal_distance") => "H ",
                         Some("vertical_distance") => "V ",
