@@ -1288,12 +1288,66 @@ impl SketchEdit {
         p.circles.get(name).map(|c| vec![c.center.clone()]).unwrap_or_default()
     }
 
-    /// Labels of the dimensions and reference dimensions, placed by what they measure.
-    pub fn labels(&self) -> Vec<Label> {
-        let Ok(p) = &self.placed else { return Vec::new() };
+    /// Where dimension `c` (a constraint or a reference dimension, as written) stands on placed
+    /// sketch `p`: its label's place (by its points, its line, or its arc) and its dimension line
+    /// (D243): from a point square to the line; between two points; a horizontal or vertical one
+    /// level with the label, with extension lines from both points, as drawn. One place for the
+    /// labels and the dimension being placed.
+    pub(crate) fn place(&self, p: &Placed, c: &Json) -> Option<([f64; 2], Segments)> {
         let at = |n: &Json| n.as_str().and_then(|n| p.solved.points.get(n)).map(|v| [v.x, v.y]);
         let mid = |a: [f64; 2], b: [f64; 2]| [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
         let line = |n: &Json| n.as_str().and_then(|n| Self::curve_points(p, n)).filter(|v| v.len() == 2).map(|v| (v[0], v[1]));
+
+        match c["type"].as_str()? {
+            "distance" => {
+                let (a, b) = (at(&c["points"][0])?, at(&c["points"][1])?);
+                Some((mid(a, b), vec![[a, b]]))
+            }
+            kind @ ("horizontal_distance" | "vertical_distance") => {
+                let (a, b) = (at(&c["points"][0])?, at(&c["points"][1])?);
+                let m = mid(a, b);
+                let k = usize::from(kind == "horizontal_distance");
+                let on = |q: [f64; 2]| if k == 1 { [q[0], m[1]] } else { [m[0], q[1]] };
+                Some((m, vec![[a, on(a)], [on(a), on(b)], [on(b), b]]))
+            }
+            "length" => c["line"].as_str().and_then(|n| Self::middle(p, n)).map(|m| (m, Vec::new())),
+            "point_line" => {
+                let (q, (a, b)) = (at(&c["point"])?, line(&c["line"])?);
+                // Between parallel lines (the point an end of one, as the dimension tool
+                // writes it): across a third of where they overlap, as drawings place them, not
+                // down whatever side runs through the point; two such dimensions across a
+                // rectangle then stand apart, and so do their labels.
+                let (n, target) = (c["point"].as_str()?, c["line"].as_str()?);
+                let side = p.lines.iter().filter(|(m, l)| m.as_str() != target && (l.from == n || l.to == n)).find_map(|(_, l)| {
+                    let (f, t) = (at(&json!(l.from))?, at(&json!(l.to))?);
+                    crate::draw::parallel([t[0] - f[0], t[1] - f[1]], [b[0] - a[0], b[1] - a[1]]).then_some((f, t))
+                });
+                match side {
+                    Some((f, t)) => {
+                        let u = [b[0] - a[0], b[1] - a[1]];
+                        let along = |x: [f64; 2]| ((x[0] - a[0]) * u[0] + (x[1] - a[1]) * u[1]) / (u[0] * u[0] + u[1] * u[1]);
+                        let (sf, st) = (along(f), along(t));
+                        let (lo, hi) = (sf.min(st).max(0.0), sf.max(st).min(1.0));
+                        let s = if lo <= hi { lo + (hi - lo) / 3.0 } else { sf + (st - sf) / 3.0 };
+                        let on = [a[0] + u[0] * s, a[1] + u[1] * s];
+                        let from = foot(on, f, t);
+                        Some((mid(from, on), vec![[from, on]]))
+                    }
+                    None => {
+                        let f = foot(q, a, b);
+                        Some((mid(q, f), vec![[q, f]]))
+                    }
+                }
+            }
+            "angle" => Some((angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?), Vec::new())),
+            "radius" | "arc_length" | "arc_angle" => c["arc"].as_str().and_then(|n| Self::middle(p, n)).map(|m| (m, Vec::new())),
+            _ => None,
+        }
+    }
+
+    /// Labels of the dimensions and reference dimensions, placed by what they measure.
+    pub fn labels(&self) -> Vec<Label> {
+        let Ok(p) = &self.placed else { return Vec::new() };
         let lookup = |n: &str| self.params.get(n).copied().ok_or_else(|| datum_math::expr::ExprError::Unknown(n.to_string()));
         let shown = |v: &Json| match v {
             Json::String(e) => {
@@ -1302,62 +1356,12 @@ impl SketchEdit {
             }
             v => v.as_f64().map_or_else(String::new, short),
         };
-        // Where a dimension's label stands (by its points, its line, or its arc), and its
-        // dimension line: from a point square to the line; between two points; a horizontal or
-        // vertical one level with the label, with extension lines from both points, as drawn.
-        let place = |c: &Json| -> Option<([f64; 2], Segments)> {
-            match c["type"].as_str()? {
-                "distance" => {
-                    let (a, b) = (at(&c["points"][0])?, at(&c["points"][1])?);
-                    Some((mid(a, b), vec![[a, b]]))
-                }
-                kind @ ("horizontal_distance" | "vertical_distance") => {
-                    let (a, b) = (at(&c["points"][0])?, at(&c["points"][1])?);
-                    let m = mid(a, b);
-                    let k = usize::from(kind == "horizontal_distance");
-                    let on = |q: [f64; 2]| if k == 1 { [q[0], m[1]] } else { [m[0], q[1]] };
-                    Some((m, vec![[a, on(a)], [on(a), on(b)], [on(b), b]]))
-                }
-                "length" => c["line"].as_str().and_then(|n| Self::middle(p, n)).map(|m| (m, Vec::new())),
-                "point_line" => {
-                    let (q, (a, b)) = (at(&c["point"])?, line(&c["line"])?);
-                    // Between parallel lines (the point an end of one, as the dimension tool
-                    // writes it): across a third of where they overlap, as drawings place them, not
-                    // down whatever side runs through the point; two such dimensions across a
-                    // rectangle then stand apart, and so do their labels.
-                    let (n, target) = (c["point"].as_str()?, c["line"].as_str()?);
-                    let side = p.lines.iter().filter(|(m, l)| m.as_str() != target && (l.from == n || l.to == n)).find_map(|(_, l)| {
-                        let (f, t) = (at(&json!(l.from))?, at(&json!(l.to))?);
-                        crate::draw::parallel([t[0] - f[0], t[1] - f[1]], [b[0] - a[0], b[1] - a[1]]).then_some((f, t))
-                    });
-                    match side {
-                        Some((f, t)) => {
-                            let u = [b[0] - a[0], b[1] - a[1]];
-                            let along = |x: [f64; 2]| ((x[0] - a[0]) * u[0] + (x[1] - a[1]) * u[1]) / (u[0] * u[0] + u[1] * u[1]);
-                            let (sf, st) = (along(f), along(t));
-                            let (lo, hi) = (sf.min(st).max(0.0), sf.max(st).min(1.0));
-                            let s = if lo <= hi { lo + (hi - lo) / 3.0 } else { sf + (st - sf) / 3.0 };
-                            let on = [a[0] + u[0] * s, a[1] + u[1] * s];
-                            let from = foot(on, f, t);
-                            Some((mid(from, on), vec![[from, on]]))
-                        }
-                        None => {
-                            let f = foot(q, a, b);
-                            Some((mid(q, f), vec![[q, f]]))
-                        }
-                    }
-                }
-                "angle" => Some((angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?), Vec::new())),
-                "radius" | "arc_length" | "arc_angle" => c["arc"].as_str().and_then(|n| Self::middle(p, n)).map(|m| (m, Vec::new())),
-                _ => None,
-            }
-        };
         // An angle reads by its °: the window's font has no ∠.
         let prefix = |c: &Json| if c["type"] == "radius" { "R" } else { "" };
         let mut out = Vec::new();
         for (k, c) in self.json["sketch"]["constraints"].as_array().into_iter().flatten().enumerate() {
             let value = c.get("value").or_else(|| c.get("degrees"));
-            if let (Some(v), Some((at, line))) = (value, place(c)) {
+            if let (Some(v), Some((at, line))) = (value, self.place(p, c)) {
                 out.push(Label {
                     pick: Pick::Constraint(k),
                     at,
@@ -1368,7 +1372,7 @@ impl SketchEdit {
             }
         }
         for (n, c) in self.json["sketch"]["measures"].as_object().into_iter().flatten() {
-            if let (Some((at, line)), Some(v)) = (place(c), p.solved.measures.get(n)) {
+            if let (Some((at, line)), Some(v)) = (self.place(p, c), p.solved.measures.get(n)) {
                 out.push(Label {
                     pick: Pick::Measure(n.clone()),
                     at,

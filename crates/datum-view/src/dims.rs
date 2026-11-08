@@ -81,9 +81,11 @@ impl SketchEdit {
     /// line: its length, or with `axis` (H, V) the horizontal or vertical distance of its ends.
     /// A point and a line: the distance between them. Two lines: the distance between them if
     /// they are parallel (within a line's lean), else the angle. The ends of one arc: the length
-    /// along it. An arc picked twice: the angle it turns. Two points: with `axis` as it says, else as the cursor at `at` (sketch
-    /// coordinates) where it goes says: horizontal when above or below them, vertical when to a
-    /// side, along them when straight off their middle (within 15°). An arc: its radius.
+    /// along it. An arc picked twice: the angle it turns. Two points: with `axis` as it says, else
+    /// as the cursor at `at` (sketch coordinates) where it goes says: along them straight off
+    /// their middle (within 15°) or off a corner, outside both their width and height (D243);
+    /// horizontal above or below them within their width, vertical to a side within their
+    /// height. An arc: its radius.
     pub fn dimension(&self, picks: &[Pick2], at: [f64; 2], axis: Option<Axis>) -> Option<(Json, &'static str, f64)> {
         let p = self.placed.as_ref().ok()?;
         let pos = |n: &str| p.solved.points.get(n).map(|v| [v.x, v.y]);
@@ -124,16 +126,22 @@ impl SketchEdit {
                     let (pa, pb) = (pos(a)?, pos(b)?);
                     let d = [pb[0] - pa[0], pb[1] - pa[1]];
                     let w = [at[0] - (pa[0] + pb[0]) * 0.5, at[1] - (pa[1] + pb[1]) * 0.5];
-                    let len = libm::hypot(d[0], d[1]);
-                    let off = libm::hypot(w[0], w[1]);
-                    // Straight off the middle, across the two points: along them.
+                    // Along them straight off their middle (within 15°), or off a corner, outside
+                    // both their width and their height; above or below within their width,
+                    // horizontal; to a side within their height, vertical. Between them, the way
+                    // the cursor is further off.
+                    let within = |k: usize| pa[k].min(pb[k]) <= at[k] && at[k] <= pa[k].max(pb[k]);
+                    let (len, off) = (libm::hypot(d[0], d[1]), libm::hypot(w[0], w[1]));
                     let across = len > 0.0 && off > 0.0 && (d[0] * w[0] + d[1] * w[1]).abs() / (len * off) < libm::sin(15f64.to_radians());
-                    let kind = if across && d[0] != 0.0 && d[1] != 0.0 {
-                        "distance"
-                    } else if (w[1].abs() >= w[0].abs() && d[0] != 0.0) || d[1] == 0.0 {
-                        "horizontal_distance"
-                    } else {
-                        "vertical_distance"
+                    let kind = match (within(0), within(1)) {
+                        _ if d[1] == 0.0 => "horizontal_distance",
+                        _ if d[0] == 0.0 => "vertical_distance",
+                        _ if across => "distance",
+                        (true, false) => "horizontal_distance",
+                        (false, true) => "vertical_distance",
+                        (false, false) => "distance",
+                        (true, true) if w[1].abs() >= w[0].abs() => "horizontal_distance",
+                        (true, true) => "vertical_distance",
                     };
                     (json!({"type": kind, "points": [a, b]}), "value")
                 }
@@ -371,7 +379,7 @@ mod tests {
     }
 
     /// Two points dimension as the cursor says: above them horizontal, beside vertical,
-    /// straight off their middle along them.
+    /// straight off their middle or off a corner along them.
     #[test]
     fn the_cursor_chooses_the_kind() {
         let e = editor();
@@ -381,6 +389,9 @@ mod tests {
         assert_eq!(kind([40.0, 5.0]), "vertical_distance");
         // On the perpendicular through their middle, (10, 5) + 10 · (−0.447, 0.894).
         assert_eq!(kind([5.53, 13.94]), "distance");
+        // Off a corner, outside both their width and their height: along them too (D243).
+        assert_eq!(kind([-4.0, 14.0]), "distance");
+        assert_eq!(kind([25.0, -3.0]), "distance");
         let (c, key, now) = e.dimension(&[Pick2::Curve("bottom".into())], [10.0, -5.0], None).unwrap();
         assert_eq!((c, key), (json!({"type": "length", "line": "bottom"}), "value"));
         assert!((now - 20.0).abs() < 1e-9);
