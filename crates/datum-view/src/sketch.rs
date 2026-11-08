@@ -102,6 +102,8 @@ pub struct SketchEdit {
 
 /// The parts a drag step that would turn a tangency over is taken in (D241).
 const DRAG_PARTS: usize = 8;
+/// While the dragged points cannot go under the cursor, the frames between two tries (D242).
+const HELD_RETRY: usize = 8;
 
 /// What a drag moves: the sketch's own points, each from where it stood, by the cursor's way
 /// from where it was grabbed. One point is grabbed where it stands: it goes under the cursor.
@@ -114,6 +116,9 @@ pub struct Drag {
     onto: Option<Join>,
     /// Where the last frame put the cursor: the same place again changes nothing.
     last: Option<[f64; 2]>,
+    /// Frames since the dragged points last went under the cursor: while they cannot, the next
+    /// frames go straight to the nearest placement, the cursor's place tried again now and then.
+    held: usize,
 }
 
 /// What a dragged point is dropped onto (D209): another point, or the middle of a line or an
@@ -817,7 +822,7 @@ impl SketchEdit {
             (Pick::Point(_), [(_, q)]) => *q,
             _ => at,
         };
-        self.drag = Some(Drag { points, grab, drawn: self.drawn(), onto: None, last: None });
+        self.drag = Some(Drag { points, grab, drawn: self.drawn(), onto: None, last: None, held: 0 });
         true
     }
 
@@ -859,17 +864,48 @@ impl SketchEdit {
         for (n, q) in &pins {
             self.json["sketch"]["points"][n] = json!(q);
         }
-        // The direction a point is free in, from the sketch solved without a pin: with one,
-        // the point would have none, and frames would alternate between two placements.
-        let plain = self.placed_with(&[], true);
-        let mut tries = vec![pins.clone()];
-        if let [(n, q)] = &pins[..]
-            && let Some((at, Some(d))) = plain.as_ref().ok().and_then(|pl| Some((pl.solved.points.get(n).copied()?, pl.solved.free.get(n).copied()?)))
-        {
-            let t = (q[0] - at.x) * d.x + (q[1] - at.y) * d.y;
-            tries.push(vec![(n.clone(), [at.x + d.x * t, at.y + d.y * t])]);
+        // The cursor's place first; while the dragged points cannot go there, only every few
+        // frames: a place that cannot be had costs a solve that fails. Then the step along the
+        // direction they are free in (D89): of a single point, from the sketch solved without a
+        // pin (with one it would have none, and frames would alternate); of more, the first held
+        // to one, as the last frame found it, if none is held fast. Last, the sketch solved from
+        // where the cursor put them: nearest it.
+        let mut placed = if drag.held % HELD_RETRY == 0 { self.placed_with(&pins, true) } else { Err(String::new()) };
+        let under = placed.is_ok();
+        if placed.is_err() {
+            let single = (pins.len() == 1).then(|| self.placed_with(&[], false));
+            let free = match &single {
+                Some(Ok(pl)) => Some(pl),
+                Some(Err(_)) => None,
+                None => self.placed.as_ref().ok(),
+            };
+            // Only if every dragged point can move at all: a step of one held fast cannot be had.
+            let along = free
+                .filter(|pl| pins.iter().all(|(n, _)| pl.solved.free.contains_key(n)))
+                .and_then(|pl| pins.iter().find_map(|(n, q)| Some((pl.solved.points.get(n).copied()?, pl.solved.free.get(n).copied()??, *q))));
+            let now = |n: &str| self.placed.as_ref().ok().and_then(|pl| pl.solved.points.get(n).copied());
+            if let Some((at, d, q)) = along {
+                let t = (q[0] - at.x) * d.x + (q[1] - at.y) * d.y;
+                let step: Option<Vec<(String, [f64; 2])>> = match &single {
+                    Some(_) => Some(pins.iter().map(|(n, _)| (n.clone(), [at.x + d.x * t, at.y + d.y * t])).collect()),
+                    None => pins.iter().map(|(n, _)| now(n).map(|c| (n.clone(), [c.x + d.x * t, c.y + d.y * t]))).collect(),
+                };
+                if let Some(step) = step {
+                    placed = self.placed_with(&step, true);
+                }
+            }
+            if placed.is_err() {
+                placed = match single {
+                    Some(plain) => plain,
+                    None => self.placed_with(&[], true),
+                };
+            }
         }
-        let placed = tries.iter().map(|t| self.placed_with(t, true)).find(Result::is_ok).unwrap_or(plain);
+        // A quick solve counts no freedom: a drag changes none, the last frame's stands.
+        if let (Ok(new), Ok(old)) = (&mut placed, &self.placed) {
+            new.solved.dof = old.solved.dof;
+            new.solved.free = old.solved.free.clone();
+        }
         let breaks = match (&placed, &self.placed) {
             (Ok(new), Ok(old)) => self.sides(new) != self.sides(old),
             (Err(_), Ok(_)) => true,
@@ -884,6 +920,7 @@ impl SketchEdit {
         // themselves start where the cursor puts them.
         if let (Ok(pl), Some(drag)) = (&placed, &mut self.drag) {
             drag.last = Some(p);
+            drag.held = if under { 0 } else { drag.held + 1 };
             for n in drag.drawn.keys().filter(|n| !drag.points.iter().any(|(d, _)| d == *n)) {
                 if let Some(q) = pl.solved.points.get(n) {
                     self.json["sketch"]["points"][n] = json!([q.x, q.y]);
@@ -973,6 +1010,16 @@ impl SketchEdit {
     /// joining a single point to the one it was dropped on; None if nothing changed. The window
     /// keeps showing the same until the model comes back.
     pub fn end_drag(&mut self) -> Option<Json> {
+        // Let go where the dragged points could not go lately: the cursor's place tried once more
+        // (D242), so they end under it if they can.
+        if let Some(d) = &mut self.drag
+            && d.held > 0
+            && let Some(p) = d.last
+        {
+            d.held = 0;
+            d.last = None;
+            self.drag_frame(p);
+        }
         let drag = self.drag.take()?;
         let Ok(placed) = &self.placed else { return None };
         let mut patch = serde_json::Map::new();
