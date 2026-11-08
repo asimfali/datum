@@ -539,11 +539,11 @@ impl Equations {
 
     /// Solves group `g` with the constraints `use_`: normalised coordinates of its points, or
     /// `None` when they cannot all hold.
-    pub fn fit(&self, g: &Group, use_: &[usize]) -> Option<Vec<f64>> {
+    pub fn fit(&self, g: &Group, use_: &[usize], iterations: usize) -> Option<Vec<f64>> {
         let x0: Vec<f64> = g.points.iter().flat_map(|&p| self.scaled(p)).collect();
         let free: Vec<usize> = g.points.iter().enumerate().filter(|(_, p)| !self.fixed[**p]).flat_map(|(k, _)| [2 * k, 2 * k + 1]).collect();
         let f = |x: &[f64], jac: Option<&mut Vec<Vec<(usize, f64)>>>, r: &mut Vec<f64>| self.residuals(g, use_, x, r, jac);
-        match solver::solve(&f, &x0, &free, TOLERANCE) {
+        match solver::solve(&f, &x0, &free, TOLERANCE, iterations) {
             Fit::Converged(x) => Some(x),
             Fit::Failed => None,
         }
@@ -620,7 +620,7 @@ impl Equations {
             .filter(|&&k| !matches!(self.eqs[k], Eq::Held))
             .filter(|&&k| {
                 let rest: Vec<usize> = g.constraints.iter().copied().filter(|&c| c != k).collect();
-                self.fit(g, &rest).is_some()
+                self.fit(g, &rest, solver::MAX_ITER).is_some()
             })
             .map(|&k| self.described[k].clone())
             .collect()

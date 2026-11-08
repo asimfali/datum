@@ -16,7 +16,10 @@ pub(crate) enum Fit {
 }
 
 /// Iterations before giving up.
-const MAX_ITER: usize = 200;
+pub(crate) const MAX_ITER: usize = 200;
+/// Iterations before giving up on a quick solve (D241): a drag's frame starts next to the last
+/// one's solution and converges in a few, or its placement cannot be had.
+pub(crate) const QUICK_ITER: usize = 50;
 /// Steps after reaching the tolerance.
 const POLISH: usize = 3;
 
@@ -51,7 +54,7 @@ fn columns(free: &[usize], n: usize) -> Vec<Option<usize>> {
 }
 
 /// Moves the `free` coordinates of `x0` until every residual is at most `tol`.
-pub(crate) fn solve(f: &Residuals, x0: &[f64], free: &[usize], tol: f64) -> Fit {
+pub(crate) fn solve(f: &Residuals, x0: &[f64], free: &[usize], tol: f64, iterations: usize) -> Fit {
     let mut x = x0.to_vec();
     let mut r = Vec::new();
     f(&x, None, &mut r);
@@ -69,7 +72,7 @@ pub(crate) fn solve(f: &Residuals, x0: &[f64], free: &[usize], tol: f64) -> Fit 
     // Once within tolerance, a few more steps polish while they still help: convergence is
     // quadratic, so the result ends near rounding, not near the tolerance.
     let mut polish = POLISH;
-    for _ in 0..MAX_ITER {
+    for _ in 0..iterations {
         f(&x, Some(&mut grads), &mut r);
         let jac = dense(&grads, &column, nf);
         // A = J Jᵀ
@@ -236,9 +239,9 @@ mod tests {
                 j.push(vec![(0, 1.0), (1, 1.0)]);
             }
         };
-        let Fit::Converged(x) = solve(&f, &[0.0, 0.0], &[0, 1], 1e-12) else { panic!("did not converge") };
+        let Fit::Converged(x) = solve(&f, &[0.0, 0.0], &[0, 1], 1e-12, MAX_ITER) else { panic!("did not converge") };
         assert!((x[0] - 1.0).abs() < 1e-12 && (x[1] - 1.0).abs() < 1e-12);
-        let Fit::Converged(x) = solve(&f, &[0.0, 0.0], &[1], 1e-12) else { panic!("did not converge") };
+        let Fit::Converged(x) = solve(&f, &[0.0, 0.0], &[1], 1e-12, MAX_ITER) else { panic!("did not converge") };
         assert_eq!(x[0], 0.0);
     }
 

@@ -60,9 +60,10 @@ pub struct Sketch {
     /// Patterns by name: copies of a group's profiles (or of one curve's).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patterns: BTreeMap<String, Pattern>,
-    /// Only whether the sketch solves: a conflict is not named (naming it solves the sketch again
-    /// without each constraint in turn). A drag tries placements and shows no failure (D241).
-    /// Not in the file.
+    /// Only whether the sketch solves, from points drawn next to a solution: a conflict is not
+    /// named (naming it solves the sketch again without each constraint in turn), and a
+    /// placement not found in a few iterations is none. A drag tries placements and shows no
+    /// failure (D241). Not in the file.
     #[serde(skip)]
     pub quick: bool,
 }
@@ -520,7 +521,7 @@ struct GroupResult {
 }
 
 fn solve_group(eq: &Equations, g: &Group, quick: bool) -> Result<GroupResult, SketchError> {
-    let fitted = eq.fit(g, &g.constraints);
+    let fitted = eq.fit(g, &g.constraints, if quick { solver::QUICK_ITER } else { solver::MAX_ITER });
     match fitted {
         Some(x) => {
             let (dof, free) = eq.freedom(g, &x);
