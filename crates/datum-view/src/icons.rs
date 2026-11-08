@@ -31,6 +31,8 @@ pub enum Icon {
     Fillet,
     /// A shape and its mirror across a dashed axis.
     Mirror,
+    /// A corner and the same corner a step inside it: offset.
+    Offset,
     Dimension,
     /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
     /// a ruler.
@@ -202,6 +204,10 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             }
             painter.add(egui::Shape::closed_line(vec![at(-2.0, -5.0), at(-2.0, 5.0), at(-7.0, 5.0)], stroke));
             painter.add(egui::Shape::closed_line(vec![at(2.0, -5.0), at(2.0, 5.0), at(7.0, 5.0)], stroke));
+        }
+        Icon::Offset => {
+            painter.add(egui::Shape::line(vec![at(-7.0, 7.0), at(-7.0, -7.0), at(7.0, -7.0)], stroke));
+            painter.add(egui::Shape::line(vec![at(-2.5, 7.0), at(-2.5, -2.5), at(7.0, -2.5)], stroke));
         }
         Icon::Dimension => {
             painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);
