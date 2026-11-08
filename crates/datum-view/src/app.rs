@@ -3172,6 +3172,7 @@ impl Viewer {
                         Act::Circle => crate::icons::Icon::Circle,
                         Act::Point => crate::icons::Icon::Point,
                         Act::Project => crate::icons::Icon::Project,
+                        Act::TrimExtend => crate::icons::Icon::Trim,
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
@@ -6315,7 +6316,7 @@ pub(crate) fn definition(v: &Json) -> String {
 }
 
 /// The sketch tools, as the side panel lists them.
-const TOOLS: [Act; 7] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::Dimension];
+const TOOLS: [Act; 8] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Dimension];
 
 /// The sketch's modes, as the menu lists them (D167).
 const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
@@ -6339,6 +6340,7 @@ fn tool(act: Act) -> Tool {
         Act::Circle => Tool::Circle,
         Act::Point => Tool::Point,
         Act::Project => Tool::Project,
+        Act::TrimExtend => Tool::Trim,
         Act::Dimension => Tool::Dimension,
         _ => Tool::Select,
     }
@@ -6519,7 +6521,7 @@ impl Viewer {
                     sk.draft.tangent = !sk.draft.tangent;
                 }
             }
-            Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Project | Act::Dimension => {
+            Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Project | Act::TrimExtend | Act::Dimension => {
                 if let Some(sk) = &mut self.sketch {
                     sk.draft.take_up(tool(act));
                 }
@@ -8783,6 +8785,40 @@ mod tests {
         }
         drop(h);
         (v, inbox)
+    }
+
+    /// X takes up trim and extend; over the top left of the axis, the piece to the corner is
+    /// shown going, and a click sends it away: the top ends where the axis meets it.
+    #[test]
+    fn the_top_is_trimmed_at_the_axis_in_the_window() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::X, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Trim);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let sk = v.sketch.as_ref().unwrap();
+        let (x, y) = sk.camera.offset([20.0, 40.0], f64::from(rect.height()));
+        let pos = rect.center() + egui::vec2(x as f32, y as f32);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(pos);
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
+        let [patch] = &sent[..] else { panic!("one edit: {sent:?}") };
+        assert_eq!(patch["lines"]["top"], json!({"from": "b", "to": "n"}), "{patch}");
+        assert_eq!(patch["remove_constraints"], json!([{"type": "on", "point": "n", "curve": "top"}]));
+        assert!(patch.get("points").is_none(), "the corner holds the left side");
+        assert!(v.sketch.as_ref().unwrap().placed.is_ok());
     }
 
     /// Constraints by hand: the plate is fully defined and its holes 50 apart, so concentric is

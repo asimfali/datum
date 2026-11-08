@@ -26,6 +26,7 @@ mod sidebar;
 mod sketch;
 mod table;
 mod templates;
+mod trim;
 mod update;
 mod uses;
 
