@@ -10,6 +10,7 @@ mod cube;
 mod dims;
 mod dock;
 mod draw;
+mod fillet;
 mod flat;
 mod i18n;
 mod icons;
