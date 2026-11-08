@@ -20,13 +20,13 @@ use serde_json::{Map, Value as Json, json};
 use crate::draw::Patch;
 use crate::sketch::SketchEdit;
 
-/// What a click would do: the `edit_sketch` patch, the piece it takes away and the length it
-/// adds, as polylines in sketch coordinates.
+/// What a click would do: the `edit_sketch` patch, the pieces it takes away and what it adds, as
+/// polylines in sketch coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     pub patch: Map<String, Json>,
-    pub gone: Vec<[f64; 2]>,
-    pub added: Vec<[f64; 2]>,
+    pub gone: Vec<Vec<[f64; 2]>>,
+    pub added: Vec<Vec<[f64; 2]>>,
 }
 
 /// What a click at pixel offset `(dx, dy)` would do, Shift held if `extend`; none over nothing
@@ -54,13 +54,13 @@ pub fn plan(edit: &SketchEdit, dx: f64, dy: f64, height: f64, extend: bool) -> O
 /// A line from `.0` to `.1`, or an arc of a circle about `c` from angle `start` counterclockwise
 /// by `sweep` (a circle: a whole turn, `closed`). Along it, 0 is its start and 1 its end.
 #[derive(Clone, Copy, Debug)]
-enum Shape {
+pub(crate) enum Shape {
     Line([f64; 2], [f64; 2]),
     Round { c: [f64; 2], r: f64, start: f64, sweep: f64, closed: bool },
 }
 
 impl Shape {
-    fn of(p: &Placed, name: &str) -> Option<Shape> {
+    pub(crate) fn of(p: &Placed, name: &str) -> Option<Shape> {
         let at = |n: &str| p.solved.points.get(n).map(|v| [v.x, v.y]);
         if let Some(l) = p.lines.get(name) {
             return Some(Shape::Line(at(&l.from)?, at(&l.to)?));
@@ -81,7 +81,7 @@ impl Shape {
 
     /// Where point `x` of the curve's line or circle is along it; on an arc's circle past its
     /// end, over 1 up to a whole turn.
-    fn param(&self, x: [f64; 2]) -> f64 {
+    pub(crate) fn param(&self, x: [f64; 2]) -> f64 {
         match *self {
             Shape::Line(a, b) => {
                 let u = sub(b, a);
@@ -109,7 +109,7 @@ impl Shape {
         }
     }
 
-    fn at(&self, t: f64) -> [f64; 2] {
+    pub(crate) fn at(&self, t: f64) -> [f64; 2] {
         match *self {
             Shape::Line(a, b) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t],
             Shape::Round { c, r, start, sweep, .. } => {
@@ -120,7 +120,7 @@ impl Shape {
     }
 
     /// Whether point `x` of the curve's line or circle is on the curve, its ends included.
-    fn holds(&self, x: [f64; 2]) -> bool {
+    pub(crate) fn holds(&self, x: [f64; 2]) -> bool {
         let t = self.param(x);
         match self {
             Shape::Line(..) => (0.0..=1.0).contains(&t),
@@ -149,7 +149,7 @@ impl Shape {
     }
 
     /// The curve from `t0` to `t1`, as polyline points.
-    fn polyline(&self, t0: f64, t1: f64) -> Vec<[f64; 2]> {
+    pub(crate) fn polyline(&self, t0: f64, t1: f64) -> Vec<[f64; 2]> {
         let n = match self {
             Shape::Line(..) => 1,
             Shape::Round { sweep, .. } => ((t1 - t0).abs() * sweep / TAU * 64.0).ceil().max(1.0) as usize,
@@ -159,7 +159,7 @@ impl Shape {
 }
 
 /// Where the lines and circles of two curves cross.
-fn crossings(s: &Shape, o: &Shape) -> Vec<[f64; 2]> {
+pub(crate) fn crossings(s: &Shape, o: &Shape) -> Vec<[f64; 2]> {
     match (*s, *o) {
         (Shape::Line(a, b), Shape::Line(p, q)) => {
             let (u, v) = (sub(b, a), sub(q, p));
@@ -239,25 +239,25 @@ enum Tie {
 }
 
 /// The sketch as trimming reads it: solved, with its constraints, typed and as written.
-struct Sketch<'a> {
-    edit: &'a SketchEdit,
-    p: &'a Placed,
+pub(crate) struct Sketch<'a> {
+    pub(crate) edit: &'a SketchEdit,
+    pub(crate) p: &'a Placed,
     typed: Vec<Constraint>,
     raw: Vec<Json>,
 }
 
 impl<'a> Sketch<'a> {
-    fn new(edit: &'a SketchEdit, p: &'a Placed) -> Option<Self> {
+    pub(crate) fn new(edit: &'a SketchEdit, p: &'a Placed) -> Option<Self> {
         let raw = edit.json["sketch"]["constraints"].as_array().cloned().unwrap_or_default();
         let typed = raw.iter().map(|c| serde_json::from_value(c.clone()).ok()).collect::<Option<Vec<Constraint>>>()?;
         Some(Self { edit, p, typed, raw })
     }
 
-    fn json(&self) -> &Json {
+    pub(crate) fn json(&self) -> &Json {
         &self.edit.json["sketch"]
     }
 
-    fn at(&self, n: &str) -> Option<[f64; 2]> {
+    pub(crate) fn at(&self, n: &str) -> Option<[f64; 2]> {
         self.p.solved.points.get(n).map(|v| [v.x, v.y])
     }
 
@@ -270,7 +270,7 @@ impl<'a> Sketch<'a> {
     }
 
     /// One point, or two made one by the sketch.
-    fn same(&self, a: &str, b: &str) -> bool {
+    pub(crate) fn same(&self, a: &str, b: &str) -> bool {
         a == b || self.typed.iter().any(|c| matches!(c, Constraint::Coincident { points: [x, y] } if (x == a && y == b) || (x == b && y == a)))
     }
 
@@ -283,7 +283,7 @@ impl<'a> Sketch<'a> {
         })
     }
 
-    fn tangent(&self, a: &str, b: &str) -> bool {
+    pub(crate) fn tangent(&self, a: &str, b: &str) -> bool {
         self.typed.iter().any(|c| matches!(c, Constraint::Tangent { curves } if curves.iter().any(|n| n == a) && curves.iter().any(|n| n == b)))
     }
 
@@ -424,7 +424,7 @@ impl<'a> Sketch<'a> {
                 self.leave(&mut patch, e, t);
             }
         }
-        Some(Plan { patch: patch.done()?, gone: s.polyline(0.0, 1.0), added: Vec::new() })
+        Some(Plan { patch: patch.done()?, gone: vec![s.polyline(0.0, 1.0)], added: Vec::new() })
     }
 
     /// The piece of curve `t` (in map `key`, shape `s`) between the cuts `t_at` lies between
@@ -433,7 +433,9 @@ impl<'a> Sketch<'a> {
         let mut patch = Patch::new(self.edit);
         let v = &self.json()[key][t];
         if s.closed() {
-            return self.open_circle(&mut patch, t, s, cuts, t_at).and_then(|gone| Some(Plan { patch: patch.done()?, gone, added: Vec::new() }));
+            return self
+                .open_circle(&mut patch, t, s, cuts, t_at)
+                .and_then(|gone| Some(Plan { patch: patch.done()?, gone: vec![gone], added: Vec::new() }));
         }
         let k = cuts.iter().filter(|c| c.t <= t_at).count();
         let mut kept = v.clone();
@@ -467,7 +469,7 @@ impl<'a> Sketch<'a> {
         patch.set(key, t, kept);
         let ends: Vec<&str> = ends.iter().map(String::as_str).collect();
         self.unconstrain(&mut patch, t, &ends);
-        Some(Plan { patch: patch.done()?, gone, added: Vec::new() })
+        Some(Plan { patch: patch.done()?, gone: vec![gone], added: Vec::new() })
     }
 
     /// Circle `t` opened at the piece between the cuts `t_at` lies between: an arc round the
@@ -546,23 +548,23 @@ impl<'a> Sketch<'a> {
         self.leave(&mut patch, e, t);
         self.unconstrain(&mut patch, t, &[&q]);
         let from = if end == "to" { 1.0 } else { 0.0 };
-        Some(Plan { patch: patch.done()?, gone: Vec::new(), added: s.polyline(from, to) })
+        Some(Plan { patch: patch.done()?, gone: Vec::new(), added: vec![s.polyline(from, to)] })
     }
 }
 
-fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+pub(crate) fn sub(a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
     [a[0] - b[0], a[1] - b[1]]
 }
 
-fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(crate) fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
     a[0] * b[0] + a[1] * b[1]
 }
 
-fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(crate) fn cross(a: [f64; 2], b: [f64; 2]) -> f64 {
     a[0] * b[1] - a[1] * b[0]
 }
 
-fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(crate) fn dist(a: [f64; 2], b: [f64; 2]) -> f64 {
     libm::hypot(a[0] - b[0], a[1] - b[1])
 }
 
@@ -683,7 +685,7 @@ mod tests {
         );
         e.draft.tool = Tool::Trim;
         hover_at(&mut e, [4.0, 0.0], false);
-        assert_eq!(e.draft.trim.as_ref().unwrap().added, vec![[5.0, 0.0], [10.0, 0.0]], "the length it adds is shown");
+        assert_eq!(e.draft.plan.as_ref().unwrap().added, vec![vec![[5.0, 0.0], [10.0, 0.0]]], "the length it adds is shown");
         let s = trim_at(&mut e, [4.0, 0.0], false).unwrap();
         assert_eq!(ends(&e, "lines", "h"), [[0.0, 0.0], [10.0, 0.0]]);
         assert!(s["points"].get("b").is_none());

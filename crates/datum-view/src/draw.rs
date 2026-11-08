@@ -32,6 +32,8 @@ pub enum Tool {
     /// Trim a piece of a curve away, or extend a curve to the next (D239): what the click does
     /// follows from where it is; Shift held extends.
     Trim,
+    /// Round or bevel a corner, or every corner of the region clicked (D240); Tab between the two.
+    Fillet,
     /// Add a geometric constraint of this kind: click what it ties (D118).
     Constrain(crate::constrain::Kind),
 }
@@ -230,8 +232,12 @@ pub struct Draft {
     /// sketch's frame it was found for: found again only when the plane moves.
     pub projectable: Vec<Projectable>,
     pub projectable_on: Option<[datum_math::Vec3; 4]>,
-    /// Trim tool: what a click where the cursor is would do.
-    pub trim: Option<crate::trim::Plan>,
+    /// Trim and fillet tools: what a click where the cursor is would do.
+    pub plan: Option<crate::trim::Plan>,
+    /// Fillet tool: the size, as typed and its value, kept from click to click; a chamfer
+    /// instead of a fillet (Tab).
+    pub fillet: Option<(Json, f64)>,
+    pub chamfer: bool,
 }
 
 impl Default for Draft {
@@ -262,7 +268,9 @@ impl Default for Draft {
             lean: None,
             projectable: Vec::new(),
             projectable_on: None,
-            trim: None,
+            plan: None,
+            fillet: None,
+            chamfer: false,
         }
     }
 }
@@ -451,7 +459,7 @@ impl Draft {
         self.asked = None;
         self.tangent = false;
         self.typed = None;
-        self.trim = None;
+        self.plan = None;
         busy
     }
 
@@ -578,6 +586,7 @@ impl Draft {
             Tool::Line => self.chain.is_some() && !self.tangent,
             Tool::Circle => self.clicks.len() == 1,
             Tool::Arc => self.clicks.len() == 1,
+            Tool::Fillet => true,
             _ => false,
         }
     }
@@ -755,8 +764,14 @@ impl Draft {
 
     /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
-        if self.tool == Tool::Trim {
-            self.trim = crate::trim::plan(edit, dx, dy, height, free);
+        if matches!(self.tool, Tool::Trim | Tool::Fillet) {
+            if let Some(t) = self.typed.clone() {
+                self.fillet = Some(t);
+            }
+            self.plan = match self.tool {
+                Tool::Trim => crate::trim::plan(edit, dx, dy, height, free),
+                _ => self.fillet.as_ref().and_then(|size| crate::fillet::plan(edit, dx, dy, height, size, self.chamfer)),
+            };
             self.cursor = Some(Spot { at: edit.camera.at(dx, dy, height), snap: Snap::Free });
             return;
         }
@@ -819,7 +834,7 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
-            Tool::Trim => return self.trim.take().map(|t| t.patch),
+            Tool::Trim | Tool::Fillet => return self.plan.take().map(|t| t.patch),
             Tool::Project => {
                 let Snap::Source(i) = spot.snap else { return None };
                 let c = self.projectable.get(i)?;
@@ -989,14 +1004,14 @@ impl Draft {
                 }
             }
         }
-        // Trimming: the piece a click takes away, red; the length it adds, dashed.
-        if let Some(t) = self.trim.as_ref().filter(|_| self.tool == Tool::Trim) {
+        // Trimming and filleting: what a click takes away, red; what it adds, dashed.
+        if let Some(t) = self.plan.as_ref().filter(|_| matches!(self.tool, Tool::Trim | Tool::Fillet)) {
             let pts = |v: &[[f64; 2]]| v.iter().copied().map(screen).collect::<Vec<_>>();
-            if t.gone.len() > 1 {
-                dashed(painter, &pts(&t.gone), egui::Stroke::new(3.0, GONE), 6.0, 3.0);
+            for g in t.gone.iter().filter(|g| g.len() > 1) {
+                dashed(painter, &pts(g), egui::Stroke::new(3.0, GONE), 6.0, 3.0);
             }
-            if t.added.len() > 1 {
-                dashed(painter, &pts(&t.added), egui::Stroke::new(2.5, DRAFT), 6.0, 3.0);
+            for a in t.added.iter().filter(|a| a.len() > 1) {
+                dashed(painter, &pts(a), egui::Stroke::new(2.5, DRAFT), 6.0, 3.0);
             }
         }
         // What the dimension or constraint tool has picked so far, marked.
@@ -1067,6 +1082,16 @@ impl Draft {
                     format!("{kind}{}{}", short(now), if c["type"] == "angle" { "°" } else { "" })
                 }
                 None => i18n.f("dim-picked", "{ $n } picked: a second, or click where the dimension goes", &[("n", &self.picks.len().to_string())]),
+            };
+            painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
+        }
+        // The fillet's radius or the chamfer's size by the cursor, or what to type.
+        if self.tool == Tool::Fillet && edit.field.is_none() {
+            let text = match (&self.fillet, self.chamfer) {
+                (Some((_, v)), false) => i18n.f("fillet-radius", "Fillet R{ $v } (Tab: chamfer)", &[("v", &short(*v).to_string())]),
+                (Some((_, v)), true) => i18n.f("fillet-chamfer", "Chamfer { $v } (Tab: fillet)", &[("v", &short(*v).to_string())]),
+                (None, false) => i18n.t("fillet-type-radius", "Type the radius").into(),
+                (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }

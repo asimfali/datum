@@ -29,6 +29,7 @@ pub enum Act {
     Point,
     Project,
     TrimExtend,
+    Fillet,
     ProjectSection,
     Dimension,
     Measure,
@@ -103,7 +104,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 52] = [
+pub const ACTIONS: [Action; 53] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -181,6 +182,14 @@ pub const ACTIONS: [Action; 52] = [
         "Click a piece of a curve between crossings: it goes; a curve crossing nothing: its end goes on to the next curve; \
          Shift held: the nearer end goes on; Esc ends",
         plain(Key::X),
+        Sketch,
+    ),
+    action(
+        Act::Fillet,
+        "sketch.fillet",
+        "Fillet / chamfer",
+        "Type the size, then click a corner, or inside a region: all its corners, of one radius; Tab: chamfer or fillet; Esc ends",
+        plain(Key::F),
         Sketch,
     ),
     action(

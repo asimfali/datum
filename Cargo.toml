@@ -101,3 +101,6 @@ opt-level = 2
 
 [profile.dev.package.datum-ops]
 opt-level = 2
+
+[profile.dev.package.datum-sketch]
+opt-level = 2

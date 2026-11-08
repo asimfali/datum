@@ -27,6 +27,8 @@ pub enum Icon {
     Project,
     /// Two lines crossing, the piece past the crossing dashed: trim or extend.
     Trim,
+    /// A corner rounded: fillet or chamfer.
+    Fillet,
     Dimension,
     /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
     /// a ruler.
@@ -179,6 +181,17 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
                 let x = 2.0 + 3.0 * k as f32;
                 painter.line_segment([at(x, -1.0), at(x + 1.5, -1.0)], stroke);
             }
+        }
+        Icon::Fillet => {
+            painter.line_segment([at(-6.0, 6.0), at(-6.0, -1.0)], stroke);
+            painter.line_segment([at(1.0, -6.0), at(6.0, -6.0)], stroke);
+            let pts: Vec<Pos2> = (0..=8)
+                .map(|k| {
+                    let a = (90.0 * k as f32 / 8.0).to_radians();
+                    at(1.0 - 7.0 * a.cos(), -1.0 - 5.0 * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::line(pts, stroke));
         }
         Icon::Dimension => {
             painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);

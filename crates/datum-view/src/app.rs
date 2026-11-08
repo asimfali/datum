@@ -3173,6 +3173,7 @@ impl Viewer {
                         Act::Point => crate::icons::Icon::Point,
                         Act::Project => crate::icons::Icon::Project,
                         Act::TrimExtend => crate::icons::Icon::Trim,
+                        Act::Fillet => crate::icons::Icon::Fillet,
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
@@ -5609,6 +5610,10 @@ impl Viewer {
         if nav.space {
             return;
         }
+        // Tab turns the fillet tool into chamfers and back, the size kept.
+        if sk.draft.tool == Tool::Fillet && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            sk.draft.chamfer = !sk.draft.chamfer;
+        }
         let mut sent = Vec::new();
         let mut leave = false;
         // An element dragged from the palette and let go here: it hangs at the cursor there, its
@@ -6316,7 +6321,7 @@ pub(crate) fn definition(v: &Json) -> String {
 }
 
 /// The sketch tools, as the side panel lists them.
-const TOOLS: [Act; 8] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Dimension];
+const TOOLS: [Act; 9] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Fillet, Act::Dimension];
 
 /// The sketch's modes, as the menu lists them (D167).
 const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
@@ -6341,6 +6346,7 @@ fn tool(act: Act) -> Tool {
         Act::Point => Tool::Point,
         Act::Project => Tool::Project,
         Act::TrimExtend => Tool::Trim,
+        Act::Fillet => Tool::Fillet,
         Act::Dimension => Tool::Dimension,
         _ => Tool::Select,
     }
@@ -6521,7 +6527,7 @@ impl Viewer {
                     sk.draft.tangent = !sk.draft.tangent;
                 }
             }
-            Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Project | Act::TrimExtend | Act::Dimension => {
+            Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Project | Act::TrimExtend | Act::Fillet | Act::Dimension => {
                 if let Some(sk) = &mut self.sketch {
                     sk.draft.take_up(tool(act));
                 }
@@ -8819,6 +8825,62 @@ mod tests {
         assert_eq!(patch["remove_constraints"], json!([{"type": "on", "point": "n", "curve": "top"}]));
         assert!(patch.get("points").is_none(), "the corner holds the left side");
         assert!(v.sketch.as_ref().unwrap().placed.is_ok());
+    }
+
+    /// F takes up the fillet tool, Tab turns it into chamfers and back; with the size 5, a click
+    /// on the plate's corner `a` rounds it: an arc and a radius sent, the dimension kept.
+    #[test]
+    fn a_corner_is_rounded_in_the_window() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Fillet);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let mut toggled = Vec::new();
+        for _ in 0..2 {
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+            h.event(egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+            drop(h);
+            toggled.push(v.sketch.as_ref().unwrap().draft.chamfer);
+        }
+        assert_eq!(toggled, [true, false], "Tab: chamfer, then fillet");
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.draft.fillet = Some((json!(5), 5.0));
+            sk.draft.chamfer = false;
+        }
+        let sk = v.sketch.as_ref().unwrap();
+        let q = sk.placed.as_ref().unwrap().solved.points["a"];
+        let (x, y) = sk.camera.offset([q.x, q.y], f64::from(rect.height()));
+        let pos = rect.center() + egui::vec2(x as f32, y as f32);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(pos);
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
+        let [patch] = &sent[..] else { panic!("one edit: {sent:?}") };
+        assert_eq!(patch["arcs"].as_object().map(|a| a.len()), Some(1), "{patch}");
+        let added = patch["add_constraints"].as_array().unwrap();
+        assert!(added.iter().any(|c| c["type"] == "radius" && c["value"] == json!(5)), "{patch}");
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.placed.is_ok(), "{:?}", sk.placed.as_ref().err());
+        let kept = sk.json["sketch"]["constraints"].as_array().unwrap();
+        assert!(kept.iter().any(|c| c["type"] == "horizontal_distance" && c["points"] == json!(["o", "a"])));
     }
 
     /// Constraints by hand: the plate is fully defined and its holes 50 apart, so concentric is
