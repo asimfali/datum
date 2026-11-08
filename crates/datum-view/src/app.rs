@@ -3175,6 +3175,7 @@ impl Viewer {
                         Act::TrimExtend => crate::icons::Icon::Trim,
                         Act::Fillet => crate::icons::Icon::Fillet,
                         Act::Mirror => crate::icons::Icon::Mirror,
+                        Act::Offset => crate::icons::Icon::Offset,
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
@@ -5621,6 +5622,11 @@ impl Viewer {
         if sk.draft.tool == Tool::Fillet && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             sk.draft.chamfer = !sk.draft.chamfer;
         }
+        // Tab: the offset or the middle line between two walls.
+        if sk.draft.tool == Tool::Offset && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            sk.draft.midline = !sk.draft.midline;
+            sk.draft.wall = None;
+        }
         // Tab: the mirror keeps the original, or leaves only the copy.
         if sk.draft.tool == Tool::Mirror && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             sk.draft.mirror_moves = !sk.draft.mirror_moves;
@@ -6360,6 +6366,7 @@ fn tool(act: Act) -> Tool {
         Act::TrimExtend => Tool::Trim,
         Act::Fillet => Tool::Fillet,
         Act::Mirror => Tool::Mirror,
+        Act::Offset => Tool::Offset,
         Act::Dimension => Tool::Dimension,
         _ => Tool::Select,
     }
@@ -6541,7 +6548,16 @@ impl Viewer {
                     sk.draft.tangent = !sk.draft.tangent;
                 }
             }
-            Act::Select | Act::Line | Act::Arc | Act::Circle | Act::Point | Act::Project | Act::TrimExtend | Act::Fillet | Act::Dimension => {
+            Act::Select
+            | Act::Line
+            | Act::Arc
+            | Act::Circle
+            | Act::Point
+            | Act::Project
+            | Act::TrimExtend
+            | Act::Fillet
+            | Act::Offset
+            | Act::Dimension => {
                 if let Some(sk) = &mut self.sketch {
                     sk.draft.take_up(tool(act));
                 }
@@ -8845,6 +8861,46 @@ mod tests {
         assert_eq!(patch["lines"]["top"], json!({"from": "b", "to": "n"}), "{patch}");
         assert_eq!(patch["remove_constraints"], json!([{"type": "on", "point": "n", "curve": "top"}]));
         assert!(patch.get("points").is_none(), "the corner holds the left side");
+        assert!(v.sketch.as_ref().unwrap().placed.is_ok());
+    }
+
+    /// O takes up offset; with 3 typed, a click a hair inside the plate's bottom sends one edit:
+    /// the outline copied 3 inside, four new lines each 3 from its own, and the construction
+    /// axis left out; the sketch still solves.
+    #[test]
+    fn the_outline_is_offset_in_the_window() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::O, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Offset);
+        v.sketch.as_mut().unwrap().draft.offset = Some((json!(3), 3.0));
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let sk = v.sketch.as_ref().unwrap();
+        let points = &sk.placed.as_ref().unwrap().solved.points;
+        let (o, a) = (points["o"], points["a"]);
+        // A quarter of the way along, off the axis that starts at the middle.
+        let (x, y) = sk.camera.offset([o.x + 0.25 * (a.x - o.x), o.y + 0.25 * (a.y - o.y)], f64::from(rect.height()));
+        let pos = rect.center() + egui::vec2(x as f32, y as f32) + egui::vec2(0.0, -2.0);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(pos);
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
+        let [patch] = &sent[..] else { panic!("one edit: {sent:?}") };
+        assert_eq!(patch["lines"].as_object().unwrap().len(), 4, "{patch}");
+        let dims: Vec<_> = patch["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "point_line").collect();
+        assert_eq!(dims.len(), 4, "{patch}");
+        assert!(dims.iter().all(|c| c["value"].as_f64() == Some(3.0) && c["line"] != "axis"), "{patch}");
         assert!(v.sketch.as_ref().unwrap().placed.is_ok());
     }
 

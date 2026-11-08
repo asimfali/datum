@@ -18,6 +18,7 @@ mod lessons;
 pub mod log;
 mod measure;
 mod mirror;
+mod offset;
 mod origin;
 mod pattern;
 pub mod render;

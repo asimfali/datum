@@ -36,6 +36,8 @@ pub enum Tool {
     Fillet,
     /// Mirror what was selected across the line clicked (D244); Tab: the original goes.
     Mirror,
+    /// Copy the chain under the cursor at the size typed, on its side; Shift both (D245).
+    Offset,
     /// Add a geometric constraint of this kind: click what it ties (D118).
     Constrain(crate::constrain::Kind),
 }
@@ -244,6 +246,12 @@ pub struct Draft {
     /// goes (Tab).
     pub mirrored: Vec<crate::sketch::Pick>,
     pub mirror_moves: bool,
+    /// Offset tool: the size, as typed and its value, kept from click to click; the middle line
+    /// between two walls instead (Tab), the first wall clicked, and the curve under the cursor.
+    pub offset: Option<(Json, f64)>,
+    pub midline: bool,
+    pub wall: Option<String>,
+    pub under: Option<String>,
 }
 
 impl Default for Draft {
@@ -279,6 +287,10 @@ impl Default for Draft {
             chamfer: false,
             mirrored: Vec::new(),
             mirror_moves: false,
+            offset: None,
+            midline: false,
+            wall: None,
+            under: None,
         }
     }
 }
@@ -468,6 +480,7 @@ impl Draft {
         self.tangent = false;
         self.typed = None;
         self.plan = None;
+        self.wall = None;
         busy
     }
 
@@ -594,7 +607,7 @@ impl Draft {
             Tool::Line => self.chain.is_some() && !self.tangent,
             Tool::Circle => self.clicks.len() == 1,
             Tool::Arc => self.clicks.len() == 1,
-            Tool::Fillet => true,
+            Tool::Fillet | Tool::Offset => true,
             _ => false,
         }
     }
@@ -772,12 +785,19 @@ impl Draft {
 
     /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
-        if matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror) {
-            if let Some(t) = self.typed.clone() {
-                self.fillet = Some(t);
+        if matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror | Tool::Offset) {
+            match (self.tool, self.typed.clone()) {
+                (Tool::Offset, Some(t)) => self.offset = Some(t),
+                (_, Some(t)) => self.fillet = Some(t),
+                _ => {}
             }
             self.plan = match self.tool {
                 Tool::Trim => crate::trim::plan(edit, dx, dy, height, free),
+                Tool::Offset if self.midline => {
+                    self.under = edit.curve_at(dx, dy, height);
+                    self.wall.as_ref().and_then(|w| crate::offset::midline(edit, w, dx, dy, height))
+                }
+                Tool::Offset => self.offset.as_ref().and_then(|size| crate::offset::plan(edit, dx, dy, height, size, free)),
                 Tool::Mirror => edit.curve_at(dx, dy, height).and_then(|axis| crate::mirror::plan(edit, &self.mirrored, &axis, !self.mirror_moves)),
                 _ => self.fillet.as_ref().and_then(|size| crate::fillet::plan(edit, dx, dy, height, size, self.chamfer)),
             };
@@ -843,7 +863,19 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
-            Tool::Trim | Tool::Fillet => return self.plan.take().map(|t| t.patch),
+            // The middle line: the first click picks a wall, the second makes the line.
+            Tool::Offset if self.midline && self.wall.is_none() => {
+                self.wall = self.under.clone();
+                return None;
+            }
+            Tool::Offset if self.midline => {
+                let patch = self.plan.take().map(|t| t.patch);
+                if patch.is_some() {
+                    self.wall = None;
+                }
+                return patch;
+            }
+            Tool::Trim | Tool::Fillet | Tool::Offset => return self.plan.take().map(|t| t.patch),
             // One mirror, then the command ends.
             Tool::Mirror => {
                 let patch = self.plan.take().map(|t| t.patch);
@@ -1022,7 +1054,7 @@ impl Draft {
             }
         }
         // Trimming and filleting: what a click takes away, red; what it adds, dashed.
-        if let Some(t) = self.plan.as_ref().filter(|_| matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror)) {
+        if let Some(t) = self.plan.as_ref().filter(|_| matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror | Tool::Offset)) {
             let pts = |v: &[[f64; 2]]| v.iter().copied().map(screen).collect::<Vec<_>>();
             for g in t.gone.iter().filter(|g| g.len() > 1) {
                 dashed(painter, &pts(g), egui::Stroke::new(3.0, GONE), 6.0, 3.0);
@@ -1117,6 +1149,18 @@ impl Draft {
                 (Some((_, v)), true) => i18n.f("fillet-chamfer", "Chamfer { $v } (Tab: fillet)", &[("v", &short(*v).to_string())]),
                 (None, false) => i18n.t("fillet-type-radius", "Type the radius").into(),
                 (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
+            };
+            painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
+        }
+        // The offset's size by the cursor, or what to type.
+        if self.tool == Tool::Offset && edit.field.is_none() {
+            let text = match (&self.offset, self.midline, &self.wall) {
+                (_, true, None) => i18n.t("midline-first", "Middle line: click one wall (Tab: offset)").into(),
+                (_, true, Some(_)) => i18n.t("midline-second", "Middle line: click the other wall").into(),
+                (Some((_, v)), false, _) => {
+                    i18n.f("offset-size", "Offset { $v } (Shift: both sides; Tab: middle line)", &[("v", &short(*v).to_string())])
+                }
+                (None, false, _) => i18n.t("offset-type-size", "Type the offset (Tab: middle line)").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }
