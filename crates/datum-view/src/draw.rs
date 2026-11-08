@@ -246,8 +246,12 @@ pub struct Draft {
     /// goes (Tab).
     pub mirrored: Vec<crate::sketch::Pick>,
     pub mirror_moves: bool,
-    /// Offset tool: the size, as typed and its value, kept from click to click.
+    /// Offset tool: the size, as typed and its value, kept from click to click; the middle line
+    /// between two walls instead (Tab), the first wall clicked, and the curve under the cursor.
     pub offset: Option<(Json, f64)>,
+    pub midline: bool,
+    pub wall: Option<String>,
+    pub under: Option<String>,
 }
 
 impl Default for Draft {
@@ -284,6 +288,9 @@ impl Default for Draft {
             mirrored: Vec::new(),
             mirror_moves: false,
             offset: None,
+            midline: false,
+            wall: None,
+            under: None,
         }
     }
 }
@@ -473,6 +480,7 @@ impl Draft {
         self.tangent = false;
         self.typed = None;
         self.plan = None;
+        self.wall = None;
         busy
     }
 
@@ -785,6 +793,10 @@ impl Draft {
             }
             self.plan = match self.tool {
                 Tool::Trim => crate::trim::plan(edit, dx, dy, height, free),
+                Tool::Offset if self.midline => {
+                    self.under = edit.curve_at(dx, dy, height);
+                    self.wall.as_ref().and_then(|w| crate::offset::midline(edit, w, dx, dy, height))
+                }
                 Tool::Offset => self.offset.as_ref().and_then(|size| crate::offset::plan(edit, dx, dy, height, size, free)),
                 Tool::Mirror => edit.curve_at(dx, dy, height).and_then(|axis| crate::mirror::plan(edit, &self.mirrored, &axis, !self.mirror_moves)),
                 _ => self.fillet.as_ref().and_then(|size| crate::fillet::plan(edit, dx, dy, height, size, self.chamfer)),
@@ -851,6 +863,18 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
+            // The middle line: the first click picks a wall, the second makes the line.
+            Tool::Offset if self.midline && self.wall.is_none() => {
+                self.wall = self.under.clone();
+                return None;
+            }
+            Tool::Offset if self.midline => {
+                let patch = self.plan.take().map(|t| t.patch);
+                if patch.is_some() {
+                    self.wall = None;
+                }
+                return patch;
+            }
             Tool::Trim | Tool::Fillet | Tool::Offset => return self.plan.take().map(|t| t.patch),
             // One mirror, then the command ends.
             Tool::Mirror => {
@@ -1130,9 +1154,13 @@ impl Draft {
         }
         // The offset's size by the cursor, or what to type.
         if self.tool == Tool::Offset && edit.field.is_none() {
-            let text = match &self.offset {
-                Some((_, v)) => i18n.f("offset-size", "Offset { $v } (Shift: both sides)", &[("v", &short(*v).to_string())]),
-                None => i18n.t("offset-type-size", "Type the offset").into(),
+            let text = match (&self.offset, self.midline, &self.wall) {
+                (_, true, None) => i18n.t("midline-first", "Middle line: click one wall (Tab: offset)").into(),
+                (_, true, Some(_)) => i18n.t("midline-second", "Middle line: click the other wall, of the same width all along").into(),
+                (Some((_, v)), false, _) => {
+                    i18n.f("offset-size", "Offset { $v } (Shift: both sides; Tab: middle line)", &[("v", &short(*v).to_string())])
+                }
+                (None, false, _) => i18n.t("offset-type-size", "Type the offset").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }

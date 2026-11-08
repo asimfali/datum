@@ -5622,6 +5622,11 @@ impl Viewer {
         if sk.draft.tool == Tool::Fillet && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             sk.draft.chamfer = !sk.draft.chamfer;
         }
+        // Tab: the offset or the middle line between two walls.
+        if sk.draft.tool == Tool::Offset && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            sk.draft.midline = !sk.draft.midline;
+            sk.draft.wall = None;
+        }
         // Tab: the mirror keeps the original, or leaves only the copy.
         if sk.draft.tool == Tool::Mirror && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             sk.draft.mirror_moves = !sk.draft.mirror_moves;

@@ -13,7 +13,7 @@ use serde_json::{Value as Json, json};
 
 use crate::draw::Patch;
 use crate::sketch::SketchEdit;
-use crate::trim::{Plan, Shape, Sketch, cross, crossings, dist, sub};
+use crate::trim::{Plan, Shape, Sketch, cross, crossings, dist, dot, sub};
 
 /// What a click at pixel offset `(dx, dy)` would do with size `size` (as typed, and its value):
 /// the chain under the cursor copied on its side, or on both sides if `both`.
@@ -51,10 +51,96 @@ pub fn plan(edit: &SketchEdit, dx: f64, dy: f64, height: f64, size: &(Json, f64)
     let behind = shape.at(if s.forward { (t - 1e-3).max(0.0) } else { (t + 1e-3).min(1.0) });
     let left = cross(sub(ahead, behind), sub(at, near)) > 0.0;
     for sign in sides(left, both) {
-        added.extend(copy_chain(&sk, &mut patch, &chain, size, sign)?);
+        added.extend(copy_chain(&sk, &mut patch, &chain, size, sign, false)?.0);
     }
     Some(Plan { patch: patch.done()?, gone: Vec::new(), added })
 }
+
+/// The middle line of a channel of one width (D245): between wall `wall`, picked first, and
+/// the chain under pixel offset `(dx, dy)`, as construction geometry (it bounds no region).
+/// Each piece of the first wall moved by the width must lie on the other's (parallel lines,
+/// concentric arcs, as near as the sketch can tell, D228); two concentric circles make a circle.
+/// It is the first wall's offset by half the width, each straight piece held as the axis of
+/// symmetry of a point of one wall and the point across from it on the other: it stays in the
+/// middle whatever sets the width, and when the width changes.
+pub fn midline(edit: &SketchEdit, wall: &str, dx: f64, dy: f64, height: f64) -> Option<Plan> {
+    let p = edit.placed.as_ref().ok()?;
+    let sk = Sketch::new(edit, p)?;
+    let other = edit.curve_at(dx, dy, height)?;
+    if other == wall {
+        return None;
+    }
+    let tol = p.solved.tolerance;
+    let json = sk.json();
+    let mut patch = Patch::new(edit);
+    // Two circles about one centre: the circle between.
+    if json["circles"].get(wall).is_some() || json["circles"].get(&other).is_some() {
+        let (Some(Shape::Round { c, r, .. }), Some(Shape::Round { c: k, r: q, .. })) = (Shape::of(p, wall), Shape::of(p, &other)) else {
+            return None;
+        };
+        if json["circles"].get(wall).is_none() || json["circles"].get(&other).is_none() || dist(c, k) > tol {
+            return None;
+        }
+        let d = |n: &str| json["circles"][n]["diameter"].clone();
+        let diameter = match (d(wall).as_f64(), d(&other).as_f64()) {
+            (Some(a), Some(b)) => json!(0.5 * (a + b)),
+            _ => json!(format!("({} + {}) / 2", show(&d(wall))?, show(&d(&other))?)),
+        };
+        let n = patch.fresh("c");
+        patch.set("circles", &n, json!({"center": json["circles"][wall]["center"], "diameter": diameter, "construction": true}));
+        let added = vec![Shape::Round { c, r: 0.5 * (r + q), start: 0.0, sweep: std::f64::consts::TAU, closed: true }.polyline(0.0, 1.0)];
+        return Some(Plan { patch: patch.done()?, gone: Vec::new(), added });
+    }
+    let (a, b) = (chain(&sk, wall)?, chain(&sk, &other)?);
+    let shapes = |c: &[Step]| c.iter().map(|s| Shape::of(p, &s.curve)).collect::<Option<Vec<_>>>();
+    let (sa, sb) = (shapes(&a)?, shapes(&b)?);
+    // How far apart a piece of the first wall and one of the other are, if they run alike.
+    let apart = |x: &Shape, y: &Shape| -> Option<f64> {
+        match (*x, *y) {
+            (Shape::Line(p0, p1), Shape::Line(q0, q1)) => {
+                let u = sub(p1, p0);
+                let l = libm::hypot(u[0], u[1]);
+                let (d0, d1) = (cross(u, sub(q0, p0)) / l, cross(u, sub(q1, p0)) / l);
+                ((d0 - d1).abs() <= tol).then_some(0.5 * (d0 + d1).abs())
+            }
+            (Shape::Round { c, r, .. }, Shape::Round { c: k, r: q, .. }) => (dist(c, k) <= tol).then_some((r - q).abs()),
+            _ => None,
+        }
+    };
+    let width = sb.iter().find_map(|y| apart(&sa[0], y))?;
+    if width <= tol || !sa.iter().all(|x| sb.iter().any(|y| apart(x, y).is_some_and(|w| (w - width).abs() <= tol))) {
+        return None;
+    }
+    // Toward the other wall: left of the first's way if a point of the other is.
+    let s0 = &a[0];
+    let (m, ahead) = (sa[0].at(0.5), sa[0].at(if s0.forward { 0.6 } else { 0.4 }));
+    let q = sb.iter().flat_map(|y| y.polyline(0.0, 1.0)).min_by(|x, y| dist(*x, m).total_cmp(&dist(*y, m)))?;
+    let sign = if cross(sub(ahead, m), sub(q, m)) > 0.0 { 1.0 } else { -1.0 };
+    let (added, copies) = copy_chain(&sk, &mut patch, &a, &(json!(0.5 * width), 0.5 * width), sign, true)?;
+    // Each straight piece in the middle whatever the width: the axis of symmetry of its wall's
+    // start and the point square across from it on the other wall, held on that wall.
+    for (k, x) in sa.iter().enumerate() {
+        let Shape::Line(p0, p1) = *x else { continue };
+        let Some((n, y)) = b.iter().zip(&sb).find(|(_, y)| apart(x, y).is_some()) else { continue };
+        let Shape::Line(q0, q1) = *y else { continue };
+        let start = if a[k].forward { p0 } else { p1 };
+        let v = sub(q1, q0);
+        let t = dot(sub(start, q0), v) / dot(v, v);
+        let q = patch.fresh("p");
+        patch.set("points", &q, json!([q0[0] + v[0] * t, q0[1] + v[1] * t]));
+        patch.constrain(json!({"type": "on", "point": q, "curve": n.curve}));
+        patch.constrain(json!({"type": "symmetric", "points": [a[k].start, q], "line": copies[k]}));
+    }
+    Some(Plan { patch: patch.done()?, gone: Vec::new(), added })
+}
+
+/// A value as an expression's operand: a number, or an expression in brackets.
+fn show(j: &Json) -> Option<String> {
+    j.as_str().map(|e| format!("({e})")).or_else(|| j.as_f64().map(|x| x.to_string()))
+}
+
+/// Curves as polylines in sketch coordinates.
+type Polylines = Vec<Vec<[f64; 2]>>;
 
 /// The sides offset to: `first` (+1) or the other (−1), or both.
 fn sides(first: bool, both: bool) -> Vec<f64> {
@@ -145,16 +231,14 @@ fn circle(sk: &Sketch, patch: &mut Patch, name: &str, size: &(Json, f64), sign: 
 fn shifted(value: &Json, size: &Json, k: f64) -> Option<Json> {
     Some(match (value.as_f64(), size.as_f64()) {
         (Some(v), Some(s)) => json!(v + k * s),
-        _ => {
-            let show = |j: &Json| j.as_str().map(|e| format!("({e})")).or_else(|| j.as_f64().map(|x| x.to_string()));
-            json!(format!("{} + {} * {}", show(value)?, k, show(size)?))
-        }
+        _ => json!(format!("{} + {} * {}", show(value)?, k, show(size)?)),
     })
 }
 
 /// The chain copied `sign` (+1 left of its way) at `size`: the patch's curves and constraints,
-/// and the copy as polylines.
-fn copy_chain(sk: &Sketch, patch: &mut Patch, chain: &[Step], size: &(Json, f64), sign: f64) -> Option<Vec<Vec<[f64; 2]>>> {
+/// and the copy as polylines and its curves' names. A `middle` line: construction, not held at
+/// the size.
+fn copy_chain(sk: &Sketch, patch: &mut Patch, chain: &[Step], size: &(Json, f64), sign: f64, middle: bool) -> Option<(Polylines, Vec<String>)> {
     let d = size.1 * sign;
     // Each curve moved, as a shape in the chain's way, and where its ends go.
     let mut moved = Vec::new();
@@ -222,12 +306,18 @@ fn copy_chain(sk: &Sketch, patch: &mut Patch, chain: &[Step], size: &(Json, f64)
         let (f, t) = if s.forward { (start.clone(), end.clone()) } else { (end.clone(), start.clone()) };
         v["from"] = json!(f);
         v["to"] = json!(t);
+        if middle {
+            v["construction"] = json!(true);
+        }
         let copy = patch.fresh(if s.key == "lines" { "l" } else { "a" });
         patch.set(s.key, &copy, v);
         match s.key {
             "lines" => {
                 patch.constrain(json!({"type": "parallel", "lines": [s.curve, copy]}));
-                patch.constrain(json!({"type": "point_line", "point": f, "line": s.curve, "value": size.0}));
+                // A middle line is held between its walls by its caller instead.
+                if !middle {
+                    patch.constrain(json!({"type": "point_line", "point": f, "line": s.curve, "value": size.0}));
+                }
             }
             // About the same centre, its radius set by its neighbours where it meets them
             // smoothly; alone, the original's radius and the size.
@@ -277,7 +367,7 @@ fn copy_chain(sk: &Sketch, patch: &mut Patch, chain: &[Step], size: &(Json, f64)
             patch.constrain(json!({"type": "tangent", "curves": [copies[k], copies[j]]}));
         }
     }
-    Some(polylines)
+    Some((polylines, copies))
 }
 
 /// Moved curve `m` of step `s` from `a` to `b` (in the chain's way), as a polyline.
@@ -438,5 +528,66 @@ mod tests {
             let dims: Vec<_> = p["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "point_line").collect();
             assert!(!dims.is_empty() && dims.iter().all(|c| c["value"].as_f64() == Some(2.0)), "{p}");
         }
+    }
+
+    /// A channel with an elbow, of one width all along (its walls parallel, its arcs about one
+    /// centre), the width a dimension of 4: Tab, a click on one wall, a click on the other — the
+    /// middle line, construction, 2 off each wall, its arc of radius 8. The width made 6, it
+    /// stays in the middle: 3 off, radius 7.
+    #[test]
+    fn the_middle_line_stays_in_the_middle() {
+        let mut e = editor(
+            json!({"points": {"a": [0, 0], "b": [10, 0], "o": [10, 10], "c": [20, 10], "d": [20, 20],
+                              "i": [0, 4], "j": [10, 4], "k": [16, 10], "m": [16, 20]},
+                   "lines": {"out1": {"from": "a", "to": "b"}, "out2": {"from": "c", "to": "d"}, "in1": {"from": "i", "to": "j"}, "in2": {"from": "k", "to": "m"}},
+                   "arcs": {"out": {"center": "o", "from": "b", "to": "c"}, "inr": {"center": "o", "from": "j", "to": "k"}},
+                   "constraints": [{"type": "fix", "point": "o"}, {"type": "fix", "point": "a"}, {"type": "horizontal", "line": "out1"}, {"type": "vertical", "line": "out2"},
+                                   {"type": "tangent", "curves": ["out1", "out"]}, {"type": "tangent", "curves": ["out", "out2"]},
+                                   {"type": "tangent", "curves": ["in1", "inr"]}, {"type": "tangent", "curves": ["inr", "in2"]},
+                                   {"type": "parallel", "lines": ["out1", "in1"]}, {"type": "parallel", "lines": ["out2", "in2"]},
+                                   {"type": "point_line", "point": "i", "line": "out1", "value": 4}]}),
+            false,
+        );
+        e.draft.tool = Tool::Offset;
+        e.draft.midline = true;
+        assert!(click_at(&mut e, [5.0, 0.0], false).is_none());
+        assert_eq!(e.draft.wall.as_deref(), Some("out1"));
+        let patch = click_at(&mut e, [5.0, 4.0], false).unwrap();
+        assert!(e.placed.is_ok() && e.draft.wall.is_none());
+        assert!(patch["lines"].as_object().unwrap().values().all(|l| l["construction"] == json!(true)));
+        let at = |e: &crate::sketch::SketchEdit, n: &str| {
+            let v = e.placed.as_ref().unwrap().solved.points[n];
+            [(v.x * 1e6).round() / 1e6, (v.y * 1e6).round() / 1e6]
+        };
+        let line = |e: &crate::sketch::SketchEdit, n: &str| {
+            [at(e, e.json["sketch"]["lines"][n]["from"].as_str().unwrap()), at(e, e.json["sketch"]["lines"][n]["to"].as_str().unwrap())]
+        };
+        assert_eq!(line(&e, "l1"), [[0.0, 2.0], [10.0, 2.0]]);
+        assert_eq!(line(&e, "l2"), [[18.0, 10.0], [18.0, 20.0]]);
+        let width = json!({"type": "point_line", "point": "i", "line": "out1", "value": 4});
+        e.apply(
+            serde_json::from_value(
+                json!({"remove_constraints": [width], "add_constraints": [{"type": "point_line", "point": "i", "line": "out1", "value": 6}]}),
+            )
+            .unwrap(),
+        );
+        assert_eq!(line(&e, "l1"), [[0.0, 3.0], [10.0, 3.0]]);
+        assert_eq!(line(&e, "l2"), [[17.0, 10.0], [17.0, 20.0]]);
+    }
+
+    /// Walls that are not of one width (they close in): no middle line of lines and arcs, nothing
+    /// made.
+    #[test]
+    fn no_middle_line_where_the_width_changes() {
+        let mut e = editor(
+            json!({"points": {"a": [0, 0], "b": [20, 0], "c": [0, 6], "d": [20, 3]},
+                   "lines": {"low": {"from": "a", "to": "b"}, "high": {"from": "c", "to": "d"}}}),
+            false,
+        );
+        e.draft.tool = Tool::Offset;
+        e.draft.midline = true;
+        click_at(&mut e, [10.0, 0.0], false);
+        assert!(click_at(&mut e, [10.0, 4.5], false).is_none());
+        assert!(e.json["sketch"]["lines"].get("l1").is_none());
     }
 }

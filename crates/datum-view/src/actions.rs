@@ -206,7 +206,7 @@ pub const ACTIONS: [Action; 55] = [
         Act::Offset,
         "sketch.offset",
         "Offset",
-        "Type the size, then click a line, an arc or a circle: the chain it is in, copied on the cursor's side at that size; Shift: both sides; Esc ends",
+        "Type the size, then click a line, an arc or a circle: the chain it is in, copied on the cursor's side at that size; Shift: both sides; Tab: the middle line between two walls; Esc ends",
         plain(Key::O),
         Sketch,
     ),
