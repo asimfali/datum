@@ -3256,6 +3256,11 @@ impl Viewer {
                 {
                     self.keeping = sk.extract(self.i18n.t("keep-new", "New element"), Some(&sk.params)).map(Keep::new);
                 }
+                // Mirror the selection: the axis is clicked next (D244).
+                let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Mirror);
+                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new(self.i18n.label(Act::Mirror))).on_hover_text(hint).clicked() {
+                    sk.start_mirror();
+                }
                 // Groups: a name for elements together (a pattern's cell, a path); its
                 // badge marks them, a click on it selects them.
                 match sk.selected_group() {
@@ -5614,6 +5619,10 @@ impl Viewer {
         if sk.draft.tool == Tool::Fillet && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             sk.draft.chamfer = !sk.draft.chamfer;
         }
+        // Tab: the mirror keeps the original, or leaves only the copy.
+        if sk.draft.tool == Tool::Mirror && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
+            sk.draft.mirror_moves = !sk.draft.mirror_moves;
+        }
         let mut sent = Vec::new();
         let mut leave = false;
         // An element dragged from the palette and let go here: it hangs at the cursor there, its
@@ -6407,6 +6416,7 @@ impl Viewer {
             Act::Measure => self.sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
             Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
+            Act::Mirror => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty()),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
             _ => true,
         }
@@ -6542,6 +6552,11 @@ impl Viewer {
                 if let Some(sk) = &mut self.sketch {
                     let on = mode(&mut sk.modes, act);
                     *on = !*on;
+                }
+            }
+            Act::Mirror => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.start_mirror();
                 }
             }
             Act::Group => {
@@ -6718,7 +6733,9 @@ impl Viewer {
             self.item(ui, Act::Trim, true);
             self.item(ui, Act::Branch, true);
             ui.separator();
-            for act in TOOLS.into_iter().chain([Act::ProjectSection, Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Construction]) {
+            for act in
+                TOOLS.into_iter().chain([Act::ProjectSection, Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Mirror, Act::Construction])
+            {
                 self.item(ui, act, true);
             }
             ui.separator();
@@ -8825,6 +8842,63 @@ mod tests {
         assert_eq!(patch["remove_constraints"], json!([{"type": "on", "point": "n", "curve": "top"}]));
         assert!(patch.get("points").is_none(), "the corner holds the left side");
         assert!(v.sketch.as_ref().unwrap().placed.is_ok());
+    }
+
+    /// M takes up the mirror tool for the selected hole, Tab turns "the original goes" on and
+    /// off; a click on the axis sends one new circle at the hole's reflection, where the other
+    /// hole is, and the tool is let go.
+    #[test]
+    fn a_hole_is_mirrored_in_the_window() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::M, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Mirror);
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let mut toggled = Vec::new();
+        for _ in 0..2 {
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+            h.event(egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+            drop(h);
+            toggled.push(v.sketch.as_ref().unwrap().draft.mirror_moves);
+        }
+        assert_eq!(toggled, [true, false], "Tab: the original goes, then stays");
+        let sk = v.sketch.as_ref().unwrap();
+        let points = &sk.placed.as_ref().unwrap().solved.points;
+        let (m, n, h1, h2) = (points["m"], points["n"], points["h1"], points["h2"]);
+        let mid = [0.5 * (m.x + n.x), 0.5 * (m.y + n.y)];
+        let (x, y) = sk.camera.offset(mid, f64::from(rect.height()));
+        let pos = rect.center() + egui::vec2(x as f32, y as f32);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(pos);
+        h.run();
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+        h.event(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
+        let [patch] = &sent[..] else { panic!("one edit: {sent:?}") };
+        let circles = patch["circles"].as_object().unwrap();
+        assert_eq!(circles.len(), 1, "{patch}");
+        let (_, circle) = circles.iter().next().unwrap();
+        assert_eq!(circle["diameter"], json!("hole"), "{patch}");
+        let centre = &patch["points"][circle["center"].as_str().unwrap()];
+        // The reflection of h1 across the axis is h2.
+        let at = [centre[0].as_f64().unwrap(), centre[1].as_f64().unwrap()];
+        assert!((at[0] - h2.x).abs() < 1e-6 && (at[1] - h2.y).abs() < 1e-6, "{at:?} vs {h1:?} {h2:?}");
+        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Select);
     }
 
     /// F takes up the fillet tool, Tab turns it into chamfers and back; with the size 5, a click

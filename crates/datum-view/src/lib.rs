@@ -17,6 +17,7 @@ mod icons;
 mod lessons;
 pub mod log;
 mod measure;
+mod mirror;
 mod origin;
 mod pattern;
 pub mod render;

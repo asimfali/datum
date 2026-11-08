@@ -34,6 +34,8 @@ pub enum Tool {
     Trim,
     /// Round or bevel a corner, or every corner of the region clicked (D240); Tab between the two.
     Fillet,
+    /// Mirror what was selected across the line clicked (D244); Tab: the original goes.
+    Mirror,
     /// Add a geometric constraint of this kind: click what it ties (D118).
     Constrain(crate::constrain::Kind),
 }
@@ -238,6 +240,10 @@ pub struct Draft {
     /// instead of a fillet (Tab).
     pub fillet: Option<(Json, f64)>,
     pub chamfer: bool,
+    /// Mirror tool: what is mirrored (the selection when it began), and whether the original
+    /// goes (Tab).
+    pub mirrored: Vec<crate::sketch::Pick>,
+    pub mirror_moves: bool,
 }
 
 impl Default for Draft {
@@ -271,6 +277,8 @@ impl Default for Draft {
             plan: None,
             fillet: None,
             chamfer: false,
+            mirrored: Vec::new(),
+            mirror_moves: false,
         }
     }
 }
@@ -764,12 +772,13 @@ impl Draft {
 
     /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
-        if matches!(self.tool, Tool::Trim | Tool::Fillet) {
+        if matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror) {
             if let Some(t) = self.typed.clone() {
                 self.fillet = Some(t);
             }
             self.plan = match self.tool {
                 Tool::Trim => crate::trim::plan(edit, dx, dy, height, free),
+                Tool::Mirror => edit.curve_at(dx, dy, height).and_then(|axis| crate::mirror::plan(edit, &self.mirrored, &axis, !self.mirror_moves)),
                 _ => self.fillet.as_ref().and_then(|size| crate::fillet::plan(edit, dx, dy, height, size, self.chamfer)),
             };
             self.cursor = Some(Spot { at: edit.camera.at(dx, dy, height), snap: Snap::Free });
@@ -835,6 +844,14 @@ impl Draft {
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
             Tool::Trim | Tool::Fillet => return self.plan.take().map(|t| t.patch),
+            // One mirror, then the command ends.
+            Tool::Mirror => {
+                let patch = self.plan.take().map(|t| t.patch);
+                if patch.is_some() {
+                    self.escape();
+                }
+                return patch;
+            }
             Tool::Project => {
                 let Snap::Source(i) = spot.snap else { return None };
                 let c = self.projectable.get(i)?;
@@ -1005,7 +1022,7 @@ impl Draft {
             }
         }
         // Trimming and filleting: what a click takes away, red; what it adds, dashed.
-        if let Some(t) = self.plan.as_ref().filter(|_| matches!(self.tool, Tool::Trim | Tool::Fillet)) {
+        if let Some(t) = self.plan.as_ref().filter(|_| matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror)) {
             let pts = |v: &[[f64; 2]]| v.iter().copied().map(screen).collect::<Vec<_>>();
             for g in t.gone.iter().filter(|g| g.len() > 1) {
                 dashed(painter, &pts(g), egui::Stroke::new(3.0, GONE), 6.0, 3.0);
@@ -1100,6 +1117,15 @@ impl Draft {
                 (Some((_, v)), true) => i18n.f("fillet-chamfer", "Chamfer { $v } (Tab: fillet)", &[("v", &short(*v).to_string())]),
                 (None, false) => i18n.t("fillet-type-radius", "Type the radius").into(),
                 (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
+            };
+            painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
+        }
+        // What the mirror does with the original, and what to click.
+        if self.tool == Tool::Mirror {
+            let text = if self.mirror_moves {
+                i18n.t("mirror-moves", "Mirror: click the axis; the original goes (Tab: keep it)")
+            } else {
+                i18n.t("mirror-copies", "Mirror: click the axis; a copy (Tab: the original goes)")
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }

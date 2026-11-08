@@ -1097,6 +1097,13 @@ impl SketchEdit {
         Some(Json::Object(params))
     }
 
+    /// The mirror tool taken up on the selection: kept as it began, the axis clicked next (D244).
+    pub fn start_mirror(&mut self) {
+        let picked = self.selected.clone();
+        self.draft.take_up(crate::draw::Tool::Mirror);
+        self.draft.mirrored = picked;
+    }
+
     /// The patterns `copies` are of, each as its JSON with `change` made for each of its copies.
     pub fn patterns_changed(&self, copies: &[(String, [i64; 2])], mut change: impl FnMut(&mut Json, [i64; 2])) -> BTreeMap<String, Json> {
         let mut out: BTreeMap<String, Json> = BTreeMap::new();
