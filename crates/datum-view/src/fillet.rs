@@ -534,4 +534,57 @@ mod tests {
             assert!(c[0] < 10.0, "{a}'s centre inside the corner: {c:?}");
         }
     }
+
+    /// An L-shaped outline rounded at every corner, the inner ones too; each side dragged to and
+    /// fro by whole millimetres a frame, as a hand drags fast: no fillet ever turns inside out
+    /// (the step is taken in parts, D241).
+    #[test]
+    fn fillets_hold_under_a_fast_drag() {
+        let mut e = editor(
+            json!({"points": {"a": [0, 0], "b": [30, 0], "c": [30, 10], "d": [12, 10], "f": [12, 25], "g": [0, 25]},
+                   "lines": {"l1": {"from": "a", "to": "b"}, "l2": {"from": "b", "to": "c"}, "l3": {"from": "c", "to": "d"},
+                             "l4": {"from": "d", "to": "f"}, "l5": {"from": "f", "to": "g"}, "l6": {"from": "g", "to": "a"}},
+                   "constraints": [{"type": "fix", "point": "a"}, {"type": "horizontal", "line": "l1"}, {"type": "vertical", "line": "l2"},
+                                   {"type": "horizontal", "line": "l3"}, {"type": "vertical", "line": "l4"}, {"type": "horizontal", "line": "l5"},
+                                   {"type": "vertical", "line": "l6"}]}),
+            false,
+        );
+        e.draft.tool = Tool::Fillet;
+        e.draft.fillet = Some((json!(2), 2.0));
+        click_at(&mut e, [5.0, 5.0], false).unwrap();
+        e.draft.tool = Tool::Select;
+        let minor = |e: &SketchEdit| {
+            e.json["sketch"]["arcs"].as_object().unwrap().iter().all(|(_, arc)| {
+                let p = e.placed.as_ref().unwrap();
+                let q = |k: &str| p.solved.points[arc[k].as_str().unwrap()];
+                let (c, f, t) = (q("center"), q("from"), q("to"));
+                let turn = (libm::atan2(t.y - c.y, t.x - c.x) - libm::atan2(f.y - c.y, f.x - c.x)).rem_euclid(std::f64::consts::TAU);
+                turn < std::f64::consts::PI
+            })
+        };
+        assert!(minor(&e));
+        for (line, along) in [("l4", [1.0, 0.0]), ("l3", [0.0, 1.0]), ("l2", [1.0, 0.0]), ("l5", [0.0, 1.0])] {
+            let p = e.placed.as_ref().unwrap();
+            let l = &p.lines[line];
+            let (a, b) = (p.solved.points[&l.from], p.solved.points[&l.to]);
+            let mid = [(a.x + b.x) / 2.0, (a.y + b.y) / 2.0];
+            e.hover = Some(crate::sketch::Pick::Curve(line.into()));
+            assert!(e.start_drag(mid), "{line}");
+            for k in [3.0, 6.0, 2.0, -3.0, -6.0, 0.0] {
+                e.drag_to([mid[0] + along[0] * k, mid[1] + along[1] * k], 0.0);
+                assert!(minor(&e), "{line} dragged by {k}: a fillet turned inside out");
+                // It goes to the cursor, but where two fillets would no longer fit on the side
+                // between (`l3` down by 6 leaves 4 for two of radius 2): there it stops short.
+                let p = e.placed.as_ref().unwrap();
+                let now = p.solved.points[&p.lines[line].from];
+                let moved = (now.x - a.x) * along[0] + (now.y - a.y) * along[1];
+                if (line, k) == ("l3", -6.0) {
+                    assert!(-6.0 < moved && moved < -5.0, "{moved}");
+                } else {
+                    assert!((moved - k).abs() < 1e-9, "{line} dragged by {k} went {moved}");
+                }
+            }
+            e.end_drag();
+        }
+    }
 }

@@ -100,6 +100,9 @@ pub struct SketchEdit {
     pub notice: Option<String>,
 }
 
+/// The parts a drag step that would turn a tangency over is taken in (D241).
+const DRAG_PARTS: usize = 8;
+
 /// What a drag moves: the sketch's own points, each from where it stood, by the cursor's way
 /// from where it was grabbed. One point is grabbed where it stands: it goes under the cursor.
 pub struct Drag {
@@ -506,7 +509,7 @@ impl SketchEdit {
 
     /// Solves and places the sketch as the model would.
     pub fn solve(&mut self) {
-        self.set(self.placed_with(&[]));
+        self.set(self.placed_with(&[], false));
     }
 
     /// Takes a solution, and the regions its profiles bound: the model's own (the regions an
@@ -534,11 +537,13 @@ impl SketchEdit {
         Json::Object(patch)
     }
 
-    /// The sketch solved and placed, with points `pins` held where given (a drag).
-    fn placed_with(&self, pins: &[(String, [f64; 2])]) -> Result<Placed, String> {
+    /// The sketch solved and placed, with points `pins` held where given (a drag); `quick`: a
+    /// conflict not named, only found.
+    fn placed_with(&self, pins: &[(String, [f64; 2])], quick: bool) -> Result<Placed, String> {
         let lookup = |n: &str| self.params.get(n).copied().ok_or_else(|| datum_math::expr::ExprError::Unknown(n.to_string()));
         let mut op = self.op()?;
         if let Op::Sketch { sketch, .. } = &mut op {
+            sketch.quick = quick;
             for (n, at) in pins {
                 sketch.constraints.push(datum_sketch::Constraint::Fix { point: n.clone(), at: Some(datum_math::Vec2::new(at[0], at[1])) });
             }
@@ -829,15 +834,34 @@ impl SketchEdit {
         if drag.last == Some(p) {
             return;
         }
-        drag.last = Some(p);
+        let from = drag.last.unwrap_or(drag.grab);
+        // A step that would turn a tangency over (a fillet inside out) or leave the sketch
+        // unsolved is taken in smaller ones, each from the last; one that still would is not
+        // taken: the drag stops short.
+        if self.drag_frame(p) {
+            return;
+        }
+        for k in 1..=DRAG_PARTS {
+            let t = k as f64 / DRAG_PARTS as f64;
+            if !self.drag_frame([from[0] + (p[0] - from[0]) * t, from[1] + (p[1] - from[1]) * t]) {
+                break;
+            }
+        }
+    }
+
+    /// One frame of a drag, the cursor at `p`: false, and nothing changed, if it would turn a
+    /// tangency over or leave the sketch unsolved.
+    fn drag_frame(&mut self, p: [f64; 2]) -> bool {
+        let Some(drag) = &self.drag else { return false };
         let (dx, dy) = (p[0] - drag.grab[0], p[1] - drag.grab[1]);
         let pins: Vec<(String, [f64; 2])> = drag.points.iter().map(|(n, q)| (n.clone(), [q[0] + dx, q[1] + dy])).collect();
+        let before = self.json["sketch"]["points"].clone();
         for (n, q) in &pins {
             self.json["sketch"]["points"][n] = json!(q);
         }
         // The direction a point is free in, from the sketch solved without a pin: with one,
         // the point would have none, and frames would alternate between two placements.
-        let plain = self.placed_with(&[]);
+        let plain = self.placed_with(&[], true);
         let mut tries = vec![pins.clone()];
         if let [(n, q)] = &pins[..]
             && let Some((at, Some(d))) = plain.as_ref().ok().and_then(|pl| Some((pl.solved.points.get(n).copied()?, pl.solved.free.get(n).copied()?)))
@@ -845,12 +869,21 @@ impl SketchEdit {
             let t = (q[0] - at.x) * d.x + (q[1] - at.y) * d.y;
             tries.push(vec![(n.clone(), [at.x + d.x * t, at.y + d.y * t])]);
         }
-        let placed = tries.iter().map(|t| self.placed_with(t)).find(Result::is_ok).unwrap_or(plain);
+        let placed = tries.iter().map(|t| self.placed_with(t, true)).find(Result::is_ok).unwrap_or(plain);
+        let breaks = match (&placed, &self.placed) {
+            (Ok(new), Ok(old)) => self.sides(new) != self.sides(old),
+            (Err(_), Ok(_)) => true,
+            _ => false,
+        };
+        if breaks {
+            self.json["sketch"]["points"] = before;
+            return false;
+        }
         // The next frame starts where this one left the points, not where they were drawn: what
-        // follows the drag (a fillet) goes with it step by step, rather than stay behind until a
-        // placement turned inside out is nearer (D241).
-        if let (Ok(pl), Some(drag)) = (&placed, &self.drag) {
-            // The dragged points themselves start where the cursor puts them.
+        // follows the drag (a fillet) goes with it step by step (D241). The dragged points
+        // themselves start where the cursor puts them.
+        if let (Ok(pl), Some(drag)) = (&placed, &mut self.drag) {
+            drag.last = Some(p);
             for n in drag.drawn.keys().filter(|n| !drag.points.iter().any(|(d, _)| d == *n)) {
                 if let Some(q) = pl.solved.points.get(n) {
                     self.json["sketch"]["points"][n] = json!([q.x, q.y]);
@@ -858,6 +891,37 @@ impl SketchEdit {
             }
         }
         self.set(placed);
+        true
+    }
+
+    /// The side each tangency at a shared end is on (D241): of a line and an arc, which side of
+    /// the line the arc's centre is; of two arcs, whether they touch inside or outside. The
+    /// solver's equation there only makes the radius square to the line, either way round.
+    fn sides(&self, p: &Placed) -> Vec<bool> {
+        let at = |n: &str| p.solved.points.get(n).map(|v| [v.x, v.y]);
+        let curve = |n: &str| match (p.lines.get(n), p.arcs.get(n)) {
+            (Some(l), _) => Some(([l.from.as_str(), l.to.as_str()], None)),
+            (_, Some(a)) => Some(([a.from.as_str(), a.to.as_str()], Some(a.center.as_str()))),
+            _ => None,
+        };
+        let mut out = Vec::new();
+        for c in self.json["sketch"]["constraints"].as_array().into_iter().flatten().filter(|c| c["type"] == "tangent") {
+            let (Some(x), Some(y)) = (c["curves"][0].as_str().and_then(curve), c["curves"][1].as_str().and_then(curve)) else { continue };
+            let Some(q) = x.0.iter().find(|e| y.0.contains(e)).and_then(|e| at(e)) else { continue };
+            let side = match (x, y) {
+                (([a, b], None), (_, Some(c))) | ((_, Some(c)), ([a, b], None)) => {
+                    let (Some(a), Some(b), Some(c)) = (at(a), at(b), at(c)) else { continue };
+                    (b[0] - a[0]) * (c[1] - q[1]) - (b[1] - a[1]) * (c[0] - q[0]) > 0.0
+                }
+                ((_, Some(c1)), (_, Some(c2))) => {
+                    let (Some(c1), Some(c2)) = (at(c1), at(c2)) else { continue };
+                    (c1[0] - q[0]) * (c2[0] - q[0]) + (c1[1] - q[1]) * (c2[1] - q[1]) > 0.0
+                }
+                _ => continue,
+            };
+            out.push(side);
+        }
+        out
     }
 
     /// What a single point dragged to `p` would go onto: the nearest point or middle of a line or

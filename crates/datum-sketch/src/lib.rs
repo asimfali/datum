@@ -60,6 +60,11 @@ pub struct Sketch {
     /// Patterns by name: copies of a group's profiles (or of one curve's).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patterns: BTreeMap<String, Pattern>,
+    /// Only whether the sketch solves: a conflict is not named (naming it solves the sketch again
+    /// without each constraint in turn). A drag tries placements and shows no failure (D241).
+    /// Not in the file.
+    #[serde(skip)]
+    pub quick: bool,
 }
 
 /// Copies of the closed profiles of `of` (a group or a curve): on a grid, along a path or around a
@@ -479,7 +484,7 @@ pub struct Solved {
 pub fn solve(sketch: &Sketch) -> Result<Solved, SketchError> {
     let eq = Equations::new(sketch)?;
     let groups = eq.groups();
-    let solved = groups.par_iter().map(|g| solve_group(&eq, g)).collect::<Vec<_>>();
+    let solved = groups.par_iter().map(|g| solve_group(&eq, g, sketch.quick)).collect::<Vec<_>>();
     let mut points = eq.start.clone();
     let mut dof = 2 * eq.unconstrained.len();
     let mut free: Vec<(usize, Option<Vec2>)> = eq.unconstrained.iter().map(|&p| (p, None)).collect();
@@ -514,13 +519,14 @@ struct GroupResult {
     free: Vec<(usize, Option<Vec2>)>,
 }
 
-fn solve_group(eq: &Equations, g: &Group) -> Result<GroupResult, SketchError> {
+fn solve_group(eq: &Equations, g: &Group, quick: bool) -> Result<GroupResult, SketchError> {
     let fitted = eq.fit(g, &g.constraints);
     match fitted {
         Some(x) => {
             let (dof, free) = eq.freedom(g, &x);
             Ok(GroupResult { points: eq.unscale(g, &x), dof, free })
         }
+        None if quick => Err(SketchError::Conflict(Vec::new())),
         None => Err(SketchError::Conflict(eq.conflicts(g))),
     }
 }
