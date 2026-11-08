@@ -1,7 +1,8 @@
 //! Mirror in a sketch (D244): the selected curves and points copied across an axis, a line of
-//! the sketch or a projection (M, then a click on the axis). The copy is the sketch's own,
-//! independent of the original (no `symmetric` between them), its shape held by the original's
-//! constraints among what is copied, mirrored: lengths, radii, distances, parallels, tangents,
+//! the sketch or a projection (M, then a click on the axis). The original holds the copy, as in
+//! Inventor: each point pair `symmetric` about the axis, each line pair `equal`, each arc or
+//! circle pair `equal_radius`; deleting them makes the copy its own, its shape still held by the
+//! original's constraints among what is copied, mirrored: lengths, radii, distances, parallels, tangents,
 //! an angle with its lines swapped (a mirror turns it the other way); horizontal and vertical
 //! only across a horizontal or vertical axis. A constraint that ties the copied to anything
 //! else is not copied, nor a fix. Points on the axis (its ends, or held on it) are the copy's as
@@ -117,13 +118,26 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
             _ => "c",
         });
         patch.set(key, &copied, copy);
-        copies.push((n.clone(), copied));
+        copies.push((*key, n.clone(), copied));
         added.push(shape.polyline(0.0, 1.0));
         if !keep {
             gone.push(Shape::of(p, n)?.polyline(0.0, 1.0));
         }
     }
-    map.extend(copies);
+    // Kept, the original holds the copy: each point mirrored by `symmetric`, each line of equal
+    // length, each arc or circle of equal radius. Deleting them makes the copy its own.
+    if keep {
+        for q in points.iter().filter(|q| !on_axis(q)) {
+            patch.constrain(json!({"type": "symmetric", "points": [q, map[q.as_str()]], "line": axis}));
+        }
+        for (key, n, copied) in &copies {
+            patch.constrain(match *key {
+                "lines" => json!({"type": "equal", "lines": [n, copied]}),
+                _ => json!({"type": "equal_radius", "curves": [n, copied]}),
+            });
+        }
+    }
+    map.extend(copies.into_iter().map(|(_, n, copied)| (n, copied)));
     // The constraints among what is copied, mirrored.
     let level = sk.typed.iter().any(|c| match c {
         Constraint::Horizontal { line: Some(l), .. } | Constraint::Vertical { line: Some(l), .. } => l == axis,
@@ -221,7 +235,8 @@ mod tests {
 
     /// Half a profile drawn from a vertical axis, mirrored across it: the other half appears
     /// on the left, joined to the axis points `a` and `d`, with the same horizontal, vertical
-    /// and length of 10; the profile closes, the original stays.
+    /// and length of 10; the profile closes, the original stays and holds the copy (symmetric,
+    /// equal), until those go.
     #[test]
     fn half_a_profile_closes_across_the_axis() {
         let mut e = editor(half_profile(), false);
@@ -255,6 +270,16 @@ mod tests {
             assert_eq!(at(&e, n), p);
         }
         assert!(["ab", "bc", "cd"].iter().all(|l| sk["lines"].get(l).is_some()));
+        // The original holds the copy: its points off the axis symmetric, its lines equal; the
+        // shared `a` and `d` need none.
+        let sym = cons(&e, "symmetric");
+        assert_eq!(sym.len(), 2, "{sym:?}");
+        assert!(sym.iter().all(|c| c["line"] == "axis" && (c["points"][0] == "b" || c["points"][0] == "c")));
+        assert_eq!(cons(&e, "equal").len(), 3);
+        // Deleted, the copy is its own and keeps its shape.
+        let ties: Vec<Json> = cons(&e, "symmetric").into_iter().chain(cons(&e, "equal")).collect();
+        e.apply(serde_json::from_value(json!({"remove_constraints": ties})).unwrap());
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
     }
 
     /// With Tab pressed (the original goes), only the copy is left: the lines `ab`, `bc`, `cd`
@@ -279,6 +304,8 @@ mod tests {
         let mut got: Vec<[f64; 2]> = fresh(&e, "points", &["a", "d", "t"]).iter().map(|n| at(&e, n)).collect();
         got.sort_by(|p, q| p[1].total_cmp(&q[1]));
         assert_eq!(got, [[-10.0, 0.0], [-10.0, 10.0]]);
+        // Nothing left to tie the copy to.
+        assert!(cons(&e, "symmetric").is_empty() && cons(&e, "equal").is_empty());
     }
 
     /// Across an axis at 45 degrees a horizontal line of length 5 comes out as a vertical one
