@@ -1321,8 +1321,27 @@ impl SketchEdit {
                 "length" => c["line"].as_str().and_then(|n| Self::middle(p, n)).map(|m| (m, Vec::new())),
                 "point_line" => {
                     let (q, (a, b)) = (at(&c["point"])?, line(&c["line"])?);
-                    let f = foot(q, a, b);
-                    Some((mid(q, f), vec![[q, f]]))
+                    // Between parallel lines (the point an end of one, as the dimension tool
+                    // writes it): across the middle of where they overlap, not down whatever
+                    // side runs through the point.
+                    let (n, target) = (c["point"].as_str()?, c["line"].as_str()?);
+                    let side = p.lines.iter().filter(|(m, l)| m.as_str() != target && (l.from == n || l.to == n)).find_map(|(_, l)| {
+                        let (f, t) = (at(&json!(l.from))?, at(&json!(l.to))?);
+                        crate::draw::parallel([t[0] - f[0], t[1] - f[1]], [b[0] - a[0], b[1] - a[1]]).then_some((f, t))
+                    });
+                    let (from, to) = match side {
+                        Some((f, t)) => {
+                            let u = [b[0] - a[0], b[1] - a[1]];
+                            let along = |x: [f64; 2]| ((x[0] - a[0]) * u[0] + (x[1] - a[1]) * u[1]) / (u[0] * u[0] + u[1] * u[1]);
+                            let (sf, st) = (along(f), along(t));
+                            let (lo, hi) = (sf.min(st).max(0.0), sf.max(st).min(1.0));
+                            let s = if lo <= hi { 0.5 * (lo + hi) } else { 0.5 * (sf + st) };
+                            let on = [a[0] + u[0] * s, a[1] + u[1] * s];
+                            (foot(on, f, t), on)
+                        }
+                        None => (q, foot(q, a, b)),
+                    };
+                    Some((mid(from, to), vec![[from, to]]))
                 }
                 "angle" => Some((angle_spot(line(&c["lines"][0])?, line(&c["lines"][1])?), Vec::new())),
                 "radius" | "arc_length" | "arc_angle" => c["arc"].as_str().and_then(|n| Self::middle(p, n)).map(|m| (m, Vec::new())),
@@ -2421,7 +2440,9 @@ mod tests {
             "lines": {"low": {"from": "a", "to": "b"}, "high": {"from": "c", "to": "d"}, "slant": {"from": "e", "to": "f"}},
             "constraints": [{"type": "point_line", "point": "c", "line": "low", "value": 12},
                             {"type": "point_line", "point": "q", "line": "slant", "value": 18}]}));
-        assert_eq!(dimension_line(&e, Pick::Constraint(0)), [[[5.0, 12.0], [5.0, 0.0]]]);
+        // `c` ends `high`, parallel to `low`: the distance between the lines, across the middle
+        // of the stretch they share (5 to 30).
+        assert_eq!(dimension_line(&e, Pick::Constraint(0)), [[[17.5, 12.0], [17.5, 0.0]]]);
         let (q, f0, f1) = (solved(&e, "q"), solved(&e, "e"), solved(&e, "f"));
         let l = e.labels().into_iter().find(|l| l.pick == Pick::Constraint(1)).unwrap();
         assert_eq!(l.line.len(), 1);
@@ -2430,6 +2451,25 @@ mod tests {
         let (d, w) = ([f1[0] - f0[0], f1[1] - f0[1]], [foot[0] - q[0], foot[1] - q[1]]);
         assert!((d[0] * w[0] + d[1] * w[1]).abs() < 1e-9, "not square to the line");
         assert!(((foot[0] - f0[0]) * d[1] - (foot[1] - f0[1]) * d[0]).abs() < 1e-9, "foot off the line");
+    }
+
+    /// A distance between parallel lines, written from a corner of a rectangle to the far side,
+    /// stands across the middle of the two, not down the side through the corner (sketch_test3).
+    #[test]
+    fn a_distance_between_parallel_lines_stands_between_them() {
+        let e = sketch_of(json!({
+            "points": {"p1": [0, 0], "p2": [10, 0], "p3": [10, 8], "p4": [0, 8]},
+            "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p4", "to": "p1"}, "l3": {"from": "p2", "to": "p3"}, "l4": {"from": "p3", "to": "p4"}},
+            "constraints": [{"type": "point_line", "point": "p1", "line": "l4", "value": 8}]}));
+        assert_eq!(dimension_line(&e, Pick::Constraint(0)), [[[5.0, 0.0], [5.0, 8.0]]]);
+        let label = e.labels().into_iter().find(|l| l.pick == Pick::Constraint(0)).unwrap();
+        assert_eq!(label.at, [5.0, 4.0]);
+        // Shifted lines: the middle of the stretch they share.
+        let e = sketch_of(json!({
+            "points": {"a": [0, 0], "b": [10, 0], "c": [6, 5], "d": [20, 5]},
+            "lines": {"low": {"from": "a", "to": "b"}, "high": {"from": "c", "to": "d"}},
+            "constraints": [{"type": "point_line", "point": "c", "line": "low", "value": 5}]}));
+        assert_eq!(dimension_line(&e, Pick::Constraint(0)), [[[8.0, 5.0], [8.0, 0.0]]]);
     }
 
     /// A distance between two points is one segment between them.
