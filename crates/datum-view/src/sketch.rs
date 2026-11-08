@@ -109,6 +109,8 @@ pub struct Drag {
     drawn: BTreeMap<String, [f64; 2]>,
     /// What a single dragged point is held on now: tied to it when the drag ends.
     onto: Option<Join>,
+    /// Where the last frame put the cursor: the same place again changes nothing.
+    last: Option<[f64; 2]>,
 }
 
 /// What a dragged point is dropped onto (D209): another point, or the middle of a line or an
@@ -810,7 +812,7 @@ impl SketchEdit {
             (Pick::Point(_), [(_, q)]) => *q,
             _ => at,
         };
-        self.drag = Some(Drag { points, grab, drawn: self.drawn(), onto: None });
+        self.drag = Some(Drag { points, grab, drawn: self.drawn(), onto: None, last: None });
         true
     }
 
@@ -824,6 +826,10 @@ impl SketchEdit {
         let Some(drag) = &mut self.drag else { return };
         drag.onto = onto.as_ref().map(|(j, _)| j.clone());
         let p = onto.map_or(p, |(_, q)| q);
+        if drag.last == Some(p) {
+            return;
+        }
+        drag.last = Some(p);
         let (dx, dy) = (p[0] - drag.grab[0], p[1] - drag.grab[1]);
         let pins: Vec<(String, [f64; 2])> = drag.points.iter().map(|(n, q)| (n.clone(), [q[0] + dx, q[1] + dy])).collect();
         for (n, q) in &pins {
@@ -840,6 +846,17 @@ impl SketchEdit {
             tries.push(vec![(n.clone(), [at.x + d.x * t, at.y + d.y * t])]);
         }
         let placed = tries.iter().map(|t| self.placed_with(t)).find(Result::is_ok).unwrap_or(plain);
+        // The next frame starts where this one left the points, not where they were drawn: what
+        // follows the drag (a fillet) goes with it step by step, rather than stay behind until a
+        // placement turned inside out is nearer (D241).
+        if let (Ok(pl), Some(drag)) = (&placed, &self.drag) {
+            // The dragged points themselves start where the cursor puts them.
+            for n in drag.drawn.keys().filter(|n| !drag.points.iter().any(|(d, _)| d == *n)) {
+                if let Some(q) = pl.solved.points.get(n) {
+                    self.json["sketch"]["points"][n] = json!([q.x, q.y]);
+                }
+            }
+        }
         self.set(placed);
     }
 

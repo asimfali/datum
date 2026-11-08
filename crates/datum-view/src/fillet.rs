@@ -504,4 +504,34 @@ mod tests {
         assert!(click_at(&mut e, [10.0, 0.0], false).is_none());
         assert_eq!(e.json, before);
     }
+
+    /// The right side of a rectangle rounded at both its corners, dragged left frame by frame as
+    /// a hand drags it: the fillets go with it, each still a quarter turn inside the corner, not
+    /// turned inside out round the line's end (sketch_test2: the solver started each frame from
+    /// where the fillet was drawn, nearer the inside-out placement the further it went).
+    #[test]
+    fn fillets_follow_a_dragged_side() {
+        let mut e = rectangle();
+        // Its width free, for the side to move.
+        let width = json!({"type": "horizontal_distance", "points": ["a", "b"], "value": 20});
+        e.apply(serde_json::from_value(json!({"remove_constraints": [width]})).unwrap());
+        click_at(&mut e, [20.0, 0.0], false).unwrap();
+        click_at(&mut e, [20.0, 10.0], false).unwrap();
+        e.draft.tool = Tool::Select;
+        e.hover = Some(crate::sketch::Pick::Curve("right".into()));
+        assert!(e.start_drag([20.0, 5.0]));
+        for k in 1..=40 {
+            e.drag_to([20.0 - 0.25 * k as f64, 5.0], 0.0);
+        }
+        e.end_drag();
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+        assert_eq!(ends(&e, "lines", "right")[0][0], 10.0, "the side went to the cursor");
+        for a in ["a1", "a2"] {
+            let arc = &e.json["sketch"]["arcs"][a];
+            let (c, f, t) = (at(&e, arc["center"].as_str().unwrap()), at(&e, arc["from"].as_str().unwrap()), at(&e, arc["to"].as_str().unwrap()));
+            let turn = (libm::atan2(t[1] - c[1], t[0] - c[0]) - libm::atan2(f[1] - c[1], f[0] - c[0])).rem_euclid(std::f64::consts::TAU);
+            assert!((turn - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "{a} turns {turn}");
+            assert!(c[0] < 10.0, "{a}'s centre inside the corner: {c:?}");
+        }
+    }
 }
