@@ -29,6 +29,9 @@ pub enum Tool {
     Project,
     /// Place a template (`Draft::template`): a click per anchor.
     Template,
+    /// Trim a piece of a curve away, or extend a curve to the next (D239): what the click does
+    /// follows from where it is; Shift held extends.
+    Trim,
     /// Add a geometric constraint of this kind: click what it ties (D118).
     Constrain(crate::constrain::Kind),
 }
@@ -227,6 +230,8 @@ pub struct Draft {
     /// sketch's frame it was found for: found again only when the plane moves.
     pub projectable: Vec<Projectable>,
     pub projectable_on: Option<[datum_math::Vec3; 4]>,
+    /// Trim tool: what a click where the cursor is would do.
+    pub trim: Option<crate::trim::Plan>,
 }
 
 impl Default for Draft {
@@ -257,6 +262,7 @@ impl Default for Draft {
             lean: None,
             projectable: Vec::new(),
             projectable_on: None,
+            trim: None,
         }
     }
 }
@@ -271,6 +277,8 @@ const SNAP_CURVE: f64 = 8.0;
 const LEAN_DEG: f64 = 3.0;
 
 const DRAFT: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
+/// What the trim tool would take away.
+const GONE: egui::Color32 = egui::Color32::from_rgb(220, 40, 40);
 
 /// What of `sources` (features by name) sketch `placed` can project, as it falls on its plane:
 /// a body's vertices and edges, another sketch's points and curves; an arc or circle only if
@@ -443,6 +451,7 @@ impl Draft {
         self.asked = None;
         self.tangent = false;
         self.typed = None;
+        self.trim = None;
         busy
     }
 
@@ -746,6 +755,11 @@ impl Draft {
 
     /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
+        if self.tool == Tool::Trim {
+            self.trim = crate::trim::plan(edit, dx, dy, height, free);
+            self.cursor = Some(Spot { at: edit.camera.at(dx, dy, height), snap: Snap::Free });
+            return;
+        }
         let mut spot = self.spot(edit, dx, dy, height, free);
         self.lean = None;
         let leaning = !free && spot.snap == Snap::Free;
@@ -805,6 +819,7 @@ impl Draft {
         let mut patch = Patch::new(edit);
         match self.tool {
             Tool::Select | Tool::Dimension | Tool::Measure | Tool::Constrain(_) => return None,
+            Tool::Trim => return self.trim.take().map(|t| t.patch),
             Tool::Project => {
                 let Snap::Source(i) = spot.snap else { return None };
                 let c = self.projectable.get(i)?;
@@ -972,6 +987,16 @@ impl Draft {
                         }
                     }
                 }
+            }
+        }
+        // Trimming: the piece a click takes away, red; the length it adds, dashed.
+        if let Some(t) = self.trim.as_ref().filter(|_| self.tool == Tool::Trim) {
+            let pts = |v: &[[f64; 2]]| v.iter().copied().map(screen).collect::<Vec<_>>();
+            if t.gone.len() > 1 {
+                dashed(painter, &pts(&t.gone), egui::Stroke::new(3.0, GONE), 6.0, 3.0);
+            }
+            if t.added.len() > 1 {
+                dashed(painter, &pts(&t.added), egui::Stroke::new(2.5, DRAFT), 6.0, 3.0);
             }
         }
         // What the dimension or constraint tool has picked so far, marked.
@@ -1239,7 +1264,7 @@ impl std::ops::DerefMut for Patch {
 }
 
 impl Patch {
-    fn new(edit: &SketchEdit) -> Self {
+    pub(crate) fn new(edit: &SketchEdit) -> Self {
         Self(SketchPatch::new(&edit.json))
     }
 
@@ -1282,14 +1307,14 @@ impl Patch {
         }
     }
 
-    fn done(self) -> Option<Map<String, Json>> {
+    pub(crate) fn done(self) -> Option<Map<String, Json>> {
         self.0.done()
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::BTreeMap;
 
     use datum_brep::TopoId;
@@ -1297,10 +1322,10 @@ mod tests {
     use super::*;
     use crate::sketch::Context;
 
-    const H: f64 = 600.0;
+    pub(crate) const H: f64 = 600.0;
 
     /// A sketch editor on `sketch`, on the top face of a 40 × 30 × 8 plate if `on_plate`.
-    fn editor(sketch: Json, on_plate: bool) -> SketchEdit {
+    pub(crate) fn editor(sketch: Json, on_plate: bool) -> SketchEdit {
         let id = TopoId::derive("feature").tag("s").finish();
         let (input, mut json) = (None, json!({"name": "s", "op": "sketch", "inputs": [], "sketch": sketch}));
         let input = if on_plate {
@@ -1332,7 +1357,7 @@ mod tests {
     }
 
     /// Moves the cursor to sketch point `q` and clicks: the patch, applied.
-    fn click_at(e: &mut SketchEdit, q: [f64; 2], free: bool) -> Option<Json> {
+    pub(crate) fn click_at(e: &mut SketchEdit, q: [f64; 2], free: bool) -> Option<Json> {
         let (x, y) = e.camera.offset(q, H);
         let mut d = std::mem::take(&mut e.draft);
         d.track(e, x, y, H, free);
@@ -1347,7 +1372,7 @@ mod tests {
     }
 
     /// Moves the cursor to sketch point `q` without clicking: where it would click.
-    fn hover_at(e: &mut SketchEdit, q: [f64; 2], free: bool) -> Spot {
+    pub(crate) fn hover_at(e: &mut SketchEdit, q: [f64; 2], free: bool) -> Spot {
         let (x, y) = e.camera.offset(q, H);
         let mut d = std::mem::take(&mut e.draft);
         d.track(e, x, y, H, free);

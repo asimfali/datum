@@ -28,6 +28,7 @@ pub enum Act {
     Circle,
     Point,
     Project,
+    TrimExtend,
     ProjectSection,
     Dimension,
     Measure,
@@ -102,7 +103,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 51] = [
+pub const ACTIONS: [Action; 52] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -171,6 +172,15 @@ pub const ACTIONS: [Action; 51] = [
         "Project",
         "Click an edge or vertex of a body, or a point, line, arc or circle of another sketch: it follows its source; Esc ends",
         plain(Key::P),
+        Sketch,
+    ),
+    action(
+        Act::TrimExtend,
+        "sketch.trim_extend",
+        "Trim / extend",
+        "Click a piece of a curve between crossings: it goes; a curve crossing nothing: its end goes on to the next curve; \
+         Shift held: the nearer end goes on; Esc ends",
+        plain(Key::X),
         Sketch,
     ),
     action(

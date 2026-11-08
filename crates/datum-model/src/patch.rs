@@ -69,6 +69,15 @@ impl SketchPatch {
         }
     }
 
+    /// Constraint `c` taken away, as the sketch has it.
+    pub fn unconstrain(&mut self, c: Value) {
+        if let Value::Array(a) = self.params.entry("remove_constraints").or_insert_with(|| json!([]))
+            && !a.contains(&c)
+        {
+            a.push(c);
+        }
+    }
+
     /// The patch, unless it changes nothing.
     pub fn done(self) -> Option<Map<String, Value>> {
         (!self.params.is_empty()).then_some(self.params)

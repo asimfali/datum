@@ -25,6 +25,8 @@ pub enum Icon {
     Point,
     /// An edge above, an arrow down to its line on the plane: project.
     Project,
+    /// Two lines crossing, the piece past the crossing dashed: trim or extend.
+    Trim,
     Dimension,
     /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
     /// a ruler.
@@ -169,6 +171,14 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             painter.line_segment([at(0.0, -4.0), at(0.0, 1.0)], stroke);
             painter.add(egui::Shape::convex_polygon(vec![at(0.0, 4.0), at(-2.5, 0.5), at(2.5, 0.5)], colour, Stroke::NONE));
             painter.line_segment([at(-6.0, 6.0), at(6.0, 6.0)], Stroke::new(2.0, colour));
+        }
+        Icon::Trim => {
+            painter.line_segment([at(-6.0, 6.0), at(6.0, -6.0)], stroke);
+            painter.line_segment([at(-6.0, -1.0), at(0.0, -1.0)], stroke);
+            for k in 0..2 {
+                let x = 2.0 + 3.0 * k as f32;
+                painter.line_segment([at(x, -1.0), at(x + 1.5, -1.0)], stroke);
+            }
         }
         Icon::Dimension => {
             painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);
