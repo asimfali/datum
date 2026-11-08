@@ -3174,16 +3174,23 @@ impl Viewer {
                         Act::Project => crate::icons::Icon::Project,
                         Act::TrimExtend => crate::icons::Icon::Trim,
                         Act::Fillet => crate::icons::Icon::Fillet,
+                        Act::Mirror => crate::icons::Icon::Mirror,
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
                     let hint = self.keys.hint(ui.ctx(), &self.i18n, act);
-                    let r = crate::icons::tile(ui, self.i18n.label(act), &hint, sk.draft.tool == tool, true, |p, c, colour| {
+                    // The mirror works on the selection: there must be one (D244).
+                    let enabled = act != Act::Mirror || !sk.selected.is_empty();
+                    let r = crate::icons::tile(ui, self.i18n.label(act), &hint, sk.draft.tool == tool, enabled, |p, c, colour| {
                         crate::icons::paint(p, c, icon, colour)
                     });
                     self.spots.insert(act.action().name, r.rect);
                     if r.clicked() {
-                        sk.draft.press(tool);
+                        if act == Act::Mirror && sk.draft.tool != Tool::Mirror {
+                            sk.start_mirror();
+                        } else {
+                            sk.draft.press(tool);
+                        }
                     }
                 }
                 let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Pattern);
@@ -3255,11 +3262,6 @@ impl Viewer {
                 if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new(self.i18n.t("to-library", "To library…"))).on_hover_text(hint).clicked()
                 {
                     self.keeping = sk.extract(self.i18n.t("keep-new", "New element"), Some(&sk.params)).map(Keep::new);
-                }
-                // Mirror the selection: the axis is clicked next (D244).
-                let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Mirror);
-                if ui.add_enabled(!sk.selected.is_empty(), egui::Button::new(self.i18n.label(Act::Mirror))).on_hover_text(hint).clicked() {
-                    sk.start_mirror();
                 }
                 // Groups: a name for elements together (a pattern's cell, a path); its
                 // badge marks them, a click on it selects them.
@@ -6330,7 +6332,8 @@ pub(crate) fn definition(v: &Json) -> String {
 }
 
 /// The sketch tools, as the side panel lists them.
-const TOOLS: [Act; 9] = [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Fillet, Act::Dimension];
+const TOOLS: [Act; 10] =
+    [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Fillet, Act::Mirror, Act::Dimension];
 
 /// The sketch's modes, as the menu lists them (D167).
 const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
@@ -6356,6 +6359,7 @@ fn tool(act: Act) -> Tool {
         Act::Project => Tool::Project,
         Act::TrimExtend => Tool::Trim,
         Act::Fillet => Tool::Fillet,
+        Act::Mirror => Tool::Mirror,
         Act::Dimension => Tool::Dimension,
         _ => Tool::Select,
     }

@@ -29,6 +29,8 @@ pub enum Icon {
     Trim,
     /// A corner rounded: fillet or chamfer.
     Fillet,
+    /// A shape and its mirror across a dashed axis.
+    Mirror,
     Dimension,
     /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
     /// a ruler.
@@ -192,6 +194,14 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
                 })
                 .collect();
             painter.add(egui::Shape::line(pts, stroke));
+        }
+        Icon::Mirror => {
+            for k in 0..4 {
+                let y = -7.0 + 4.0 * k as f32;
+                painter.line_segment([at(0.0, y), at(0.0, y + 2.0)], stroke);
+            }
+            painter.add(egui::Shape::closed_line(vec![at(-2.0, -5.0), at(-2.0, 5.0), at(-7.0, 5.0)], stroke));
+            painter.add(egui::Shape::closed_line(vec![at(2.0, -5.0), at(2.0, 5.0), at(7.0, 5.0)], stroke));
         }
         Icon::Dimension => {
             painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);
