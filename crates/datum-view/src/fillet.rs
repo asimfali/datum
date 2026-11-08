@@ -536,8 +536,8 @@ mod tests {
     }
 
     /// An L-shaped outline rounded at every corner, the inner ones too; each side dragged to and
-    /// fro by whole millimetres a frame, as a hand drags fast: no fillet ever turns inside out
-    /// (the step is taken in parts, D241).
+    /// fro by half a millimetre a frame, as a hand drags fast: no fillet ever turns inside out
+    /// (D241), and the side gets where the cursor stops, but past where it can go (D242).
     #[test]
     fn fillets_hold_under_a_fast_drag() {
         let mut e = editor(
@@ -570,9 +570,16 @@ mod tests {
             let mid = [(a.x + b.x) / 2.0, (a.y + b.y) / 2.0];
             e.hover = Some(crate::sketch::Pick::Curve(line.into()));
             assert!(e.start_drag(mid), "{line}");
+            let mut was = 0.0;
             for k in [3.0, 6.0, 2.0, -3.0, -6.0, 0.0] {
-                e.drag_to([mid[0] + along[0] * k, mid[1] + along[1] * k], 0.0);
-                assert!(minor(&e), "{line} dragged by {k}: a fillet turned inside out");
+                // Half a millimetre a frame: fast for a part 30 long.
+                let n = ((k - was) / 0.5_f64).abs().round() as usize;
+                for j in 1..=n {
+                    let x = was + (k - was) * j as f64 / n as f64;
+                    e.drag_to([mid[0] + along[0] * x, mid[1] + along[1] * x], 0.0);
+                    assert!(minor(&e), "{line} dragged by {x}: a fillet turned inside out");
+                }
+                was = k;
                 // It goes to the cursor, but where two fillets would no longer fit on the side
                 // between (`l3` down by 6 leaves 4 for two of radius 2): there it stops short.
                 let p = e.placed.as_ref().unwrap();
