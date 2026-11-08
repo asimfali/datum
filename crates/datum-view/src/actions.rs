@@ -197,7 +197,7 @@ pub const ACTIONS: [Action; 54] = [
         Act::Mirror,
         "sketch.mirror",
         "Mirror",
-        "Select points and curves, M, then click the axis line: a copy across it, its own; Tab: the original goes; Esc ends",
+        "Select points and curves, M, then click the axis line: a copy across it, held symmetric (delete the ties to free it); Tab: the original goes; Esc ends",
         plain(Key::M),
         Sketch,
     ),
