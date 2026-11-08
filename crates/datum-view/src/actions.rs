@@ -30,6 +30,7 @@ pub enum Act {
     Project,
     TrimExtend,
     Fillet,
+    Mirror,
     ProjectSection,
     Dimension,
     Measure,
@@ -104,7 +105,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 53] = [
+pub const ACTIONS: [Action; 54] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -190,6 +191,14 @@ pub const ACTIONS: [Action; 53] = [
         "Fillet / chamfer",
         "Type the size, then click a corner, or inside a region: all its corners, of one radius; Tab: chamfer or fillet; Esc ends",
         plain(Key::F),
+        Sketch,
+    ),
+    action(
+        Act::Mirror,
+        "sketch.mirror",
+        "Mirror",
+        "Select points and curves, M, then click the axis line: a copy across it, held symmetric (delete the ties to free it); Tab: the original goes; Esc ends",
+        plain(Key::M),
         Sketch,
     ),
     action(

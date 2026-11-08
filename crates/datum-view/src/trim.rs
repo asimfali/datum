@@ -242,8 +242,8 @@ enum Tie {
 pub(crate) struct Sketch<'a> {
     pub(crate) edit: &'a SketchEdit,
     pub(crate) p: &'a Placed,
-    typed: Vec<Constraint>,
-    raw: Vec<Json>,
+    pub(crate) typed: Vec<Constraint>,
+    pub(crate) raw: Vec<Json>,
 }
 
 impl<'a> Sketch<'a> {
@@ -275,7 +275,7 @@ impl<'a> Sketch<'a> {
     }
 
     /// Whether the sketch puts point `q` on curve `c`.
-    fn on(&self, q: &str, c: &str) -> bool {
+    pub(crate) fn on(&self, q: &str, c: &str) -> bool {
         self.typed.iter().any(|k| match k {
             Constraint::On { point, curve } => point == q && curve == c,
             Constraint::Midpoint { point, line } => point == q && line == c,
