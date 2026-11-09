@@ -3767,6 +3767,16 @@ impl Viewer {
     /// The sketch edited, its draft, measures and frame, over what the pane has painted.
     fn paint_sketch(&self, painter: &egui::Painter, rect: egui::Rect) {
         let Some(sk) = &self.sketch else { return };
+        if let Some(t) = &sk.turned {
+            t.paint(
+                sk,
+                painter,
+                rect,
+                self.i18n
+                    .t("project-turned-hint", "Drag to turn · click an edge, a vertex or a face to project it · Esc: back to the sketch's plane"),
+            );
+            return;
+        }
         sk.paint(painter, rect);
         sk.draft.paint(sk, painter, rect, &self.i18n);
         let measured = crate::measure::lines(&sk.draft.measured, &self.i18n);
@@ -3822,6 +3832,7 @@ impl Viewer {
         }
         let anchor = m.scene.anchor();
         let (view_projection, eye) = match self.sketch.as_ref().filter(|_| sketched) {
+            Some(SketchEdit { turned: Some(t), .. }) => t.camera.matrices(anchor, aspect, radius),
             Some(sk) => sk.camera.matrices(anchor, aspect, radius),
             None => self.camera.matrices(anchor, aspect, radius),
         };
@@ -5820,12 +5831,44 @@ impl Viewer {
         let Some(sk) = &mut self.sketch else { return };
         let h = f64::from(rect.height());
         let nav = navigation(ui, r, self.touchpad);
-        if nav.pan != egui::Vec2::ZERO {
-            sk.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), h);
+        // The tool over: the view is the sketch's again (D248).
+        if sk.turned.is_some() && sk.draft.tool != Tool::Project {
+            sk.set_turned(None);
         }
-        if nav.zoom != 1.0 {
-            let (x, y) = offset.unwrap_or((0.0, 0.0));
-            sk.camera.zoom_at(nav.zoom, x, y, h);
+        // Projecting, a left drag turns the view to the model: parts lying over one another hide
+        // what is under them from the sketch's plane.
+        if sk.draft.tool == Tool::Project
+            && !sk.on_blank()
+            && r.dragged_by(egui::PointerButton::Primary)
+            && !nav.space
+            && let Some(m) = &self.model
+        {
+            if sk.turned.is_none() {
+                let (anchor, radius) = sphere(&m.scene);
+                sk.set_turned(Some(crate::turned::Turned::new(&sk.camera, &self.camera, anchor, radius)));
+            }
+            if let Some(t) = &mut sk.turned {
+                t.camera.orbit(f64::from(r.drag_delta().x), f64::from(r.drag_delta().y));
+            }
+        }
+        if let Some(t) = &mut sk.turned {
+            if nav.pan != egui::Vec2::ZERO {
+                t.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), h);
+            }
+            if nav.zoom != 1.0 {
+                t.camera.zoom(nav.zoom);
+            }
+            if let (Some(m), Some((x, y))) = (&self.model, offset) {
+                t.look_at(&m.scene, &m.bodies, [f64::from(rect.width()), h], x, y);
+            }
+        } else {
+            if nav.pan != egui::Vec2::ZERO {
+                sk.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), h);
+            }
+            if nav.zoom != 1.0 {
+                let (x, y) = offset.unwrap_or((0.0, 0.0));
+                sk.camera.zoom_at(nav.zoom, x, y, h);
+            }
         }
         // Space held: the left button moves the view, and draws, selects or drags nothing.
         if nav.space {
@@ -9055,6 +9098,73 @@ mod tests {
         }
         drop(h);
         (v, inbox)
+    }
+
+    /// Projecting, a drag turns the view and offers every edge, a click takes one in 3D; the tool
+    /// over, the view is the sketch's again and what falls on another is offered once (D248).
+    #[test]
+    fn a_drag_turns_the_view_to_project_and_the_end_of_the_tool_turns_it_back() {
+        let (mut v, inbox) = sketching();
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let sk = v.sketch.as_mut().unwrap();
+        let plate = session.graph().find("plate").unwrap();
+        sk.context.sources = vec![("plate".to_string(), session.evaluation().results[plate as usize].as_ref().unwrap().clone())];
+        sk.draft.tool = Tool::Project;
+        sk.draft.projectable_on = None;
+        sk.solve();
+        let flat = sk.draft.projectable.len();
+        let before = sk.camera;
+        let _ = inbox.try_iter().count();
+        let frame = |v: &mut Viewer, events: Vec<egui::Event>, hover: Option<egui::Pos2>| {
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+            if let Some(p) = hover {
+                h.hover_at(p);
+                h.run();
+            }
+            for e in events {
+                h.event(e);
+                h.run();
+            }
+        };
+        let press =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
+        let (a, b) = (egui::pos2(300.0, 200.0), egui::pos2(340.0, 160.0));
+        frame(&mut v, vec![egui::Event::PointerMoved(a), press(a, true), egui::Event::PointerMoved(b), press(b, false)], Some(a));
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.turned.is_some(), "a drag turned it");
+        assert!(sk.draft.projectable.len() > flat, "every edge offered: {} of {flat}", sk.draft.projectable.len());
+        assert_eq!(sk.camera.center, before.center, "the sketch's own view stays");
+        // The vertex the cursor can take, as the view shows it.
+        let t = sk.turned.as_ref().unwrap();
+        let m = t.view_projection();
+        let (i, (x, y)) = sk
+            .draft
+            .projectable
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| matches!(c.shape, crate::draw::Flat::Point(_)))
+            .filter_map(|(i, c)| Some((i, t.offset(&m, c.world[0][0])?)))
+            .find(|&(_, (x, y))| t.spot(sk.draft.projectable.iter().enumerate(), x, y).is_some())
+            .expect("a vertex in view");
+        let id = sk.draft.projectable[i].entry.1.clone();
+        let pos = egui::pos2(300.0 + x as f32, 200.0 + y as f32);
+        frame(&mut v, vec![press(pos, true), press(pos, false)], Some(pos));
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
+        let [patch] = &sent[..] else { panic!("one edit: {sent:?}") };
+        let taken = patch["project"].as_object().unwrap().values().next().unwrap();
+        assert_eq!((taken["from"].as_str(), taken["id"].as_str()), (Some("plate"), Some(id.as_str())), "{patch}");
+        assert!(v.sketch.as_ref().unwrap().turned.is_some(), "still turned: for the next edge");
+        v.sketch.as_mut().unwrap().draft.escape();
+        frame(&mut v, vec![], Some(a));
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.turned.is_none(), "back on the sketch's plane");
+        assert_eq!(sk.draft.projectable.len(), flat);
     }
 
     /// X takes up trim and extend; over the top left of the axis, the piece to the corner is

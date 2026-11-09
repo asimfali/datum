@@ -83,6 +83,8 @@ pub struct SketchEdit {
     /// open, so a hole pushed out of its outline shows as the disc it becomes.
     pub fill: Vec<[[f64; 2]; 3]>,
     pub camera: SketchCamera,
+    /// The view turned away from the plane while projecting (D248), none: the sketch's own.
+    pub turned: Option<crate::turned::Turned>,
     pub hover: Option<Pick>,
     pub selected: Vec<Pick>,
     /// What is being dragged.
@@ -409,6 +411,7 @@ impl SketchEdit {
             placed: Err(String::new()),
             fill: Vec::new(),
             camera,
+            turned: None,
             hover: None,
             selected: Vec::new(),
             drag: None,
@@ -464,7 +467,8 @@ impl SketchEdit {
         let Some((first, body)) = self.context.inputs.first().and_then(|(n, v)| Some((n, v.body()?))) else { return Vec::new() };
         let Some(Ok(blank)) = placed.k_factor.map(|k| datum_ops::unfold_side(body, self.json["flat"] == "back", k)) else { return Vec::new() };
         let whole = |group: &str| self.json["project"].as_object().is_some_and(|m| m.values().any(|p| p["blank"] == group));
-        let take = |id: TopoId, shape: Flat| Projectable { from: first.clone(), entry: ("blank", format!("{id:?}")), shape, height: 0.0 };
+        let take =
+            |id: TopoId, shape: Flat| Projectable { from: first.clone(), entry: ("blank", format!("{id:?}")), shape, height: 0.0, world: Vec::new() };
         let pieces = blank.pieces.iter().zip(&blank.ids).enumerate().filter(|(i, _)| !(whole("outline") && blank.outer.contains(i)));
         let bends = blank.bends.iter().zip(&blank.bend_ids).filter(|_| !whole("bends"));
         pieces
@@ -529,10 +533,19 @@ impl SketchEdit {
         if let Ok(p) = &placed
             && self.draft.projectable_on != Some(p.frame)
         {
-            self.draft.projectable = if self.on_blank() { self.blank_projectable(p) } else { projectable(&self.context.sources, p) };
+            self.draft.projectable =
+                if self.on_blank() { self.blank_projectable(p) } else { projectable(&self.context.sources, p, self.turned.is_some()) };
             self.draft.projectable_on = Some(p.frame);
         }
         self.placed = placed;
+    }
+
+    /// The view turned, or the sketch's own again: what can be projected is found anew, every
+    /// edge when turned (D248).
+    pub fn set_turned(&mut self, turned: Option<crate::turned::Turned>) {
+        self.turned = turned;
+        self.draft.projectable_on = None;
+        self.solve();
     }
 
     /// Applies an `edit_sketch` patch drawn in the window at once, without waiting for the

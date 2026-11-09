@@ -220,7 +220,7 @@ impl Camera {
     }
 
     /// Half the view's height at the target, in model units.
-    fn half_height(&self) -> f64 {
+    pub(crate) fn half_height(&self) -> f64 {
         self.distance * libm::tan(self.fov * 0.5)
     }
 

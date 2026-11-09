@@ -174,7 +174,7 @@ pub const ACTIONS: [Action; 56] = [
         Act::Project,
         "sketch.project",
         "Project",
-        "Click an edge or vertex of a body, or a point, line, arc or circle of another sketch: it follows its source; Esc ends",
+        "Click an edge or vertex of a body, or a point, line, arc or circle of another sketch: it follows its source; drag to turn the view and see what lies under other parts; Esc ends",
         plain(Key::P),
         Sketch,
     ),
