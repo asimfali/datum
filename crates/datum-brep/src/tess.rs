@@ -132,6 +132,9 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
     if let Surface::Wall(w) = face.surface {
         return wall_mesh(body, f, &w, chord);
     }
+    if let Surface::Torus(t) = face.surface {
+        return torus_mesh(body, f, &t, chord);
+    }
     let (mut points, mut vertices, mut next, mut angles) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let frame = face.surface.revolution().map(|c| crate::curve::frame(&c));
     // The middle of the angles the outer loop spans: a hole's are taken a whole turn round if
@@ -191,7 +194,8 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
         let side = if c.convex { 1.0 } else { -1.0 };
         let stretch = libm::sqrt(1.0 + c.slope * c.slope);
         let known = flat.len();
-        refine(&mut flat, &mut triangles, c.radius * std::f64::consts::TAU / crate::curve::per_turn(c.radius, chord));
+        let step = c.radius * std::f64::consts::TAU / crate::curve::per_turn(c.radius, chord);
+        refine(&mut flat, &mut triangles, [step, f64::INFINITY], [0.5 * step; 2]);
         for q in &flat[known..] {
             let z = q.y / stretch;
             points.push(fr.point(q.x * side / c.radius, z, c.radius + c.slope * z));
@@ -254,6 +258,79 @@ fn wall_mesh(body: &Body, f: Ix, w: &crate::Rolled, chord: f64) -> Result<FaceMe
     Ok(FaceMesh { points, normals, vertices, triangles })
 }
 
+/// Face `f` on the torus or sphere `t`, its loops and points inside to keep within `chord`. A
+/// torus lays out by its angles, scaled to millimetres at its widest. A sphere has no such map
+/// through a pole, which a face may hold: it is projected stereographically from the point
+/// opposite the face, where Delaunay in the plane is Delaunay on the sphere (circles stay circles)
+/// and the pole is a point like any other.
+fn torus_mesh(body: &Body, f: Ix, t: &crate::Torus, chord: f64) -> Result<FaceMesh, BrepError> {
+    use std::f64::consts::TAU;
+    let (mut points, mut vertices, mut next) = (Vec::new(), Vec::new(), Vec::new());
+    for l in body.face_loops(f) {
+        let first = points.len() as Vx;
+        for h in body.loop_half_edges(l) {
+            let he = &body.half_edges()[h as usize];
+            let (u, v) = (body.point(he.origin), body.point(body.half_edges()[body.next(h) as usize].origin));
+            points.push(u);
+            vertices.push(he.origin);
+            let edge = &body.edges()[he.edge as usize];
+            if let Some(curve) = body.edge_curve(edge) {
+                let curve = if edge.half == h { curve } else { curve.reversed() };
+                for p in curve.inner_points(u, v, chord) {
+                    points.push(p);
+                    vertices.push(Ix::MAX);
+                }
+            }
+        }
+        let last = points.len() as Vx - 1;
+        next.extend((first..last).map(|k| k + 1).chain([first]));
+    }
+    let (side, r, wide) = (if t.convex { 1.0 } else { -1.0 }, t.minor, t.major + t.minor);
+    // The sphere's axes: the third towards the middle of the face.
+    let sphere = (t.major == 0.0).then(|| {
+        let c = crate::curve::unit(points.iter().fold(Vec3::ZERO, |s, &p| s + crate::curve::unit(p - t.center)));
+        let fr = crate::curve::Frame::about(t.center, c);
+        (c, fr.point(0.0, 0.0, 1.0) - t.center, fr.point(std::f64::consts::FRAC_PI_2, 0.0, 1.0) - t.center)
+    });
+    let fr = crate::curve::Frame::about(t.center, t.axis);
+    let mut last = t.angles(&fr, points[0]);
+    let mut flat: Vec<Vec2> = points
+        .iter()
+        .map(|&p| match sphere {
+            Some((c, e1, e2)) => {
+                let w = p - t.center;
+                let k = 2.0 * r / (r + w.dot(c));
+                Vec2::new(side * k * w.dot(e1) + 0.0, k * w.dot(e2) + 0.0)
+            }
+            None => {
+                let (a, b) = t.angles(&fr, p);
+                last = (a + TAU * libm::round((last.0 - a) / TAU), b + TAU * libm::round((last.1 - b) / TAU));
+                Vec2::new(side * wide * last.0 + 0.0, r * last.1 + 0.0)
+            }
+        })
+        .collect();
+    let round = |radius: f64| radius * TAU / crate::curve::per_turn(radius, chord);
+    let step = if sphere.is_some() { [round(r); 2] } else { [round(wide), round(r)] };
+    let mut triangles = Polygon::new(&flat, next)
+        .and_then(|poly| poly.triangulate(true))
+        .map_err(|()| BrepError::Degenerate(format!("face {:?} cannot be triangulated", body.faces()[f as usize].id)))?;
+    let known = flat.len();
+    refine(&mut flat, &mut triangles, step, [0.5 * step[0], 0.5 * step[1]]);
+    for &q in &flat[known..] {
+        points.push(match sphere {
+            Some((c, e1, e2)) => {
+                let d = (q.x * q.x + q.y * q.y) / (4.0 * r * r);
+                t.center + c * (r * (1.0 - d) / (1.0 + d)) + (e1 * (side * q.x) + e2 * q.y) * (1.0 / (1.0 + d))
+            }
+            None => t.point(&fr, side * q.x / wide, q.y / r),
+        });
+        vertices.push(Ix::MAX);
+    }
+    let surface = Surface::Torus(*t);
+    let normals = points.iter().map(|&p| surface.normal_at(p)).collect();
+    Ok(FaceMesh { points, normals, vertices, triangles })
+}
+
 /// A face's own 2D coordinates, in which its loops have the interior on their left. A plane drops
 /// its dominant axis: that keeps the loops' turning sense when the other two axes stay in cyclic
 /// order; a negative dominant component flips it, and swapping the two flips it back. A cylinder
@@ -274,7 +351,7 @@ impl Projection {
             }
             Surface::Cylinder(c) => Self::Revolution(c.into()),
             Surface::Cone(c) => Self::Revolution(c),
-            Surface::Wall(_) => unreachable!("walls are laid out by `wall_mesh`"),
+            Surface::Torus(_) | Surface::Wall(_) => unreachable!("tori and walls are laid out by their own meshes"),
         }
     }
 
@@ -395,38 +472,44 @@ fn flip_from(p: &[Vec2], tris: &mut [[Vx; 3]], nb: &mut [[u32; 3]], mut stack: V
     }
 }
 
-/// Inserts points into triangles wider along X than `step`, keeping Delaunay: on an unrolled
+/// Inserts points into triangles wider than `step` along X or Y, keeping Delaunay: on an unrolled
 /// cylinder X runs around the axis, and a wide triangle cuts deep under the face (from a hole to
-/// the far corners of a sheet). The points are those of a grid of half that spacing that fall
-/// strictly inside such a triangle; each is found by walking from it and inserted, then the
+/// the far corners of a sheet). The points are those of a grid of spacing `grid` that fall
+/// well inside such a triangle; each is found by walking from it and inserted, then the
 /// triangulation flipped back to Delaunay around it. Loop edges are no wider already, being chords.
-fn refine(p: &mut Vec<Vec2>, tris: &mut Vec<[Vx; 3]>, step: f64) {
-    let span = |p: &[Vec2], t: &[Vx; 3]| {
-        let x = t.map(|k| p[k as usize].x);
-        x[0].max(x[1]).max(x[2]) - x[0].min(x[1]).min(x[2])
+fn refine(p: &mut Vec<Vec2>, tris: &mut Vec<[Vx; 3]>, step: [f64; 2], grid: [f64; 2]) {
+    let wide = |p: &[Vec2], t: &[Vx; 3]| {
+        let (x, y) = (t.map(|k| p[k as usize].x), t.map(|k| p[k as usize].y));
+        x[0].max(x[1]).max(x[2]) - x[0].min(x[1]).min(x[2]) > step[0] || y[0].max(y[1]).max(y[2]) - y[0].min(y[1]).min(y[2]) > step[1]
     };
-    let h = 0.5 * step;
     // Until no wide triangle holds a point of the grid: each round inserts at least one, and a
     // point of the grid is inserted once at most.
     loop {
         // Grid points strictly inside a wide triangle, with that triangle.
-        let mut grid: Vec<(Vec2, u32)> = Vec::new();
-        for (t, tri) in tris.iter().enumerate().filter(|(_, tri)| span(p, tri) > step) {
+        let mut inside: Vec<(Vec2, u32)> = Vec::new();
+        for (t, tri) in tris.iter().enumerate().filter(|(_, tri)| wide(p, tri)) {
             let q = tri.map(|k| p[k as usize]);
             let (lo, hi) = (
                 Vec2::new(q[0].x.min(q[1].x).min(q[2].x), q[0].y.min(q[1].y).min(q[2].y)),
                 Vec2::new(q[0].x.max(q[1].x).max(q[2].x), q[0].y.max(q[1].y).max(q[2].y)),
             );
-            for i in (lo.x / h).ceil() as i64..=(hi.x / h).floor() as i64 {
-                for j in (lo.y / h).ceil() as i64..=(hi.y / h).floor() as i64 {
-                    let g = Vec2::new(i as f64 * h, j as f64 * h);
-                    if (0..3).all(|k| orient2d(q[k], q[(k + 1) % 3], g) == Sign::Positive) {
-                        grid.push((g, t as u32));
+            for i in (lo.x / grid[0]).ceil() as i64..=(hi.x / grid[0]).floor() as i64 {
+                for j in (lo.y / grid[1]).ceil() as i64..=(hi.y / grid[1]).floor() as i64 {
+                    let g = Vec2::new(i as f64 * grid[0], j as f64 * grid[1]);
+                    // Not a hair from an edge: a loop running along the grid (a parallel at φ = 0)
+                    // would get points on itself, inside only by rounding.
+                    let clear = |k: usize| {
+                        let (a, b) = (q[k], q[(k + 1) % 3]);
+                        let (dx, dy) = (b.x - a.x, b.y - a.y);
+                        dx * (g.y - a.y) - dy * (g.x - a.x) > 1e-3 * grid[0].min(grid[1]) * libm::hypot(dx, dy)
+                    };
+                    if (0..3).all(|k| orient2d(q[k], q[(k + 1) % 3], g) == Sign::Positive && clear(k)) {
+                        inside.push((g, t as u32));
                     }
                 }
             }
         }
-        if grid.is_empty() || !insert(p, tris, &grid) {
+        if inside.is_empty() || !insert(p, tris, &inside) {
             return;
         }
     }

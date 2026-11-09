@@ -377,7 +377,7 @@ fn plane_neighbours(target: &Body, other: &[Ix], frame: &Frame, boxes: &[Box2], 
         let along = match &face.surface {
             Surface::Plane(p) => p.normal.dot(z) == 0.0,
             Surface::Cylinder(c) => c.axis.cross(z) == Vec3::ZERO,
-            Surface::Cone(_) | Surface::Wall(_) => false,
+            Surface::Cone(_) | Surface::Torus(_) | Surface::Wall(_) => false,
         };
         if !along && face.surface.plane().is_none() {
             return Ok::<_, BrepError>(Some((h, None)));

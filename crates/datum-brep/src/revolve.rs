@@ -1,12 +1,15 @@
 //! Revolutions (D206): a closed profile of segments turned about an axis in its plane, fully or
 //! by an angle. A segment along the axis turns into a cylinder, an oblique one into a cone, one
-//! square to the axis into a plane (a disc or a ring).
+//! square to the axis into a plane (a disc or a ring), an arc into a torus, or a sphere when its
+//! centre is on the axis.
 
 use std::f64::consts::TAU;
 
-use datum_math::{Sign, Vec2, Vec3, orient2d};
+use datum_math::{Arc2, Sign, Vec2, Vec3, orient2d, segment_touches_arc};
 
-use crate::{Arc, Body, BrepError, Cone, Curve, CurveSpec, Cylinder, FaceSpec, Plane, Region, Surface, TopoId, Vertex, build_with_curves};
+use crate::{
+    Arc, Body, BrepError, Cone, Curve, CurveSpec, Cylinder, FaceSpec, Plane, ProfileLoop, Region, Surface, TopoId, Torus, Vertex, build_with_curves,
+};
 
 /// Where a profile is turned: its point `(x, y)` is `origin + axis·x + start·y` before turning,
 /// `y` the distance from the axis. `axis` and `start` are unit and square to each other; the
@@ -40,20 +43,19 @@ impl Axis {
 ///
 /// The loop's point `k` names the vertices it turns into (`vertices[k][0]`), edge `k` the faces
 /// (`sides[k]`); a full turn splits a circle into three arcs of 120° (D65), and the faces of a
-/// curved edge with it: the first keeps the side's ID. Refused: holes and arcs in the region
-/// (`Unsupported`: a torus or a sphere is not made yet), a point across the axis, collinear
-/// neighbours, a loop touching itself (`Degenerate`), and an oblique edge reaching the axis
-/// (`Unsupported`: a cone to a point).
+/// curved edge with it: the first keeps the side's ID. An arc turning more than 135° is cut into
+/// equal pieces, each its own edge, so that no face runs from pole to pole (a circle's arcs of
+/// 120° stay whole). Refused: holes in the
+/// region, a point or arc across the axis, collinear neighbours, a loop touching itself
+/// (`Degenerate`), and what would reach the axis and fold there (`Unsupported`): an oblique edge
+/// (a cone to a point), an arc not centred on it or centred beyond it.
 pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError> {
     let degenerate = |m: &str| Err(BrepError::Degenerate(m.into()));
-    let l = &region.outer;
-    let n = l.points.len();
     if !region.holes.is_empty() {
         return Err(BrepError::Unsupported("a revolved profile with holes".into()));
     }
-    if l.arcs.iter().any(Option::is_some) {
-        return Err(BrepError::Unsupported("an arc in a revolved profile: a torus or a sphere is not made yet".into()));
-    }
+    let l = &short_arcs(&region.outer);
+    let n = l.points.len();
     if n < 3 || l.vertices.len() != n || l.sides.len() != n {
         return degenerate(&format!("a profile loop has {n} points"));
     }
@@ -63,7 +65,8 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
     if l.points.iter().any(|p| p.y < 0.0) {
         return degenerate("the profile crosses the axis");
     }
-    if (0..n).any(|k| orient2d(l.points[k], l.points[(k + 1) % n], l.points[(k + 2) % n]) == Sign::Zero) {
+    let straight = |k: usize| l.arc(k % n).is_none();
+    if (0..n).any(|k| straight(k) && straight(k + 1) && orient2d(l.points[k], l.points[(k + 1) % n], l.points[(k + 2) % n]) == Sign::Zero) {
         return degenerate("collinear or repeated neighbouring points in the profile");
     }
     if l.edges_touch(None) {
@@ -73,9 +76,14 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
     let p = &l.points;
     if (0..n).any(|k| {
         let (a, b) = (p[k], p[(k + 1) % n]);
-        (a.y == 0.0) != (b.y == 0.0) && a.x != b.x
+        l.arc(k).is_none() && (a.y == 0.0) != (b.y == 0.0) && a.x != b.x
     }) {
         return Err(BrepError::Unsupported("a cone to a point: an oblique edge reaches the axis".into()));
+    }
+    for (k, &a) in p.iter().enumerate() {
+        if let Some(arc) = l.arc(k) {
+            check_arc(a, p[(k + 1) % n], arc)?;
+        }
     }
 
     let full = angle >= TAU;
@@ -91,8 +99,9 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
     let mut curves = Vec::new();
     for (k, &q) in p.iter().enumerate() {
         if q.y == 0.0 {
-            // A full turn leaves no vertex on the axis: its edges turn into nothing or a disc.
-            if !full {
+            // A full turn leaves no vertex on the axis: its edges turn into nothing or a disc. A
+            // pole of a sphere stays, where its meridians meet.
+            if !full || l.arc(k).is_some() || l.arc((k + n - 1) % n).is_some() {
                 vertices.push(Vertex { id: vid(k, 0), point: on_axis(k) });
             }
             continue;
@@ -103,6 +112,20 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
         let arc = Curve::Arc(Arc { center: on_axis(k), axis: at.axis, radius: q.y });
         for i in 0..if full { m } else { 1 } {
             curves.push(CurveSpec { from: vid(k, i), to: vid(k, (i + 1) % m), curve: arc });
+        }
+    }
+
+    // Each arc of the profile at every angle it stands at: a meridian of its torus.
+    for (k, &q) in p.iter().enumerate() {
+        let Some(arc) = l.arc(k) else { continue };
+        let radius = libm::hypot(q.x - arc.center.x, q.y - arc.center.y);
+        for (i, &t) in angles.iter().enumerate() {
+            let axis = at.axis.cross(at.radial(t)) * if arc.ccw { 1.0 } else { -1.0 };
+            curves.push(CurveSpec {
+                from: vid(k, i),
+                to: vid((k + 1) % n, i),
+                curve: Curve::Arc(Arc { center: at.point(arc.center, t), axis, radius }),
+            });
         }
     }
 
@@ -120,6 +143,16 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
     };
     for k in 0..n {
         let (a, b) = (p[k], p[(k + 1) % n]);
+        if let Some(arc) = l.arc(k) {
+            // The region lies left of the edge: an arc counterclockwise has its centre inside.
+            let (major, minor) = (arc.center.y, libm::hypot(a.x - arc.center.x, a.y - arc.center.y));
+            let surface = Surface::Torus(Torus { center: at.origin + at.axis * arc.center.x, axis: at.axis, major, minor, convex: arc.ccw });
+            for i in 0..if full { m } else { 1 } {
+                let id = if i == 0 { l.sides[k] } else { TopoId::derive("revolve.side").id(l.sides[k]).index(i as u64).finish() };
+                faces.push(FaceSpec { id, surface, loops: vec![sector(k, i)] });
+            }
+            continue;
+        }
         if a.y == 0.0 && b.y == 0.0 {
             // Along the axis: an edge between the caps, or nothing in a full turn.
             continue;
@@ -176,4 +209,54 @@ pub fn revolve(region: &Region, at: &Axis, angle: f64) -> Result<Body, BrepError
         });
     }
     build_with_curves(vertices, faces, curves)
+}
+
+/// The loop with each arc turning more than 135° cut into equal pieces. The first piece keeps the
+/// arc's side, the new points are named after it.
+fn short_arcs(l: &ProfileLoop) -> ProfileLoop {
+    let mut out = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };
+    let n = l.points.len();
+    for k in 0..n {
+        out.points.push(l.points[k]);
+        out.vertices.push(l.vertices[k]);
+        out.sides.push(l.sides[k]);
+        out.arcs.push(l.arc(k));
+        let Some(arc) = l.arc(k) else { continue };
+        let (a, b) = (l.points[k], l.points[(k + 1) % n]);
+        let turn = arc.turn(a, b);
+        let pieces = libm::ceil(turn.abs() / (0.375 * TAU)) as u64;
+        for j in 1..pieces {
+            let (s, c) = libm::sincos(turn * j as f64 / pieces as f64);
+            let (x, y) = (a.x - arc.center.x, a.y - arc.center.y);
+            out.points.push(Vec2::new(arc.center.x + x * c - y * s, arc.center.y + x * s + y * c));
+            let v = TopoId::derive("revolve.arc_point").id(l.sides[k]).index(j).finish();
+            out.vertices.push([v, v]);
+            out.sides.push(TopoId::derive("revolve.arc_side").id(l.sides[k]).index(j).finish());
+            out.arcs.push(Some(arc));
+        }
+    }
+    out
+}
+
+/// Whether arc piece `a → b` (of at most 135°) can be turned: on one side of the axis, and if an
+/// end lies on the axis, centred on it, the end a sphere's pole.
+fn check_arc(a: Vec2, b: Vec2, arc: crate::ProfileArc) -> Result<(), BrepError> {
+    if arc.center.y < 0.0 {
+        return Err(BrepError::Unsupported("an arc centred across the axis".into()));
+    }
+    let r = libm::hypot(a.x - arc.center.x, a.y - arc.center.y);
+    if a.y == 0.0 || b.y == 0.0 {
+        if arc.center.y != 0.0 {
+            return Err(BrepError::Unsupported("an arc reaching the axis off its centre: a torus folded at the axis".into()));
+        }
+        let (s, c) = libm::sincos(0.5 * arc.turn(a, b));
+        let (x, y) = (a.x - arc.center.x, a.y);
+        return if x * s + y * c > 0.0 { Ok(()) } else { Err(BrepError::Degenerate("the profile crosses the axis".into())) };
+    }
+    let (from, to) = if arc.ccw { (a, b) } else { (b, a) };
+    let axis = (Vec2::new(arc.center.x - 2.0 * r, 0.0), Vec2::new(arc.center.x + 2.0 * r, 0.0));
+    if segment_touches_arc(axis.0, axis.1, &Arc2 { center: arc.center, from, to }) {
+        return Err(BrepError::Degenerate("the profile crosses the axis".into()));
+    }
+    Ok(())
 }

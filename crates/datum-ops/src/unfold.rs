@@ -530,7 +530,7 @@ fn regions(body: &Body) -> Vec<Region> {
             Surface::Plane(p) => (0, v(p.origin), v(p.normal), 0, 0, 0),
             Surface::Cylinder(c) => (1, v(c.origin), v(c.axis), c.radius.to_bits(), 0, u64::from(c.convex)),
             Surface::Cone(c) => (2, v(c.origin), v(c.axis), c.radius.to_bits(), c.slope.to_bits(), u64::from(c.convex)),
-            Surface::Wall(_) => (3, [0; 3], [0; 3], 0, 0, 0),
+            Surface::Wall(_) | Surface::Torus(_) => (3, [0; 3], [0; 3], 0, 0, 0),
         };
         [kind, a, b, c, d, e, f, g, h, i]
     };
@@ -772,6 +772,7 @@ fn lay_from(body: &Body, nodes: &[Node], i: usize, from: Lay, h: Ix, k: f64) -> 
             Ok((Lay::Bend { o, line, d, u, v, origin: c.origin, axis, start, span, neutral: neutral(c.radius, other.radius, k) }, u))
         }
         Surface::Cone(_) => Err(unsupported("a cone joined to other faces of a sheet")),
+        Surface::Torus(_) => Err(unsupported("a torus or sphere in a sheet")),
         Surface::Wall(_) => Err(unsupported("the wall of a cut is not a face of the sheet")),
     }
 }
@@ -908,6 +909,7 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
                 }
             }
             Surface::Cone(_) => return Err(unsupported("a cone in a chain of the sheet")),
+            Surface::Torus(_) => return Err(unsupported("a torus or sphere in a chain of the sheet")),
             Surface::Wall(_) => return Err(unsupported("the wall of a cut is not a face of the sheet")),
         }
     };

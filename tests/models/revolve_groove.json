@@ -1,0 +1,29 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "section",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "o": [0, 0], "x": [100, 0],
+          "a": [0, 10], "b": [40, 10], "c": [46, 16], "d": [60, 16], "e": [60, 22],
+          "f": [52, 30], "g": [40, 30], "h": [34, 30], "i": [28, 30], "j": [0, 30],
+          "cc": [40, 16], "fc": [52, 22], "gc": [34, 30]
+        },
+        "lines": {
+          "ax": { "from": "o", "to": "x", "construction": true },
+          "ja": { "from": "j", "to": "a" }, "ab": { "from": "a", "to": "b" },
+          "cd": { "from": "c", "to": "d" }, "de": { "from": "d", "to": "e" },
+          "fg": { "from": "f", "to": "g" }, "ij": { "from": "i", "to": "j" }
+        },
+        "arcs": {
+          "fillet": { "center": "cc", "from": "c", "to": "b" },
+          "round": { "center": "fc", "from": "e", "to": "f" },
+          "groove": { "center": "gc", "from": "i", "to": "g" }
+        }
+      }
+    },
+    { "name": "bush", "op": "revolve", "inputs": ["section"], "axis": "ax" }
+  ]
+}

@@ -398,8 +398,136 @@ fn revolution_refusals() {
     assert!(matches!(revolved(&[(0.0, 0.0), (2.0, 0.0), (0.0, 1.0)], &at, full), Err(BrepError::Unsupported(m)) if m.contains("cone to a point")));
     assert!(matches!(revolved(&[(0.0, -1.0), (2.0, 1.0), (0.0, 1.0)], &at, full), Err(BrepError::Degenerate(m)) if m.contains("axis")));
     assert!(matches!(revolved(&[(0.0, 1.0), (1.0, 1.0), (2.0, 1.0), (1.0, 2.0)], &at, full), Err(BrepError::Degenerate(_))));
-    let arc = revolve(&region(circle("c", Vec2::new(0.0, 3.0), 1.0), Vec::new()), &at, full);
-    assert!(matches!(arc, Err(BrepError::Unsupported(m)) if m.contains("torus")));
+    // An arc crossing the axis, reaching it off centre, centred beyond it.
+    let arcs = |pts: &[(f64, f64)], arc: ProfileArc, on: usize| {
+        let mut arcs = vec![None; pts.len()];
+        arcs[on] = Some(arc);
+        revolve(&region(ring("rev", pts.iter().map(|&(x, y)| Vec2::new(x, y)).collect(), arcs), Vec::new()), &at, full)
+    };
+    let crossing = arcs(&[(-1.0, 0.5), (1.0, 0.5), (1.0, 3.0), (-1.0, 3.0)], ProfileArc { center: Vec2::new(0.0, 0.5), ccw: true }, 0);
+    assert!(matches!(crossing, Err(BrepError::Degenerate(m)) if m.contains("axis")));
+    let folded = arcs(&[(0.0, 0.0), (2.0, 2.0), (0.0, 2.0)], ProfileArc { center: Vec2::new(0.0, 2.0), ccw: false }, 0);
+    assert!(matches!(folded, Err(BrepError::Unsupported(m)) if m.contains("off its centre")));
+    let beyond = arcs(&[(-1.0, 1.0), (1.0, 1.0), (1.0, 3.0), (-1.0, 3.0)], ProfileArc { center: Vec2::new(0.0, -1.0), ccw: true }, 2);
+    assert!(matches!(beyond, Err(BrepError::Unsupported(m)) if m.contains("across the axis")));
+}
+
+/// A closed body's mesh: every edge, by where its ends are (faces number the points along an
+/// arc apart), used once each way; and about the body's volume.
+fn check_mesh(b: &Body) {
+    let mesh = tessellate(b).unwrap();
+    let key = |i: u32| mesh.positions[i as usize].to_array().map(|c| (c * 1e6).round() as i64);
+    let mut edges = std::collections::BTreeMap::new();
+    for t in &mesh.triangles {
+        for k in 0..3 {
+            *edges.entry((key(t[k]), key(t[(k + 1) % 3]))).or_insert(0) += 1;
+        }
+    }
+    assert!(edges.iter().all(|(&(a, b), &n)| n == 1 && edges.get(&(b, a)) == Some(&1)), "the mesh is not closed");
+    let (v, mv) = (b.volume(), mesh_volume(&mesh));
+    // Chords of at most 64 a turn both ways round: not the 0.16 % of a cylinder, but about 1 %.
+    assert!((mv - v).abs() < 1.5e-2 * v, "mesh volume {mv} vs {v}");
+}
+
+/// Volume, area, centroid and box of tori and spheres against their formulas, on a tilted axis.
+#[test]
+fn torus_and_sphere_mass_properties() {
+    use std::f64::consts::{PI, TAU};
+    let at = tilted_axis();
+    let on_axis = |x: f64, y: f64| at.origin + at.axis * x + at.start * y;
+    // A ring: Pappus. The body's box reaches past every edge the kernel has.
+    let (major, minor) = (5.0, 1.5);
+    let b = revolve(&region(circle("c", Vec2::new(2.0, major), minor), Vec::new()), &at, TAU).unwrap();
+    b.validate().unwrap();
+    check_mesh(&b);
+    assert_eq!(b.faces().len(), 9);
+    let m = b.mass_properties();
+    let closer = |a: f64, x: f64| (a - x).abs() <= 1e-10 * x.abs().max(1.0);
+    assert!(closer(m.volume, 2.0 * PI * PI * major * minor * minor), "{}", m.volume);
+    assert!(closer(m.area, 4.0 * PI * PI * major * minor), "{}", m.area);
+    let c = on_axis(2.0, 0.0);
+    assert!((m.centroid - c).dot(m.centroid - c) < 1e-18, "{:?}", m.centroid);
+    // Along X the torus reaches `minor` past the circle of radius `major` tilted with the axis.
+    let ax = at.axis.x;
+    let reach = (major + minor) * (1.0 - ax * ax).sqrt();
+    let extreme = major * (1.0 - ax * ax).sqrt() + minor;
+    assert!(m.max.x - c.x >= reach * (1.0 - 1e-9) && (m.max.x - c.x - extreme).abs() < 1e-9, "{} vs {extreme}", m.max.x - c.x);
+    // A ball: a half circle and its diameter on the axis, the arc cut in two for the poles.
+    let r = 3.0;
+    let half = vec![Some(ProfileArc { center: Vec2::new(1.0, 0.0), ccw: true }), None];
+    let ball = revolve(&region(ring("s", vec![Vec2::new(1.0 + r, 0.0), Vec2::new(1.0 - r, 0.0)], half), Vec::new()), &at, TAU).unwrap();
+    ball.validate().unwrap();
+    check_mesh(&ball);
+    let m = ball.mass_properties();
+    assert!(closer(m.volume, 4.0 / 3.0 * PI * r * r * r), "{}", m.volume);
+    assert!(closer(m.area, 4.0 * PI * r * r), "{}", m.area);
+    let c = on_axis(1.0, 0.0);
+    assert!((m.centroid - c).dot(m.centroid - c) < 1e-18, "{:?}", m.centroid);
+    assert!((m.max.x - c.x - r).abs() < 1e-9 && (c.y - m.min.y - r).abs() < 1e-9, "{:?}", m.max);
+    // A quarter of the ball by a sector: a pole on each of its faces, two plane caps with arcs.
+    let half = vec![Some(ProfileArc { center: Vec2::new(1.0, 0.0), ccw: true }), None];
+    let quarter = revolve(&region(ring("s", vec![Vec2::new(1.0 + r, 0.0), Vec2::new(1.0 - r, 0.0)], half), Vec::new()), &at, PI / 2.0).unwrap();
+    quarter.validate().unwrap();
+    check_mesh(&quarter);
+    assert!(closer(quarter.volume(), PI * r * r * r / 3.0), "{}", quarter.volume());
+    assert!(closer(quarter.mass_properties().area, PI * r * r + 2.0 * (0.5 * PI * r * r)), "{}", quarter.mass_properties().area);
+}
+
+/// A dome and a groove: a convex and a concave arc against the volumes of their shapes.
+#[test]
+fn dome_and_concave_groove() {
+    use std::f64::consts::{PI, TAU};
+    let at = tilted_axis();
+    // Cylinder of radius 4 and height 2, topped by a half ball of radius 4: pole on the axis.
+    let (r, h) = (4.0, 2.0);
+    let top = |p: Vec<Vec2>, a: Vec<Option<ProfileArc>>| revolve(&region(ring("d", p, a), Vec::new()), &at, TAU);
+    let dome = {
+        let p = [(-r, 0.0), (h, 0.0), (h, r), (0.0, r)].map(|(x, y)| Vec2::new(x, y)).to_vec();
+        let mut a = vec![None; 4];
+        a[3] = Some(ProfileArc { center: Vec2::new(0.0, 0.0), ccw: true });
+        top(p, a).unwrap()
+    };
+    dome.validate().unwrap();
+    check_mesh(&dome);
+    let expected = PI * r * r * h + 2.0 / 3.0 * PI * r * r * r;
+    assert!((dome.volume() - expected).abs() < 1e-9 * expected, "{} vs {expected}", dome.volume());
+    // A rod of radius 6 and length 4 with a groove: an arc of radius 2 into it, centred on its
+    // surface. The groove takes away half a torus's section, less its bulge toward the axis.
+    let (big, s) = (6.0, 2.0);
+    let p = [(-2.0 * s, 0.0), (2.0 * s, 0.0), (2.0 * s, big), (s, big), (-s, big), (-2.0 * s, big)].map(|(x, y)| Vec2::new(x, y)).to_vec();
+    let mut a = vec![None; 6];
+    a[3] = Some(ProfileArc { center: Vec2::new(0.0, big), ccw: false });
+    let rod = top(p, a).unwrap();
+    rod.validate().unwrap();
+    check_mesh(&rod);
+    // Half a disc of radius 2: its area and centroid's distance from the axis, by Pappus.
+    let (area, centroid) = (PI * s * s / 2.0, big - 4.0 * s / (3.0 * PI));
+    let expected = PI * big * big * (4.0 * s) - TAU * centroid * area;
+    assert!((rod.volume() - expected).abs() < 1e-9 * expected, "{} vs {expected}", rod.volume());
+    assert!(rod.faces().iter().any(|f| matches!(f.surface, Surface::Torus(t) if !t.convex && t.major == big && t.minor == s)));
+}
+
+/// STEP names the surfaces; a torus reaching across its own axis has no plain STEP type.
+#[test]
+fn torus_and_sphere_in_step() {
+    use std::f64::consts::TAU;
+    let at = tilted_axis();
+    let b = revolve(&region(circle("c", Vec2::new(2.0, 5.0), 1.5), Vec::new()), &at, TAU).unwrap();
+    let s = step(&[&b], "ring", false).unwrap();
+    assert_eq!(s.text.matches("TOROIDAL_SURFACE").count(), 9);
+    assert_eq!(s.approximated, 0);
+    let half = vec![Some(ProfileArc { center: Vec2::new(0.0, 0.0), ccw: true }), None];
+    let ball = revolve(&region(ring("s", vec![Vec2::new(3.0, 0.0), Vec2::new(-3.0, 0.0)], half), Vec::new()), &at, TAU).unwrap();
+    assert_eq!(step(&[&ball], "ball", false).unwrap().text.matches("SPHERICAL_SURFACE").count(), 6);
+    // Minor radius 2 about a circle of radius 1: the arc stays off the axis, its torus does not.
+    let x = libm::sqrt(3.0);
+    let mut arcs = vec![None; 4];
+    arcs[0] = Some(ProfileArc { center: Vec2::new(0.0, 1.0), ccw: true });
+    let pts = [(x, 2.0), (-x, 2.0), (-x, 1.0), (x, 1.0)].map(|(x, y)| Vec2::new(x, y)).to_vec();
+    let fat = revolve(&region(ring("f", pts, arcs), Vec::new()), &at, TAU).unwrap();
+    fat.validate().unwrap();
+    check_mesh(&fat);
+    assert!(matches!(step(&[&fat], "fat", false), Err(BrepError::Unsupported(m)) if m.contains("major radius")));
 }
 
 /// Cones on screen and in STEP: the mesh holds about the volume, STEP names the cone.

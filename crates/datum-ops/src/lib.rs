@@ -268,8 +268,8 @@ pub enum Op {
     /// the sketch's line `axis` by `angle` degrees (360, the default: a full turn), a new body
     /// (D206). Seen from the axis line's end `to`, the turn is counterclockwise. An edge parallel
     /// to the axis turns into a cylinder, an oblique one into a cone, one square to it into a
-    /// plane; arcs (a torus, a sphere) and an oblique edge reaching the axis (a cone to a point)
-    /// are refused. One input: a sketch.
+    /// plane, an arc into a torus or, centred on the axis, a sphere; an oblique edge reaching the
+    /// axis (a cone to a point) is refused. One input: a sketch.
     Revolve {
         axis: String,
         #[serde(default = "full_turn")]
