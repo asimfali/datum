@@ -332,7 +332,7 @@ impl Span {
 }
 
 /// The sketch's coordinates in space: `depth` runs out of the body from its face.
-enum Frame {
+pub(crate) enum Frame {
     /// On a plane face: origin and axes, `z` its normal.
     Plane { o: Vec3, x: Vec3, y: Vec3, z: Vec3 },
     /// On a cylinder face of `radius`: `side` is 1 when the sheet lies inside it, −1 outside.
@@ -471,7 +471,7 @@ fn rolled_neighbours(
 /// together (the two ends of an edge along the cut) are merged: a face along the cut shows as its
 /// edges, there and back. In a development an arc about the axis is straight, and a piece of the
 /// same development keeps its arc; a piece of another one has no outline here.
-fn outline(body: &Body, h: Ix, frame: &Frame) -> Result<Vec<ProfileLoop>, BrepError> {
+pub(crate) fn outline(body: &Body, h: Ix, frame: &Frame) -> Result<Vec<ProfileLoop>, BrepError> {
     body.face_loops(h)
         .map(|l| {
             let mut ring = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };

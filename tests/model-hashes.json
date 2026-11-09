@@ -178,6 +178,21 @@
     "bush": "a1fbb250a82b036185aa283c0598c4837bf6a2da09518e44ad2f5ad6e78cf2c0",
     "section": "a9e3a4a02663aaabd4762a2b116042ffb9f0746334a56df0d4b91a17423ff18e"
   },
+  "rib.json": {
+    "blank": "868bb0483a6b08af22e7d808a7dc8a8ccfde3e1b39ea47aad522ffb4460750d5",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "path": "3a681e1fc4d485f5bc60fb86a54353623915357e4f1e54505ce92416dc13067c",
+    "path2": "f2430940c74e3022b3d73ddaaf894d242706070844c5cff964e53de89cba790a",
+    "plate": "9f1e5fb127bb12a791f3ca0696a8b8a177a0f7370c364df6ff1024271927c707",
+    "rib": "ea881ec7a5675de5cf7e4aa9ed816950de6c1450bfe3d6939f42863613610241",
+    "rib2": "4b1f18cd6368d2eaf39cd94200f9145e68b4d07db0ee1ba41c85149fd7e17106"
+  },
+  "rib_shallow.json": {
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "path": "f7041ac387fe4e48eadff5dded550fcd6b44c64ea45309507198149d76a4a2ed",
+    "plate": "2c7badea56943312dfb60e233205f5c23f433ec5b713d8f6ed7ce080adbd4f74",
+    "rib": "e6caf4e0b7608ac20ab456d05c882025e28214c4204ea7b52ce9343196f6facd"
+  },
   "rolled.json": {
     "cone": "4fbefb83353726cee199c1a5e5e4ec8f8ea7fc157e6e204d8c4e78b0598f850c",
     "cone_profile": "9be3b20c63769e9ea77bfbb1a96c45dbea9fd78a6ffe8e289616edd4a9d8abd9",

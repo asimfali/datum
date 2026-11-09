@@ -1,0 +1,9 @@
+{
+  "name": "Ролик R6",
+  "kind": "roll",
+  "diameter": 12,
+  "depth": 3,
+  "shoulder": 2,
+  "min_length": 20,
+  "description": "Пример: ролик с гребнем R6, глубина 3 мм"
+}

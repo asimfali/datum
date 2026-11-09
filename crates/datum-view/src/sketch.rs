@@ -464,7 +464,7 @@ impl SketchEdit {
     /// projected whole already.
     fn blank_projectable(&self, placed: &Placed) -> Vec<crate::draw::Projectable> {
         use crate::draw::{Flat, Projectable};
-        let Some((first, body)) = self.context.inputs.first().and_then(|(n, v)| Some((n, v.body()?))) else { return Vec::new() };
+        let Some((first, body)) = self.context.inputs.first().and_then(|(n, v)| Some((n, v.blank()?))) else { return Vec::new() };
         let Some(Ok(blank)) = placed.k_factor.map(|k| datum_ops::unfold_side(body, self.json["flat"] == "back", k)) else { return Vec::new() };
         let whole = |group: &str| self.json["project"].as_object().is_some_and(|m| m.values().any(|p| p["blank"] == group));
         let take =

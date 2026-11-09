@@ -49,7 +49,7 @@ pub fn sheet_metal(graph: &Graph, ix: usize) -> bool {
     let node = &graph.nodes()[ix];
     match node.op {
         Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => true,
-        Op::Flange { .. } | Op::Extrude { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } => {
+        Op::Flange { .. } | Op::Extrude { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } | Op::Rib { .. } => {
             node.inputs.first().is_some_and(|&i| sheet_metal(graph, i as usize))
         }
         _ => false,
