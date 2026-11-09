@@ -1,0 +1,180 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            200,
+            0
+          ],
+          "c": [
+            200,
+            100
+          ],
+          "d": [
+            0,
+            100
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "plate",
+      "op": "plate",
+      "inputs": [
+        "outline"
+      ],
+      "thickness": 2
+    },
+    {
+      "name": "path",
+      "op": "sketch",
+      "inputs": [
+        "plate"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "sketch": {
+        "points": {
+          "p": [
+            30,
+            20
+          ],
+          "q": [
+            80,
+            20
+          ],
+          "m": [
+            80,
+            50
+          ],
+          "r": [
+            110,
+            50
+          ],
+          "s": [
+            110,
+            85
+          ]
+        },
+        "lines": {
+          "l1": {
+            "from": "p",
+            "to": "q"
+          },
+          "l2": {
+            "from": "r",
+            "to": "s"
+          }
+        },
+        "arcs": {
+          "turn": {
+            "center": "m",
+            "from": "q",
+            "to": "r"
+          }
+        },
+        "constraints": [
+          {
+            "type": "tangent",
+            "curves": [
+              "l1",
+              "turn"
+            ]
+          },
+          {
+            "type": "tangent",
+            "curves": [
+              "turn",
+              "l2"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "rib",
+      "op": "rib",
+      "inputs": [
+        "plate",
+        "path"
+      ],
+      "tool": "Пример",
+      "diameter": 12,
+      "depth": 3,
+      "shoulder": 2
+    },
+    {
+      "name": "path2",
+      "op": "sketch",
+      "inputs": [
+        "rib"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "sketch": {
+        "points": {
+          "a": [
+            130,
+            20
+          ],
+          "b": [
+            180,
+            20
+          ]
+        },
+        "lines": {
+          "l": {
+            "from": "a",
+            "to": "b"
+          }
+        }
+      }
+    },
+    {
+      "name": "rib2",
+      "op": "rib",
+      "inputs": [
+        "rib",
+        "path2"
+      ],
+      "tool": "Пример",
+      "diameter": 12,
+      "depth": 3,
+      "shoulder": 2,
+      "flip": true
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "inputs": [
+        "rib2"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "k_factor": 0.5
+    }
+  ]
+}

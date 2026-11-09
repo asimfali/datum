@@ -1269,6 +1269,12 @@ pub(crate) struct ChainPiece {
 /// The open chains of the profile curves of `s` (D237): each named by its first curve, walked the
 /// way that curve is drawn.
 pub(crate) fn open_chains(s: &Placed) -> Result<Vec<(String, Vec<ChainPiece>)>, BrepError> {
+    let named = open_chains_named(s)?;
+    Ok(named.into_iter().map(|c| (c[0].0.clone(), c.into_iter().map(|(_, p)| p).collect())).collect())
+}
+
+/// [`open_chains`] with each curve's name.
+pub(crate) fn open_chains_named(s: &Placed) -> Result<Vec<Vec<(String, ChainPiece)>>, BrepError> {
     let keep = |_: &str, construction: bool| !construction;
     let found = contours(&s.lines, &s.arcs, &keep);
     let at = |n: &str| s.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
@@ -1285,9 +1291,9 @@ pub(crate) fn open_chains(s: &Placed) -> Result<Vec<(String, Vec<ChainPiece>)>, 
             };
             let pieces = path.iter().map(|st| {
                 let arc = s.arcs.get(st.curve).map(|a| Ok::<_, BrepError>(ProfileArc { center: at(&a.center)?, ccw: st.forward })).transpose()?;
-                Ok(ChainPiece { from: at(st.from)?, to: at(st.to)?, arc })
+                Ok((st.curve.to_string(), ChainPiece { from: at(st.from)?, to: at(st.to)?, arc }))
             });
-            Ok((path[0].curve.to_string(), pieces.collect::<Result<_, BrepError>>()?))
+            pieces.collect::<Result<_, BrepError>>()
         })
         .collect()
 }

@@ -28,7 +28,7 @@ use crate::workspace;
 
 /// The levels with elements so far: a library folder's subfolders by the same names.
 /// A material (D178) and a rule (D179) are the enterprise's own: none is built in.
-pub const LEVELS: [&str; 3] = ["sketch", "material", "rule"];
+pub const LEVELS: [&str; 4] = ["sketch", "material", "rule", "tool"];
 
 const BUILT_IN_SKETCH: [&str; 2] =
     [include_str!("../../../library/sketch/rectangle.json"), include_str!("../../../library/sketch/center_rectangle.json")];
@@ -142,6 +142,7 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
     match level {
         "material" => return check_material(e),
         "rule" => return check_rule(e),
+        "tool" => return check_tool(e),
         _ => {}
     }
     let sketch: Sketch = serde_json::from_value(e["sketch"].clone()).map_err(|err| format!("`sketch`: {err}"))?;
@@ -238,6 +239,25 @@ fn check_rule(e: &Value) -> Result<(), String> {
         Some(Ok(r)) if r > 0.0 => Ok(()),
         _ => Err("a sheet rule's bend `radius`: mm above zero, or a formula of the thickness `t`".into()),
     }
+}
+
+/// A tool of the punch press (D250): its `name`, its `kind` (`roll`, a ball or a roller rolled
+/// along a path), its `diameter`, the `depth` it presses and the die's `shoulder` radius, all in
+/// mm above zero, the shortest path it rolls (`min_length`, optional) and a `description`.
+fn check_tool(e: &Value) -> Result<(), String> {
+    let o = fields("tool", e, &["name", "kind", "diameter", "depth", "shoulder", "min_length", "description"], &["kind", "description"])?;
+    if o.get("kind").and_then(Value::as_str) != Some("roll") {
+        return Err("a tool's `kind`: `roll`".into());
+    }
+    for key in ["diameter", "depth", "shoulder"] {
+        if !o.get(key).and_then(Value::as_f64).is_some_and(|v| v > 0.0) {
+            return Err(format!("a tool's `{key}`: mm, above zero"));
+        }
+    }
+    if o.get("min_length").is_some_and(|v| !v.as_f64().is_some_and(|v| v >= 0.0)) {
+        return Err("a tool's `min_length`: mm, not below zero".into());
+    }
+    Ok(())
 }
 
 /// A length of a sheet rule (mm, or a formula of `t`: the bend radius, the corner gap, the
@@ -1057,10 +1077,26 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_has_its_sizes() {
+        let tool = |e: Value| check("tool", &e);
+        assert!(tool(json!({"name": "R6", "kind": "roll", "diameter": 12, "depth": 3, "shoulder": 2})).is_ok());
+        assert!(tool(json!({"name": "R6", "kind": "roll", "diameter": 12, "depth": 3, "shoulder": 2, "min_length": 20, "description": "x"})).is_ok());
+        assert!(tool(json!({"name": "R6", "kind": "punch", "diameter": 12, "depth": 3, "shoulder": 2})).unwrap_err().contains("`roll`"));
+        assert!(tool(json!({"name": "R6", "kind": "roll", "depth": 3, "shoulder": 2})).unwrap_err().contains("`diameter`"));
+        assert!(tool(json!({"name": "R6", "kind": "roll", "diameter": 12, "depth": 0, "shoulder": 2})).unwrap_err().contains("`depth`"));
+        assert!(
+            tool(json!({"name": "R6", "kind": "roll", "diameter": 12, "depth": 3, "shoulder": 2, "min_length": -1}))
+                .unwrap_err()
+                .contains("`min_length`")
+        );
+        assert!(tool(json!({"name": "R6", "kind": "roll", "diameter": 12, "depth": 3, "shoulder": 2, "x": 1})).unwrap_err().contains("no `x`"));
+    }
+
+    #[test]
     fn the_starter_library_is_valid() {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../library/");
         let mut materials: Vec<String> = Vec::new();
-        for level in ["material", "rule"] {
+        for level in ["material", "rule", "tool"] {
             let mut paths: Vec<_> = std::fs::read_dir(format!("{root}{level}"))
                 .unwrap()
                 .map(|f| f.unwrap().path())
@@ -1074,7 +1110,7 @@ mod tests {
                 assert!(valid.is_ok(), "{file}: {valid:?}");
                 if level == "material" {
                     materials.push(e["name"].as_str().unwrap().to_string());
-                } else {
+                } else if level == "rule" {
                     let of = e["material"].as_str().unwrap_or_default();
                     assert!(materials.iter().any(|m| m == of), "{file}: no material `{of}` in the library");
                 }

@@ -309,6 +309,32 @@ impl Doc {
     /// from before rules has its own numbers, a new one fails asking for a rule. The library is
     /// read only when a sheet metal part has a rule.
     pub fn built<'g>(&self, g: &'g Graph, level: Option<&str>, project: Option<&std::path::Path>) -> Cow<'g, Graph> {
+        if !g.nodes().iter().any(|n| matches!(n.op, Op::Rib { .. })) {
+            return self.ruled(g, level, project);
+        }
+        // A rib's numbers come from its tool (D250); a tool the library lacks leaves the feature
+        // as it is: a file's own numbers, or a refusal saying what is missing.
+        let tools = crate::library::load("tool", project);
+        let mut out = g.clone();
+        for (ix, n) in g.nodes().iter().enumerate() {
+            let Op::Rib { tool, flip, .. } = &n.op else { continue };
+            let Some(e) = tools.get(tool) else { continue };
+            let number = |key: &str| e.element[key].as_f64().map(Num::Value);
+            let op = Op::Rib {
+                tool: tool.clone(),
+                flip: *flip,
+                diameter: number("diameter"),
+                depth: number("depth"),
+                shoulder: number("shoulder"),
+                min_length: number("min_length"),
+            };
+            let _ = out.set_op(ix as NodeIx, op);
+        }
+        Cow::Owned(self.ruled(&out, level, project).into_owned())
+    }
+
+    /// [`DocLevels::built`] after the tools: the rules' numbers.
+    fn ruled<'g>(&self, g: &'g Graph, level: Option<&str>, project: Option<&std::path::Path>) -> Cow<'g, Graph> {
         // A sheet or a face of sheet metal by its part's rule; a flange or a trim by the rule of
         // the part whose body it is on (D205, D211).
         let sheets: Vec<(usize, String)> = g

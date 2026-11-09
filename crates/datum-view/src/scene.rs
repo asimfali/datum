@@ -127,6 +127,7 @@ impl Scene {
         for v in values {
             match v {
                 Value::Body(b) => s.bodies.push(cache.get(b)),
+                Value::Formed(f) => s.bodies.push(cache.get(&f.body)),
                 // A flat blank is for export (DXF), not drawn in the 3D scene.
                 // Work planes are drawn over the picture, from the model's inspection.
                 Value::Flat(_) | Value::Plane(_) => {}

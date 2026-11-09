@@ -11,6 +11,7 @@ mod flange;
 mod mirror;
 mod pattern;
 mod revolve;
+mod rib;
 mod sheet;
 mod sketch;
 mod trim;
@@ -34,6 +35,7 @@ pub use flange::{
 pub use mirror::TurnAxis;
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
+pub use rib::{Formed, Imprint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
@@ -325,6 +327,23 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         k_factor: Option<Num>,
     },
+    /// Ribs rolled along the open chains of a sketch on a flat wall of sheet metal (D250): by the
+    /// tool `tool` of the library (its `diameter`, `depth`, `shoulder` and `min_length` put here
+    /// when the model is built). The rib rises out of the sketch's face, or into it (`flip`). The
+    /// sheet's blank does not change. Inputs: the sheet, then the sketch.
+    Rib {
+        tool: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        flip: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        diameter: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        depth: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        shoulder: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_length: Option<Num>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -439,6 +458,7 @@ fn sketch_value(
     }
     let source = |from: Option<&str>| match values.get(input(from)?) {
         Some(Value::Body(b)) => Ok(Source::Body(b)),
+        Some(Value::Formed(f)) => Ok(Source::Body(&f.body)),
         Some(Value::Sketch(s)) => Ok(Source::Sketch(s)),
         Some(Value::Plane(_)) => Err(BrepError::Sketch("a projection names the input it takes geometry from (`from`), not the work plane".into())),
         Some(_) => Err(BrepError::Sketch("a projection takes geometry from a body or a sketch".into())),
@@ -473,6 +493,8 @@ pub enum Value {
     Sketch(Box<Placed>),
     /// Boxed, as a sketch: a blank is larger than a body.
     Flat(Box<Flat>),
+    /// Sheet metal with ribs (D250). Boxed, as it holds two bodies.
+    Formed(Box<rib::Formed>),
     /// A work plane: its origin, X axis and normal, as a sketch plane.
     Plane(SketchPlane),
 }
@@ -482,6 +504,7 @@ impl Value {
     pub fn hash(&self) -> [u8; 32] {
         match self {
             Self::Body(b) => b.hash(),
+            Self::Formed(f) => f.body.hash(),
             Self::Sketch(s) => s.hash,
             Self::Flat(f) => f.hash,
             Self::Plane(p) => {
@@ -497,7 +520,16 @@ impl Value {
     pub fn body(&self) -> Option<&Body> {
         match self {
             Self::Body(b) => Some(b),
+            Self::Formed(f) => Some(&f.body),
             _ => None,
+        }
+    }
+
+    /// The body sheet metal is laid flat from: without its ribs (D250).
+    pub fn blank(&self) -> Option<&Body> {
+        match self {
+            Self::Formed(f) => Some(&f.blank),
+            _ => self.body(),
         }
     }
 
@@ -548,6 +580,7 @@ impl Op {
             Self::Saddle { .. } => "saddle",
             Self::BranchHole { .. } => "branch_hole",
             Self::Unfold { .. } => "unfold",
+            Self::Rib { .. } => "rib",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
             Self::Flange { .. } => "flange",
@@ -582,8 +615,23 @@ impl Op {
             | Self::Rolled { .. } => 1..=1,
             Self::Flange { .. } => 1..=4,
             Self::Boolean { .. } => 2..=usize::MAX,
-            Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } => 2..=2,
+            Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } | Self::Rib { .. } => 2..=2,
         }
+    }
+
+    /// Whether the operation works on sheet metal without its ribs (D250): the blank is laid
+    /// from it, and a flange or a cut changes it, the ribs laid again after.
+    fn reads_blank(&self) -> bool {
+        matches!(
+            self,
+            Self::Flange { .. }
+                | Self::Extrude { .. }
+                | Self::Trim { .. }
+                | Self::Saddle { .. }
+                | Self::BranchHole { .. }
+                | Self::Unfold { .. }
+                | Self::Sketch { flat: Some(_), .. }
+        )
     }
 
     /// The operation with every number evaluated, parameter values coming from `lookup` (D57).
@@ -623,6 +671,17 @@ impl Op {
                 Self::Plane { base: *base, face: face.clone(), points: points.clone(), line: line.clone(), offset: r(offset, "offset")? }
             }
             Self::Unfold { face, k_factor } => Self::Unfold { face: face.clone(), k_factor: r(k_factor, "k_factor")? },
+            Self::Rib { tool, flip, diameter, depth, shoulder, min_length } => {
+                let opt = |n: &Option<Num>, field: &str| n.as_ref().map(|n| r(n, field)).transpose();
+                Self::Rib {
+                    tool: tool.clone(),
+                    flip: *flip,
+                    diameter: opt(diameter, "diameter")?,
+                    depth: opt(depth, "depth")?,
+                    shoulder: opt(shoulder, "shoulder")?,
+                    min_length: opt(min_length, "min_length")?,
+                }
+            }
             Self::Trim { flip, k_factor } => Self::Trim { flip: *flip, k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
             Self::Saddle { k_factor } => Self::Saddle { k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
             Self::BranchHole { k_factor } => Self::BranchHole { k_factor: k_factor.as_ref().map(|k| r(k, "k_factor")).transpose()? },
@@ -745,7 +804,8 @@ impl Op {
             | Self::Rolled { .. }
             | Self::Trim { .. }
             | Self::Saddle { .. }
-            | Self::BranchHole { .. } => {
+            | Self::BranchHole { .. }
+            | Self::Rib { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -762,6 +822,22 @@ impl Op {
     pub fn eval_named(&self, feature: TopoId, values: &[&Value], names: &[&str]) -> Result<Value, BrepError> {
         if !self.arity().contains(&values.len()) {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
+        }
+        if let (Some(Value::Formed(f)), true) = (values.first(), self.reads_blank()) {
+            let blank = Value::Body(f.blank.clone());
+            let mut plain = values.to_vec();
+            plain[0] = &blank;
+            return match self.eval_named(feature, &plain, names)? {
+                Value::Body(body) => {
+                    let mut laid = body.clone();
+                    for i in &f.imprints {
+                        laid = rib::imprint(&laid, i)?;
+                    }
+                    validated(&laid)?;
+                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone() })))
+                }
+                other => Ok(other),
+            };
         }
         // A work plane, and a sketch on one, take no body.
         if let Self::Plane { base, face, points, line, offset } = self {
@@ -803,6 +879,7 @@ impl Op {
             | Self::Revolve { .. }
             | Self::Rolled { .. }
             | Self::Mirror { .. }
+            | Self::Rib { .. }
             | Self::Trim { .. } => Vec::new(),
             // The sheet; its work planes are read by name.
             Self::Flange { .. } => {
@@ -865,6 +942,24 @@ impl Op {
             }
             Self::Unfold { face, k_factor } => return Ok(Value::Flat(Box::new(unfold(inputs[0], face, num(k_factor)?)?))),
             Self::Extrude { .. } => extrude(feature, values, self)?,
+            Self::Rib { flip, diameter, depth, shoulder, min_length, tool } => {
+                let (Some(d), Some(h), Some(s)) = (diameter, depth, shoulder) else {
+                    return Err(BrepError::Sketch(format!("rib: no tool `{tool}` in the library: add it to the tools, or choose one that is there")));
+                };
+                let tool =
+                    rib::RibTool { radius: 0.5 * num(d)?, depth: num(h)?, shoulder: num(s)?, min_length: min_length.as_ref().map_or(Ok(0.0), num)? };
+                let (sheet, s) = (values[0], sketch(1)?);
+                let body = sheet.body().ok_or_else(|| BrepError::Sketch("a rib takes the sheet, then a sketch".into()))?;
+                let i = rib::imprint_of(feature, s, tool, *flip)?;
+                let laid = rib::imprint(body, &i)?;
+                validated(&laid)?;
+                let (blank, mut imprints) = match sheet {
+                    Value::Formed(f) => (f.blank.clone(), f.imprints.clone()),
+                    _ => (body.clone(), Vec::new()),
+                };
+                imprints.push(i);
+                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints })));
+            }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
             Self::Trim { flip, k_factor } => {
                 let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
@@ -982,11 +1077,17 @@ impl Op {
             // Made above, before inputs are taken as bodies.
             Self::Plane { .. } => return Err(BrepError::Invalid("a plane is no body".into())),
         };
-        if cfg!(debug_assertions) {
-            body.validate()?;
-        }
+        validated(&body)?;
         Ok(Value::Body(body))
     }
+}
+
+/// In debug builds, every operation's result is validated.
+fn validated(body: &Body) -> Result<(), BrepError> {
+    if cfg!(debug_assertions) {
+        body.validate()?;
+    }
+    Ok(())
 }
 
 /// A point a work plane goes through (D204): a vertex of an input body by its ID, a point of an

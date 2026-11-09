@@ -278,8 +278,16 @@ impl Writer {
                     } else if t.major > t.minor {
                         (self.put(format_args!("TOROIDAL_SURFACE('',#{at},{},{})", Real(t.major), Real(t.minor))), t.convex)
                     } else {
-                        // STEP's torus is a ring; one reaching across its own axis is another type.
-                        return Err(BrepError::Unsupported(format!("STEP: a torus of major radius {} and minor {}", t.major, t.minor)));
+                        // STEP's torus is a ring: one whose tube reaches its axis is the tube's
+                        // circle turned about it, exactly. Its normal is ∂turn × ∂circle: out
+                        // of the tube when the circle runs from across the axis towards along it.
+                        let ref_dir = perpendicular(t.axis);
+                        let center = t.center + ref_dir * t.major;
+                        let circle = self.circle(center, ref_dir.cross(t.axis), center + ref_dir * t.minor, t.minor);
+                        let o = self.point(t.center);
+                        let d = self.direction(t.axis);
+                        let axis = self.put(format_args!("AXIS1_PLACEMENT('',#{o},#{d})"));
+                        (self.put(format_args!("SURFACE_OF_REVOLUTION('',#{circle},#{axis})")), t.convex)
                     }
                 }
                 Surface::Wall(w) if walls[f] > 0 => self.wall(&w, radii(b, f as Ix)?, walls[f]),

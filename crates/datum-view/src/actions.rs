@@ -45,6 +45,8 @@ pub enum Act {
     LookAt,
     WorkPlane,
     Flange,
+    Rib,
+    ToolTable,
     Trim,
     MirrorPart,
     Branch,
@@ -107,7 +109,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 56] = [
+pub const ACTIONS: [Action; 58] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -273,6 +275,22 @@ pub const ACTIONS: [Action; 56] = [
         "A bend and a wall on edges of sheet metal: its ends or its walls along its sides; click the edges (Shift adds), Enter",
         None,
         Model,
+    ),
+    action(
+        Act::Rib,
+        "sheet.rib",
+        "Rib",
+        "A rib rolled by a punch press tool along the open lines of a sketch on a flat wall; the blank does not change",
+        plain(Key::B),
+        Model,
+    ),
+    action(
+        Act::ToolTable,
+        "view.tool_table",
+        "Tools",
+        "The punch press's tools of the library: diameter, depth, shoulder radius, shortest path",
+        None,
+        Anywhere,
     ),
     action(
         Act::Trim,

@@ -197,7 +197,7 @@ pub fn overlap(a: Box2, b: Box2) -> bool {
 impl ProfileLoop {
     /// Edges `i` and `k` of this loop and of `other` share a point, past the point two neighbours
     /// of one loop share. Of the same loop when `other` is `None`.
-    pub(crate) fn edges_touch(&self, other: Option<&ProfileLoop>) -> bool {
+    pub fn edges_touch(&self, other: Option<&ProfileLoop>) -> bool {
         let n = self.points.len();
         match other {
             None => (0..n).any(|i| (i + 1..n).any(|k| (i + 1) % n != k && (k + 1) % n != i && touch(&self.piece(i), &self.piece(k)))),

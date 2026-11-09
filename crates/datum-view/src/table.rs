@@ -646,6 +646,8 @@ pub enum Source {
     Parameters,
     Materials,
     Rules,
+    /// The punch press's tools (D250).
+    Tools,
     /// The presets of the element being kept in the library.
     Presets,
 }
@@ -679,9 +681,20 @@ pub const RULES: Records = Records {
     widths: &[35.0, 25.0, 25.0, 45.0, 20.0, 40.0, 40.0, 40.0, 40.0, 40.0, 50.0],
 };
 
+/// The punch press's tools (D250). All roll for now: `kind` is not a column.
+pub const TOOLS: Records = Records {
+    level: "tool",
+    keys: &["name", "diameter", "depth", "shoulder", "min_length", "description"],
+    widths: &[35.0, 25.0, 25.0, 30.0, 35.0, 50.0],
+};
+
 impl Records {
     fn is_rule(&self) -> bool {
         self.level == RULES.level
+    }
+
+    fn is_tool(&self) -> bool {
+        self.level == TOOLS.level
     }
 }
 
@@ -700,6 +713,10 @@ fn header<'a>(key: &str, i18n: &'a I18n) -> &'a str {
         "bend_relief_width" => i18n.t("table-bend-relief-width", "Bend relief width (mm or of t)"),
         "bend_relief_depth" => i18n.t("table-bend-relief-depth", "Bend relief depth (mm or of t)"),
         "kerf" => i18n.t("table-kerf", "Cut width (mm or of t)"),
+        "diameter" => i18n.t("table-tool-diameter", "Diameter (mm)"),
+        "depth" => i18n.t("table-tool-depth", "Depth (mm)"),
+        "shoulder" => i18n.t("table-tool-shoulder", "Shoulder R (mm)"),
+        "min_length" => i18n.t("table-tool-min-length", "Shortest path (mm)"),
         _ => i18n.t("table-radius", "Bend radius (mm or of t)"),
     }
 }
@@ -744,12 +761,19 @@ pub fn editable_records(r: usize, _: usize) -> bool {
 fn field_value(rec: &Records, key: &str, text: &str, i18n: &I18n) -> Result<Option<Json>, String> {
     let text = text.trim();
     match key {
+        "name" if text.is_empty() && rec.is_tool() => {
+            Err(i18n.t("table-tool-nameless", "A tool needs a name. To remove a row: select it whole and press Delete").to_string())
+        }
         "name" if text.is_empty() && rec.is_rule() => {
             Err(i18n.t("table-rule-nameless", "A rule needs a name. To remove a row: select it whole and press Delete").to_string())
         }
         "name" if text.is_empty() => {
             Err(i18n.t("table-material-nameless", "A material needs a name. To remove a row: select it whole and press Delete").to_string())
         }
+        "diameter" | "depth" | "shoulder" | "min_length" if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
+            Ok(d) if d.is_finite() && (d > 0.0 || (d == 0.0 && key == "min_length")) => Ok(Some(json!(d))),
+            _ => Err(i18n.t("table-tool-number", "A tool's sizes are numbers above zero, in mm").to_string()),
+        },
         "density" | "thickness" if !text.is_empty() => match text.replace(',', ".").parse::<f64>() {
             Ok(d) if d.is_finite() && d > 0.0 => Ok(Some(json!(d))),
             _ if key == "density" => Err(i18n.t("table-material-density", "The density is a number above zero, in kg/m³").to_string()),
@@ -849,7 +873,9 @@ pub fn record_requests(
 ) -> (Vec<Request>, Option<String>) {
     let first_new = elements.len() + 1;
     let taken = |name: &str| {
-        if rec.is_rule() {
+        if rec.is_tool() {
+            i18n.f("table-tool-taken", "`{ $name }` is a tool already", &[("name", name)])
+        } else if rec.is_rule() {
             i18n.f("table-rule-taken", "`{ $name }` is a rule already", &[("name", name)])
         } else {
             i18n.f("table-material-taken", "`{ $name }` is a material already", &[("name", name)])

@@ -410,7 +410,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "library",
-        description: "The library's elements of a `level` (VISION §10; `sketch`, `material` or `rule`): built in, then from `library/<level>` \
+        description: "The library's elements of a `level` (VISION §10; `sketch`, `material`, `rule` or `tool`, the punch press's): built in, then from `library/<level>` \
                       beside the program, then from `library/<level>` of the model's project (the nearest folder above the model \
                       file with `datum-project.json`); one of a name already listed takes its place. Each with its `source` and \
                       all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
@@ -1327,7 +1327,7 @@ impl Session {
         if let Some(f) = value.flat() {
             return Ok(Arc::new(f.with_lines_closed(&closed)));
         }
-        let body = value.body().ok_or_else(|| format!("`{name}` is no body"))?;
+        let body = value.blank().ok_or_else(|| format!("`{name}` is no body"))?;
         let settings = self.doc.flats.get(name).cloned().unwrap_or_default();
         let values = parameter_values(self.graph.parameters());
         let lookup = |n: &str| values.get(n).cloned().unwrap_or_else(|| Err(ExprError::Unknown(n.into())));
@@ -1821,9 +1821,9 @@ impl Session {
                     Ok(v) => {
                         let hash: String = v.hash()[..8].iter().map(|x| format!("{x:02x}")).collect();
                         let status = match v.as_ref() {
-                            Feature::Body(b) => {
+                            Feature::Body(_) | Feature::Formed(_) => v.body().map_or(Value::Null, |b| {
                                 json!({"volume": b.volume(), "faces": b.faces().len(), "edges": b.edges().len(), "vertices": b.vertices().len(), "hash": hash})
-                            }
+                            }),
                             Feature::Sketch(s) => {
                                 let points: serde_json::Map<String, Value> = s.solved.points.iter().map(|(n, p)| (n.clone(), json!([p.x, p.y]))).collect();
                                 // A free point: "plane", or the direction it slides along.

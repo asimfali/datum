@@ -507,7 +507,7 @@ fn dome_and_concave_groove() {
     assert!(rod.faces().iter().any(|f| matches!(f.surface, Surface::Torus(t) if !t.convex && t.major == big && t.minor == s)));
 }
 
-/// STEP names the surfaces; a torus reaching across its own axis has no plain STEP type.
+/// STEP names the surfaces; a torus reaching its own axis goes as a circle turned about it.
 #[test]
 fn torus_and_sphere_in_step() {
     use std::f64::consts::TAU;
@@ -527,7 +527,9 @@ fn torus_and_sphere_in_step() {
     let fat = revolve(&region(ring("f", pts, arcs), Vec::new()), &at, TAU).unwrap();
     fat.validate().unwrap();
     check_mesh(&fat);
-    assert!(matches!(step(&[&fat], "fat", false), Err(BrepError::Unsupported(m)) if m.contains("major radius")));
+    let s = step(&[&fat], "fat", false).unwrap();
+    assert_eq!(s.text.matches("SURFACE_OF_REVOLUTION").count(), 3);
+    assert_eq!(s.approximated, 0);
 }
 
 /// Cones on screen and in STEP: the mesh holds about the volume, STEP names the cone.
