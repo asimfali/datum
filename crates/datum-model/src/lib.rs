@@ -270,7 +270,9 @@ const NOTE: &str = "Datum STEP note";
 /// or, when `approximate`, written as B-splines and told of in `<path>.txt` (D147); a note left
 /// by an earlier export goes. Returns the faces approximated.
 pub fn write_step(g: &Graph, e: &datum_graph::Evaluation, path: &std::path::Path, approximate: bool) -> Result<usize, String> {
-    let bodies: Vec<&datum_brep::Body> = e.final_values(g).into_iter().filter_map(datum_graph::Value::body).collect();
+    // A turned copy (D247) is the same part again, to look at: not exported.
+    let parts = e.finals(g).into_iter().filter(|&i| !g.nodes()[i as usize].op.is_turned_copy());
+    let bodies: Vec<&datum_brep::Body> = parts.filter_map(|i| e.results[i as usize].as_ref().ok()?.body()).collect();
     if bodies.is_empty() {
         return Err("the model has no body to export".into());
     }

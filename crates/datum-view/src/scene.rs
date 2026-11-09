@@ -115,6 +115,9 @@ pub struct Scene {
     /// its edges alone, faint, so as not to hide the part being worked on.
     pub context: Vec<Arc<BodyMesh>>,
     pub faded: bool,
+    /// Which of `bodies` are turned copies of a part (D247): picked as any, drawn in their own
+    /// colour.
+    pub copies: Vec<usize>,
 }
 
 impl Scene {
@@ -305,6 +308,8 @@ pub const LINE_VERTEX: u64 = 16;
 
 const BODY: [u8; 4] = [168, 182, 199, 255];
 const EDGE: [u8; 4] = [32, 36, 44, 255];
+/// A turned copy of a part (D247): a warm grey beside the cold one of the parts.
+const COPY: [u8; 4] = [206, 196, 178, 255];
 const SKETCH: [u8; 4] = [214, 96, 32, 255];
 /// The rest of the product, faded: its edges, faint.
 const FADED: [u8; 4] = [150, 158, 170, 255];
@@ -333,13 +338,14 @@ impl Geometry {
         // Solid: the bodies, and the product around them unless it is faded.
         let solid: Vec<&BodyMesh> = scene.bodies.iter().chain(scene.context.iter().filter(|_| !scene.faded)).map(|m| &**m).collect();
         let bodies = &solid;
+        let colours: Vec<[u8; 4]> = (0..solid.len()).map(|b| if scene.copies.contains(&b) { COPY } else { BODY }).collect();
         let triangles = bodies.iter().enumerate().flat_map(|(b, m)| m.triangles.iter().enumerate().map(move |(i, t)| key(t, b, i))).collect();
         let triangles = Part::new(triangles, |b, i| {
             let (m, i) = (bodies[b as usize], i as usize);
             let (t, n) = (m.triangles[i], m.normals[i]);
             [0, 1, 2].map(|k| {
                 let (p, n) = (rel(t[k]), n[k]);
-                vertex::<28>(&[p[0], p[1], p[2], n[0], n[1], n[2]], BODY)
+                vertex::<28>(&[p[0], p[1], p[2], n[0], n[1], n[2]], colours[b as usize])
             })
         });
         // Edges of the bodies, of the product around them, then the sketch lines: a group each.

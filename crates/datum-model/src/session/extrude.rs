@@ -74,7 +74,9 @@ impl Session {
         fields: &Map<String, Value>,
         body: Option<&str>,
     ) -> Result<(String, String), String> {
-        let all = bodies(&self.graph);
+        // A turned copy (D247) is only looked at: never a target.
+        let copy = |begun: &str| self.graph.find(begun).is_some_and(|i| self.graph.nodes()[i as usize].op.is_turned_copy());
+        let all: Vec<(String, String)> = bodies(&self.graph).into_iter().filter(|(begun, _)| !copy(begun)).collect();
         let list = || all.iter().map(|(begun, _)| format!("`{begun}`")).collect::<Vec<_>>().join(", ");
         let one = |found: Vec<&(String, String)>, none: String| match found[..] {
             [b] => Ok(b.clone()),

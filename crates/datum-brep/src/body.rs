@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 
 use crate::curve::{self, Integrals, Path, unit};
-use crate::{Arc, BrepError, Curve, CurveSpec, FaceSpec, Surface, TopoId};
+use crate::{Arc, BrepError, Cone, Curve, CurveSpec, Cylinder, FaceSpec, Surface, TopoId, build_with_curves};
 
 /// Index into one of a body's element vectors.
 pub type Ix = u32;
@@ -339,6 +339,44 @@ impl Body {
         }
         b.rehash();
         b
+    }
+
+    /// The body reflected in the plane through `origin` with normal `normal` (any non-zero
+    /// length). Topology IDs are unchanged; every loop is reversed, so faces still look out. A
+    /// body with a development (a cut through a rolled sheet) is refused: reflected, it would
+    /// run the other way round its axis.
+    pub fn reflected(&self, origin: Vec3, normal: Vec3) -> Result<Body, BrepError> {
+        let k = normal * (2.0 / normal.dot(normal));
+        let dir = |v: Vec3| v - k * normal.dot(v);
+        let point = |p: Vec3| p - k * normal.dot(p - origin);
+        let developed = || BrepError::Unsupported("a mirror of a body with a cut through a rolled sheet".into());
+        let mut vertices = self.vertices.clone();
+        for v in &mut vertices {
+            v.point = point(v.point);
+        }
+        let faces = (0..self.faces.len() as Ix)
+            .map(|f| {
+                let mut spec = self.face_spec(f);
+                spec.surface = match spec.surface {
+                    Surface::Plane(p) => Surface::Plane(Plane { origin: point(p.origin), normal: dir(p.normal) }),
+                    Surface::Cylinder(c) => Surface::Cylinder(Cylinder { origin: point(c.origin), axis: dir(c.axis), ..c }),
+                    Surface::Cone(c) => Surface::Cone(Cone { origin: point(c.origin), axis: dir(c.axis), ..c }),
+                    Surface::Wall(_) => return Err(developed()),
+                };
+                spec.loops.iter_mut().for_each(|l| l.reverse());
+                Ok(spec)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let curves = self
+            .curve_specs()
+            .into_iter()
+            .map(|c| match c.curve {
+                // A reflection turns the other way round the reflected axis.
+                Curve::Arc(a) => Ok(CurveSpec { curve: Curve::Arc(Arc { center: point(a.center), axis: -dir(a.axis), ..a }), ..c }),
+                Curve::Rolled { .. } => Err(developed()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        build_with_curves(vertices, faces, curves)
     }
 
     /// The body under an affine map that keeps orientation: `point` maps points, `normal` maps

@@ -638,3 +638,30 @@ fn rolled_meet_uv_box_holds_and_is_attained() {
         }
     }
 }
+
+#[test]
+fn a_reflection_is_valid_and_twice_is_the_body_itself() {
+    let b = l_prism();
+    let r = b.reflected(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)).unwrap();
+    r.validate().unwrap();
+    assert_eq!(r.mass_properties().volume, b.mass_properties().volume);
+    assert_eq!(r.bounds().0.x, -2.0);
+    assert_ne!(r.hash(), b.hash());
+    assert_eq!(r.reflected(Vec3::ZERO, Vec3::new(1.0, 0.0, 0.0)).unwrap().hash(), b.hash());
+}
+
+proptest! {
+    /// Reflected in any plane a body stays valid and keeps its volume; its IDs stay.
+    #[test]
+    fn a_reflection_keeps_the_body(
+        (x, y, z) in (-1.0..1.0f64, -1.0..1.0f64, 0.1..1.0f64),
+        origin in (-50.0..50.0f64, -50.0..50.0f64, -50.0..50.0f64),
+    ) {
+        let b = l_prism();
+        let r = b.reflected(Vec3::new(origin.0, origin.1, origin.2), Vec3::new(x, y, z)).unwrap();
+        prop_assert!(r.validate().is_ok());
+        prop_assert!((r.mass_properties().volume - b.mass_properties().volume).abs() < 1e-9);
+        prop_assert_eq!(r.faces().len(), b.faces().len());
+        prop_assert!(r.faces().iter().zip(b.faces()).all(|(a, c)| a.id == c.id));
+    }
+}

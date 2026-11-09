@@ -255,9 +255,29 @@ impl Doc {
     /// Bodies branching from one beginning are one part, listed once.
     pub fn parts(&self) -> Vec<String> {
         let mut parts: Vec<String> =
-            bodies(&self.root).into_iter().map(|(begun, _)| begun).filter(|b| !matches!(self.parts.get(b), Some(None))).collect();
+            bodies(&self.root).into_iter().map(|(begun, _)| begun).filter(|b| !matches!(self.parts.get(b), Some(None)) && !self.is_copy(b)).collect();
         parts.dedup();
         parts
+    }
+
+    /// Whether body `begun` of the root is a turned copy of a part (D247): the same part again.
+    fn is_copy(&self, begun: &str) -> bool {
+        self.root.find(begun).is_some_and(|i| self.root.nodes()[i as usize].op.is_turned_copy())
+    }
+
+    /// The model's surroundings (D247): its turned copies, in the order they were made, each with
+    /// the part it copies. Shown and hidden, and kept in sets, as parts are.
+    pub fn environment(&self) -> Vec<(String, String)> {
+        let nodes = self.root.nodes();
+        let source = |copy: NodeIx| body_history(&self.root, nodes[copy as usize].inputs[0]).last().map(|&b| nodes[b as usize].name.clone());
+        bodies(&self.root)
+            .into_iter()
+            .filter(|(begun, _)| self.is_copy(begun))
+            .filter_map(|(begun, _)| {
+                let of = source(self.root.find(&begun)?)?;
+                Some((begun, of))
+            })
+            .collect()
     }
 
     /// Part `part`'s name: as given, else the feature that began it.
@@ -298,7 +318,7 @@ impl Doc {
             .filter_map(|(ix, n)| match n.op {
                 Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
                 Op::Flange { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } | Op::Extrude { wall: true, .. } => {
-                    let begun = body_chain(g, ix as NodeIx).last()?;
+                    let begun = *body_history(g, ix as NodeIx).last()?;
                     Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
                 }
                 _ => None,
@@ -377,7 +397,8 @@ impl Doc {
     /// The kind of part `part` (D179): `sheet` if its body began as sheet metal (from a path, a
     /// face of it, D195, or rolled about an axis, D207), else `part`. Set by its first feature, it never changes.
     pub fn kind(&self, part: &str) -> &'static str {
-        match self.root.find(part).map(|i| &self.root.nodes()[i as usize].op) {
+        let begun = self.root.find(part).and_then(|i| body_history(&self.root, i).last().copied());
+        match begun.map(|i| &self.root.nodes()[i as usize].op) {
             Some(Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. }) => "sheet",
             _ => "part",
         }
@@ -436,7 +457,7 @@ impl Doc {
 
     /// Part `part` shown in the product, or not.
     pub fn show(&mut self, part: &str, visible: bool) -> Result<(), String> {
-        if !self.parts().iter().any(|p| p == part) {
+        if !self.parts().iter().any(|p| p == part) && !self.is_copy(part) {
             return Err(format!("no part `{part}`"));
         }
         if visible {
@@ -476,15 +497,91 @@ impl Doc {
 }
 
 /// Whether feature `op` makes a body (not a sketch, a plane or a blank).
-fn makes_body(op: &Op) -> bool {
+pub(crate) fn makes_body(op: &Op) -> bool {
     !matches!(op, Op::Sketch { .. } | Op::Plane { .. } | Op::Unfold { .. })
 }
 
 /// The features of the body feature `last` of graph `g` ends in, from `last` back to the one
 /// that began it: down its first inputs while they make bodies (a cut's body, a boolean's first).
+/// A mirror begins a body: what it mirrors stays.
 pub(crate) fn body_chain(g: &Graph, last: NodeIx) -> impl Iterator<Item = NodeIx> + '_ {
     let nodes = g.nodes();
-    std::iter::successors(Some(last), |&at| nodes[at as usize].inputs.first().copied().filter(|&j| makes_body(&nodes[j as usize].op)))
+    std::iter::successors(Some(last), |&at| {
+        if matches!(nodes[at as usize].op, Op::Mirror { .. }) {
+            return None;
+        }
+        nodes[at as usize].inputs.first().copied().filter(|&j| makes_body(&nodes[j as usize].op))
+    })
+}
+
+/// The features of the body feature `last` ends in, and, for a mirrored body, of the body it
+/// mirrors, on to the first: what its sheet rule, kind and cuts on the blank come from.
+pub(crate) fn body_history(g: &Graph, last: NodeIx) -> Vec<NodeIx> {
+    let mut out: Vec<NodeIx> = body_chain(g, last).collect();
+    while let Some(&mirror) = out.last().filter(|&&b| matches!(g.nodes()[b as usize].op, Op::Mirror { .. })) {
+        out.extend(body_chain(g, g.nodes()[mirror as usize].inputs[0]));
+    }
+    out
+}
+
+/// Graph `g` with every mirror taking the end of the part it mirrors (D247), moved after it when
+/// the part has grown since; none if every mirror does already. An error if the part's new end
+/// is built on the mirror.
+pub(crate) fn mirrors_on_ends(g: &Graph) -> Result<Option<Graph>, String> {
+    let nodes = g.nodes();
+    let users = g.users();
+    let end = |mut at: NodeIx| {
+        while let Some(&u) = users[at as usize].iter().find(|&&u| nodes[u as usize].inputs.first() == Some(&at) && makes_body(&nodes[u as usize].op))
+        {
+            at = u;
+        }
+        at
+    };
+    let built_on = |from: NodeIx, mirror: NodeIx| {
+        let (mut todo, mut seen) = (vec![from], std::collections::BTreeSet::new());
+        while let Some(i) = todo.pop() {
+            if i == mirror {
+                return true;
+            }
+            if seen.insert(i) {
+                todo.extend(&nodes[i as usize].inputs);
+            }
+        }
+        false
+    };
+    let mut moved = std::collections::BTreeMap::new();
+    for (m, n) in nodes.iter().enumerate().filter(|(_, n)| matches!(n.op, Op::Mirror { .. })) {
+        let last = end(n.inputs[0]);
+        if last != n.inputs[0] {
+            if built_on(last, m as NodeIx) {
+                return Err(format!(
+                    "`{}` is built on `{}`, a mirror of its own part: a part cannot stand on its own copy",
+                    nodes[last as usize].name, n.name
+                ));
+            }
+            moved.insert(m, last);
+        }
+    }
+    if moved.is_empty() {
+        return Ok(None);
+    }
+    let features = (0..nodes.len())
+        .map(|i| {
+            let mut f = crate::feature_json(g, i as NodeIx);
+            if let (Some(&last), Some(Value::Array(inputs))) = (moved.get(&i), f.get_mut("inputs")) {
+                inputs[0] = Value::String(nodes[last as usize].name.clone());
+            }
+            f
+        })
+        .collect();
+    let mut out = Graph::default();
+    for (n, v) in g.parameters() {
+        out.set_parameter(n, v.clone()).map_err(|e| e.to_string())?;
+    }
+    for f in in_order(features)? {
+        crate::add_feature(&mut out, f)?;
+    }
+    Ok(Some(out))
 }
 
 /// The bodies of graph `g`, in the order they were begun: for each final body feature, the

@@ -209,6 +209,8 @@ enum Purpose {
     Flange,
     /// A work plane a rolled sheet is trimmed by.
     Trim,
+    /// The plane or plane face a part is mirrored across (D247).
+    Mirror,
     /// The main pipe, then the branch pipe set on it.
     Branch,
 }
@@ -569,11 +571,15 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
     let mine = session.active().and_then(|a| session.part_of(a));
     let product = session.product();
     let own = |part: &str, level: &Option<String>| mine.is_none() && level.is_none() && session.visible(part);
+    let hidden_copy = |name: &str| !session.visible(name) && graph.find(name).is_some_and(|i| graph.nodes()[i as usize].op.is_turned_copy());
     let skip: Vec<String> = datum_model::levels::bodies(graph)
         .into_iter()
-        .filter(|(begun, _)| match &mine {
-            Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
-            None => product.iter().any(|(q, level, _)| q == begun && !own(q, level)),
+        .filter(|(begun, _)| {
+            hidden_copy(begun)
+                || match &mine {
+                    Some(p) => begun != p && product.iter().any(|(q, _, _)| q == begun),
+                    None => product.iter().any(|(q, level, _)| q == begun && !own(q, level)),
+                }
         })
         .map(|(_, last)| last)
         .collect();
@@ -595,19 +601,29 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         .map(|(_, v)| v)
         .collect();
     let context: Vec<&datum_brep::Body> = around.iter().filter_map(|v| v.body()).collect();
-    let scene = Scene::new(&finals, meshes).with_context(&context, session.active().is_some(), meshes);
+    let mut scene = Scene::new(&finals, meshes).with_context(&context, session.active().is_some(), meshes);
+    scene.copies = bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| graph.find(n).is_some_and(|i| graph.nodes()[i as usize].op.is_turned_copy()))
+        .map(|(k, _)| k)
+        .collect();
     meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().copied()).collect::<Vec<_>>());
     let context = editing.and_then(|name| {
         let node = graph.nodes().iter().position(|n| n.name == name)?;
         let named = |i: usize| Some((graph.nodes()[i].name.clone(), evaluation.results[i].as_ref().ok()?.clone()));
         let inputs = graph.nodes()[node].inputs.iter().filter_map(|&i| named(i as usize)).collect();
         // What it could project from (D214): the sketches before it, and the bodies as they stand
-        // there (a body no later body before it was made of).
+        // there (a body no later body before it used up: a mirror leaves it as it is), but a
+        // turned copy hidden: what is out of the view offers nothing.
         let body = |i: usize| evaluation.results[i].as_ref().is_ok_and(|v| v.body().is_some());
+        let users = graph.users();
         let sources = (0..node)
             .filter(|&i| match evaluation.results[i].as_ref() {
                 Ok(v) if v.sketch().is_some() => true,
-                Ok(v) if v.body().is_some() => !(i + 1..node).any(|k| body(k) && graph.nodes()[k].inputs.contains(&(i as datum_graph::NodeIx))),
+                Ok(v) if v.body().is_some() => {
+                    !users[i].iter().any(|&k| (k as usize) < node && body(k as usize)) && !hidden_copy(&graph.nodes()[i].name)
+                }
                 _ => false,
             })
             .filter_map(named)
@@ -887,6 +903,8 @@ struct Viewer {
     revolve: Option<RevolveForm>,
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
+    /// A mirror of a part being asked for: its form (D247).
+    mirror: Option<MirrorForm>,
     /// The main pipe of a branch being asked for: its body's feature, once clicked.
     branch_main: Option<String>,
     /// An extrusion being asked for: its form by the cursor (D185 item 4).
@@ -1053,6 +1071,51 @@ impl TrimForm {
         }
         ("add", p)
     }
+}
+
+/// The form of a mirror of a part (D247): the part, the plane as the model takes it and as the
+/// form says it, reflected or turned about which axis, the preview sent last.
+struct MirrorForm {
+    name: String,
+    body: String,
+    /// The fields naming the plane: `base`, or `inputs` after the part, or `face`.
+    plane: Json,
+    plane_label: String,
+    turn: bool,
+    axis: datum_ops::TurnAxis,
+    /// Changing feature `name`, opened from the tree, not adding it.
+    editing: bool,
+    sent: Option<Json>,
+}
+
+impl MirrorForm {
+    /// The axis asked for, none if reflected.
+    fn turn(&self) -> Option<datum_ops::TurnAxis> {
+        self.turn.then_some(self.axis)
+    }
+
+    /// The command and its fields as the model takes them: the feature added, or changed.
+    fn params(&self) -> (&'static str, Json) {
+        if self.editing {
+            return ("edit", json!({"name": self.name, "turn": self.turn()}));
+        }
+        let mut p = json!({"name": self.name, "op": "mirror", "inputs": [self.body]});
+        for (k, v) in self.plane.as_object().into_iter().flatten() {
+            match (k.as_str(), v.as_array()) {
+                ("inputs", Some(more)) => p["inputs"].as_array_mut().into_iter().for_each(|a| a.extend(more.iter().cloned())),
+                _ => p[k] = v.clone(),
+            }
+        }
+        if let Some(axis) = self.turn() {
+            p["turn"] = json!(axis);
+        }
+        ("add", p)
+    }
+}
+
+/// Whether `inspect`'s feature `name` is a turned copy of a part (D247).
+fn is_turned_copy(inspect: &Json, name: &str) -> bool {
+    inspect["features"].as_array().is_some_and(|fs| fs.iter().any(|f| f["name"] == name && f["op"] == "mirror" && !f["turn"].is_null()))
 }
 
 /// The "other side" tile of a form: two arrows opposite, highlighted when flipped.
@@ -1521,6 +1584,7 @@ impl Viewer {
             flange: None,
             revolve: None,
             trim: None,
+            mirror: None,
             branch_main: None,
             extrusion: None,
             contour_hint: None,
@@ -2036,6 +2100,7 @@ impl Viewer {
             self.close_extrusion();
             self.close_revolve();
             self.close_trim();
+            self.close_mirror();
         } else {
             self.leave();
         }
@@ -2514,6 +2579,7 @@ impl Viewer {
         self.close_extrusion();
         self.close_revolve();
         self.close_trim();
+        self.close_mirror();
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
         if let Some(sk) = &self.sketch {
@@ -2631,6 +2697,7 @@ impl Viewer {
                 (Act::NewSketch, Icon::NewSketch),
                 (Act::Extrude, Icon::Extrude),
                 (Act::Revolve, Icon::Revolve),
+                (Act::MirrorPart, Icon::Mirror),
                 (Act::FlatPane, Icon::Flat),
                 (Act::WorkPlane, Icon::WorkPlane),
                 (Act::LookAt, Icon::LookAt),
@@ -2952,6 +3019,22 @@ impl Viewer {
                     crate::icons::marked(ui, Icon::Failed, ui.visuals().error_fg_color, &format!("{n}: {e}"));
                 }
             }
+        }
+        // The surroundings (D247): shown and hidden as parts, kept in sets; not worked in.
+        let environment = m.inspect["environment"].as_array().map_or(&[][..], Vec::as_slice);
+        if !environment.is_empty() {
+            ui.label(egui::RichText::new(self.i18n.t("section-environment", "Surroundings")).weak());
+        }
+        for p in environment {
+            let (Some(part), Some(name), Some(of)) = (p["part"].as_str(), p["name"].as_str(), p["of"].as_str()) else { continue };
+            ui.horizontal(|ui| {
+                let mut visible = p["visible"].as_bool().unwrap_or(true);
+                if ui.checkbox(&mut visible, "").on_hover_text(self.i18n.t("environment-visible-hint", "Shown in the model")).changed() {
+                    show = Some((part.to_string(), visible));
+                }
+                ui.label(name).on_hover_text(self.i18n.f("environment-hint", "The same part turned: { $of }", &[("of", of)]));
+                ui.label(egui::RichText::new(of).weak());
+            });
         }
         let mut add: Option<(Option<String>, String, String)> = None;
         if let Some((parent, part, name)) = &mut self.new_level {
@@ -3513,7 +3596,7 @@ impl Viewer {
                         });
                     }
                     // Changed in the form it was made in, its values in it.
-                    None if matches!(op, "revolve" | "rolled" | "trim" | "extrude" | "sheet" | "plate" | "flange") => {
+                    None if matches!(op, "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange") => {
                         ui.horizontal(|ui| {
                             tree.label(ui, &self.i18n, f, Icon::Done, op);
                             let hint = self.i18n.t("edit-feature", "Change it");
@@ -3939,6 +4022,7 @@ impl Viewer {
                     "Click edges of the sheet for flanges, or a face for all its contour · Shift or Ctrl adds or removes · Enter: the flange · Esc: cancel",
                 ),
                 Purpose::Trim => "Click the work plane to trim the sheet by · Esc: cancel",
+                Purpose::Mirror => self.i18n.t("mirror-pick-plane", "Click the plane or plane face to mirror the part across · Esc: cancel"),
                 Purpose::Branch => {
                     branch_hint = match &self.branch_main {
                         None => "Click the main pipe · Esc: cancel".to_string(),
@@ -4179,6 +4263,24 @@ impl Viewer {
             Some((Purpose::Flange, _)) => {}
             Some((Purpose::Trim, Under::Work(k))) => self.open_trim(work[k].0.clone()),
             Some((Purpose::Trim, _)) => {}
+            Some((Purpose::Mirror, under)) => {
+                let Some(part) = self.mirror_body() else { return };
+                let (plane, label) = match under {
+                    Under::Origin(k) => {
+                        let base = datum_ops::OriginPlane::ALL[k];
+                        (json!({"base": base}), base.name().to_string())
+                    }
+                    Under::Work(k) => (json!({"inputs": [work[k].0]}), work[k].0.clone()),
+                    Under::Face(f) => {
+                        let Some(holder) = body(self, f) else { return };
+                        let face = json!(format!("{:?}", f.face));
+                        let plane = if holder == part { json!({"face": face}) } else { json!({"inputs": [holder], "face": face}) };
+                        (plane, self.i18n.t("mirror-face", "face").to_string())
+                    }
+                    Under::Spot(_) | Under::Line(_) => return,
+                };
+                self.open_mirror(part, plane, label);
+            }
             Some((Purpose::Branch, Under::Face(f))) => self.branch_click(f.body),
             Some((Purpose::Branch, _)) => {}
             Some((Purpose::Plane, under)) => {
@@ -4502,6 +4604,24 @@ impl Viewer {
                     sent: None,
                 });
             }
+            Some("mirror") => {
+                let plane_label = match (f["base"].as_str(), f["face"].is_null()) {
+                    (Some(base), _) => base.to_uppercase(),
+                    (None, false) => self.i18n.t("mirror-face", "face").to_string(),
+                    (None, true) => input(1),
+                };
+                let turn: Option<datum_ops::TurnAxis> = serde_json::from_value(f["turn"].clone()).ok().flatten();
+                self.mirror = Some(MirrorForm {
+                    name: name.to_string(),
+                    body: input(0),
+                    plane: Json::Null,
+                    plane_label,
+                    turn: turn.is_some(),
+                    axis: turn.unwrap_or(datum_ops::TurnAxis::Y),
+                    editing: true,
+                    sent: None,
+                });
+            }
             Some("trim") => {
                 self.trim =
                     Some(TrimForm { name: name.to_string(), body: input(0), plane: input(1), flip: f["flip"] == true, editing: true, sent: None });
@@ -4589,8 +4709,9 @@ impl Viewer {
         let flange = self.flange.as_ref().filter(|f| f.editing).map(|f| &f.name);
         let revolve = self.revolve.as_ref().filter(|f| f.editing).map(|f| &f.name);
         let trim = self.trim.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let mirror = self.mirror.as_ref().filter(|f| f.editing).map(|f| &f.name);
         let extrusion = self.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        flange.or(revolve).or(trim).or(extrusion).cloned()
+        flange.or(revolve).or(trim).or(mirror).or(extrusion).cloned()
     }
 
     /// With a form changing a feature, Shift or Ctrl held: what is under the cursor of what the
@@ -4792,11 +4913,10 @@ impl Viewer {
     /// Whether the sketch feature `sketch` lies on a face of a body, or on its flat blank.
     fn on_face(model: Option<&Model>, sketch: &str) -> bool {
         model.is_some_and(|m| {
-            m.inspect["features"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .any(|f| f["name"].as_str() == Some(sketch) && !(f["face"].is_null() && f["flat"].is_null()))
+            m.inspect["features"].as_array().into_iter().flatten().any(|f| {
+                let copy = f["inputs"][0].as_str().is_some_and(|b| is_turned_copy(&m.inspect, b));
+                f["name"].as_str() == Some(sketch) && !(f["face"].is_null() && f["flat"].is_null()) && !copy
+            })
         })
     }
 
@@ -4838,6 +4958,98 @@ impl Viewer {
         match sheets.next() {
             None => Some(first.0.clone()),
             Some(second) => [first, second].into_iter().chain(sheets).find(|(_, b)| self.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
+        }
+    }
+
+    /// The feature a mirror goes from: the only part, else the part clicked last.
+    fn mirror_body(&self) -> Option<String> {
+        let m = self.model.as_ref()?;
+        let mut parts = m.bodies.iter().zip(&m.begun).filter(|(_, b)| !is_turned_copy(&m.inspect, b));
+        let first = parts.next()?;
+        match parts.next() {
+            None => Some(first.0.clone()),
+            Some(second) => [first, second].into_iter().chain(parts).find(|(_, b)| self.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
+        }
+    }
+
+    /// Opens the form of a mirror of `body` across `plane`, and stops picking.
+    fn open_mirror(&mut self, body: String, plane: Json, plane_label: String) {
+        self.close_revolve();
+        self.flange = None;
+        self.flange_edges.clear();
+        self.picking = None;
+        self.under = None;
+        self.mirror = Some(MirrorForm {
+            name: self.feature_name("mirror"),
+            body,
+            plane,
+            plane_label,
+            turn: false,
+            axis: datum_ops::TurnAxis::Y,
+            editing: false,
+            sent: None,
+        });
+    }
+
+    /// Drops the mirror form, and the preview it made.
+    fn close_mirror(&mut self) {
+        if let Some(m) = self.mirror.take()
+            && m.sent.is_some()
+        {
+            self.send(Request::Preview(None));
+        }
+    }
+
+    /// The mirror form: the part, the plane, reflected or turned about which axis; the command
+    /// previewed at every change, Enter or OK makes it once the preview of what it says now is not
+    /// refused, Esc or Cancel drops it.
+    fn mirror_window(&mut self, ctx: &egui::Context) {
+        let note = self.uses_note();
+        let Some(f) = &mut self.mirror else { return };
+        let (command, params) = f.params();
+        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let ok = preview.is_some_and(Result::is_ok);
+        let (mut add, mut cancel) = (false, false);
+        egui::Window::new(self.i18n.label(Act::MirrorPart))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
+            .show(ctx, |ui| {
+                uses_note(ui, note.as_ref());
+                ui.label(format!("{}: {}", self.i18n.t("mirror-part", "Part"), f.body));
+                ui.label(format!("{}: {}", self.i18n.t("trim-plane", "Plane"), f.plane_label));
+                ui.checkbox(&mut f.turn, self.i18n.t("mirror-turn", "Turn"))
+                    .on_hover_text(self.i18n.t("mirror-turn-about", "The same part half a turn round, not a new one reflected"));
+                ui.add_enabled_ui(f.turn, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("mirror-axis", "Axis"));
+                        ui.radio_value(&mut f.axis, datum_ops::TurnAxis::X, "X");
+                        ui.radio_value(&mut f.axis, datum_ops::TurnAxis::Y, "Y");
+                        ui.radio_value(&mut f.axis, datum_ops::TurnAxis::Normal, self.i18n.t("mirror-axis-normal", "Normal"));
+                    });
+                });
+                if let Some(Err(why)) = preview {
+                    ui.colored_label(ui.visuals().error_fg_color, why);
+                }
+                ui.horizontal(|ui| {
+                    add = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK"))).clicked();
+                    cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
+                });
+            });
+        let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+        if cancel || esc {
+            self.mirror = None;
+            self.send(Request::Preview(None));
+        } else if (add || enter) && ok {
+            self.mirror = None;
+            self.send(Request::Preview(None));
+            self.send(Request::Command(command, params));
+        } else {
+            let (command, params) = f.params();
+            if f.sent.as_ref() != Some(&params) {
+                f.sent = Some(params.clone());
+                self.send(Request::Preview(Some((command, params))));
+            }
         }
     }
 
@@ -5130,6 +5342,7 @@ impl Viewer {
                         ui.label(match act {
                             Act::Revolve => self.i18n.t("revolve-pick", "Open a sketch with a profile and an axis line, then R"),
                             Act::Trim => self.i18n.t("trim-pick", "Click the sheet first"),
+                            Act::MirrorPart => self.i18n.t("mirror-pick", "Click the part first"),
                             _ => self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E"),
                         })
                     });
@@ -6420,6 +6633,7 @@ impl Viewer {
                         .iter()
                         .any(|b| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"))
             }),
+            Act::MirrorPart => self.model.as_ref().is_some_and(|m| m.begun.iter().any(|b| !is_turned_copy(&m.inspect, b))),
             Act::Branch => self.model.as_ref().is_some_and(|m| (0..m.bodies.len()).filter(|&k| rolled_part(m, k)).count() >= 2),
             Act::FlatPane => self.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::Rename => self.tree.selected.is_some(),
@@ -6447,6 +6661,7 @@ impl Viewer {
             Act::LookAt => self.picking == Some(Purpose::Look),
             Act::Flange => self.picking == Some(Purpose::Flange),
             Act::Trim => self.picking == Some(Purpose::Trim) || self.trim.is_some(),
+            Act::MirrorPart => self.picking == Some(Purpose::Mirror) || self.mirror.is_some(),
             Act::Branch => self.picking == Some(Purpose::Branch),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             Act::Construction => draft.is_some_and(|d| d.construction),
@@ -6530,6 +6745,15 @@ impl Viewer {
                 } else {
                     let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
                     self.contour_hint = Some((at, std::time::Instant::now(), Act::Trim));
+                }
+            }
+            Act::MirrorPart => {
+                self.leave();
+                if self.mirror_body().is_some() {
+                    self.pick(Purpose::Mirror);
+                } else {
+                    let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                    self.contour_hint = Some((at, std::time::Instant::now(), Act::MirrorPart));
                 }
             }
             Act::Branch => {
@@ -6751,6 +6975,7 @@ impl Viewer {
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
             self.item(ui, Act::Trim, true);
+            self.item(ui, Act::MirrorPart, true);
             self.item(ui, Act::Branch, true);
             ui.separator();
             for act in
@@ -7085,6 +7310,7 @@ impl Viewer {
         self.flange_window(ui.ctx());
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
+        self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
         self.settings_said(ui.ctx());
@@ -7216,6 +7442,7 @@ mod tests {
             flange: None,
             revolve: None,
             trim: None,
+            mirror: None,
             branch_main: None,
             extrusion: None,
             contour_hint: None,
@@ -9514,6 +9741,58 @@ mod tests {
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("sheet", p) if p == flipped)));
     }
 
+    /// The mirror's form: reflected first; Turn asks for the same part about Y, the axis changes it,
+    /// Enter on a fresh preview makes it.
+    #[test]
+    fn the_mirror_form_turns_about_the_axis_chosen() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.open_mirror("plate".into(), json!({"base": "xz"}), "XZ".into());
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(|ui, v: &mut Viewer| v.mirror_window(ui.ctx()), v);
+        h.run();
+        let previews = |inbox: &std::sync::mpsc::Receiver<Request>| -> Vec<Json> {
+            inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect()
+        };
+        let first = previews(&inbox).pop().expect("a preview of the reflection");
+        assert_eq!(first, json!({"name": "mirror1", "op": "mirror", "inputs": ["plate"], "base": "xz"}));
+        h.get_by_label("Turn").click();
+        h.run();
+        let turned = previews(&inbox).pop().expect("a preview of the turn");
+        assert_eq!(turned["turn"], "y");
+        h.get_by_label("Normal").click();
+        h.run();
+        let normal = previews(&inbox).pop().expect("a preview about the normal");
+        assert_eq!(normal["turn"], "normal");
+        h.state_mut().model.as_mut().unwrap().preview = Some((normal.clone(), Ok(json!({}))));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("add", p) if p == normal)));
+        assert!(h.state().mirror.is_none());
+    }
+
+    /// A plane given by a work plane or by a face of another part goes into the inputs.
+    #[test]
+    fn a_mirrors_plane_is_given_as_the_model_takes_it() {
+        let form = |plane: Json| MirrorForm {
+            name: "m".into(),
+            body: "a".into(),
+            plane,
+            plane_label: String::new(),
+            turn: true,
+            axis: datum_ops::TurnAxis::X,
+            editing: false,
+            sent: None,
+        };
+        assert_eq!(form(json!({"inputs": ["wall"]})).params().1, json!({"name": "m", "op": "mirror", "inputs": ["a", "wall"], "turn": "x"}));
+        assert_eq!(
+            form(json!({"inputs": ["b"], "face": "f1"})).params().1,
+            json!({"name": "m", "op": "mirror", "inputs": ["a", "b"], "face": "f1", "turn": "x"})
+        );
+        let mut edit = form(Json::Null);
+        (edit.editing, edit.turn) = (true, false);
+        assert_eq!(edit.params(), ("edit", json!({"name": "m", "turn": null})));
+    }
+
     /// The flange feature's fields as the model takes them.
     #[test]
     fn flange_params_are_the_features_fields() {
@@ -9797,6 +10076,75 @@ mod tests {
         // The whole skeleton in the view: its middle in the middle, all of it within the height.
         assert_eq!(sk.camera.center, [200.0, 150.0]);
         assert!(sk.camera.half_height >= 200.0, "{}", sk.camera.half_height);
+    }
+
+    /// Surroundings are listed after the parts, hidden as parts are and kept in sets (D247).
+    #[test]
+    fn a_turned_copy_hides_and_goes_into_a_set() {
+        let mut s = Session::default();
+        let square = json!({"points": {"a": [10, 10], "b": [50, 10], "c": [50, 40], "d": [10, 40]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+        s.execute("add", &json!({"name": "o", "op": "sketch", "sketch": square})).unwrap();
+        s.execute("extrude", &json!({"name": "plate", "sketch": "o", "mode": "new", "z1": 5})).unwrap();
+        s.execute("add", &json!({"name": "copy", "op": "mirror", "inputs": ["plate"], "base": "xz", "turn": "y"})).unwrap();
+        let p = picture(&s, None, None, &mut MeshCache::default());
+        assert_eq!(p.inspect["environment"], json!([{"part": "copy", "name": "copy", "of": "plate", "visible": true}]));
+        assert_eq!(p.bodies, ["plate", "copy"]);
+        s.execute("save_set", &json!({"name": "all"})).unwrap();
+        s.execute("show", &json!({"part": "copy", "visible": false})).unwrap();
+        let p = picture(&s, None, None, &mut MeshCache::default());
+        assert_eq!(p.bodies, ["plate"]);
+        assert!(p.scene.copies.is_empty());
+        s.execute("save_set", &json!({"name": "alone"})).unwrap();
+        s.execute("apply_set", &json!({"name": "all"})).unwrap();
+        assert_eq!(picture(&s, None, None, &mut MeshCache::default()).bodies, ["plate", "copy"]);
+        s.execute("apply_set", &json!({"name": "alone"})).unwrap();
+        let p = picture(&s, None, None, &mut MeshCache::default());
+        assert_eq!((p.bodies.len(), p.inspect["set"].as_str()), (1, Some("alone")));
+    }
+
+    /// A turned copy is drawn in its own colour, a reflected part as any part (D247).
+    #[test]
+    fn a_turned_copy_has_its_own_colour() {
+        let mut s = Session::default();
+        let square = json!({"points": {"a": [10, 10], "b": [50, 10], "c": [50, 40], "d": [10, 40]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+        s.execute("add", &json!({"name": "o", "op": "sketch", "sketch": square})).unwrap();
+        s.execute("extrude", &json!({"name": "plate", "sketch": "o", "mode": "new", "z1": 5})).unwrap();
+        s.execute("add", &json!({"name": "other", "op": "mirror", "inputs": ["plate"], "base": "yz"})).unwrap();
+        s.execute("add", &json!({"name": "copy", "op": "mirror", "inputs": ["plate"], "base": "xz", "turn": "y"})).unwrap();
+        let colours = |p: &Picture| -> std::collections::BTreeSet<[u8; 4]> {
+            p.geometry.triangles.vertices.chunks(crate::scene::TRIANGLE_VERTEX as usize).map(|v| [v[24], v[25], v[26], v[27]]).collect()
+        };
+        let p = picture(&s, None, None, &mut MeshCache::default());
+        assert_eq!(p.scene.copies.iter().map(|&k| p.bodies[k].as_str()).collect::<Vec<_>>(), ["copy"]);
+        assert_eq!(colours(&p).len(), 2);
+        s.execute("edit", &json!({"name": "copy", "turn": null})).unwrap();
+        let p = picture(&s, None, None, &mut MeshCache::default());
+        assert!(p.scene.copies.is_empty());
+        assert_eq!(colours(&p).len(), 1, "a reflected part is a part");
+    }
+
+    /// A sketch after a turned copy projects from the copy and from the part it copies (D247).
+    #[test]
+    fn a_sketch_projects_from_a_part_and_from_its_copy() {
+        let mut s = Session::default();
+        let square = json!({"points": {"a": [10, 10], "b": [50, 10], "c": [50, 40], "d": [10, 40]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}}});
+        s.execute("add", &json!({"name": "o", "op": "sketch", "sketch": square})).unwrap();
+        s.execute("extrude", &json!({"name": "plate", "sketch": "o", "mode": "new", "z1": 5})).unwrap();
+        s.execute("add", &json!({"name": "copy", "op": "mirror", "inputs": ["plate"], "base": "xz", "turn": "y"})).unwrap();
+        s.execute("add", &json!({"name": "s2", "op": "sketch", "sketch": {"points": {}}})).unwrap();
+        let p = picture(&s, Some("s2"), None, &mut MeshCache::default());
+        let (_, context) = p.editing.clone().unwrap();
+        let names: Vec<&str> = context.sources.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"plate") && names.contains(&"copy"), "{names:?}");
+        // Hidden, a copy offers nothing.
+        s.execute("show", &json!({"part": "copy", "visible": false})).unwrap();
+        let p = picture(&s, Some("s2"), None, &mut MeshCache::default());
+        let (_, context) = p.editing.clone().unwrap();
+        let names: Vec<&str> = context.sources.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"plate") && !names.contains(&"copy"), "{names:?}");
     }
 
     /// In the base, a part as the base has it is a body of the scene, not around it: a ray from
