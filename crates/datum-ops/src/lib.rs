@@ -8,6 +8,7 @@ mod branch;
 mod copies;
 mod cut;
 mod flange;
+mod mirror;
 mod pattern;
 mod revolve;
 mod sheet;
@@ -30,6 +31,7 @@ pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
 };
+pub use mirror::TurnAxis;
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
 use schemars::JsonSchema;
@@ -45,6 +47,19 @@ pub use unfold::{Flat, FlatPiece, LineCut, POLYLINE_DEVIATION, sheet_sides, unfo
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Op {
+    /// The first input, a body, across a plane (D247): the origin plane `base`, the work plane
+    /// that is the second input, or plane face `face` of the second input (none: of the first).
+    /// `turn`: not reflected but the same part half a turn about that axis of the plane, through
+    /// its origin. Either way the body mirrored stays. Reflected, it is a new part; turned, a live
+    /// copy to see and to take geometry from, which only sketches and work planes may take.
+    Mirror {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<OriginPlane>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        face: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn: Option<TurnAxis>,
+    },
     /// A polygon in the XY plane extruded from `z0` to `z1`. No inputs.
     Prism { polygon: Vec<Vec2>, z0: Num, z1: Num },
     /// Rotation by `angle_deg` about `axis` through the origin, then translation. One input.
@@ -519,6 +534,7 @@ fn z_axis() -> Vec3 {
 impl Op {
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Mirror { .. } => "mirror",
             Self::Prism { .. } => "prism",
             Self::Transform { .. } => "transform",
             Self::Boolean { .. } => "boolean",
@@ -539,6 +555,16 @@ impl Op {
         }
     }
 
+    /// Whether it makes a turned copy of a part (D247), which only sketches and work planes take.
+    pub fn is_turned_copy(&self) -> bool {
+        matches!(self, Self::Mirror { turn: Some(_), .. })
+    }
+
+    /// Whether it may take a turned copy as an input.
+    pub fn takes_turned_copy(&self) -> bool {
+        matches!(self, Self::Sketch { .. } | Self::Plane { .. })
+    }
+
     /// Allowed numbers of inputs.
     pub fn arity(&self) -> RangeInclusive<usize> {
         match self {
@@ -546,6 +572,7 @@ impl Op {
             Self::Sketch { .. } => 0..=usize::MAX,
             Self::Plane { .. } => 0..=3,
             Self::Extrude { .. } => 1..=3,
+            Self::Mirror { .. } => 1..=2,
             Self::Transform { .. }
             | Self::PatternGrid { .. }
             | Self::Unfold { .. }
@@ -565,6 +592,7 @@ impl Op {
         let r = |n: &Num, field: &str| n.resolve(lookup).map(Num::Value).map_err(|e| format!("`{field}`: {e}"));
         let r3 = |v: &[Num; 3], field: &str| -> Result<[Num; 3], String> { Ok([r(&v[0], field)?, r(&v[1], field)?, r(&v[2], field)?]) };
         Ok(Cow::Owned(match self {
+            Self::Mirror { .. } => self.clone(),
             Self::Prism { polygon, z0, z1 } => Self::Prism { polygon: polygon.clone(), z0: r(z0, "z0")?, z1: r(z1, "z1")? },
             Self::Transform { translate, axis, angle_deg } => {
                 Self::Transform { translate: r3(translate, "translate")?, axis: *axis, angle_deg: r(angle_deg, "angle_deg")? }
@@ -709,7 +737,8 @@ impl Op {
                 h.update(face.as_bytes());
             }
             // `Debug` spells every field exactly, as for a sketch.
-            Self::Sheet { .. }
+            Self::Mirror { .. }
+            | Self::Sheet { .. }
             | Self::Plate { .. }
             | Self::Flange { .. }
             | Self::Revolve { .. }
@@ -773,6 +802,7 @@ impl Op {
             | Self::Plane { .. }
             | Self::Revolve { .. }
             | Self::Rolled { .. }
+            | Self::Mirror { .. }
             | Self::Trim { .. } => Vec::new(),
             // The sheet; its work planes are read by name.
             Self::Flange { .. } => {
@@ -796,6 +826,23 @@ impl Op {
                     return Err(BrepError::Degenerate("rotation about a zero axis".into()));
                 };
                 inputs[0].transformed(&rot.then(Rigid::translation(vec3(translate)?)))
+            }
+            Self::Mirror { base, face, turn } => {
+                let body = values[0].body().ok_or_else(|| BrepError::Sketch("a mirror takes a body".into()))?;
+                let plane = match (base, face, values.get(1)) {
+                    (Some(b), None, None) => b.plane(),
+                    (None, None, Some(v)) => *v
+                        .plane()
+                        .ok_or_else(|| BrepError::Sketch("a mirror takes a work plane as its second input, or a body with `face`".into()))?,
+                    (None, Some(f), holder) => face_plane(
+                        holder
+                            .map_or(Some(body), |v| v.body())
+                            .ok_or_else(|| BrepError::Sketch("a mirror across a face takes the body of the face".into()))?,
+                        f,
+                    )?,
+                    _ => return Err(BrepError::Sketch("a mirror goes across one thing: an origin plane (`base`), a work plane, or a face".into())),
+                };
+                mirror::mirror(body, &plane, *turn)?
             }
             Self::Boolean { kind, through } => boolean(feature, *kind, *through, &inputs)?,
             Self::PatternGrid { count: n, step } => {

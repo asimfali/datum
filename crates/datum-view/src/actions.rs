@@ -46,6 +46,7 @@ pub enum Act {
     WorkPlane,
     Flange,
     Trim,
+    MirrorPart,
     Branch,
     SideBar,
     SideBarRight,
@@ -106,7 +107,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 55] = [
+pub const ACTIONS: [Action; 56] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -279,6 +280,14 @@ pub const ACTIONS: [Action; 55] = [
         "Trim by plane",
         "Rolled sheet metal cut by a work plane: click the plane; the part on the side of its arrow goes, Other side keeps it instead",
         None,
+        Model,
+    ),
+    action(
+        Act::MirrorPart,
+        "part.mirror",
+        "Mirror part",
+        "Click the part, M, then a plane or a plane face: a new part reflected across it; tick Turn for the same part half a turn about an axis of the plane, to see it and take geometry from it",
+        plain(Key::M),
         Model,
     ),
     action(

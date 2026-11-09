@@ -172,6 +172,18 @@ impl Rigid {
         Self { rot, shift: Vec3::ZERO }
     }
 
+    /// Half a turn about `axis` (any non-zero length) through the origin. No sines: about a
+    /// coordinate axis, coordinates only change sign.
+    pub fn half_turn(axis: Vec3) -> Self {
+        let k = axis * (2.0 / axis.dot(axis));
+        let rot = [
+            Vec3::new(k.x * axis.x - 1.0, k.x * axis.y, k.x * axis.z),
+            Vec3::new(k.y * axis.x, k.y * axis.y - 1.0, k.y * axis.z),
+            Vec3::new(k.z * axis.x, k.z * axis.y, k.z * axis.z - 1.0),
+        ];
+        Self { rot, shift: Vec3::ZERO }
+    }
+
     /// The motion taking coordinates in the frame with axes `x, y, z` (orthonormal, right-handed)
     /// at `origin` to world coordinates.
     pub fn frame(origin: Vec3, x: Vec3, y: Vec3, z: Vec3) -> Self {

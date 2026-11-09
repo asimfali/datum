@@ -669,6 +669,22 @@ const COMMANDS: &[Command] = &[
         params: name_param,
         run: |s, p| {
             let ix = s.find(text(p, "name")?)?;
+            // A mirror of the part goes back with its end, if the part goes on before it.
+            let node = &s.graph.nodes()[ix as usize];
+            if let Some(&back) = node.inputs.first().filter(|&&j| crate::levels::makes_body(&s.graph.nodes()[j as usize].op))
+                && !matches!(node.op, Op::Mirror { .. })
+            {
+                let mirrors: Vec<NodeIx> = (0..s.graph.nodes().len() as NodeIx)
+                    .filter(|&m| {
+                        matches!(s.graph.nodes()[m as usize].op, Op::Mirror { .. }) && s.graph.nodes()[m as usize].inputs.first() == Some(&ix)
+                    })
+                    .collect();
+                for m in mirrors {
+                    let mut inputs = s.graph.nodes()[m as usize].inputs.clone();
+                    inputs[0] = back;
+                    s.graph.set_inputs(m, &inputs).map_err(|e| e.to_string())?;
+                }
+            }
             if let Some(user) = s.graph.nodes().iter().find(|n| n.inputs.contains(&ix)) {
                 return Err(format!("`{}` uses it: remove or change that first", user.name));
             }
@@ -686,7 +702,8 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "levels",
         description: "The model's parts and their variants (D152, D169). The root is a multi-body part, the product's base: its \
-                      bodies are the parts, each keyed by the feature that began it (`parts`: key, name, variant chosen, visible). \
+                      bodies are the parts, each keyed by the feature that began it (`parts`: key, name, variant chosen, visible); \
+                      `environment`: its turned copies of parts (key, name, the part it copies, visible). \
                       Variants are levels below the root, each of a part: with its parent, depth, part, what it sets otherwise; \
                       `active` the one worked in. A level holds only what differs from its parent; a change to the parent reaches \
                       every level below. `sets`: the product's variants by name, `set` the one the product is as now.",
@@ -779,7 +796,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "show",
-        description: "Part `part` (the feature that began its body) shown in the product (`visible`: true) or hidden: the view of the whole model and around a part \
+        description: "Part `part` (the feature that began its body), or a turned copy of a part, shown in the product (`visible`: true) or hidden: the view of the whole model and around a part \
                       leaves hidden parts out (the part worked in is always shown). Saved with the model.",
         params: || json!({"type": "object", "properties": {"part": {"type": "string"}, "visible": {"type": "boolean"}}, "required": ["part", "visible"]}),
         run: |s, p| {
@@ -1178,6 +1195,23 @@ impl Session {
         let (doc, active, graph) = (self.doc.clone(), self.active.clone(), self.graph.clone());
         let results_before = self.last.results.clone();
         let mut result = (c.run)(self, p);
+        // A part grown: its mirrors go on its new end (D247). In the root: a variant shows them
+        // as the root has them.
+        if result.is_ok() && self.active.is_none() && self.graph != graph {
+            match crate::levels::mirrors_on_ends(&self.graph) {
+                Ok(None) => {}
+                Ok(Some(settled)) => {
+                    self.graph = settled;
+                    let summary = self.rebuild();
+                    if let Ok(Value::Object(reply)) = &mut result
+                        && let Value::Object(summary) = summary
+                    {
+                        reply.extend(summary);
+                    }
+                }
+                Err(e) => result = Err(e),
+            }
+        }
         // The model whole follows the level's graph: what it differs in from its parent kept.
         if result.is_ok()
             && self.graph != graph
@@ -1242,7 +1276,7 @@ impl Session {
     /// The K-factor the sheet rule of the part of feature `ix` gives, if it does (D197): the
     /// rule's is the only one then, as for thickness (D193).
     fn rule_k(&self, ix: NodeIx) -> Option<f64> {
-        let begun = crate::levels::body_chain(&self.graph, ix).last()?;
+        let begun = *crate::levels::body_history(&self.graph, ix).last()?;
         let rule = self.doc.rule(&self.graph.nodes()[begun as usize].name, self.active.as_deref())?;
         crate::library::load("rule", self.project().as_deref()).get(&rule)?.element["k_factor"].as_f64()
     }
@@ -1276,6 +1310,15 @@ impl Session {
     pub fn flat_of(&mut self, name: &str) -> Result<Arc<Flat>, String> {
         let ix = self.find(name)?;
         let value = self.last.results[ix as usize].as_ref().map_err(|e| format!("`{name}` failed: {e}"))?.clone();
+        // A mirror reflects the body; its cuts on the blank are in the sketches of what it mirrors.
+        for &m in crate::levels::body_history(&self.graph, ix).iter().filter(|&&n| matches!(self.graph.nodes()[n as usize].op, Op::Mirror { .. })) {
+            let source = self.graph.nodes()[m as usize].inputs[0];
+            let on_blank = crate::levels::body_chain(&self.graph, source)
+                .any(|n| matches!(self.graph.nodes()[n as usize].op, Op::Extrude { blank_only: true, .. }));
+            if on_blank || !self.line_cuts_of(source)?.is_empty() {
+                return Err(format!("`{name}` mirrors sheet metal with cuts on its blank only or along lines: its blank cannot be made yet"));
+            }
+        }
         let closed = self.line_cuts_of(ix)?;
         if let Some(f) = value.flat() {
             return Ok(Arc::new(f.with_lines_closed(&closed)));
@@ -1457,8 +1500,17 @@ impl Session {
                                 "rule": self.doc.rule(&p, None)})
             })
             .collect();
+        let environment: Vec<Value> = self
+            .doc
+            .environment()
+            .into_iter()
+            .map(|(copy, of)| {
+                let title = self.graph.find(&copy).and_then(|i| self.graph.nodes()[i as usize].title.clone());
+                json!({"part": copy, "name": title.unwrap_or_else(|| copy.clone()), "of": self.doc.part_name(&of), "visible": !self.doc.hidden.contains(&copy)})
+            })
+            .collect();
         let sets: Vec<&String> = self.doc.sets.keys().collect();
-        json!({"active": self.active, "parts": parts, "levels": list, "sets": sets, "set": self.doc.current_set()})
+        json!({"active": self.active, "parts": parts, "environment": environment, "levels": list, "sets": sets, "set": self.doc.current_set()})
     }
 
     /// Bodies whose shape (pieces, through holes; [`Body::shape`]) an edit changed, by feature:
@@ -1469,6 +1521,8 @@ impl Session {
             .nodes()
             .iter()
             .zip(&self.last.results)
+            // A mirror changes with what it mirrors, by design (D247).
+            .filter(|(n, _)| !matches!(n.op, Op::Mirror { .. }))
             .filter_map(|(n, now)| {
                 let old = graph_before.find(&n.name).and_then(|i| before.get(i as usize))?.as_ref().ok()?;
                 let now = now.as_ref().ok()?;
@@ -1827,7 +1881,7 @@ impl Session {
             })
             .collect();
         json!({"file": self.path.as_ref().map(|p| p.display().to_string()), "modified": self.doc != self.saved, "parameters": parameters,
-               "level": self.active, "levels": levels["levels"], "parts": levels["parts"], "sets": levels["sets"], "set": levels["set"],
+               "level": self.active, "levels": levels["levels"], "parts": levels["parts"], "environment": levels["environment"], "sets": levels["sets"], "set": levels["set"],
                "flats": self.doc.flats,
                "features": features, "step_inexact": crate::inexact_features(&self.graph, &self.last)})
     }

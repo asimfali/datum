@@ -55,6 +55,12 @@
     "flange": "2022c6e4883baabd7d2f109c8de5a0fb50e7e32a3c84794a151f5abaed5034f6",
     "outline": "1d78bc1b6571e71f659511bb7f99d3346ee88893e31b58093f5a39d9c9d3db10"
   },
+  "mirror_part.json": {
+    "other": "56f5d64946fb4ca3642e94b694ba02a2cc1cc659f7b73ad7aa41404ea22634ef",
+    "outline": "51ee6be2257cb5f4373177b804c2752817560ad681a8ed6333a2007d7aa396a8",
+    "plate": "b15e218a1bda1bbfb229850ff45518b7f43088213dd10d607ed57d39305afd5b",
+    "turned": "b43e6ce68837588802b58ad335ac0a20f25f84dc3c25b51c35b432f47386125c"
+  },
   "parametric.json": {
     "drilled": "9f65ab72f40fa33f9aab1e302a91dbcc358852191c59be648828d91f5950cd8e",
     "first": "110706260cce18bd6a5ddec5dc369caacd4435915ff8d5c924bacd8eb62b4fb5",

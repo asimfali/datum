@@ -64,6 +64,11 @@ pub enum GraphError {
         expected: RangeInclusive<usize>,
         got: usize,
     },
+    /// A feature taking a turned copy of a part (D247) though only sketches and planes may.
+    TurnedCopy {
+        node: String,
+        copy: String,
+    },
 }
 
 impl fmt::Display for GraphError {
@@ -72,6 +77,9 @@ impl fmt::Display for GraphError {
             Self::DuplicateName(n) => write!(f, "a feature named `{n}` already exists"),
             Self::Parameter(m) => write!(f, "{m}"),
             Self::UnknownInput { node, input } => write!(f, "`{node}`: input #{input} is not an earlier feature"),
+            Self::TurnedCopy { node, copy } => {
+                write!(f, "`{node}`: `{copy}` is a turned copy of a part: only sketches and work planes take from it")
+            }
             Self::Arity { node, expected, got } => write!(f, "`{node}` takes {} input(s), got {got}", datum_ops::describe_arity(expected.clone())),
         }
     }
@@ -96,6 +104,7 @@ impl Graph {
             return Err(GraphError::UnknownInput { node: name.into(), input });
         }
         check_arity(name, &op, inputs.len())?;
+        self.check_copies(name, &op, inputs)?;
         let ix = self.nodes.len() as NodeIx;
         self.nodes.push(Node {
             name: name.into(),
@@ -142,15 +151,28 @@ impl Graph {
     }
 
     /// The features that use each node up, in node order (see [`Evaluation::final_values`]: an
-    /// unfold, a sketch or a work plane uses nothing up).
-    fn users(&self) -> Vec<Vec<NodeIx>> {
+    /// unfold, a sketch, a work plane or a mirror uses nothing up).
+    pub fn users(&self) -> Vec<Vec<NodeIx>> {
         let mut users = vec![Vec::new(); self.nodes.len()];
-        for (k, n) in self.nodes.iter().enumerate().filter(|(_, n)| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. })) {
+        for (k, n) in self
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. } | Op::Mirror { .. }))
+        {
             for &i in &n.inputs {
                 users[i as usize].push(k as NodeIx);
             }
         }
         users
+    }
+
+    /// A turned copy among `inputs` of an operation that may not take one: an error.
+    fn check_copies(&self, name: &str, op: &Op, inputs: &[NodeIx]) -> Result<(), GraphError> {
+        match inputs.iter().find(|&&i| !op.takes_turned_copy() && self.nodes[i as usize].op.is_turned_copy()) {
+            Some(&i) => Err(GraphError::TurnedCopy { node: name.into(), copy: self.nodes[i as usize].name.clone() }),
+            None => Ok(()),
+        }
     }
 
     /// Replaces a node's inputs: earlier nodes, as many as its operation takes (a sketch's
@@ -161,14 +183,22 @@ impl Graph {
             return Err(GraphError::UnknownInput { node: node.name.clone(), input });
         }
         check_arity(&node.name, &node.op, inputs.len())?;
+        self.check_copies(&node.name, &node.op, inputs)?;
         self.nodes[ix as usize].inputs = inputs.to_vec();
         Ok(())
     }
 
     /// Replaces a node's operation (a parameter edit) keeping its inputs.
     pub fn set_op(&mut self, ix: NodeIx, op: Op) -> Result<(), GraphError> {
-        let node = &mut self.nodes[ix as usize];
+        let node = &self.nodes[ix as usize];
         check_arity(&node.name, &op, node.inputs.len())?;
+        self.check_copies(&node.name, &op, &node.inputs)?;
+        if op.is_turned_copy()
+            && let Some(user) = self.nodes.iter().find(|n| n.inputs.contains(&ix) && !n.op.takes_turned_copy())
+        {
+            return Err(GraphError::TurnedCopy { node: user.name.clone(), copy: node.name.clone() });
+        }
+        let node = &mut self.nodes[ix as usize];
         node.op = op;
         Ok(())
     }
