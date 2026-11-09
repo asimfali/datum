@@ -114,6 +114,8 @@ pub struct Projectable {
     pub entry: (&'static str, String),
     pub shape: Flat,
     pub height: f64,
+    /// Where it is in the model, for the view turned (D248): polylines, a point alone in one.
+    pub world: Vec<Vec<datum_math::Vec3>>,
 }
 
 /// A shape in sketch coordinates. An arc runs counterclockwise from angle `start` through
@@ -300,7 +302,7 @@ impl Default for Draft {
 pub(crate) const SNAP_POINT: f64 = 10.0;
 /// Pixels within which the cursor is in line with a point of the sketch (tracking).
 const TRACK: f64 = 6.0;
-const SNAP_CURVE: f64 = 8.0;
+pub(crate) const SNAP_CURVE: f64 = 8.0;
 /// Degrees within which a line is taken as horizontal, vertical, parallel or perpendicular.
 const LEAN_DEG: f64 = 3.0;
 
@@ -312,21 +314,32 @@ const GONE: egui::Color32 = egui::Color32::from_rgb(220, 40, 40);
 /// a body's vertices and edges, another sketch's points and curves; an arc or circle only if
 /// it lies parallel to the plane (else it would fall as an ellipse), a line seen end on as its
 /// vertex. Of things that fall on one another (a box's top and bottom edges), the one nearest
-/// the eye, above the plane.
-pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed) -> Vec<Projectable> {
+/// the eye, above the plane; with `every`, all of them, for the view turned to see them apart.
+pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed, every: bool) -> Vec<Projectable> {
     let [o, x, y, z] = placed.frame;
     let flat = |p: datum_math::Vec3| [(p - o).dot(x), (p - o).dot(y)];
     let height = |p: datum_math::Vec3| (p - o).dot(z);
     let angle = |c: [f64; 2], p: [f64; 2]| libm::atan2(p[1] - c[1], p[0] - c[0]);
-    // An arc from `a` to `b` counterclockwise about `axis`, as it falls.
-    // A circle's arc about `axis` from `a` to `b` (none: whole) as it falls: an arc, or at a
-    // slant an ellipse's, as points along it (D218); none seen edge on.
-    let arc = |c: datum_math::Vec3, r: f64, a: datum_math::Vec3, b: Option<datum_math::Vec3>, axis: datum_math::Vec3| {
+    // The points along a circle's arc about `axis` from `a` to `b` (none: whole).
+    let round = |c: datum_math::Vec3, r: f64, a: datum_math::Vec3, b: Option<datum_math::Vec3>, axis: datum_math::Vec3| {
         let tau = std::f64::consts::TAU;
         let n = axis * (1.0 / axis.dot(axis).sqrt());
         let (u, w) = ((a - c) * (1.0 / r), n.cross((a - c) * (1.0 / r)));
         let sweep = b.map_or(tau, |b| libm::atan2((b - c).dot(w), (b - c).dot(u)).rem_euclid(tau));
         let sweep = if sweep == 0.0 { tau } else { sweep };
+        let k = ((sweep / tau) * 64.0).ceil().max(2.0) as usize;
+        (0..=k)
+            .map(|i| {
+                let (sn, cs) = libm::sincos(sweep * i as f64 / k as f64);
+                c + (u * cs + w * sn) * r
+            })
+            .collect::<Vec<_>>()
+    };
+    // A circle's arc about `axis` from `a` to `b` (none: whole) as it falls: an arc, or at a
+    // slant an ellipse's, as points along it (D218); none seen edge on.
+    let arc = |c: datum_math::Vec3, r: f64, a: datum_math::Vec3, b: Option<datum_math::Vec3>, axis: datum_math::Vec3| {
+        let tau = std::f64::consts::TAU;
+        let n = axis * (1.0 / axis.dot(axis).sqrt());
         if datum_ops::parallel(axis, z) {
             let (fc, (fa, fb)) = (flat(c), if axis.dot(z) > 0.0 { (flat(a), b.map_or(flat(a), flat)) } else { (b.map_or(flat(a), flat), flat(a)) });
             let turn = (angle(fc, fb) - angle(fc, fa)).rem_euclid(tau);
@@ -335,42 +348,36 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
         if n.dot(z) == 0.0 {
             return None;
         }
-        let k = ((sweep / tau) * 64.0).ceil().max(2.0) as usize;
-        Some(Flat::Polyline(
-            (0..=k)
-                .map(|i| {
-                    let (sn, cs) = libm::sincos(sweep * i as f64 / k as f64);
-                    flat(c + (u * cs + w * sn) * r)
-                })
-                .collect(),
-        ))
+        Some(Flat::Polyline(round(c, r, a, b, axis).into_iter().map(flat).collect()))
     };
     let mut out: Vec<Projectable> = Vec::new();
     for (from, v) in sources {
-        let mut put = |key: &'static str, name: String, shape: Flat, at: datum_math::Vec3| {
-            out.push(Projectable { from: from.clone(), entry: (key, name), shape, height: height(at) });
+        let mut put = |key: &'static str, name: String, shape: Flat, at: datum_math::Vec3, world: Vec<Vec<datum_math::Vec3>>| {
+            out.push(Projectable { from: from.clone(), entry: (key, name), shape, height: height(at), world });
         };
         if let Some(body) = v.body() {
             for vx in body.vertices() {
-                put("id", format!("{:?}", vx.id), Flat::Point(flat(vx.point)), vx.point);
+                put("id", format!("{:?}", vx.id), Flat::Point(flat(vx.point)), vx.point, vec![vec![vx.point]]);
             }
             // Each edge as it falls; none if it cannot be projected.
-            let edges: Vec<Option<Flat>> = body
+            let edges: Vec<Option<(Flat, Vec<datum_math::Vec3>)>> = body
                 .edges()
                 .iter()
                 .map(|edge| {
                     let (a, b) = (body.half_edges()[edge.half as usize].origin, body.half_edges()[body.next(edge.half) as usize].origin);
                     let (pa, pb) = (body.point(a), body.point(b));
                     match body.edge_curve(edge) {
-                        None => Some(Flat::Line(flat(pa), flat(pb))),
-                        Some(Curve::Arc(c)) => arc(c.center, c.radius, pa, Some(pb), c.axis),
+                        None => Some((Flat::Line(flat(pa), flat(pb)), vec![pa, pb])),
+                        Some(Curve::Arc(c)) => {
+                            Some((arc(c.center, c.radius, pa, Some(pb), c.axis)?, round(c.center, c.radius, pa, Some(pb), c.axis)))
+                        }
                         Some(Curve::Rolled { .. }) => None,
                     }
                 })
                 .collect();
-            for (e, shape) in body.edges().iter().zip(&edges) {
-                if let Some(shape) = shape.as_ref().filter(|s| !matches!(s, Flat::Line(a, b) if a == b)) {
-                    put("id", format!("{:?}", e.id), shape.clone(), body.point(body.half_edges()[e.half as usize].origin));
+            for (e, edge) in body.edges().iter().zip(&edges) {
+                if let Some((shape, world)) = edge.as_ref().filter(|(s, _)| !matches!(s, Flat::Line(a, b) if a == b)) {
+                    put("id", format!("{:?}", e.id), shape.clone(), body.point(body.half_edges()[e.half as usize].origin), vec![world.clone()]);
                 }
             }
             // A plane face not seen edge on, all its edges projectable: its loops, each edge's
@@ -380,25 +387,32 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
                 if plane.normal.dot(z) == 0.0 {
                     continue;
                 }
-                let loops: Option<Vec<Vec<[f64; 2]>>> = body
+                let loops: Option<Vec<_>> = body
                     .face_loops(f as Ix)
                     .map(|l| {
-                        let mut pts = Vec::new();
+                        let (mut pts, mut world) = (Vec::new(), Vec::new());
                         for h in body.loop_half_edges(l) {
                             let he = &body.half_edges()[h as usize];
-                            let mut along = edges[he.edge as usize].as_ref()?.curve_points();
+                            let (shape, curve) = edges[he.edge as usize].as_ref()?;
+                            let (mut along, mut curve) = (shape.curve_points(), curve.clone());
                             if body.edges()[he.edge as usize].half != h {
                                 along.reverse();
+                                curve.reverse();
                             }
                             along.pop();
+                            curve.pop();
                             pts.extend(along);
+                            world.extend(curve);
                         }
-                        Some(pts)
+                        // Closed, to draw.
+                        world.extend(world.first().copied());
+                        Some((pts, world))
                     })
                     .collect();
                 if let Some(loops) = loops {
                     let at = body.point(body.half_edges()[body.loop_half_edges(body.face_loops(f as Ix).start).start as usize].origin);
-                    put("face", format!("{:?}", face.id), Flat::Region(loops), at);
+                    let (flat_loops, world) = loops.into_iter().unzip();
+                    put("face", format!("{:?}", face.id), Flat::Region(flat_loops), at, world);
                 }
             }
         } else if let Some(s) = v.sketch().filter(|s| s.developed.is_none()) {
@@ -406,20 +420,20 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
             let at = |n: &str| s.solved.points.get(n).map(|q| so + sx * q.x + sy * q.y);
             for n in s.solved.points.keys().filter(|n| n.as_str() != datum_ops::ORIGIN) {
                 let p = at(n).unwrap_or(so);
-                put("element", n.clone(), Flat::Point(flat(p)), p);
+                put("element", n.clone(), Flat::Point(flat(p)), p, vec![vec![p]]);
             }
             for (n, l) in &s.lines {
                 if let (Some(a), Some(b)) = (at(&l.from), at(&l.to))
                     && flat(a) != flat(b)
                 {
-                    put("element", n.clone(), Flat::Line(flat(a), flat(b)), a);
+                    put("element", n.clone(), Flat::Line(flat(a), flat(b)), a, vec![vec![a, b]]);
                 }
             }
             for (n, a) in &s.arcs {
                 if let (Some(c), Some(p), Some(q)) = (at(&a.center), at(&a.from), at(&a.to)) {
                     let r = (p - c).dot(p - c).sqrt();
                     if let Some(shape) = arc(c, r, p, Some(q), sz) {
-                        put("element", n.clone(), shape, c);
+                        put("element", n.clone(), shape, c, vec![round(c, r, p, Some(q), sz)]);
                     }
                 }
             }
@@ -427,10 +441,14 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
                 if let (Some(centre), Some(d)) = (at(&c.center), c.diameter.value())
                     && let Some(shape) = arc(centre, 0.5 * d, centre + sx * (0.5 * d), None, sz)
                 {
-                    put("element", n.clone(), shape, centre);
+                    let start = centre + sx * (0.5 * d);
+                    put("element", n.clone(), shape, centre, vec![round(centre, 0.5 * d, start, None, sz)]);
                 }
             }
         }
+    }
+    if every {
+        return out;
     }
     // Of equal shapes the highest, then the first given: sorted by shape, height down, and kept
     // once. Bits compare exactly: what falls on one place falls there bit for bit or is another.
@@ -466,6 +484,14 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed)
 }
 
 impl Draft {
+    /// What to project the cursor is on.
+    pub fn chosen(&self) -> Option<&Projectable> {
+        match self.cursor.as_ref()?.snap {
+            Snap::Source(i) => self.projectable.get(i),
+            _ => None,
+        }
+    }
+
     /// Cancels what is half drawn; true if there was something.
     pub fn cancel(&mut self) -> bool {
         let busy = self.chain.is_some() || !self.clicks.is_empty() || !self.picks.is_empty() || !self.sockets.is_empty() || !self.measured.is_empty();
@@ -643,6 +669,9 @@ impl Draft {
         if self.tool == Tool::Project {
             let done = edit.projected();
             let left = || self.projectable.iter().enumerate().filter(|(_, c)| !done.contains(&(c.from.clone(), c.entry.1.clone())));
+            if let Some(t) = &edit.turned {
+                return t.spot(left(), dx, dy).map_or(free_spot, |i| Spot { at, snap: Snap::Source(i) });
+            }
             let points = left().filter_map(|(i, c)| match c.shape {
                 Flat::Point(q) => Some((px(q), Spot { at: q, snap: Snap::Source(i) })),
                 _ => None,
