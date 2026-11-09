@@ -164,8 +164,8 @@ pub(crate) fn imprint(body: &Body, i: &Imprint) -> Result<Body, BrepError> {
             let over = || loops[1..].iter().any(|l| foot.winding(l.points[0]) != 0);
             if !inside || loops.iter().any(|l| l.touches(&foot)) || over() {
                 return Err(BrepError::Sketch(format!(
-                    "rib: the rib along `{}` does not stay inside its wall: it reaches an edge, a hole, a bend or another rib",
-                    chain[0].0
+                    "rib: the rib along `{}` does not stay inside its wall: its foot runs {:.2} mm each side of the path and past its ends, and reaches an edge, a hole, a bend or another rib",
+                    chain[0].0, sec.w
                 )));
             }
         }
