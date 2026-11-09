@@ -1,0 +1,15 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "half_circle",
+      "op": "sketch",
+      "sketch": {
+        "points": { "a": [-20, 0], "b": [20, 0], "m": [0, 0] },
+        "lines": { "ax": { "from": "a", "to": "b" } },
+        "arcs": { "top": { "center": "m", "from": "b", "to": "a" } }
+      }
+    },
+    { "name": "ball", "op": "revolve", "inputs": ["half_circle"], "axis": "ax" }
+  ]
+}

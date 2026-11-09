@@ -170,6 +170,14 @@
     "bushing": "7a1c8b4b77e244c6ed10dc2a6cecbe9def4db2d9bd173f97fd560dbfc8020f0d",
     "profile": "fb06260e4a036138e19068561887eb7546dbc79bb849105fa50c7f67a8fa42b2"
   },
+  "revolve_ball.json": {
+    "ball": "efdcd8ed5cda00c1b2571761b06c9a2944fe72f5a46a64bc9172751c514aefe6",
+    "half_circle": "0fe7f842afbbb40c6045d22b2e14bc96dd864f837b2da85f17acff920b5e2088"
+  },
+  "revolve_groove.json": {
+    "bush": "a1fbb250a82b036185aa283c0598c4837bf6a2da09518e44ad2f5ad6e78cf2c0",
+    "section": "a9e3a4a02663aaabd4762a2b116042ffb9f0746334a56df0d4b91a17423ff18e"
+  },
   "rolled.json": {
     "cone": "4fbefb83353726cee199c1a5e5e4ec8f8ea7fc157e6e204d8c4e78b0598f850c",
     "cone_profile": "9be3b20c63769e9ea77bfbb1a96c45dbea9fd78a6ffe8e289616edd4a9d8abd9",

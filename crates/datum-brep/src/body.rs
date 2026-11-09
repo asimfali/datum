@@ -1,5 +1,6 @@
 //! The immutable body and its queries.
 
+use std::f64::consts::TAU;
 use std::ops::Range;
 
 use datum_math::{Rigid, Vec3};
@@ -7,7 +8,7 @@ use rayon::prelude::*;
 use smallvec::SmallVec;
 
 use crate::curve::{self, Integrals, Path, unit};
-use crate::{Arc, BrepError, Cone, Curve, CurveSpec, Cylinder, FaceSpec, Surface, TopoId, build_with_curves};
+use crate::{Arc, BrepError, Cone, Curve, CurveSpec, Cylinder, FaceSpec, Surface, TopoId, Torus, build_with_curves};
 
 /// Index into one of a body's element vectors.
 pub type Ix = u32;
@@ -224,9 +225,11 @@ impl Body {
                 acc.moment = acc.moment + seg.moment;
                 (seg.area_vector.dot(seg.area_vector).sqrt(), seg.area_vector)
             }
-            Surface::Cylinder(_) | Surface::Cone(_) => {
+            surface @ (Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_)) => {
                 let mut rev = Integrals::default();
-                if let Some(c) = self.faces[f as usize].surface.revolution() {
+                if let Surface::Torus(t) = surface {
+                    curve::torus(&mut rev, t, self.face_paths(f), o);
+                } else if let Some(c) = surface.revolution() {
                     curve::revolution(&mut rev, &c, self.face_paths(f), o);
                 }
                 acc.six_v += rev.six_v;
@@ -297,6 +300,9 @@ impl Body {
                 curve.extend_bounds(self.point(he.origin), self.point(self.half_edges[he.twin as usize].origin), &mut min, &mut max);
             }
         }
+        for f in (0..self.faces.len() as Ix).filter(|&f| matches!(self.faces[f as usize].surface, Surface::Torus(_))) {
+            self.extend_over_torus(f, &Rigid::IDENTITY, &mut min, &mut max);
+        }
         (min, max)
     }
 
@@ -316,7 +322,54 @@ impl Body {
                 c.moved(m).extend_bounds(u, v, &mut lo, &mut hi);
             }
         }
+        self.extend_over_torus(f, m, &mut lo, &mut hi);
         (lo, hi)
+    }
+
+    /// Widens `lo, hi` to hold a face on a torus moved by `m`: it bulges past its edges where the
+    /// surface is farthest along an axis. Such a point counts if its angles lie within those of
+    /// the face's boundary, which for the faces the kernel builds, bounded by parallels and
+    /// meridians, is exactly the face.
+    fn extend_over_torus(&self, f: Ix, m: &Rigid, lo: &mut Vec3, hi: &mut Vec3) {
+        let Surface::Torus(t) = self.faces[f as usize].surface.moved(m) else { return };
+        let fr = curve::Frame::about(t.center, t.axis);
+        let mut range: Option<[f64; 4]> = None;
+        let mut last = (0.0, 0.0);
+        let mut visit = |p: Vec3| {
+            let (a, b) = t.angles(&fr, p);
+            let (a, b) = (a + TAU * libm::round((last.0 - a) / TAU), b + TAU * libm::round((last.1 - b) / TAU));
+            last = (a, b);
+            let r = range.get_or_insert([a, a, b, b]);
+            *r = [r[0].min(a), r[1].max(a), r[2].min(b), r[3].max(b)];
+        };
+        for h in self.face_loops(f).flat_map(|l| self.loop_half_edges(l)) {
+            let he = &self.half_edges[h as usize];
+            let (u, v) = (m.apply(self.point(he.origin)), m.apply(self.point(self.half_edges[self.next(h) as usize].origin)));
+            visit(u);
+            let edge = &self.edges[he.edge as usize];
+            if let Some(Curve::Arc(a)) = self.edge_curve(edge).map(|c| if edge.half == h { c } else { c.reversed() }).map(|c| c.moved(m)) {
+                // At least 12 chords a turn: no step between points is near half a turn.
+                a.inner_points(u, v, f64::INFINITY).for_each(&mut visit);
+            }
+        }
+        let Some([t0, t1, p0, p1]) = range else { return };
+        for e in [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)] {
+            let w = e - t.axis * e.dot(t.axis);
+            let w = w - t.axis * w.dot(t.axis);
+            let len = w.dot(w).sqrt();
+            for s in [1.0, -1.0] {
+                // Square to the surface's normal along `e`: `ρ` along what `e` has across the axis.
+                let theta = if len > 0.0 { fr.angle(t.center + w * s) } else { 0.5 * (t0 + t1) };
+                let theta = theta + TAU * libm::round((0.5 * (t0 + t1) - theta) / TAU);
+                let phi = libm::atan2(s * e.dot(t.axis), len);
+                let phi = phi + TAU * libm::round((0.5 * (p0 + p1) - phi) / TAU);
+                if (t0..=t1).contains(&theta) && (p0..=p1).contains(&phi) {
+                    let q = t.point(&fr, theta, phi);
+                    *lo = Vec3::new(lo.x.min(q.x), lo.y.min(q.y), lo.z.min(q.z));
+                    *hi = Vec3::new(hi.x.max(q.x), hi.y.max(q.y), hi.z.max(q.z));
+                }
+            }
+        }
     }
 
     /// Whether some face is curved or some edge an arc: operations on plane geometry only refuse
@@ -361,6 +414,7 @@ impl Body {
                     Surface::Plane(p) => Surface::Plane(Plane { origin: point(p.origin), normal: dir(p.normal) }),
                     Surface::Cylinder(c) => Surface::Cylinder(Cylinder { origin: point(c.origin), axis: dir(c.axis), ..c }),
                     Surface::Cone(c) => Surface::Cone(Cone { origin: point(c.origin), axis: dir(c.axis), ..c }),
+                    Surface::Torus(t) => Surface::Torus(Torus { center: point(t.center), axis: dir(t.axis), ..t }),
                     Surface::Wall(_) => return Err(developed()),
                 };
                 spec.loops.iter_mut().for_each(|l| l.reverse());
@@ -534,6 +588,13 @@ impl Body {
                 floats(&mut b, &c.axis.to_array());
                 floats(&mut b, &[c.radius, c.slope]);
                 b.push(u8::from(c.convex));
+            }
+            Surface::Torus(t) => {
+                b.extend_from_slice(b"torus");
+                floats(&mut b, &t.center.to_array());
+                floats(&mut b, &t.axis.to_array());
+                floats(&mut b, &[t.major, t.minor]);
+                b.push(u8::from(t.convex));
             }
             Surface::Wall(w) => {
                 b.extend_from_slice(b"wall");

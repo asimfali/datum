@@ -910,6 +910,7 @@ pub fn place<'a>(
                     (frame(d.point(Vec2::new(0.0, 0.0), c.radius), d.dev.axis.cross(r), if c.convex { r } else { -r })?, Some(id))
                 }
                 Surface::Cone(_) => return Err(BrepError::Unsupported("a sketch on a cone face".into())),
+                Surface::Torus(_) => return Err(BrepError::Unsupported("a sketch on a torus or sphere face".into())),
                 Surface::Wall(_) => return Err(BrepError::Unsupported("a sketch on the wall of a cut".into())),
             }
         }

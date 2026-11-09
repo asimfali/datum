@@ -271,6 +271,17 @@ impl Writer {
                     let angle = libm::atan(c.slope.abs());
                     (self.put(format_args!("CONICAL_SURFACE('',#{at},{},{})", Real(c.radius), Real(angle))), c.convex)
                 }
+                Surface::Torus(t) => {
+                    let at = self.placement(t.center, t.axis, perpendicular(t.axis));
+                    if t.major == 0.0 {
+                        (self.put(format_args!("SPHERICAL_SURFACE('',#{at},{})", Real(t.minor))), t.convex)
+                    } else if t.major > t.minor {
+                        (self.put(format_args!("TOROIDAL_SURFACE('',#{at},{},{})", Real(t.major), Real(t.minor))), t.convex)
+                    } else {
+                        // STEP's torus is a ring; one reaching across its own axis is another type.
+                        return Err(BrepError::Unsupported(format!("STEP: a torus of major radius {} and minor {}", t.major, t.minor)));
+                    }
+                }
                 Surface::Wall(w) if walls[f] > 0 => self.wall(&w, radii(b, f as Ix)?, walls[f]),
                 Surface::Wall(w) => {
                     // A straight piece along the axis or around it: the wall is flat.
@@ -281,7 +292,7 @@ impl Writer {
             };
             let surface = match face.surface {
                 Surface::Plane(_) => self.put(format_args!("PLANE('',#{surface})")),
-                Surface::Cylinder(_) | Surface::Cone(_) | Surface::Wall(_) => surface,
+                Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_) | Surface::Wall(_) => surface,
             };
             let mut bounds = Vec::with_capacity(face.loop_count as usize);
             for (k, l) in b.face_loops(f as Ix).enumerate() {

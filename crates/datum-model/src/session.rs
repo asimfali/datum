@@ -989,6 +989,10 @@ const COMMANDS: &[Command] = &[
                         Surface::Cone(c) => {
                             json!({"id": id, "cone": {"origin": c.origin, "axis": c.axis, "radius": c.radius, "slope": c.slope, "convex": c.convex}, "area": area})
                         }
+                        // A sphere when `major` is zero.
+                        Surface::Torus(t) => {
+                            json!({"id": id, "torus": {"center": t.center, "axis": t.axis, "major": t.major, "minor": t.minor, "convex": t.convex}, "area": area})
+                        }
                         // A wall of a cut through a rolled sheet: its piece in the sheet's development.
                         Surface::Wall(w) => {
                             let arc = w.arc.map(|a| json!({"center": a.center, "ccw": a.ccw}));

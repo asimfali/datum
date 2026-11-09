@@ -3,7 +3,7 @@
 
 use std::f64::consts::TAU;
 
-use datum_brep::{Axis, Body, BrepError, ProfileLoop, Region, TopoId, revolve};
+use datum_brep::{Axis, Body, BrepError, ProfileArc, ProfileLoop, Region, TopoId, revolve};
 use datum_math::{Sign, Vec2, Vec3, orient2d, parallel2d};
 
 use crate::sheet::Side;
@@ -56,7 +56,9 @@ impl Turn {
             .zip(&sides)
             .map(|(&p, &side)| {
                 let w = Vec2::new(p.x - o.x, p.y - o.y);
-                let y = if side == Sign::Zero { 0.0 } else { (d.x * w.y - d.y * w.x).abs() / len };
+                let y = (d.x * w.y - d.y * w.x).abs() / len;
+                // On the axis exactly, or as far as the solver can tell (D228).
+                let y = if side == Sign::Zero || y <= tolerance { 0.0 } else { y };
                 Vec2::new((d.x * w.x + d.y * w.y) / len, y)
             })
             .collect();
@@ -73,6 +75,17 @@ impl Turn {
             }
         }
         Ok((flat, right))
+    }
+
+    /// Arc `arc` in the axis's coordinates (see [`Turn::flat`]): seen from the right of the axis
+    /// the distance from it runs the other way, and so does the arc. Its centre may lie across
+    /// the axis, negative; on the axis as far as the solver can tell, it is on it.
+    fn flat_arc(&self, arc: ProfileArc, right: bool, tolerance: f64) -> ProfileArc {
+        let (o, d) = (self.o, Vec2::new(self.x.x - self.o.x, self.x.y - self.o.y));
+        let len = libm::hypot(d.x, d.y);
+        let w = Vec2::new(arc.center.x - o.x, arc.center.y - o.y);
+        let y = (d.x * w.y - d.y * w.x) / len * if right { -1.0 } else { 1.0 };
+        ProfileArc { center: Vec2::new((d.x * w.x + d.y * w.y) / len, if y.abs() <= tolerance { 0.0 } else { y }), ccw: arc.ccw != right }
     }
 }
 
@@ -92,6 +105,9 @@ pub(crate) fn revolve_sketch(feature: TopoId, s: &Placed, axis: &str, angle: f64
     let Region { outer: mut ring, holes, .. } = regions.remove(0);
     let (flat, on_right) = turn.flat(&ring.points, true, s.solved.tolerance)?;
     ring.points = flat;
+    for arc in ring.arcs.iter_mut().flatten() {
+        *arc = turn.flat_arc(*arc, on_right, s.solved.tolerance);
+    }
     let at = Axis { start: if on_right { right } else { left }, ..turn.at };
     let caps = ["revolve.cap_start", "revolve.cap_end"].map(|t| TopoId::derive(t).id(feature).finish());
     let angle = if angle == 360.0 { TAU } else { angle.to_radians() };
@@ -141,7 +157,7 @@ pub(crate) fn rolled(feature: TopoId, s: &Placed, axis: &str, path: Option<&str>
         _ => {}
     }
     if !s.arcs.is_empty() || !s.circles.is_empty() {
-        return Err(BrepError::Unsupported("rolled sheet from arcs: a torus is not made yet".into()));
+        return Err(BrepError::Unsupported("rolled sheet from arcs: its flat pattern is not made yet".into()));
     }
     let name = match path {
         Some(p) => p.to_string(),

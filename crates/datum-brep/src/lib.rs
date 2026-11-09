@@ -19,7 +19,7 @@ mod validate;
 
 pub use body::{Body, Edge, Face, HalfEdge, Ix, Loop, MassProperties, Plane, Vertex};
 pub use build::{CurveSpec, FaceSpec, build, build_with_curves};
-pub use curve::{Arc, Cone, Curve, Cylinder, Development, Meet, Rolled, Surface, Trace, Wave};
+pub use curve::{Arc, Cone, Curve, Cylinder, Development, Meet, Rolled, Surface, Torus, Trace, Wave};
 pub use id::{Origin, TopoId};
 pub use prism::{Region, cuboid, extrude, prism};
 pub use profile::{Box2, ProfileArc, ProfileLoop, overlap, overlapping};

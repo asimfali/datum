@@ -9,7 +9,7 @@
 //! integrates to rounding. The `z` direction is linear at most and integrated by Simpson's rule,
 //! exactly. A wall is integrated over its own coordinates, along the curve and the radius.
 
-use std::f64::consts::{FRAC_PI_4, TAU};
+use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
 
 use datum_math::{Rigid, Vec2, Vec3};
 
@@ -43,12 +43,44 @@ impl From<Cylinder> for Cone {
     }
 }
 
+/// A circular torus: the circle of radius `minor` whose centre is `major` from the axis, turned
+/// about the unit `axis` through `center`. With `major` zero it is a sphere of radius `minor`, its
+/// poles on the axis: the two share every formula. `convex` as for [`Cylinder`], the normal
+/// pointing away from the turned circle's centre when true. Its point at angles `(θ, φ)` is
+/// `center + ρ(θ)·(major + minor·cos φ) + axis·minor·sin φ`, `ρ` the unit vector across the axis.
+/// Curves on it are parallels (`φ` constant) and meridians (`θ` constant).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Torus {
+    pub center: Vec3,
+    pub axis: Vec3,
+    pub major: f64,
+    pub minor: f64,
+    pub convex: bool,
+}
+
+impl Torus {
+    /// The angles `(θ, φ)` of point `p` of the torus, `θ` in `fr` (see [`Frame::about`]).
+    pub(crate) fn angles(&self, fr: &Frame, p: Vec3) -> (f64, f64) {
+        let w = p - self.center;
+        let z = w.dot(self.axis);
+        let across = w - self.axis * z;
+        (fr.angle(p), libm::atan2(z, across.dot(across).sqrt() - self.major))
+    }
+
+    /// The point at angles `(θ, φ)`, `θ` in `fr`.
+    pub(crate) fn point(&self, fr: &Frame, theta: f64, phi: f64) -> Vec3 {
+        let (s, c) = libm::sincos(phi);
+        fr.point(theta, self.minor * s, self.major + self.minor * c)
+    }
+}
+
 /// The surface a face lies on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Surface {
     Plane(Plane),
     Cylinder(Cylinder),
     Cone(Cone),
+    Torus(Torus),
     /// The wall of a cut through a rolled sheet (M5c): the piece swept along the radius, out of
     /// the body to the left of the piece's direction in the development.
     Wall(Rolled),
@@ -58,7 +90,7 @@ impl Surface {
     pub fn plane(&self) -> Option<&Plane> {
         match self {
             Self::Plane(p) => Some(p),
-            Self::Cylinder(_) | Self::Cone(_) | Self::Wall(_) => None,
+            Self::Cylinder(_) | Self::Cone(_) | Self::Torus(_) | Self::Wall(_) => None,
         }
     }
 
@@ -68,7 +100,7 @@ impl Surface {
         match *self {
             Self::Cylinder(c) => Some(c.into()),
             Self::Cone(c) => Some(c),
-            Self::Plane(_) | Self::Wall(_) => None,
+            Self::Plane(_) | Self::Torus(_) | Self::Wall(_) => None,
         }
     }
 
@@ -78,6 +110,7 @@ impl Surface {
             Self::Plane(p) => Self::Plane(Plane { origin: m.apply(p.origin), normal: m.apply_vector(p.normal) }),
             Self::Cylinder(c) => Self::Cylinder(Cylinder { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
             Self::Cone(c) => Self::Cone(Cone { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
+            Self::Torus(t) => Self::Torus(Torus { center: m.apply(t.center), axis: m.apply_vector(t.axis), ..t }),
             Self::Wall(w) => Self::Wall(Rolled { dev: w.dev.moved(m), ..w }),
         }
     }
@@ -94,6 +127,13 @@ impl Surface {
                 // Across the surface: away from the axis, tilted back along it by the slope.
                 let n = unit(radial(c.origin, c.axis, p) - c.axis * c.slope);
                 if c.convex { n } else { -n }
+            }
+            Self::Torus(t) => {
+                let w = p - t.center;
+                // On a sphere the turned circle's centre is the sphere's, even at a pole.
+                let rim = if t.major == 0.0 { Vec3::ZERO } else { unit(w - t.axis * w.dot(t.axis)) * t.major };
+                let n = unit(w - rim);
+                if t.convex { n } else { -n }
             }
             Self::Wall(w) => {
                 let (q, r) = w.dev.unroll(p, w.from.x);
@@ -667,6 +707,18 @@ pub(crate) struct Integrals {
     pub area_vector: Vec3,
 }
 
+impl Integrals {
+    /// Adds a curved face's sums over its loops: area, six times the volume, the moment, the area
+    /// vector. The loops run the other way on a surface the body lies outside: every term with
+    /// the normal in it has the right sign already, the area needs turning back.
+    fn add_curved(&mut self, sum: [f64; 8], convex: bool) {
+        self.area += if convex { sum[0] } else { -sum[0] };
+        self.six_v += sum[1];
+        self.moment = self.moment + Vec3::new(sum[2], sum[3], sum[4]);
+        self.area_vector = self.area_vector + Vec3::new(sum[5], sum[6], sum[7]);
+    }
+}
+
 /// The correction of a plane face's polygon for an arc from `u` to `v` turning about `k`: the
 /// circular segment between the chord and the arc, added where the arc bulges out of the face and
 /// taken away where it bulges in. `n` is the face's unit normal.
@@ -706,16 +758,20 @@ pub(crate) struct Frame {
 }
 
 pub(crate) fn frame(c: &Cone) -> Frame {
-    let a = c.axis;
-    let least = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]
-        .into_iter()
-        .min_by(|x, y| x.dot(a).abs().total_cmp(&y.dot(a).abs()))
-        .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
-    let e1 = unit(least - a * least.dot(a));
-    Frame { axis: a, origin: c.origin, e1, e2: a.cross(e1) }
+    Frame::about(c.origin, c.axis)
 }
 
 impl Frame {
+    /// Coordinates about the unit axis `a` through `origin`.
+    pub fn about(origin: Vec3, a: Vec3) -> Self {
+        let least = [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)]
+            .into_iter()
+            .min_by(|x, y| x.dot(a).abs().total_cmp(&y.dot(a).abs()))
+            .unwrap_or(Vec3::new(1.0, 0.0, 0.0));
+        let e1 = unit(least - a * least.dot(a));
+        Self { axis: a, origin, e1, e2: a.cross(e1) }
+    }
+
     /// The angle `θ` of point `p`, in `(−π, π]`.
     pub fn angle(&self, p: Vec3) -> f64 {
         let w = p - self.origin;
@@ -796,11 +852,79 @@ pub(crate) fn revolution(acc: &mut Integrals, c: &Cone, paths: impl Iterator<Ite
             }
         }
     }
-    let sigma = if c.convex { 1.0 } else { -1.0 };
-    acc.area += sigma * sum[0];
-    acc.six_v += sum[1];
-    acc.moment = acc.moment + Vec3::new(sum[2], sum[3], sum[4]);
-    acc.area_vector = acc.area_vector + Vec3::new(sum[5], sum[6], sum[7]);
+    acc.add_curved(sum, c.convex);
+}
+
+/// Integrals of a face on a torus or a sphere, from the parallels of its loops (`θ` stands still
+/// along a meridian, which adds nothing). At `(θ, φ)`, `n dA = minor·q·(ρ cos φ + axis sin φ) dθ dφ`
+/// with `q = major + minor·cos φ`. As on a cone, by Green's theorem: `−∮ P dθ`, `P` the integral
+/// over `φ` from a base. On a torus any base serves, and the first vertex's keeps `φ` on one
+/// branch. A sphere's parametrization folds at a pole, a line there with no edge along it to
+/// count: the base is the pole the face comes nearest, where `P` is zero; a face reaching neither
+/// pole does not mind.
+pub(crate) fn torus(acc: &mut Integrals, t: &Torus, paths: impl Iterator<Item = Path>, o: Vec3) {
+    let fr = Frame::about(t.center, t.axis);
+    let (a, r, big) = (fr.axis, t.minor, t.major);
+    let p0 = t.center - o;
+    let f = |th: f64, ph: f64| -> [f64; 8] {
+        let (sn, cs) = libm::sincos(th);
+        let (sp, cp) = libm::sincos(ph);
+        let rv = fr.e1 * cs + fr.e2 * sn;
+        let q = big + r * cp;
+        let nv = rv * cp + a * sp;
+        let x = p0 + rv * q + a * (r * sp);
+        let area = r * q;
+        let height = x.dot(nv);
+        let m = x * (6.0 * area * height);
+        [area, 2.0 * area * height, m.x, m.y, m.z, area * nv.x, area * nv.y, area * nv.z]
+    };
+    let parallels: Vec<(Arc, Vec3, Vec3)> = paths.filter_map(|p| if let Path::Arc(arc, u, v) = p { Some((arc, u, v)) } else { None }).collect();
+    let Some(&(_, first, _)) = parallels.first() else { return };
+    let reference = t.angles(&fr, first).1;
+    let branch = |p: Vec3| {
+        let ph = t.angles(&fr, p).1;
+        ph + TAU * libm::round((reference - ph) / TAU)
+    };
+    let (lo, hi) = parallels.iter().fold((reference, reference), |(lo, hi), &(_, u, _)| {
+        let ph = branch(u);
+        (lo.min(ph), hi.max(ph))
+    });
+    let base = match (big == 0.0, hi.abs() >= lo.abs()) {
+        (false, _) => reference,
+        (true, true) => FRAC_PI_2,
+        (true, false) => -FRAC_PI_2,
+    };
+    let mut sum = [0.0; 8];
+    for (arc, u, v) in parallels {
+        // Meridians turn about an axis square to the torus's, parallels about its own.
+        if arc.axis.dot(a).abs() < 0.5 {
+            continue;
+        }
+        let dtheta = arc.sweep(u, v) * if arc.axis.dot(a) > 0.0 { 1.0 } else { -1.0 };
+        let (th0, ph) = (fr.angle(u), branch(u));
+        let (pieces, across) = ((dtheta.abs() / FRAC_PI_4).ceil().max(1.0) as usize, ((ph - base).abs() / FRAC_PI_4).ceil().max(1.0) as usize);
+        let (h, k) = (1.0 / pieces as f64, (ph - base) / across as f64);
+        for i in 0..pieces {
+            let mid = h * (i as f64 + 0.5);
+            for (x, wgt) in GAUSS {
+                for s in [mid - 0.5 * h * x, mid + 0.5 * h * x] {
+                    let th = th0 + dtheta * s;
+                    for j in 0..across {
+                        let centre = base + k * (j as f64 + 0.5);
+                        for (y, wy) in GAUSS {
+                            for t in [centre - 0.5 * k * y, centre + 0.5 * k * y] {
+                                let v = f(th, t);
+                                for q in 0..8 {
+                                    sum[q] -= 0.5 * h * wgt * dtheta * 0.5 * k * wy * v[q];
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    acc.add_curved(sum, t.convex);
 }
 
 /// Integrals of the wall over `w` from `r0` to `r1 > r0` from the axis, over its own coordinates

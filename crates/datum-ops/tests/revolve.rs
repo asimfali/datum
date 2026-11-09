@@ -181,18 +181,41 @@ fn refusal(sketch: Json, extra: Json) -> BrepError {
     build(sketch, extra).unwrap_err()
 }
 
+/// A profile with an arc, on either side of the axis, as a sketch draws it: a rounded corner.
 #[test]
-fn arcs_in_the_profile_are_refused() {
-    let sk = with_axis(
-        json!({
-            "points": {"a": [10, 5], "b": [30, 5], "c": [30, 8], "d": [10, 8], "m": [30, 6.5]},
-            "lines": {"ab": {"from": "a", "to": "b"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
-            "arcs": {"round": {"center": "m", "from": "b", "to": "c"}}
-        }),
-        [0.0, 0.0],
-        [100.0, 0.0],
-    );
-    assert!(matches!(refusal(sk, json!({"axis": "ax"})), BrepError::Unsupported(m) if m.contains("torus")));
+fn an_arc_in_the_profile_turns_into_a_torus() {
+    for y in [1.0, -1.0] {
+        let sk = with_axis(
+            json!({
+                "points": {"a": [10, 5.0 * y], "b": [30, 5.0 * y], "c": [32, 7.0 * y], "d": [10, 7.0 * y], "m": [30, 7.0 * y]},
+                "lines": {"ab": {"from": "a", "to": "b"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
+                "arcs": {"round": if y > 0.0 { json!({"center": "m", "from": "b", "to": "c"}) } else { json!({"center": "m", "from": "c", "to": "b"}) }}
+            }),
+            [0.0, 0.0],
+            [100.0, 0.0],
+        );
+        let b = build(sk, json!({"axis": "ax"})).unwrap();
+        // The tube of a ring of 5 to 7 with one end rounded inward (the centre at the outer radius).
+        let pi = PI;
+        let corner = (pi * 4.0 / 4.0, 7.0 - 4.0 * 2.0 / (3.0 * pi));
+        let expected = pi * (49.0 - 25.0) * 20.0 + 2.0 * pi * corner.1 * corner.0;
+        assert!(close(b.volume(), expected), "{} vs {expected}", b.volume());
+        assert!(b.faces().iter().any(|f| matches!(f.surface, Surface::Torus(t) if t.convex && close(t.major, 7.0) && close(t.minor, 2.0))));
+    }
+}
+
+/// A ball: an arc drawn from one end of the axis to the other, closed by the axis line itself.
+#[test]
+fn a_half_circle_on_the_axis_turns_into_a_ball() {
+    let sk = json!({
+        "points": {"a": [-4, 0], "b": [4, 0], "m": [0, 0]},
+        "lines": {"ax": {"from": "a", "to": "b"}},
+        "arcs": {"top": {"center": "m", "from": "b", "to": "a"}}
+    });
+    let b = build(sk, json!({"axis": "ax"})).unwrap();
+    assert!(close(b.volume(), 4.0 / 3.0 * PI * 64.0), "{}", b.volume());
+    assert_eq!(b.faces().len(), 6);
+    assert!(b.faces().iter().all(|f| matches!(f.surface, Surface::Torus(t) if t.major == 0.0 && t.convex)));
 }
 
 #[test]
