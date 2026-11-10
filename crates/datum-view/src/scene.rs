@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
-use datum_brep::{Body, Ix, TopoId, edge_points, face_mesh};
+use datum_brep::{Body, Ix, Surface, TopoId, edge_points, face_mesh};
 use datum_graph::Value;
 use datum_math::{Vec2, Vec3};
 use rayon::prelude::*;
@@ -55,14 +55,17 @@ impl BodyMesh {
             mesh.normals.extend(f.normals);
             mesh.faces.extend(f.faces);
         }
-        // Edges where the surface turns: between nearly coplanar faces (a terrain's cells, a
-        // split face) or along the seams of a cylinder an edge says nothing on screen. A display
-        // threshold; the model never sees it.
-        let normal = |h: Ix, p: Vec3| body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface.normal_at(p);
+        // Edges where the surface turns, and where a flat face goes smoothly into a curved one:
+        // that line is where a bend or a rib starts. Between nearly coplanar faces (a terrain's
+        // cells, a split face) or along the seams of a cylinder an edge says nothing on screen.
+        // A display threshold; the model never sees it.
+        let surface = |h: Ix| &body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface;
+        let flat = |s: &Surface| matches!(s, Surface::Plane(_));
         for (e, edge) in body.edges().iter().enumerate() {
             let pts = edge_points(body, e as Ix, chord);
             let p = pts[0];
-            if normal(edge.half, p).dot(normal(body.half_edges()[edge.half as usize].twin, p)) < SHARP {
+            let (a, b) = (surface(edge.half), surface(body.half_edges()[edge.half as usize].twin));
+            if flat(a) != flat(b) || a.normal_at(p).dot(b.normal_at(p)) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
             }
         }

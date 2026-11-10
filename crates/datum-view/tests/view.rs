@@ -15,6 +15,17 @@ fn scene(model: &str) -> Scene {
     Scene::new(&e.final_values(&g), &mut Default::default())
 }
 
+/// Where a flat face goes smoothly into a curved one a line is drawn, the start of the rib; the
+/// smooth seams between curved faces stay undrawn, so a ball has none.
+#[test]
+fn a_smooth_edge_is_drawn_only_at_a_flat_face() {
+    let s = scene("rib.json");
+    let (lo, hi) = s.bounds.unwrap();
+    let inside = |p: &Vec3| p.x > lo.x && p.x < hi.x && p.y > lo.y && p.y < hi.y;
+    assert!(s.bodies[0].edges.iter().flatten().any(inside), "the rib's foot is not drawn");
+    assert!(scene("revolve_ball.json").bodies[0].edges.is_empty());
+}
+
 /// #119: a pattern's copies are drawn with their sketch outside it too, as the profiles they make.
 #[test]
 fn pattern_copies_are_drawn_with_the_sketch() {
