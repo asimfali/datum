@@ -1838,7 +1838,7 @@ impl Session {
                                     .iter()
                                     .map(|p| {
                                         let n = p.at.len() as f64;
-                                        let mut t = json!({"copies": p.at.len(), "profiles": p.at.len() * p.loops, "open_area": p.area * n});
+                                        let mut t = json!({"copies": p.at.len() + p.chains.len(), "profiles": p.at.len() * p.loops, "open_area": p.area * n});
                                         if let Some(r) = p.region.filter(|r| *r > 0.0) {
                                             t["region_area"] = json!(r);
                                             t["open_share"] = json!(p.area * n / r);

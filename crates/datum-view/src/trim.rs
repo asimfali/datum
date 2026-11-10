@@ -13,6 +13,7 @@
 
 use std::f64::consts::TAU;
 
+use datum_math::{Carrier, Vec2};
 use datum_ops::Placed;
 use datum_sketch::Constraint;
 use serde_json::{Map, Value as Json, json};
@@ -160,44 +161,11 @@ impl Shape {
 
 /// Where the lines and circles of two curves cross.
 pub(crate) fn crossings(s: &Shape, o: &Shape) -> Vec<[f64; 2]> {
-    match (*s, *o) {
-        (Shape::Line(a, b), Shape::Line(p, q)) => {
-            let (u, v) = (sub(b, a), sub(q, p));
-            let d = cross(u, v);
-            if d == 0.0 {
-                return Vec::new();
-            }
-            let t = cross(sub(p, a), v) / d;
-            vec![[a[0] + u[0] * t, a[1] + u[1] * t]]
-        }
-        (Shape::Line(a, b), Shape::Round { c, r, .. }) | (Shape::Round { c, r, .. }, Shape::Line(a, b)) => {
-            let u = sub(b, a);
-            let l2 = dot(u, u);
-            let f = dot(sub(c, a), u) / l2;
-            let foot = [a[0] + u[0] * f, a[1] + u[1] * f];
-            let d2 = dot(sub(c, foot), sub(c, foot));
-            if d2 > r * r {
-                return Vec::new();
-            }
-            let h = ((r * r - d2) / l2).sqrt();
-            let mut out = vec![[a[0] + u[0] * (f - h), a[1] + u[1] * (f - h)], [a[0] + u[0] * (f + h), a[1] + u[1] * (f + h)]];
-            out.dedup();
-            out
-        }
-        (Shape::Round { c, r, .. }, Shape::Round { c: k, r: q, .. }) => {
-            let d = dist(c, k);
-            if d == 0.0 || d > r + q || d < (r - q).abs() {
-                return Vec::new();
-            }
-            let along = (r * r - q * q + d * d) / (2.0 * d);
-            let h = (r * r - along * along).max(0.0).sqrt();
-            let u = [(k[0] - c[0]) / d, (k[1] - c[1]) / d];
-            let f = [c[0] + u[0] * along, c[1] + u[1] * along];
-            let mut out = vec![[f[0] - u[1] * h, f[1] + u[0] * h], [f[0] + u[1] * h, f[1] - u[0] * h]];
-            out.dedup();
-            out
-        }
-    }
+    let carrier = |s: &Shape| match *s {
+        Shape::Line(a, b) => Carrier::Line(Vec2::new(a[0], a[1]), Vec2::new(b[0], b[1])),
+        Shape::Round { c, r, .. } => Carrier::Circle(Vec2::new(c[0], c[1]), r),
+    };
+    datum_math::crossings(carrier(s), carrier(o)).into_iter().map(|p| [p.x, p.y]).collect()
 }
 
 /// Where two curves the sketch makes tangent touch: the foot of the centre on the line, or on

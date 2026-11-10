@@ -16,7 +16,7 @@ use datum_brep::{
 use datum_math::{Vec2, Vec3};
 
 use crate::cut::{Frame, outline};
-use crate::sketch::{ChainPiece, Placed, open_chains_named};
+use crate::sketch::{ChainPiece, Placed, first_corner, open_chains_named};
 
 /// A tool's section: the crown's radius (half the tool's diameter) on the side pressed from, how
 /// far the sheet is pressed, and the radius of the die's shoulder.
@@ -79,18 +79,16 @@ pub(crate) fn imprint_of(feature: TopoId, s: &Placed, tool: RibTool, flip: bool)
     if !(tool.radius > 0.0 && tool.depth > 0.0 && tool.shoulder > 0.0) {
         return Err(degenerate(format!("a tool has a diameter, a depth and a shoulder above zero, got {tool:?}")));
     }
-    let chains = open_chains_named(s)?;
+    let aside = crate::copies::aside(&s.patterns);
+    let mut chains = open_chains_named(s, &|n| !aside.contains(&n.to_string()))?;
+    if let Some((a, b)) = chains.iter().find_map(|c| first_corner(s, c)) {
+        return Err(BrepError::Sketch(format!("rib: a tool cannot turn a corner: make `{a}` and `{b}` tangent")));
+    }
+    chains.extend(s.patterns.iter().flat_map(|p| p.chains.iter().map(|c| c.pieces.clone())));
     if chains.is_empty() {
         return Err(BrepError::Sketch("rib: the sketch has no open line or arc to roll along".into()));
     }
     for chain in &chains {
-        for w in chain.windows(2) {
-            let (a, b) = (&w[0].0, &w[1].0);
-            let pair = if a < b { [a.clone(), b.clone()] } else { [b.clone(), a.clone()] };
-            if !s.tangent.contains(&pair) {
-                return Err(BrepError::Sketch(format!("rib: a tool cannot turn a corner: make `{a}` and `{b}` tangent")));
-            }
-        }
         let length: f64 = chain.iter().map(|(_, c)| piece_length(c)).sum();
         if length < tool.min_length {
             return Err(BrepError::Sketch(format!("rib: a path of {length:.1} mm is shorter than the {:.1} mm the tool rolls", tool.min_length)));

@@ -27,9 +27,23 @@ pub enum Base {
 /// The fields of each kind, by key: a number or a formula, empty when not given.
 const FIELDS: [&str; 11] = ["n1", "s1", "g1", "n2", "s2", "g2", "angle", "step", "clearance", "n", "g"];
 
+/// What stops an end of a parallel copy: a group or a curve of the sketch, or curves picked, a
+/// group made of them with the pattern.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Bound {
+    Named(String),
+    New(Vec<String>),
+}
+
 #[derive(Clone)]
 pub struct PatternForm {
     pub base: Base,
+    /// Along an open group: parallel copies of it (D253) rather than copies along it.
+    pub offset: bool,
+    /// What stops the copies' start and end.
+    pub bound: [Option<Bound>; 2],
+    /// Which of the two the selection is being taken as.
+    pub bounding: Option<usize>,
     /// Along a closed group: fill it rather than go round it.
     pub fill: bool,
     pub rotate: bool,
@@ -187,12 +201,38 @@ impl PatternForm {
             Base::Along { .. } => set("n", "5"),
         }
         let fill = matches!(base, Base::Along { closed: true, .. });
-        Self { base, fill, rotate: true, flip: [false; 2], fields, name, of: None, picking: false, cell: Vec::new(), before: sk.json.clone() }
+        Self {
+            base,
+            offset: false,
+            bound: [None, None],
+            bounding: None,
+            fill,
+            rotate: true,
+            flip: [false; 2],
+            fields,
+            name,
+            of: None,
+            picking: false,
+            cell: Vec::new(),
+            before: sk.json.clone(),
+        }
     }
 
     /// The menu editing pattern `name` as the sketch has it.
     pub fn edit(sk: &SketchEdit, name: &str) -> Result<Self, String> {
         let p = &sk.json["sketch"]["patterns"][name];
+        if let Some(o) = p.get("offset") {
+            let group = p["of"].as_str().unwrap_or_default().to_string();
+            let mut form = Self::new(sk, Base::Along { closed: false, group, new: Vec::new() });
+            form.offset = true;
+            form.name = name.to_string();
+            form.of = p["of"].as_str().map(String::from);
+            form.bound = ["start", "end"].map(|k| o[k].as_str().map(|g| Bound::Named(g.to_string())));
+            for (k, v) in [("n", &o["count"]), ("s1", &o["step"]), ("clearance", p.get("clearance").unwrap_or(&Json::Null))] {
+                form.fields.insert(k, text(v));
+            }
+            return Ok(form);
+        }
         let base = if let Some(a) = p.get("around") {
             Base::Around(a["center"].as_str().unwrap_or_default().to_string())
         } else if let Some(a) = p.get("along") {
@@ -263,6 +303,7 @@ impl PatternForm {
         match &self.base {
             Base::Grid(_) => i18n.t("pattern-grid", "Pattern on a grid").into(),
             Base::Around(c) => i18n.f("pattern-around", "Pattern around `{ $name }`", &[("name", c)]),
+            Base::Along { group, .. } if self.offset => i18n.f("pattern-offset", "Parallel copies of `{ $name }`", &[("name", group)]),
             Base::Along { group, .. } if self.fill => i18n.f("pattern-filling", "Pattern filling `{ $name }`", &[("name", group)]),
             Base::Along { group, .. } => i18n.f("pattern-along", "Pattern along `{ $name }`", &[("name", group)]),
         }
@@ -276,6 +317,7 @@ impl PatternForm {
                 (i18n.t("pattern-second", "Second direction"), vec!["n2", "s2", "g2"], Some(1)),
             ],
             Base::Around(_) => vec![(i18n.t("pattern-row-around", "Around"), vec!["n", "angle", "step", "g"], Some(0))],
+            Base::Along { .. } if self.offset => vec![(i18n.t("pattern-row-offset", "Copies"), vec!["n", "s1", "clearance"], Some(0))],
             Base::Along { .. } if self.fill => vec![(i18n.t("pattern-steps", "Steps"), vec!["s1", "s2", "clearance"], None)],
             Base::Along { .. } => vec![(i18n.t("pattern-row-along", "Along"), vec!["n", "s1", "g"], Some(0))],
         }
@@ -294,10 +336,26 @@ impl PatternForm {
     }
 
     /// The pattern's JSON, as the fields and the base give it.
-    fn pattern(&self, of: &str) -> Result<Json, String> {
+    fn pattern(&self, of: &str, bounds: &[Option<String>; 2]) -> Result<Json, String> {
         let f = |k: &str| self.fields.get(k).map_or("", |s| s.as_str());
         let sign = |i: usize| if self.flip[i] { -1.0 } else { 1.0 };
         let mut p = json!({ "of": of });
+        if self.offset {
+            let mut o = json!({
+                "step": times(f("s1"), sign(0)).ok_or("Give the step")?,
+                "count": num(f("n")).ok_or("Give the count")?,
+            });
+            for (k, b) in ["start", "end"].iter().zip(bounds) {
+                if let Some(b) = b {
+                    o[*k] = json!(b);
+                }
+            }
+            p["offset"] = o;
+            if let Some(c) = num(f("clearance")) {
+                p["clearance"] = c;
+            }
+            return Ok(p);
+        }
         let grid = match &self.base {
             Base::Grid(d) => Some(*d),
             Base::Along { .. } if self.fill => Some([[1.0, 0.0], [0.0, 1.0]]),
@@ -377,7 +435,24 @@ impl PatternForm {
             patch.claim(group)?;
             patch.set("groups", group, json!(new));
         }
+        let mut bounds = [None, None];
+        for i in 0..2 {
+            bounds[i] = match &self.bound[i] {
+                None => None,
+                Some(Bound::Named(g)) => Some(g.clone()),
+                Some(Bound::New(_)) if i == 1 && self.bound[0] == self.bound[1] => bounds[0].clone(),
+                Some(Bound::New(curves)) => {
+                    let g = patch.fresh("bound");
+                    patch.set("groups", &g, json!(curves));
+                    Some(g)
+                }
+            };
+        }
         let of = match (&self.cell[..], &self.of) {
+            _ if self.offset => match &self.base {
+                Base::Along { group, .. } => group.clone(),
+                _ => return Ok(None),
+            },
             ([], None) => return Ok(None),
             ([], Some(of)) => of.clone(),
             ([one], _) if self.before["sketch"]["points"].get(one).is_none() => one.clone(),
@@ -391,7 +466,7 @@ impl PatternForm {
                 group
             }
         };
-        patch.set("patterns", &self.name, self.pattern(&of)?);
+        patch.set("patterns", &self.name, self.pattern(&of, &bounds)?);
         Ok(patch.done())
     }
 
@@ -422,6 +497,17 @@ impl PatternForm {
                 self.fields.insert(k, step.clone());
             }
         }
+    }
+
+    /// Bound `i` from the selection: the group it is, its one curve, or the curves selected.
+    pub fn take_bound(&mut self, sk: &SketchEdit, i: usize) {
+        let curves: Vec<String> = sk.selected.iter().filter_map(|p| if let Pick::Curve(n) = p { Some(n.clone()) } else { None }).collect();
+        self.bound[i] = match (sk.selected_group(), &curves[..]) {
+            (Some(g), _) => Some(Bound::Named(g)),
+            (None, []) => return,
+            (None, [one]) => Some(Bound::Named(one.clone())),
+            (None, _) => Some(Bound::New(curves)),
+        };
     }
 
     /// The elements picked, from the selection.
@@ -558,6 +644,48 @@ mod tests {
 
     fn select(sk: &mut SketchEdit, picks: Vec<Pick>) {
         sk.selected = picks;
+    }
+
+    /// A line into a tangent arc, and two construction lines that can stop it.
+    fn hook() -> SketchEdit {
+        edit(json!({
+            "points": {"a": [0, 0], "b": [0, 50], "c": [50, 100], "o": [50, 50], "p": [60, 120], "q": [60, 60], "r": [100, 40]},
+            "lines": {"l": {"from": "a", "to": "b"}, "one": {"from": "p", "to": "q", "construction": true}, "two": {"from": "q", "to": "r", "construction": true}},
+            "arcs": {"bend": {"center": "o", "from": "c", "to": "b"}},
+            "constraints": [{"type": "tangent", "curves": ["l", "bend"]}]
+        }))
+    }
+
+    /// An open chain selected, parallel copies chosen, two curves picked as what stops the ends:
+    /// the group of the chain, a group of the bound, and the pattern; copies previewed at once;
+    /// and its menu opens again with what it had.
+    #[test]
+    fn parallel_copies_are_stopped_by_curves_picked() {
+        let mut sk = hook();
+        select(&mut sk, vec![Pick::Curve("l".into()), Pick::Curve("bend".into())]);
+        let mut form = PatternForm::new(&sk, base_of(&sk).unwrap());
+        form.offset = true;
+        form.fields.insert("n", "2".into());
+        form.fields.insert("s1", "10".into());
+        select(&mut sk, vec![Pick::Curve("one".into()), Pick::Curve("two".into())]);
+        form.take_bound(&sk, 1);
+        assert_eq!(form.bound[1], Some(Bound::New(vec!["one".into(), "two".into()])));
+        form.preview(&mut sk).unwrap();
+        let placed = sk.placed.as_ref().unwrap();
+        assert_eq!(placed.patterns[0].chains.len(), 2, "previewed");
+        let patch = form.patch().unwrap().unwrap();
+        let name = form.name.clone();
+        let pattern = &patch["patterns"][&name];
+        let of = pattern["of"].as_str().unwrap();
+        assert_eq!(patch["groups"][of], json!(["l", "bend"]));
+        assert_eq!(pattern["offset"]["step"], json!(10.0));
+        let bound = pattern["offset"]["end"].as_str().unwrap();
+        assert_eq!(patch["groups"][bound], json!(["one", "two"]));
+        assert!(pattern["offset"].get("start").is_none());
+        let again = PatternForm::edit(&sk, &name).unwrap();
+        assert!(again.offset);
+        assert_eq!(again.bound, [None, Some(Bound::Named(bound.to_string()))]);
+        assert_eq!(again.fields["s1"], "10");
     }
 
     /// What is selected first says the kind.

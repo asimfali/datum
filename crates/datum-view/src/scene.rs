@@ -185,6 +185,7 @@ impl Scene {
                                 SketchEdit::copy_outline(p, c, at).into_iter().for_each(|pts| chords(p, pts, &mut s.sketch_lines));
                             }
                         }
+                        c.chains.iter().for_each(|copy| chords(p, copy.outline(), &mut s.sketch_lines));
                     }
                 }
             }

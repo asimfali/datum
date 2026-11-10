@@ -1028,6 +1028,17 @@ pub fn place<'a>(
                 bytes(c.as_bytes());
             }
         }
+        for c in &p.chains {
+            bytes(&c.k.to_le_bytes());
+            for (name, piece) in &c.pieces {
+                bytes(name.as_bytes());
+                bytes(&[piece.from.x, piece.from.y, piece.to.x, piece.to.y].map(f64::to_bits).map(u64::to_le_bytes).concat());
+                if let Some(a) = piece.arc {
+                    bytes(&[a.center.x, a.center.y].map(f64::to_bits).map(u64::to_le_bytes).concat());
+                    bytes(&[u8::from(a.ccw)]);
+                }
+            }
+        }
         for (k, d) in &p.at {
             bytes(&[k[0].to_le_bytes(), k[1].to_le_bytes(), d.by.x.to_bits().to_le_bytes(), d.by.y.to_bits().to_le_bytes()].concat());
             // A grid's copies are not turned: their bytes as before turns (D153).
@@ -1178,7 +1189,7 @@ pub(crate) struct Copy {
 pub(crate) fn profile_loops(feature: TopoId, s: &Placed) -> Result<Vec<Found>, BrepError> {
     let aside = crate::copies::aside(&s.patterns);
     let mut out = loops(feature, s, &|n| !aside.contains(&n.to_string()), false)?;
-    for (pattern, p) in s.patterns.iter().enumerate() {
+    for (pattern, p) in s.patterns.iter().enumerate().filter(|(_, p)| p.chains.is_empty()) {
         let base = loops(feature, s, &|n| p.cell.contains(n), false)?;
         out.par_extend(p.at.par_iter().flat_map_iter(|&(k, d)| {
             let own = p.source && k == [0, 0];
@@ -1260,7 +1271,7 @@ pub fn open_curves(s: &Placed) -> Vec<String> {
 
 /// A curve of an open chain, as it is walked: an arc if it has its centre and way round.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ChainPiece {
+pub struct ChainPiece {
     pub from: Vec2,
     pub to: Vec2,
     pub arc: Option<ProfileArc>,
@@ -1269,33 +1280,34 @@ pub(crate) struct ChainPiece {
 /// The open chains of the profile curves of `s` (D237): each named by its first curve, walked the
 /// way that curve is drawn.
 pub(crate) fn open_chains(s: &Placed) -> Result<Vec<(String, Vec<ChainPiece>)>, BrepError> {
-    let named = open_chains_named(s)?;
+    let named = open_chains_named(s, &|_| true)?;
     Ok(named.into_iter().map(|c| (c[0].0.clone(), c.into_iter().map(|(_, p)| p).collect())).collect())
 }
 
-/// [`open_chains`] with each curve's name.
-pub(crate) fn open_chains_named(s: &Placed) -> Result<Vec<Vec<(String, ChainPiece)>>, BrepError> {
-    let keep = |_: &str, construction: bool| !construction;
+/// [`open_chains`] of the curves `keep` keeps, with each curve's name.
+pub(crate) fn open_chains_named(s: &Placed, keep: &dyn Fn(&str) -> bool) -> Result<Vec<Vec<(String, ChainPiece)>>, BrepError> {
+    let keep = |n: &str, construction: bool| !construction && keep(n);
     let found = contours(&s.lines, &s.arcs, &keep);
+    found.paths.iter().map(|path| if path[0].forward { named_pieces(s, path) } else { named_pieces(s, &datum_sketch::reversed(path)) }).collect()
+}
+
+/// A chain's curves as pieces, each with its name.
+pub(crate) fn named_pieces(s: &Placed, path: &[Step<'_>]) -> Result<Vec<(String, ChainPiece)>, BrepError> {
     let at = |n: &str| s.solved.points.get(n).copied().ok_or_else(|| BrepError::Sketch(format!("no point `{n}`")));
-    found
-        .paths
-        .iter()
-        .map(|path| {
-            let turned;
-            let path = if path[0].forward {
-                path
-            } else {
-                turned = datum_sketch::reversed(path);
-                &turned
-            };
-            let pieces = path.iter().map(|st| {
-                let arc = s.arcs.get(st.curve).map(|a| Ok::<_, BrepError>(ProfileArc { center: at(&a.center)?, ccw: st.forward })).transpose()?;
-                Ok((st.curve.to_string(), ChainPiece { from: at(st.from)?, to: at(st.to)?, arc }))
-            });
-            pieces.collect::<Result<_, BrepError>>()
+    path.iter()
+        .map(|st| {
+            let arc = s.arcs.get(st.curve).map(|a| Ok::<_, BrepError>(ProfileArc { center: at(&a.center)?, ccw: st.forward })).transpose()?;
+            Ok((st.curve.to_string(), ChainPiece { from: at(st.from)?, to: at(st.to)?, arc }))
         })
         .collect()
+}
+
+/// The first two neighbours of `chain` the sketch does not state tangent.
+pub(crate) fn first_corner<'a>(s: &Placed, chain: &'a [(String, ChainPiece)]) -> Option<(&'a str, &'a str)> {
+    chain.windows(2).map(|w| (w[0].0.as_str(), w[1].0.as_str())).find(|(a, b)| {
+        let pair = if a < b { [a.to_string(), b.to_string()] } else { [b.to_string(), a.to_string()] };
+        !s.tangent.contains(&pair)
+    })
 }
 
 /// The curves of each closed profile of `s`, by name: what `profiles` picks a profile by.
