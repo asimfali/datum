@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use egui_wgpu::wgpu;
 
-use crate::scene::{Geometry, LINE_VERTEX, Part, TRIANGLE_VERTEX};
+use crate::scene::{CONTOUR_VERTEX, Geometry, LINE_VERTEX, Part, TRIANGLE_VERTEX};
 
 /// The GPU interfaces the window and headless pictures open, `WGPU_BACKEND` still choosing. On
 /// Windows, DirectX 12 with OpenGL for GPUs without it, not Vulkan: a laptop's Vulkan driver
@@ -58,6 +58,16 @@ struct LineOut { @builtin(position) clip: vec4<f32>, @location(0) colour: vec4<f
     return o;
 }
 
+// An edge of a sphere's or a torus's triangles, on the outline only when its two triangles turn
+// to different sides of the eye; any other is sent outside the picture whole.
+@vertex fn vs_contour(@location(0) pos: vec3<f32>, @location(1) mid: vec3<f32>, @location(2) a: vec3<f32>, @location(3) b: vec3<f32>, @location(4) colour: vec4<f32>) -> LineOut {
+    var o: LineOut;
+    let to_eye = u.eye.xyz - mid * u.eye.w;
+    o.clip = select(vec4<f32>(2.0, 2.0, 2.0, 1.0), u.vp * vec4<f32>(pos, 1.0), (dot(a, to_eye) <= 0.0) != (dot(b, to_eye) <= 0.0));
+    o.colour = colour;
+    return o;
+}
+
 @fragment fn fs_line(i: LineOut) -> @location(0) vec4<f32> {
     return i.colour;
 }
@@ -87,13 +97,13 @@ pub const SAMPLES: u32 = 4;
 
 pub struct Renderer {
     /// Triangles and lines, without multisampling and with it.
-    pipelines: [[wgpu::RenderPipeline; 2]; 2],
+    pipelines: [[wgpu::RenderPipeline; 3]; 2],
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
     /// The uploaded geometry: its version, triangles and lines.
-    buffers: Option<(u64, Vertices, Vertices)>,
+    buffers: Option<(u64, [Vertices; 3])>,
     /// Index ranges of triangles and lines in view in the frame being drawn.
-    visible: [Vec<Range<u32>>; 2],
+    visible: [Vec<Range<u32>>; 3],
     target: Option<Target>,
 }
 
@@ -216,7 +226,19 @@ impl Renderer {
                 wgpu::DepthBiasState::default(),
             )
         };
-        let pipelines = [1, SAMPLES].map(|n| [triangles(n), lines(n)]);
+        let contours = |samples| {
+            pipeline(
+                samples,
+                "vs_contour",
+                "fs_line",
+                CONTOUR_VERTEX,
+                &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x3, 3 => Float32x3, 4 => Unorm8x4],
+                wgpu::PrimitiveTopology::LineList,
+                None,
+                wgpu::DepthBiasState::default(),
+            )
+        };
+        let pipelines = [1, SAMPLES].map(|n| [triangles(n), lines(n), contours(n)]);
         Self { pipelines, uniform, bind, buffers: None, visible: Default::default(), target: None }
     }
 
@@ -303,9 +325,11 @@ impl Renderer {
                     })
                     .collect::<Vec<_>>()
             };
-            self.buffers = Some((frame.version, part(&frame.geometry.triangles, TRIANGLE_VERTEX), part(&frame.geometry.lines, LINE_VERTEX)));
+            let g = &frame.geometry;
+            self.buffers =
+                Some((frame.version, [part(&g.triangles, TRIANGLE_VERTEX), part(&g.lines, LINE_VERTEX), part(&g.contours, CONTOUR_VERTEX)]));
         }
-        self.visible = [&frame.geometry.triangles, &frame.geometry.lines].map(|p| visible(p, &frame.view_projection));
+        self.visible = [&frame.geometry.triangles, &frame.geometry.lines, &frame.geometry.contours].map(|p| visible(p, &frame.view_projection));
         let mut u = Vec::with_capacity(80);
         for f in frame.view_projection.iter().chain(&frame.eye) {
             u.extend_from_slice(&f.to_le_bytes());
@@ -313,10 +337,10 @@ impl Renderer {
         queue.write_buffer(&self.uniform, 0, &u);
     }
 
-    fn paint(&self, pass: &mut wgpu::RenderPass<'_>, pipelines: &[wgpu::RenderPipeline; 2]) {
-        let Some((_, tris, lines)) = &self.buffers else { return };
+    fn paint(&self, pass: &mut wgpu::RenderPass<'_>, pipelines: &[wgpu::RenderPipeline; 3]) {
+        let Some((_, parts)) = &self.buffers else { return };
         pass.set_bind_group(0, &self.bind, &[]);
-        for ((pipeline, blocks), ranges) in pipelines.iter().zip([tris, lines]).zip(&self.visible) {
+        for ((pipeline, blocks), ranges) in pipelines.iter().zip(parts).zip(&self.visible) {
             pass.set_pipeline(pipeline);
             for b in blocks {
                 pass.set_vertex_buffer(0, b.vertices.slice(..));

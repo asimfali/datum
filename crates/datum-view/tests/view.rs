@@ -15,6 +15,39 @@ fn scene(model: &str) -> Scene {
     Scene::new(&e.final_values(&g), &mut Default::default())
 }
 
+/// Where a flat face goes smoothly into a curved one a line is drawn, the start of the rib; a
+/// face's seams with its own surface stay undrawn, so a ball has no edge at all.
+#[test]
+fn a_smooth_edge_is_drawn_where_a_transition_starts() {
+    let s = scene("rib.json");
+    let (lo, hi) = s.bounds.unwrap();
+    let inside = |p: &Vec3| p.x > lo.x && p.x < hi.x && p.y > lo.y && p.y < hi.y;
+    assert!(s.bodies[0].edges.iter().flatten().any(inside), "the rib's foot is not drawn");
+    assert!(scene("revolve_ball.json").bodies[0].edges.is_empty());
+}
+
+/// A ball's outline is drawn though it has no edge: every side of its triangles is shared, across
+/// the seams too, and in the picture some pixels are as dark as lines and no surface is.
+#[test]
+fn a_ball_is_outlined_from_any_view() {
+    let s = scene("revolve_ball.json");
+    let m = &s.bodies[0];
+    assert_eq!(m.contours.len() * 2, m.triangles.len() * 3);
+    let (w, h) = (200, 200);
+    for turn in [0.0, 1.0] {
+        let mut cam = Camera::default();
+        cam.fit(s.bounds, 1.0);
+        cam.spin(turn);
+        let rgba = match datum_view::capture::picture(&s, &cam, w, h) {
+            Ok(p) => p,
+            Err(e) if e.contains("no GPU adapter") => return eprintln!("skipping: {e}"),
+            Err(e) => panic!("{e}"),
+        };
+        let dark = rgba.chunks(4).filter(|p| p[0] < 50).count();
+        assert!(dark > 100, "{dark} dark pixels");
+    }
+}
+
 /// #119: a pattern's copies are drawn with their sketch outside it too, as the profiles they make.
 #[test]
 fn pattern_copies_are_drawn_with_the_sketch() {

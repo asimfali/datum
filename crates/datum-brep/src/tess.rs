@@ -270,16 +270,15 @@ fn torus_mesh(body: &Body, f: Ix, t: &crate::Torus, chord: f64) -> Result<FaceMe
         let first = points.len() as Vx;
         for h in body.loop_half_edges(l) {
             let he = &body.half_edges()[h as usize];
-            let (u, v) = (body.point(he.origin), body.point(body.half_edges()[body.next(h) as usize].origin));
-            points.push(u);
+            points.push(body.point(he.origin));
             vertices.push(he.origin);
-            let edge = &body.edges()[he.edge as usize];
-            if let Some(curve) = body.edge_curve(edge) {
-                let curve = if edge.half == h { curve } else { curve.reversed() };
-                for p in curve.inner_points(u, v, chord) {
-                    points.push(p);
-                    vertices.push(Ix::MAX);
-                }
+            // The edge's own points, the same to both its faces: a mesh without cracks to the bit.
+            let along = edge_points(body, he.edge, chord);
+            let inner = &along[1..along.len() - 1];
+            let forward = body.edges()[he.edge as usize].half == h;
+            for k in 0..inner.len() {
+                points.push(inner[if forward { k } else { inner.len() - 1 - k }]);
+                vertices.push(Ix::MAX);
             }
         }
         let last = points.len() as Vx - 1;

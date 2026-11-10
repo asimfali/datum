@@ -102,7 +102,7 @@ pub fn frame_times(scene: &Scene, full: Geometry, width: u32, height: u32, frame
     let mut o = Offscreen::new(width, height)?;
     let contents = [
         ("faces + edges", Arc::new(full.clone())),
-        ("faces", Arc::new(Geometry { lines: Part::default(), ..full.clone() })),
+        ("faces", Arc::new(Geometry { lines: Part::default(), contours: Part::default(), ..full.clone() })),
         ("edges", Arc::new(Geometry { triangles: Part::default(), ..full })),
     ];
     let mut fitted = Camera::default();
