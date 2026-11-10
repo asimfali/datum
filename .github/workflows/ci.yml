@@ -19,6 +19,8 @@ env:
   CARGO_TERM_COLOR: always
   # Compiling the tests is most of a run (about 75%); nothing here reads their debug info.
   CARGO_PROFILE_DEV_DEBUG: "0"
+  # The 49 test programs of a run are linked one by one: on Windows by the fast linker Rust ships.
+  CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: rust-lld
 
 jobs:
   check:
