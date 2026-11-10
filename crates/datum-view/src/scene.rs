@@ -29,6 +29,39 @@ pub struct BodyMesh {
     pub faces: Vec<TopoId>,
     /// B-rep edges (not triangle edges), arcs as chords: what an engineer reads a part by.
     pub edges: Vec<[Vec3; 2]>,
+    /// What can become the outline of a sphere or a torus on screen.
+    pub contours: Vec<Contour>,
+}
+
+/// An edge of the triangles of spheres and tori: drawn only while one of its two triangles faces
+/// the eye and the other does not, so that the lines drawn are the outline from where one looks.
+#[derive(Clone, Copy)]
+pub struct Contour {
+    ends: [Vec3; 2],
+    /// Which way the surface looks at each of the two triangles, of any length: only the side
+    /// matters. The surface's normals at the corners: a thin triangle along a seam has a plane of
+    /// its own, nothing like the surface.
+    normals: [[f32; 3]; 2],
+}
+
+/// The contours of `triangles` among those numbered `round`: edges two of them share. Across a
+/// seam of a sphere too: faces next to each other have the same points along their common edge.
+fn contours(triangles: &[[Vec3; 3]], normals: &[[[f32; 3]; 3]], round: &[usize]) -> Vec<Contour> {
+    // Adding zero makes -0 the same as 0.
+    let bits = |p: Vec3| [p.x, p.y, p.z].map(|c| (c + 0.0).to_bits());
+    let mut sides: Vec<_> = round
+        .iter()
+        .flat_map(|&t| {
+            (0..3).map(move |k| {
+                let (a, b) = (bits(triangles[t][k]), bits(triangles[t][(k + 1) % 3]));
+                (if a < b { [a, b] } else { [b, a] }, t)
+            })
+        })
+        .collect();
+    sides.par_sort_unstable();
+    let normal = |t: usize| [0, 1, 2].map(|k| normals[t].iter().map(|n| n[k]).sum::<f32>());
+    let point = |p: [u64; 3]| Vec3::new(f64::from_bits(p[0]), f64::from_bits(p[1]), f64::from_bits(p[2]));
+    sides.windows(2).filter(|w| w[0].0 == w[1].0).map(|w| Contour { ends: w[0].0.map(point), normals: [normal(w[0].1), normal(w[1].1)] }).collect()
 }
 
 impl BodyMesh {
@@ -45,27 +78,33 @@ impl BodyMesh {
                     triangles: m.triangles.iter().map(|t| corners(t, &m.points)).collect(),
                     normals: m.triangles.iter().map(|t| corners(t, &m.normals).map(f32s)).collect(),
                     faces: vec![body.faces()[f as usize].id; m.triangles.len()],
-                    edges: Vec::new(),
+                    ..Self::default()
                 }
             })
             .collect();
         let mut mesh = Self::default();
-        for f in faces {
+        let mut round = Vec::new();
+        for (f, face) in faces.into_iter().zip(body.faces()) {
+            if matches!(face.surface, Surface::Torus(_)) {
+                round.extend(mesh.triangles.len()..mesh.triangles.len() + f.triangles.len());
+            }
             mesh.triangles.extend(f.triangles);
             mesh.normals.extend(f.normals);
             mesh.faces.extend(f.faces);
         }
-        // Edges where the surface turns, and where a flat face goes smoothly into a curved one:
-        // that line is where a bend or a rib starts. Between nearly coplanar faces (a terrain's
+        mesh.contours = contours(&mesh.triangles, &mesh.normals, &round);
+        // Edges where the surface turns, where a flat face goes smoothly into a curved one, and
+        // where a torus or a sphere ends: those lines are where a bend or a rib starts. Between nearly coplanar faces (a terrain's
         // cells, a split face) or along the seams of a cylinder an edge says nothing on screen.
         // A display threshold; the model never sees it.
         let surface = |h: Ix| &body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface;
         let flat = |s: &Surface| matches!(s, Surface::Plane(_));
+        let round = |s: &Surface| matches!(s, Surface::Torus(_));
         for (e, edge) in body.edges().iter().enumerate() {
             let pts = edge_points(body, e as Ix, chord);
             let p = pts[0];
             let (a, b) = (surface(edge.half), surface(body.half_edges()[edge.half as usize].twin));
-            if flat(a) != flat(b) || a.normal_at(p).dot(b.normal_at(p)) < SHARP {
+            if flat(a) != flat(b) || ((round(a) || round(b)) && a != b) || a.normal_at(p).dot(b.normal_at(p)) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
             }
         }
@@ -305,10 +344,14 @@ pub struct Geometry {
     pub triangles: Part,
     /// Per vertex: position (3 × f32), colour (4 × u8); pairs of indices.
     pub lines: Part,
+    /// Per vertex: position, the edge's middle and its two triangles' normals (3 × f32 each),
+    /// colour (4 × u8); pairs of indices.
+    pub contours: Part,
 }
 
 pub const TRIANGLE_VERTEX: u64 = 28;
 pub const LINE_VERTEX: u64 = 16;
+pub const CONTOUR_VERTEX: u64 = 52;
 
 const BODY: [u8; 4] = [168, 182, 199, 255];
 const EDGE: [u8; 4] = [32, 36, 44, 255];
@@ -366,6 +409,19 @@ impl Geometry {
             let (e, colour) = groups[g as usize];
             e[i as usize].map(|p| vertex::<16>(&rel(p), colour))
         });
-        Self { triangles, lines }
+        // The outlines of the bodies, then of the product around them.
+        let meshes: Vec<(&BodyMesh, [u8; 4])> =
+            scene.bodies.iter().map(|m| (&**m, EDGE)).chain(scene.context.iter().map(|m| (&**m, around))).collect();
+        let order = meshes.iter().enumerate().flat_map(|(g, (m, _))| m.contours.iter().enumerate().map(move |(i, c)| key(&c.ends, g, i))).collect();
+        let contours = Part::new(order, |g, i| {
+            let (m, colour) = meshes[g as usize];
+            let Contour { ends, normals: [a, b] } = m.contours[i as usize];
+            let mid = rel((ends[0] + ends[1]) * 0.5);
+            ends.map(|p| {
+                let p = rel(p);
+                vertex::<52>(&[p[0], p[1], p[2], mid[0], mid[1], mid[2], a[0], a[1], a[2], b[0], b[1], b[2]], colour)
+            })
+        });
+        Self { triangles, lines, contours }
     }
 }
