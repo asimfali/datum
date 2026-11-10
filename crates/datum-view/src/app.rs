@@ -5861,6 +5861,12 @@ impl Viewer {
                             ui.radio_value(&mut form.fill, false, self.i18n.t("pattern-outline", "Along its outline"));
                         });
                     }
+                    if matches!(form.base, crate::pattern::Base::Along { closed: false, .. }) {
+                        ui.horizontal(|ui| {
+                            ui.radio_value(&mut form.offset, false, self.i18n.t("pattern-row-along", "Along"));
+                            ui.radio_value(&mut form.offset, true, self.i18n.t("pattern-parallel", "Parallel copies"));
+                        });
+                    }
                     for (row, keys, flip) in form.rows(&self.i18n) {
                         ui.horizontal(|ui| {
                             ui.label(row);
@@ -5891,23 +5897,49 @@ impl Viewer {
                             }
                         });
                     }
-                    if matches!(form.base, crate::pattern::Base::Along { .. }) && !form.fill {
+                    if matches!(form.base, crate::pattern::Base::Along { .. }) && !form.fill && !form.offset {
                         ui.checkbox(&mut form.rotate, self.i18n.t("pattern-rotate", "Turn with the path"));
                     }
-                    ui.horizontal(|ui| {
-                        let hint =
-                            self.i18n.t("pattern-select-hint", "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away");
-                        let select = ui.selectable_label(form.picking, self.i18n.t("pattern-select", "Select elements"));
-                        self.spots.insert("pattern.select", select.rect);
-                        if select.on_hover_text(hint).clicked() && !form.picking {
-                            form.picking = true;
-                            sk.selected.clear();
+                    if form.offset {
+                        let names = [self.i18n.t("pattern-bound-start", "Start stops at"), self.i18n.t("pattern-bound-end", "End stops at")];
+                        for (i, name) in names.into_iter().enumerate() {
+                            ui.horizontal(|ui| {
+                                let hint =
+                                    self.i18n.t("pattern-bound-hint", "Select a group or the curves that stop this end; construction ones too");
+                                if ui.selectable_label(form.bounding == Some(i), name).on_hover_text(hint).clicked() {
+                                    form.bounding = if form.bounding == Some(i) { None } else { Some(i) };
+                                    sk.selected.clear();
+                                }
+                                match &form.bound[i] {
+                                    None => ui.weak(self.i18n.t("pattern-bound-none", "stays where it is")),
+                                    Some(crate::pattern::Bound::Named(g)) => ui.weak(format!("`{g}`")),
+                                    Some(crate::pattern::Bound::New(c)) => {
+                                        ui.weak(self.i18n.f("pattern-picked", "{ $n } picked", &[("n", &c.len().to_string())]))
+                                    }
+                                };
+                                if form.bound[i].is_some() && ui.small_button("×").clicked() {
+                                    form.bound[i] = None;
+                                }
+                            });
                         }
-                        match (form.cell.len(), &form.of) {
-                            (0, Some(of)) => ui.weak(self.i18n.f("pattern-copies-of", "copies `{ $of }`", &[("of", of)])),
-                            (n, _) => ui.weak(self.i18n.f("pattern-picked", "{ $n } picked", &[("n", &n.to_string())])),
-                        };
-                    });
+                    }
+                    if !form.offset {
+                        ui.horizontal(|ui| {
+                            let hint = self
+                                .i18n
+                                .t("pattern-select-hint", "Click or frame what to copy (holes and the like); Shift or Ctrl adds or takes away");
+                            let select = ui.selectable_label(form.picking, self.i18n.t("pattern-select", "Select elements"));
+                            self.spots.insert("pattern.select", select.rect);
+                            if select.on_hover_text(hint).clicked() && !form.picking {
+                                form.picking = true;
+                                sk.selected.clear();
+                            }
+                            match (form.cell.len(), &form.of) {
+                                (0, Some(of)) => ui.weak(self.i18n.f("pattern-copies-of", "copies `{ $of }`", &[("of", of)])),
+                                (n, _) => ui.weak(self.i18n.f("pattern-picked", "{ $n } picked", &[("n", &n.to_string())])),
+                            };
+                        });
+                    }
                     if !form.picking || !form.cell.is_empty() || form.of.is_some() {
                         *error = form.preview(sk).err().or_else(|| sk.placed.as_ref().err().cloned());
                     }
@@ -5915,7 +5947,7 @@ impl Viewer {
                     if let Some(e) = error.as_ref().filter(|_| !ui.ctx().text_edit_focused()) {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
-                    let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some());
+                    let ready = error.is_none() && (!form.cell.is_empty() || form.of.is_some() || form.offset);
                     ui.horizontal(|ui| {
                         let r = ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done")));
                         self.spots.insert("pattern.done", r.rect);
@@ -6572,6 +6604,13 @@ impl Viewer {
         }
         if r.secondary_clicked() && !held && self.menu.is_none() {
             sk.draft.again();
+        }
+        // The menu's pattern takes the selection as what stops its copies, previewed at once.
+        if let Some(Menu::Pattern { form, error, .. }) = &mut self.menu
+            && let Some(i) = form.bounding
+        {
+            form.take_bound(sk, i);
+            *error = form.preview(sk).err();
         }
         // The menu's pattern takes the selection as the elements to copy, previewed at once.
         if let Some(Menu::Pattern { form, error, .. }) = &mut self.menu

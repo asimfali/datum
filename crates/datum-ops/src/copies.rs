@@ -10,6 +10,7 @@ use datum_math::Vec2;
 use datum_sketch::{Along, Around, Pattern, Sketch};
 use rayon::prelude::*;
 
+use crate::bounded::{self, ChainCopy};
 use crate::sketch::{Found, Placed, closed_loops, loops};
 
 /// A pattern of a sketch, placed: the curves it copies and each copy, by its place on the grid
@@ -23,6 +24,8 @@ pub struct Copies {
     /// The profile curves of its path (not construction): a guide, no profile of the sketch.
     pub guide: BTreeSet<String>,
     pub at: At,
+    /// A bounded array's copies (D253), instead of `at`.
+    pub chains: Vec<ChainCopy>,
     /// Copy `(0, 0)` is the cell itself (`count`), keeping its IDs; filling, the cell is a sample.
     pub source: bool,
     /// The area one copy opens, and its profiles.
@@ -84,10 +87,21 @@ pub(crate) fn place_patterns(sketch: &Sketch, s: &Placed) -> Result<Vec<Copies>,
     let cells: Vec<BTreeSet<String>> = sketch.patterns.values().map(|p| profiles(&p.of)).collect();
     // A path is a guide, as construction geometry is: drawn as profile lines (as in Inventor), it
     // bounds nothing.
-    let guides: Vec<BTreeSet<String>> = sketch.patterns.values().map(|p| p.along.as_ref().map(|a| profiles(&a.path)).unwrap_or_default()).collect();
+    let guides: Vec<BTreeSet<String>> = sketch
+        .patterns
+        .values()
+        .map(|p| {
+            let bounds = p.offset.iter().flat_map(|o| o.start.iter().chain(&o.end)).flat_map(|g| profiles(g));
+            p.along.iter().flat_map(|a| profiles(&a.path)).chain(bounds).collect()
+        })
+        .collect();
     let copied: BTreeSet<&String> = cells.iter().chain(&guides).flatten().collect();
     let mut out = Vec::with_capacity(sketch.patterns.len());
     for (((name, p), cell), guide) in sketch.patterns.iter().zip(&cells).zip(&guides) {
+        if let Some(o) = &p.offset {
+            out.push(bounded::place(sketch, s, name, p, o, cell.clone(), guide.clone())?);
+            continue;
+        }
         let bad = |m: String| BrepError::Sketch(format!("pattern `{name}`: {m}"));
         let base = loops(TopoId::derive("sketch.cell").finish(), s, &|n| cell.contains(n), false).map_err(|e| bad(format!("its cell: {e}")))?;
         if base.is_empty() {
@@ -161,7 +175,17 @@ pub(crate) fn place_patterns(sketch: &Sketch, s: &Placed) -> Result<Vec<Copies>,
             }
         };
         let at: At = at.into_iter().filter(|(k, _)| !p.skip.contains(k)).collect();
-        out.push(Copies { name: name.clone(), cell: cell.clone(), guide: guide.clone(), at, source, area, loops: base.len(), region });
+        out.push(Copies {
+            name: name.clone(),
+            cell: cell.clone(),
+            guide: guide.clone(),
+            at,
+            chains: Vec::new(),
+            source,
+            area,
+            loops: base.len(),
+            region,
+        });
     }
     keep_apart(s, &out)?;
     Ok(out)
@@ -181,7 +205,7 @@ fn vectors(s: &[[datum_math::expr::Num; 2]; 2], what: &str) -> Result<[Vec2; 2],
 }
 
 /// A count: a whole number from 1.
-fn whole(n: &datum_math::expr::Num) -> Option<i64> {
+pub(crate) fn whole(n: &datum_math::expr::Num) -> Option<i64> {
     n.value().filter(|v| v.fract() == 0.0 && *v >= 1.0 && *v <= 1e6).map(|v| v as i64)
 }
 
@@ -558,7 +582,7 @@ fn keep_apart(s: &Placed, patterns: &[Copies]) -> Result<(), BrepError> {
     let aside = aside(patterns);
     let own = closed_loops(id, s, &|n| !aside.contains(&n.to_string()));
     let mut all: Vec<(Option<usize>, ProfileLoop)> = own.into_iter().map(|l| (None, l.ring)).collect();
-    for (k, p) in patterns.iter().enumerate() {
+    for (k, p) in patterns.iter().enumerate().filter(|(_, p)| p.chains.is_empty()) {
         let base = loops(id, s, &|n| p.cell.contains(n), false)?;
         all.par_extend(p.at.par_iter().flat_map_iter(|&(c, d)| base.iter().map(move |l| (Some(k), moved(&l.ring, d, id, &p.name, c, true)))));
     }

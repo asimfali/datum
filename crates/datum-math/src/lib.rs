@@ -8,10 +8,12 @@ mod arc;
 mod exact;
 pub mod expr;
 mod implicit;
+mod meet;
 
 pub use arc::{Arc2, arcs_touch, inside_circle, segment_touches_arc};
 pub use exact::{exact_fallbacks, perturbed_signs, ties};
 pub use implicit::{Exact, ExactScale, Lpi, Point, cmp_axis, cmp_axis_filtered, orient2d_along, orient3d};
+pub use meet::{Carrier, crossings};
 
 use std::ops::{Add, Mul, Neg, Sub};
 

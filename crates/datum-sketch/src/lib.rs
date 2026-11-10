@@ -95,11 +95,29 @@ pub struct Pattern {
     pub along: Option<Along>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub around: Option<Around>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<Offset>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip: Vec<[i64; 2]>,
     /// By copy, `"i,j"`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub shift: BTreeMap<String, [Num; 2]>,
+}
+
+/// `count` copies of open chains (D253), the cell the first of them, each `step` further to the
+/// left of the way the group's first curve is drawn (negative: to the right): lines parallel,
+/// arcs about the same centres. Each end of each copy stops at the first curve of `start` or
+/// `end` (a group or a curve, construction or not, one for both if wished), `clearance` from
+/// it, walking from the middle of the copy past its end if need be; without one it stays.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Offset {
+    pub step: Num,
+    pub count: Num,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
 }
 
 /// Copies along `path` (a group of lines and arcs joined end to end, or one curve), run the way
@@ -350,6 +368,10 @@ impl Sketch {
                 for n in a.step.iter_mut().chain(a.angle.iter_mut()).chain([&mut a.count, &mut a.grow]) {
                     num(n, "around")?;
                 }
+            }
+            if let Some(o) = &mut p.offset {
+                num(&mut o.step, "offset")?;
+                num(&mut o.count, "offset")?;
             }
             num(&mut p.clearance, "clearance")?;
             for (k, v) in &mut p.shift {

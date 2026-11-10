@@ -1832,6 +1832,9 @@ impl SketchEdit {
         // The copies of patterns: each one's outline while few, the selected and the one under
         // the cursor always; many are seen by the regions they open.
         for c in &p.patterns {
+            for copy in &c.chains {
+                painter.add(egui::Shape::line(copy.outline().into_iter().map(screen).collect(), egui::Stroke::new(1.0, COPY)));
+            }
             let few = c.at.len() <= 2000;
             for (k, place) in &c.at {
                 let pick = Pick::Copy(c.name.clone(), *k);

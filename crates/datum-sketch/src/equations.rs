@@ -150,6 +150,17 @@ impl Equations {
                 return invalid(format!("pattern `{n}`: `of` names no group or curve: `{}`", p.of));
             }
             let grid = p.step.is_some() || p.count.is_some() || p.fill.is_some() || p.grow.is_some();
+            if let Some(o) = &p.offset {
+                if grid || p.along.is_some() || p.around.is_some() {
+                    return invalid(format!("pattern `{n}`: `offset` goes alone, not with a grid, `along` or `around`"));
+                }
+                for bound in o.start.iter().chain(&o.end) {
+                    if !(sketch.groups.contains_key(bound) || curve(bound)) {
+                        return invalid(format!("pattern `{n}`: bound names no group or curve: `{bound}`"));
+                    }
+                }
+                continue;
+            }
             match (grid, &p.along, &p.around) {
                 (true, None, None) => match (&p.step, &p.count, &p.fill) {
                     (None, ..) => return invalid(format!("pattern `{n}`: give `step`, `along` or `around`")),

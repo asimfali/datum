@@ -347,7 +347,7 @@ pub const ACTIONS: [Action; 58] = [
         "sketch.pattern",
         "Pattern",
         "Copies, by what is selected: a point or a circle — around it; one or two lines — a grid along them; \
-         lines and arcs closed into a contour, or a group — filling it or along its outline; an open chain — along it; \
+         lines and arcs closed into a contour, or a group — filling it or along its outline; an open chain — along it, or parallel copies up to what stops them; \
          nothing — a grid along the axes. Copies selected: shifted, left out, their pattern edited. \
          Then pick what to copy. The right button held on the sketch does the same",
         plain(Key::A),

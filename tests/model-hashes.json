@@ -187,6 +187,12 @@
     "rib": "ea881ec7a5675de5cf7e4aa9ed816950de6c1450bfe3d6939f42863613610241",
     "rib2": "4b1f18cd6368d2eaf39cd94200f9145e68b4d07db0ee1ba41c85149fd7e17106"
   },
+  "rib_array.json": {
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "path": "3aa4efbaa4d3e1042dd67a8b61fcac694b31e1ceee894611edb8b5df80537d19",
+    "plate": "9f1e5fb127bb12a791f3ca0696a8b8a177a0f7370c364df6ff1024271927c707",
+    "rib": "b0e881fe33aa9bf6f54dd6a8031f3294363cf16578a833cfdf83432ee7dae566"
+  },
   "rib_shallow.json": {
     "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
     "path": "f7041ac387fe4e48eadff5dded550fcd6b44c64ea45309507198149d76a4a2ed",

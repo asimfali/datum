@@ -1,0 +1,174 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            200,
+            0
+          ],
+          "c": [
+            200,
+            100
+          ],
+          "d": [
+            0,
+            100
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "plate",
+      "op": "plate",
+      "inputs": [
+        "outline"
+      ],
+      "thickness": 2
+    },
+    {
+      "name": "path",
+      "op": "sketch",
+      "inputs": [
+        "plate"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "sketch": {
+        "points": {
+          "a": [
+            40,
+            15
+          ],
+          "b": [
+            40,
+            50
+          ],
+          "c": [
+            80,
+            90
+          ],
+          "o": [
+            80,
+            50
+          ],
+          "s0": [
+            10,
+            10
+          ],
+          "s1": [
+            60,
+            5
+          ],
+          "e0": [
+            95,
+            100
+          ],
+          "e1": [
+            110,
+            70
+          ],
+          "e2": [
+            95,
+            45
+          ]
+        },
+        "lines": {
+          "l": {
+            "from": "a",
+            "to": "b"
+          },
+          "from_start": {
+            "from": "s0",
+            "to": "s1",
+            "construction": true
+          },
+          "to_end": {
+            "from": "e0",
+            "to": "e1",
+            "construction": true
+          },
+          "to_end2": {
+            "from": "e1",
+            "to": "e2",
+            "construction": true
+          }
+        },
+        "arcs": {
+          "bend": {
+            "center": "o",
+            "from": "c",
+            "to": "b"
+          }
+        },
+        "constraints": [
+          {
+            "type": "tangent",
+            "curves": [
+              "l",
+              "bend"
+            ]
+          }
+        ],
+        "groups": {
+          "cell": [
+            "l",
+            "bend"
+          ],
+          "ends": [
+            "to_end",
+            "to_end2"
+          ]
+        },
+        "patterns": {
+          "ribs": {
+            "of": "cell",
+            "offset": {
+              "step": -16,
+              "count": 2,
+              "start": "from_start",
+              "end": "ends"
+            },
+            "clearance": 4
+          }
+        }
+      }
+    },
+    {
+      "name": "rib",
+      "op": "rib",
+      "inputs": [
+        "plate",
+        "path"
+      ],
+      "tool": "Пример",
+      "diameter": 12,
+      "depth": 3,
+      "shoulder": 2
+    }
+  ]
+}

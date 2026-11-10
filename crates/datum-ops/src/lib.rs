@@ -3,6 +3,7 @@
 
 mod bent;
 mod boolean;
+mod bounded;
 mod bounds;
 mod branch;
 mod copies;
@@ -23,6 +24,7 @@ use std::ops::RangeInclusive;
 
 pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
+pub use bounded::ChainCopy;
 pub use copies::{Copies, Place};
 use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
@@ -39,6 +41,7 @@ pub use rib::{Formed, Imprint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 pub use sheet::{Sheet, Side, path_ends, paths, sheet};
+pub use sketch::ChainPiece;
 pub use sketch::{
     Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
     face_plane, open_curves, parallel, place, profile_curves, profile_regions,
