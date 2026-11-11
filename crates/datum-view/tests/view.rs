@@ -3,15 +3,20 @@
 
 use std::path::Path;
 
-use datum_graph::Evaluator;
+use datum_graph::{Evaluator, Value};
 use datum_math::Vec3;
 use datum_view::camera::Camera;
-use datum_view::scene::{Geometry, Scene, TRIANGLE_VERTEX};
+use datum_view::scene::{BodyMesh, Geometry, Scene, TRIANGLE_VERTEX};
 
-fn scene(model: &str) -> Scene {
+fn model(model: &str) -> (datum_graph::Graph, datum_graph::Evaluation) {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models");
     let g = datum_model::parse(&std::fs::read_to_string(root.join(model)).unwrap()).unwrap();
     let e = Evaluator::default().evaluate(&g);
+    (g, e)
+}
+
+fn scene(name: &str) -> Scene {
+    let (g, e) = model(name);
     Scene::new(&e.final_values(&g), &mut Default::default())
 }
 
@@ -24,6 +29,31 @@ fn a_smooth_edge_is_drawn_where_a_transition_starts() {
     let inside = |p: &Vec3| p.x > lo.x && p.x < hi.x && p.y > lo.y && p.y < hi.y;
     assert!(s.bodies[0].edges.iter().flatten().any(inside), "the rib's foot is not drawn");
     assert!(scene("revolve_ball.json").bodies[0].edges.is_empty());
+}
+
+/// A rib is one tool's surface: its foot, where a flat face meets a curved one, is drawn, but the
+/// tangent seams of the tool's strips are not. A revolved body keeps its transitions.
+#[test]
+fn a_rib_shows_its_foot_but_not_the_seams_of_its_tool() {
+    let (g, e) = model("rib.json");
+    let rib = e
+        .final_values(&g)
+        .into_iter()
+        .find_map(|v| match v {
+            Value::Formed(f) => Some(&f.body),
+            _ => None,
+        })
+        .unwrap();
+    let formed = BodyMesh::new(rib, true);
+    let plain = BodyMesh::new(rib, false);
+    assert!(formed.edges.len() < plain.edges.len(), "the tool's seams are still drawn");
+    assert_eq!(scene("rib.json").bodies[0].edges, formed.edges);
+
+    let (g, e) = model("revolve_groove.json");
+    let body = e.final_values(&g).into_iter().find_map(|v| v.body()).unwrap();
+    let plain = BodyMesh::new(body, false);
+    assert_eq!(scene("revolve_groove.json").bodies[0].edges, plain.edges);
+    assert!(BodyMesh::new(body, true).edges.len() < plain.edges.len(), "the flag would have changed a revolve");
 }
 
 /// A ball's outline is drawn though it has no edge: every side of its triangles is shared, across

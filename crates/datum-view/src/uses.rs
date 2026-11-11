@@ -2,7 +2,7 @@
 //! came out as it did, and what of it Ctrl or Shift and a click adds or takes away.
 
 use datum_brep::{Body, TopoId};
-use datum_graph::{Evaluation, Graph, Op};
+use datum_graph::{Evaluation, Graph, Op, Value};
 use datum_math::Vec3;
 use datum_ops::Placed;
 
@@ -114,7 +114,7 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
             u.planes.push(graph.nodes()[i as usize].name.clone());
         } else if let Some(b) = v.body().filter(|_| k > 0) {
             // The body it changes is the one on the screen; another (a main pipe) it meets.
-            u.lines.extend(cache.get(b).edges.iter().copied());
+            u.lines.extend(cache.get(b, matches!(&**v, Value::Formed(_))).edges.iter().copied());
         }
     }
     match &node.op {
@@ -421,7 +421,7 @@ mod tests {
             // The body it changes is not drawn over: its lines are the other pipe's.
             let other = {
                 let b = s.evaluation().results[s.graph().find(inputs[1]).unwrap() as usize].as_ref().unwrap().body().unwrap();
-                MeshCache::default().get(b).edges.clone()
+                MeshCache::default().get(b, false).edges.clone()
             };
             assert_eq!(u.lines.len(), other.len(), "{name}");
         }

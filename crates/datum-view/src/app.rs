@@ -600,7 +600,8 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         .flatten()
         .map(|(_, v)| v)
         .collect();
-    let context: Vec<&datum_brep::Body> = around.iter().filter_map(|v| v.body()).collect();
+    let context: Vec<(&datum_brep::Body, bool)> =
+        around.iter().filter_map(|v| Some((v.body()?, matches!(&**v, datum_graph::Value::Formed(_))))).collect();
     let mut scene = Scene::new(&finals, meshes).with_context(&context, session.active().is_some(), meshes);
     scene.copies = bodies
         .iter()
@@ -608,7 +609,7 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         .filter(|(_, n)| graph.find(n).is_some_and(|i| graph.nodes()[i as usize].op.is_turned_copy()))
         .map(|(k, _)| k)
         .collect();
-    meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().copied()).collect::<Vec<_>>());
+    meshes.retain(&finals.iter().filter_map(|v| v.body()).chain(context.iter().map(|(b, _)| *b)).collect::<Vec<_>>());
     let context = editing.and_then(|name| {
         let node = graph.nodes().iter().position(|n| n.name == name)?;
         let named = |i: usize| Some((graph.nodes()[i].name.clone(), evaluation.results[i].as_ref().ok()?.clone()));
