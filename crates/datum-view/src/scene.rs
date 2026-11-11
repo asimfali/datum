@@ -65,7 +65,9 @@ fn contours(triangles: &[[Vec3; 3]], normals: &[[[f32; 3]; 3]], round: &[usize])
 }
 
 impl BodyMesh {
-    pub fn new(body: &Body) -> Self {
+    /// The mesh of `body`; `formed` is a body that is one tool's surface (a rib, D250), whose
+    /// tangent seams are not edges a reader needs.
+    pub fn new(body: &Body, formed: bool) -> Self {
         let chord = if body.has_curves() { body.chord() } else { 0.0 };
         let f32s = |n: Vec3| [n.x as f32, n.y as f32, n.z as f32];
         let faces: Vec<Self> = (0..body.faces().len() as Ix)
@@ -94,9 +96,11 @@ impl BodyMesh {
         }
         mesh.contours = contours(&mesh.triangles, &mesh.normals, &round);
         // Edges where the surface turns, where a flat face goes smoothly into a curved one, and
-        // where a torus or a sphere ends: those lines are where a bend or a rib starts. Between nearly coplanar faces (a terrain's
-        // cells, a split face) or along the seams of a cylinder an edge says nothing on screen.
-        // A display threshold; the model never sees it.
+        // where a torus or a sphere ends: those lines are where a bend or a rib starts. A rib is
+        // one tool's surface: its strips meet tangentially, and those seams say nothing on screen;
+        // its outline is the foot, where a flat face meets a curved one. Between nearly coplanar
+        // faces (a terrain's cells, a split face) or along the seams of a cylinder an edge says
+        // nothing either. A display threshold; the model never sees it.
         let surface = |h: Ix| &body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface;
         let flat = |s: &Surface| matches!(s, Surface::Plane(_));
         let round = |s: &Surface| matches!(s, Surface::Torus(_));
@@ -104,7 +108,7 @@ impl BodyMesh {
             let pts = edge_points(body, e as Ix, chord);
             let p = pts[0];
             let (a, b) = (surface(edge.half), surface(body.half_edges()[edge.half as usize].twin));
-            if flat(a) != flat(b) || ((round(a) || round(b)) && a != b) || a.normal_at(p).dot(b.normal_at(p)) < SHARP {
+            if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || a.normal_at(p).dot(b.normal_at(p)) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
             }
         }
@@ -131,19 +135,20 @@ pub fn chords(p: &datum_ops::Placed, pts: Vec<[f64; 2]>, out: &mut Vec<[Vec3; 2]
     }
 }
 
-/// Meshes of bodies by content hash (lookups only: the map's order never shows).
+/// Meshes of bodies by content hash and the way they are drawn (lookups only: the map's order
+/// never shows).
 #[derive(Default)]
-pub struct MeshCache(HashMap<[u8; 32], Arc<BodyMesh>>);
+pub struct MeshCache(HashMap<([u8; 32], bool), Arc<BodyMesh>>);
 
 impl MeshCache {
-    pub fn get(&mut self, body: &Body) -> Arc<BodyMesh> {
-        self.0.entry(body.hash()).or_insert_with(|| Arc::new(BodyMesh::new(body))).clone()
+    pub fn get(&mut self, body: &Body, formed: bool) -> Arc<BodyMesh> {
+        self.0.entry((body.hash(), formed)).or_insert_with(|| Arc::new(BodyMesh::new(body, formed))).clone()
     }
 
     /// Keeps only the meshes of `bodies`: memory follows the model, not its history.
     pub fn retain(&mut self, bodies: &[&Body]) {
         let keep: Vec<[u8; 32]> = bodies.iter().map(|b| b.hash()).collect();
-        self.0.retain(|h, _| keep.contains(h));
+        self.0.retain(|(h, _), _| keep.contains(h));
     }
 }
 
@@ -168,8 +173,8 @@ impl Scene {
         let mut s = Self::default();
         for v in values {
             match v {
-                Value::Body(b) => s.bodies.push(cache.get(b)),
-                Value::Formed(f) => s.bodies.push(cache.get(&f.body)),
+                Value::Body(b) => s.bodies.push(cache.get(b, false)),
+                Value::Formed(f) => s.bodies.push(cache.get(&f.body, true)),
                 // A flat blank is for export (DXF), not drawn in the 3D scene.
                 // Work planes are drawn over the picture, from the model's inspection.
                 Value::Flat(_) | Value::Plane(_) => {}
@@ -194,9 +199,9 @@ impl Scene {
         s
     }
 
-    /// The scene with `bodies` around it, the rest of the product: drawn whole, or `faded`.
-    pub fn with_context(mut self, bodies: &[&Body], faded: bool, cache: &mut MeshCache) -> Self {
-        self.context = bodies.iter().map(|b| cache.get(b)).collect();
+    /// The scene with `(body, formed)` around it, the rest of the product: drawn whole, or `faded`.
+    pub fn with_context(mut self, bodies: &[(&Body, bool)], faded: bool, cache: &mut MeshCache) -> Self {
+        self.context = bodies.iter().map(|&(b, formed)| cache.get(b, formed)).collect();
         self.faded = faded;
         self.bound();
         self
