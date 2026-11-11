@@ -17,8 +17,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use datum_graph::Graph;
 use datum_math::Vec2;
-use datum_math::expr::{ExprError, eval, substitute, valid_name};
+use datum_math::expr::{ExprError, Num, eval, substitute, valid_name};
+use datum_ops::Op;
 use datum_sketch::{Constraint, Sketch};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -27,8 +29,9 @@ use crate::patch::SketchPatch;
 use crate::workspace;
 
 /// The levels with elements so far: a library folder's subfolders by the same names.
-/// A material (D178) and a rule (D179) are the enterprise's own: none is built in.
-pub const LEVELS: [&str; 4] = ["sketch", "material", "rule", "tool"];
+/// A material (D178) and a rule (D179) are the enterprise's own: none is built in. A part (D256)
+/// is a body built by features, for the punch press's stamps so far.
+pub const LEVELS: [&str; 5] = ["sketch", "material", "rule", "part", "tool"];
 
 const BUILT_IN_SKETCH: [&str; 2] =
     [include_str!("../../../library/sketch/rectangle.json"), include_str!("../../../library/sketch/center_rectangle.json")];
@@ -142,6 +145,7 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
     match level {
         "material" => return check_material(e),
         "rule" => return check_rule(e),
+        "part" => return check_part(e),
         "tool" => return check_tool(e),
         _ => {}
     }
@@ -173,6 +177,12 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
         }
     }
     let names = parameter_names(e)?;
+    check_presets(e, &names)?;
+    Ok(())
+}
+
+/// The presets of an element name only its parameters.
+fn check_presets(e: &Value, names: &[String]) -> Result<(), String> {
     for (preset, values) in e.get("presets").and_then(Value::as_object).into_iter().flatten() {
         let values = values.as_object().ok_or_else(|| format!("preset `{preset}`: parameter values by name"))?;
         if let Some(n) = values.keys().find(|n| !names.contains(n)) {
@@ -256,6 +266,71 @@ fn check_tool(e: &Value) -> Result<(), String> {
     }
     if o.get("min_length").is_some_and(|v| !v.as_f64().is_some_and(|v| v >= 0.0)) {
         return Err("a tool's `min_length`: mm, not below zero".into());
+    }
+    Ok(())
+}
+
+/// A part of the library (D256): its `kind` (`stamp` so far), the `features` that build its body
+/// (the model's operations, by name), the `roles` of the body (`cut`, `form`, optional `hinge`),
+/// the `anchor` where it is put in its local frame, an optional `thickness` range and the
+/// parameters of its size series. The body is built and checked when the part is used, not here:
+/// this keeps the library readable and lets a part be made before its stamp operation exists.
+fn check_part(e: &Value) -> Result<(), String> {
+    let keys = ["name", "kind", "description", "parameters", "presets", "features", "roles", "anchor", "thickness"];
+    let o = fields("part", e, &keys, &["kind", "description"])?;
+    if o.get("kind").and_then(Value::as_str) != Some("stamp") {
+        return Err("a part's `kind`: `stamp`".into());
+    }
+    let anchor = o.get("anchor").and_then(Value::as_array).ok_or("a part's `anchor`: a point [x, y, z]")?;
+    if anchor.len() != 3 || anchor.iter().any(|v| v.as_f64().is_none()) {
+        return Err("a part's `anchor`: a point [x, y, z]".into());
+    }
+    if let Some(t) = o.get("thickness") {
+        let t = t.as_array().filter(|t| t.len() == 2 && t.iter().all(Value::is_number)).ok_or("a part's `thickness`: [min, max]")?;
+        let (min, max) = (t[0].as_f64().unwrap_or_default(), t[1].as_f64().unwrap_or_default());
+        if !(min > 0.0 && max >= min) {
+            return Err("a part's `thickness`: mm, 0 < min <= max".into());
+        }
+    }
+    let names = parameter_names(e)?;
+    check_presets(e, &names)?;
+    let mut graph = Graph::default();
+    for p in e.get("parameters").and_then(Value::as_array).into_iter().flatten() {
+        let name = p["name"].as_str().unwrap_or_default();
+        let value: Num = serde_json::from_value(p["value"].clone()).map_err(|err| format!("parameter `{name}`: {err}"))?;
+        graph.set_parameter(name, value).map_err(|err| err.to_string())?;
+    }
+    let features = o.get("features").and_then(Value::as_array).filter(|f| !f.is_empty()).ok_or("a part's `features`: a non-empty list")?;
+    for f in features {
+        let f = fields("feature", f, &["name", "op", "inputs"], &[])?;
+        let name = f.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty()).ok_or("a feature's `name`: text")?;
+        let op: Op = serde_json::from_value(f["op"].clone()).map_err(|err| format!("feature `{name}`: {err}"))?;
+        let inputs: Vec<&str> = match f.get("inputs") {
+            None => Vec::new(),
+            Some(v) => v
+                .as_array()
+                .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
+                .ok_or_else(|| format!("feature `{name}`: `inputs` are feature names"))?,
+        };
+        let mut at = Vec::with_capacity(inputs.len());
+        for input in inputs {
+            let ix = graph.find(input).ok_or_else(|| format!("feature `{name}`: input `{input}` is not an earlier feature"))?;
+            at.push(ix);
+        }
+        graph.add(name, op, &at).map_err(|err| err.to_string())?;
+    }
+    let roles = o.get("roles").and_then(Value::as_object).ok_or("a part's `roles`: `cut`, `form` or `hinge`")?;
+    if let Some(k) = roles.keys().find(|k| !["cut", "form", "hinge"].contains(&k.as_str())) {
+        return Err(format!("a part's role `{k}`: `cut`, `form` or `hinge`"));
+    }
+    for (role, name) in roles {
+        let name = name.as_str().ok_or_else(|| format!("a part's role `{role}`: a feature name"))?;
+        if graph.find(name).is_none() {
+            return Err(format!("a part's role `{role}`: no feature `{name}`"));
+        }
+    }
+    if !roles.contains_key("cut") && !roles.contains_key("form") {
+        return Err("a part's `roles`: `cut` or `form`".into());
     }
     Ok(())
 }
@@ -1070,7 +1145,6 @@ mod tests {
         let names: Vec<&str> = lib.entries.iter().filter(|e| e.source == Source::BuiltIn).map(Entry::name).collect();
         assert_eq!(names, ["Rectangle", "Center rectangle"]);
         assert!(check("sketch", &element()).is_ok());
-        assert!(check("part", &element()).unwrap_err().contains("no elements of level"));
         let mut bad = element();
         bad["presets"]["short"]["width"] = json!(3);
         assert!(check("sketch", &bad).unwrap_err().contains("no parameter `width`"));
@@ -1090,6 +1164,43 @@ mod tests {
                 .contains("`min_length`")
         );
         assert!(tool(json!({"name": "R6", "kind": "roll", "diameter": 12, "depth": 3, "shoulder": 2, "x": 1})).unwrap_err().contains("no `x`"));
+    }
+
+    /// A stamp part: its body is a feature graph, its roles name the features the stamp uses.
+    #[test]
+    fn a_stamp_has_its_body_and_roles() {
+        let stamp = json!({
+            "name": "Язык 20",
+            "kind": "stamp",
+            "description": "x",
+            "anchor": [0.0, 0.0, 0.0],
+            "thickness": [0.5, 3.0],
+            "parameters": [{"name": "w", "value": 20.0}],
+            "presets": {"20": {"w": 20.0}},
+            "features": [
+                {"name": "body", "op": {"op": "prism", "polygon": [[0, 0], [1, 0], [1, 1], [0, 1]], "z0": 0, "z1": 1}, "inputs": []}
+            ],
+            "roles": {"cut": "body", "form": "body"}
+        });
+        assert!(check("part", &stamp).is_ok());
+        let mut bad = stamp.clone();
+        bad["kind"] = json!("part");
+        assert!(check("part", &bad).unwrap_err().contains("`stamp`"));
+        let mut bad = stamp.clone();
+        bad["roles"]["cut"] = json!("missing");
+        assert!(check("part", &bad).unwrap_err().contains("no feature `missing`"));
+        let mut bad = stamp.clone();
+        bad["thickness"] = json!([3.0, 1.0]);
+        assert!(check("part", &bad).unwrap_err().contains("0 < min <= max"));
+        let mut bad = stamp.clone();
+        bad["features"][0]["inputs"] = json!(["later"]);
+        assert!(check("part", &bad).unwrap_err().contains("not an earlier feature"));
+        let mut bad = stamp.clone();
+        bad["features"][0]["inputs"] = json!([1]);
+        assert!(check("part", &bad).unwrap_err().contains("`inputs` are feature names"));
+        let mut bad = stamp.clone();
+        bad["features"][0]["op"] = json!({"op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0});
+        assert!(check("part", &bad).unwrap_err().contains("feature `body`"));
     }
 
     #[test]
