@@ -176,6 +176,7 @@ mod tests {
     fn the_catalog_and_the_code_agree() {
         let sources = [
             include_str!("app.rs"),
+            include_str!("app/forms/rib.rs"),
             include_str!("sidebar.rs"),
             include_str!("dock.rs"),
             include_str!("table.rs"),
