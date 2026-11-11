@@ -410,12 +410,12 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "library",
-        description: "The library's elements of a `level` (VISION §10; `sketch`, `material`, `rule` or `tool`, the punch press's): built in, then from `library/<level>` \
+        description: "The library's elements of a `level` (VISION §10; `sketch`, `material`, `rule`, `part` or `tool`, the punch press's): built in, then from `library/<level>` \
                       beside the program, then from `library/<level>` of the model's project (the nearest folder above the model \
                       file with `datum-project.json`); one of a name already listed takes its place. Each with its `source` and \
                       all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
                       by name) and `anchors`; a material's `designation` and `density`; a rule's `kind`, `material`, `thickness` and \
-                      `radius`, `k_factor`. `skipped`: files that are not elements, \
+                      `radius`, `k_factor`; a part's `kind`, `features`, `roles`, `anchor`, `thickness` and size series. `skipped`: files that are not elements, \
                       with why.",
         params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
