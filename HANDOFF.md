@@ -12,7 +12,9 @@
 - `examples/stamp-leaf.json` — профиль инструмента; `datum build` проходит, объём 240.33.
 - Форма профиля ещё не подтверждена: пользователь правил JSON, текущий профиль может быть не тем.
 - MCP `datum` подключён в `opencode.json`; агенты `architect`, `worker`, `reviewer` — в `.opencode/agent/`.
-- Память и роли настроены: `HANDOFF.md`, `opencode.json`, `.opencode/agent/`, правило в `CLAUDE.md`; коммит `chore/agent-memory`.
+- Память и роли настроены: `HANDOFF.md`, `opencode.json`, `.opencode/agent/`, правила в `AGENTS.md` (симлинк `CLAUDE.md` — для Claude Code и старых ссылок); коммит `chore/agent-memory`.
+- OpenCode 2 читает только `AGENTS.md`, фолбэка на `CLAUDE.md` нет — правила до переименования в контекст не попадали.
+- MCP стартует через `cargo run --release`: при пересборке он не успевал за 30 с, отсюда «1 MCP failed». В `opencode.json` стоит `mcp.timeout.startup: 180000`.
 - Незакоммиченные тест-прототип `crates/datum-ops/tests/stamp_spike.rs` и пример `examples/stamp-leaf.json`; не мержить без ревью.
 - Зеркало при вставке элемента библиотеки эскиза (D258) сделано и смержено в `main` (`843c20b`, PR #240); ветка удалена. Windows-копия собрана.
 
@@ -27,7 +29,7 @@
 
 ## Следующий шаг
 
-0. Ветка `chore/agent-memory` (память агентов + handoff) — отдельный PR в следующей сессии.
+0. PR ветки `chore/agent-memory` (память, роли, `AGENTS.md`, таймаут MCP) — открыть и смержить.
 1. Подтвердить или поправить профиль `examples/stamp-leaf.json` (два гиба, размеры, ограничения).
 2. Параметризовать профиль: `t`, `w`, `R_base`, `R_tip`, `L_face`, `L_lip`, углы; размеры и ограничения — через параметры.
 3. Перейти к листу с вырезом и универсальному `stamp`; затем библиотечный редактор и вставка.
