@@ -1,0 +1,12 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "architect",
+  "instructions": ["HANDOFF.md"],
+  "mcp": {
+    "datum": {
+      "type": "local",
+      "command": ["cargo", "run", "--quiet", "--release", "-p", "datum-cli", "--", "mcp"],
+      "enabled": true
+    }
+  }
+}

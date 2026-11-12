@@ -1,4 +1,5 @@
 /target
 *:Zone.Identifier
+/photos/
 # Local notes for the agent: paths on the author's machine
 .claude/CLAUDE.md
