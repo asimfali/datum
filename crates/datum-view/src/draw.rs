@@ -4,6 +4,8 @@
 //! of undo each. Snap and inference tolerances are pixels and degrees on the screen: they only
 //! choose which constraints to add, and the solver then holds those exactly.
 
+use std::borrow::Cow;
+
 use datum_brep::{Curve, Ix, Surface};
 use datum_model::SketchPatch;
 use datum_ops::Placed;
@@ -194,6 +196,9 @@ impl Flat {
 pub struct Draft {
     pub tool: Tool,
     pub construction: bool,
+    /// Template tool: the element is placed mirrored left-right about its first anchor; only the
+    /// mirrored copy goes in. Sticky, as `construction` is (D258).
+    pub mirror: bool,
     /// Line tool: the chain's end.
     pub chain: Option<Chain>,
     /// Arc tool: centre, then start; circle tool: centre.
@@ -261,6 +266,7 @@ impl Default for Draft {
         Self {
             tool: Tool::Select,
             construction: false,
+            mirror: false,
             chain: None,
             clicks: Vec::new(),
             sweep: 0.0,
@@ -610,11 +616,18 @@ impl Draft {
         (self.stage(&edit.modes) == Some(Stage::Sizes) && !self.asks_sizes(&edit.modes)).then(|| self.put(edit)).flatten()
     }
 
+    /// The element being placed, mirrored about the vertical through its first anchor when asked:
+    /// only the mirrored copy is placed (D258).
+    fn element(&self) -> Option<Cow<'_, Json>> {
+        let t = self.template.as_ref()?;
+        if self.mirror { datum_model::library::mirrored(t).ok().map(Cow::Owned) } else { Some(Cow::Borrowed(t)) }
+    }
+
     /// The element at its anchors, with its sockets completed: one change.
     fn put(&mut self, edit: &SketchEdit) -> Option<Map<String, Json>> {
-        let t = self.template.as_ref()?;
+        let t = self.element()?;
         let mut patch = Patch::new(edit);
-        let links = crate::templates::place(&mut patch, t, self.preset.as_deref(), &self.answers, &self.clicks, self.construction, &edit.params)?;
+        let links = crate::templates::place(&mut patch, &t, self.preset.as_deref(), &self.answers, &self.clicks, self.construction, &edit.params)?;
         for (link, target) in links.iter().zip(&self.sockets) {
             if let Some(target) = target {
                 patch.constrain(link.to(target));
@@ -1133,9 +1146,9 @@ impl Draft {
             (Tool::Template, _, clicks) => {
                 // The cursor is the anchor asked; once they are clicked, the element stays there.
                 let asked = (self.stage(&edit.modes) == Some(Stage::Anchors)).then_some(spot.at);
-                if let Some(t) = &self.template {
+                if let Some(t) = self.element() {
                     let at: Vec<[f64; 2]> = clicks.iter().map(|c| c.at).chain(asked).collect();
-                    for line in crate::templates::outline(t, self.preset.as_deref(), &self.answers, &at, &edit.params) {
+                    for line in crate::templates::outline(&t, self.preset.as_deref(), &self.answers, &at, &edit.params) {
                         polyline(line);
                     }
                 }

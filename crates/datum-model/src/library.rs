@@ -696,6 +696,70 @@ pub fn place(
     Ok(renamed)
 }
 
+/// Element `e` mirrored left-right about the vertical through its first anchor, in its local
+/// coordinates: the element itself is reflected before placing, not a copy made after it (D258).
+/// Its points' x are reflected, an arc's ends swap (it runs counterclockwise from `from` to
+/// `to`), an angle's two lines swap, and a fix's `at` is reflected. Lengths, radii, distances,
+/// tangencies and symmetry about a vertical stay as they are. `links` stay untouched: they name
+/// the side outside the element, and their labels must read the same wherever it is put.
+/// Patterns are not supported: they would need their own reflection.
+pub fn mirrored(e: &Value) -> Result<Value, String> {
+    let mut out = e.clone();
+    let ax = {
+        let first = anchors(e).into_iter().next().ok_or("the element has no anchor point")?;
+        let p = &e["sketch"]["points"][first.as_str()];
+        let p = p.as_array().filter(|p| p.len() == 2 && p.iter().all(Value::is_number)).ok_or("a point is not [x, y]")?;
+        p[0].as_f64().ok_or("a point is not [x, y]")?
+    };
+    let sketch = out["sketch"].as_object_mut().ok_or("the element has no `sketch`")?;
+    if sketch.get("patterns").and_then(Value::as_object).is_some_and(|p| !p.is_empty()) {
+        return Err("mirroring an element with patterns is not supported".into());
+    }
+    if let Some(points) = sketch.get_mut("points").and_then(Value::as_object_mut) {
+        for p in points.values_mut() {
+            *p = mirror_point(p, ax)?;
+        }
+    }
+    for a in sketch.get_mut("arcs").and_then(Value::as_object_mut).into_iter().flat_map(|m| m.values_mut()) {
+        let Some(o) = a.as_object_mut() else { continue };
+        let (from, to) = (o.get("from").cloned(), o.get("to").cloned());
+        if let (Some(from), Some(to)) = (from, to) {
+            o.insert("from".into(), to);
+            o.insert("to".into(), from);
+        }
+    }
+    let swap_angle = |c: &mut Value| {
+        if c["type"] == "angle"
+            && let Some(lines) = c.get_mut("lines").and_then(Value::as_array_mut)
+            && lines.len() == 2
+        {
+            lines.swap(0, 1);
+        }
+    };
+    for c in sketch.get_mut("constraints").and_then(Value::as_array_mut).into_iter().flatten() {
+        if c["type"] == "fix" {
+            if let Some(at) = c.get("at").filter(|v| !v.is_null()).cloned() {
+                c["at"] = mirror_point(&at, ax)?;
+            }
+        } else {
+            swap_angle(c);
+        }
+    }
+    if let Some(measures) = sketch.get_mut("measures").and_then(Value::as_object_mut) {
+        for m in measures.values_mut() {
+            swap_angle(m);
+        }
+    }
+    Ok(out)
+}
+
+/// Point `p` (`[x, y]`) reflected about the vertical line `x = ax`.
+fn mirror_point(p: &Value, ax: f64) -> Result<Value, String> {
+    let q = p.as_array().filter(|q| q.len() == 2 && q.iter().all(Value::is_number)).ok_or("a point is not [x, y]")?;
+    let (x, y) = (q[0].as_f64().ok_or("a point is not [x, y]")?, q[1].as_f64().ok_or("a point is not [x, y]")?);
+    Ok(json!([2.0 * ax - x, y]))
+}
+
 /// What stands for the outside side of a socket's constraint (see [`Link`]).
 pub const SOCKET: &str = "?";
 
@@ -1355,5 +1419,48 @@ mod tests {
         let q = shape(&e, &v, &at, &none).unwrap().points;
         assert_eq!(q["a"], Vec2::new(10.0, 10.0), "the first anchor where clicked");
         assert!((q["c"].x - 40.0).abs() < 1e-9 && (q["c"].y - 15.0).abs() < 1e-9, "5 high as typed: {q:?}");
+    }
+
+    /// A piece mirrored about the vertical through its first anchor: its points, an arc's ends,
+    /// an angle's lines and a fix's spot; placed once, not twice (D258).
+    #[test]
+    fn a_mirrored_element_is_placed_once() {
+        let e = json!({"name": "Hook", "anchors": ["a"],
+            "sketch": {"points": {"a": [0, 0], "b": [4, 0], "c": [4, 2], "m": [2, 1]},
+                       "lines": {"bottom": {"from": "a", "to": "b"}, "edge": {"from": "b", "to": "c"}},
+                       "arcs": {"bow": {"center": "m", "from": "a", "to": "b"}},
+                       "constraints": [{"type": "angle", "lines": ["bottom", "edge"], "degrees": 90},
+                                       {"type": "fix", "point": "c", "at": [4, 2]}],
+                       "measures": {"bend": {"type": "angle", "lines": ["bottom", "edge"]}}}});
+        let m = mirrored(&e).unwrap();
+        assert_eq!(m["sketch"]["points"]["b"], json!([-4.0, 0.0]), "about the first anchor at x = 0: {m}");
+        assert_eq!(m["sketch"]["points"]["c"], json!([-4.0, 2.0]), "{m}");
+        assert_eq!((&m["sketch"]["arcs"]["bow"]["from"], &m["sketch"]["arcs"]["bow"]["to"]), (&json!("b"), &json!("a")), "{m}");
+        assert_eq!(m["sketch"]["constraints"][0]["lines"], json!(["edge", "bottom"]), "{m}");
+        assert_eq!(m["sketch"]["constraints"][1]["at"], json!([-4.0, 2.0]), "{m}");
+        assert_eq!(m["sketch"]["measures"]["bend"]["lines"], json!(["edge", "bottom"]), "{m}");
+        // Placed once: the points, lines and arc of the mirror, not the element and its copy.
+        let v = answers(&m, None, &Map::new(), &[], &none).unwrap();
+        let at = [Anchor { at: [10.0, 10.0], point: None }];
+        let mut patch = SketchPatch::new(&json!({"sketch": {}}));
+        let renamed = place(&mut patch, &m, &v, &at, &BTreeMap::new(), Put::default(), &none).unwrap();
+        let p = Value::Object(patch.done().unwrap());
+        assert_eq!(p["points"].as_object().unwrap().len(), 4, "{p}");
+        assert_eq!(p["lines"].as_object().unwrap().len(), 2, "{p}");
+        assert_eq!(p["arcs"].as_object().unwrap().len(), 1, "{p}");
+        let q = |n: &str| {
+            let point = &p["points"][renamed[n].as_str()];
+            [point[0].as_f64().unwrap(), point[1].as_f64().unwrap()]
+        };
+        assert_eq!(q("a"), [10.0, 10.0], "the anchor where clicked: {p}");
+        assert_eq!(q("b"), [6.0, 10.0], "left of the anchor, not right: {p}");
+        assert_eq!(q("c"), [6.0, 12.0], "{p}");
+        // A point that is not a pair of numbers, and patterns, are refused.
+        let mut bad = e.clone();
+        bad["sketch"]["points"]["b"] = json!([4]);
+        assert!(mirrored(&bad).unwrap_err().contains("not [x, y]"));
+        let mut patterned = e.clone();
+        patterned["sketch"]["patterns"] = json!({"grid": {"of": "bottom", "count": 2, "step": [5, 0]}});
+        assert!(mirrored(&patterned).unwrap_err().contains("patterns"));
     }
 }

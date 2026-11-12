@@ -567,7 +567,8 @@ const COMMANDS: &[Command] = &[
                       by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
                       sketch's axes, or with `fit: align` turn it toward the second. `names`: element names that take the given \
                       free names (a section put in place of one removed keeps its name, and so what referred to it downstream). \
-                      With a `preset`, the placed geometry is a sketch group named after it. \
+                      With a `preset`, the placed geometry is a sketch group named after it. `mirror`: placed reflected left-right \
+                      about its first anchor; only the mirrored copy is placed, the original is not kept. \
                       `links`: the element's sockets (constraints reaching out of it, `perpendicular l5 ?`, as `library` lists \
                       them) completed by a point, line or curve of the sketch. The reply has the edit's result, `names`: each \
                       element name with the name it got, and `open_links`: the sockets left open.",
@@ -581,12 +582,13 @@ const COMMANDS: &[Command] = &[
                        "items": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}]}},
                 "names": {"type": "object", "additionalProperties": {"type": "string"}},
                 "links": {"type": "object", "additionalProperties": {"type": "string"}},
-                "construction": {"type": "boolean"}
+                "construction": {"type": "boolean"},
+                "mirror": {"type": "boolean"}
             }, "required": ["name", "element", "at"], "additionalProperties": false})
         },
         run: |s, p| {
             let name = text(p, "name")?;
-            let element = match &p["element"] {
+            let mut element = match &p["element"] {
                 Value::String(n) => library::load("sketch", s.project().as_deref())
                     .get(n)
                     .map(|e| e.element.clone())
@@ -596,6 +598,9 @@ const COMMANDS: &[Command] = &[
                     e.clone()
                 }
             };
+            if p.get("mirror").and_then(Value::as_bool).unwrap_or(false) {
+                element = library::mirrored(&element)?;
+            }
             let Ok(Feature::Sketch(placed)) = s.value(name) else { return Err(format!("`{name}` is not a sketch that solves")) };
             let mut at = Vec::new();
             for spot in p.get("at").and_then(Value::as_array).into_iter().flatten() {
