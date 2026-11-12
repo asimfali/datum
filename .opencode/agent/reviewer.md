@@ -1,7 +1,7 @@
 ---
 description: Ревьюит diff только чтением; находки с file:line.
 mode: subagent
-model: opencode-go/deepseek-v4-pro
+model: opencode-go/glm-5.3-flash
 permission:
   edit: deny
   bash:
