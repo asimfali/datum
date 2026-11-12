@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# shotd - turn an image on the Windows clipboard into a file path, so OpenCode
+# in WSL can attach it with a plain Ctrl+V.
+#
+#   shotd start   - start the background watcher
+#   shotd stop    - stop it
+#   shotd status  - report whether it runs
+#   shotd once    - convert the current clipboard image once
+set -euo pipefail
+
+SCRIPT="$HOME/.local/share/shotd/watch.ps1"
+PS="$(command -v powershell.exe || echo /mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe)"
+MARK='watch.ps1'
+
+win_dir() {
+  "$PS" -NoProfile -NonInteractive -Command \
+    'Write-Output (Join-Path $env:LOCALAPPDATA "Temp\opencode-shots")' 2>/dev/null | tr -d '\r\n'
+}
+
+running() {
+  "$PS" -NoProfile -Command \
+    "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*$MARK*' } | Select-Object -First 1 -ExpandProperty ProcessId" \
+    2>/dev/null | tr -d '\r' | grep -q '[0-9]'
+}
+
+case "${1:-start}" in
+  start)
+    if running; then
+      echo "shotd: already running"
+      exit 0
+    fi
+    WIN_DIR="$(win_dir)"
+    WSL_DIR="$(wslpath -u "$WIN_DIR")"
+    "$PS" -STA -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass \
+      -File "$(wslpath -w "$SCRIPT")" -Dir "$WIN_DIR" -WslDir "$WSL_DIR" >/dev/null 2>&1 &
+    sleep 1
+    if running; then echo "shotd: started ($WSL_DIR)"; else echo "shotd: failed to start" >&2; exit 1; fi
+    ;;
+  stop)
+    "$PS" -NoProfile -Command \
+      "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { \$_.ProcessId -ne \$PID -and \$_.CommandLine -like '*$MARK*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }" \
+      >/dev/null 2>&1 || true
+    echo "shotd: stopped"
+    ;;
+  status)
+    if running; then echo "shotd: running"; else echo "shotd: not running"; fi
+    ;;
+  once)
+    WIN_DIR="$(win_dir)"
+    WSL_DIR="$(wslpath -u "$WIN_DIR")"
+    "$PS" -STA -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$SCRIPT")" \
+      -Dir "$WIN_DIR" -WslDir "$WSL_DIR" -Once
+    echo "shotd: clipboard processed"
+    ;;
+  *)
+    echo "usage: shotd {start|stop|status|once}" >&2
+    exit 2
+    ;;
+esac
