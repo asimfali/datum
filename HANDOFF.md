@@ -18,6 +18,7 @@
 - В `opencode.json` этого проекта разрешён `git push` (в глобальном конфиге он запрещён для остальных проектов); push и PR — только по явной просьбе автора.
 - Незакоммиченные тест-прототип `crates/datum-ops/tests/stamp_spike.rs` и пример `examples/stamp-leaf.json`; не мержить без ревью.
 - Зеркало при вставке элемента библиотеки эскиза (D258) сделано и смержено в `main` (`843c20b`, PR #240); ветка удалена. Windows-копия собрана.
+- Скилл `pr` (`.claude/skills/pr/`), шаблон `.github/pull_request_template.md`, раздел «Поиск» в `AGENTS.md` и строки в промптах `architect`/`worker`/`reviewer` — в ветке `chore/pr-skill-and-search-rules`, PR #244 ждёт мержа.
 
 ## Решения
 
@@ -32,11 +33,13 @@
 ## Окружение
 - Скилл `wsl-image-paste` (`.claude/skills/wsl-image-paste/`) — вставка картинок из буфера Windows в WSL без GUI: `shotd` кладёт путь к скриншоту в буфер, opencode прикрепляет его как `[Image 1]`.
 - Скиллы ядра (`.claude/skills/`): `add-op` — цепочка новой операции, с молчаливыми местами (`reads_blank`, переименование кривых, правило листа, `reedit`); `add-surface` — поверхность от `Surface` до STEP и развёртки; `geometry-debug` — репро, `inspect_model`, бисекция, детерминизм; `bless-hashes` — перепин эталонов: чистое дерево, `determinism-check`, diff после bless.
+- Скилл `pr` — открытие PR: ветка от свежего `main`, `scripts/check.sh`, `HANDOFF.md`, тело по `.github/pull_request_template.md`, ревью `reviewer`, мерж через `merge-pr`. Скилла синхронизации нет намеренно: это `git pull --ff-only`, и он уже есть шагом в `merge-pr`.
+- `rg` 15.2.0 (статический musl) в `~/.local/bin` — для shell-однострочников и поиска вне репозитория; агентский поиск идёт встроенными `grep`/`glob` (правила «Поиск» в `AGENTS.md`), чтобы не зависеть от машины. На Windows-копии `rg` нет.
 - Связь с домашней машиной — через комментарии в GitHub issue (чат сессий не общий).
 
 ## Следующий шаг
 
-0. PR #241 (`chore/agent-memory`: память, роли, `AGENTS.md`, таймаут MCP, push для проекта) — ждёт ревью и мержа.
+0. Смержить PR #244 (`chore/pr-skill-and-search-rules`: скилл `pr`, шаблон PR, правила «Поиск»), затем на рабочей машине: `git pull --ff-only`, при желании поставить `rg` в `~/.local/bin`, пересобрать `datum-cli` для MCP и обновить Windows-копию.
 1. Подтвердить или поправить профиль `examples/stamp-leaf.json` (два гиба, размеры, ограничения).
 2. Параметризовать профиль: `t`, `w`, `R_base`, `R_tip`, `L_face`, `L_lip`, углы; размеры и ограничения — через параметры.
 3. Перейти к листу с вырезом и универсальному `stamp`; затем библиотечный редактор и вставка.
