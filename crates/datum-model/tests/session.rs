@@ -247,6 +247,31 @@ fn an_element_between_two_points_of_a_chain() {
     assert!(s.execute("insert_element", &json!({"name": "path", "element": "Rectangle", "at": ["q"]})).unwrap_err().contains("no point `q`"));
 }
 
+/// An element inserted with `mirror` is placed reflected left-right about its first anchor:
+/// only the mirrored copy goes in, with as many names as the element has (D258).
+#[test]
+fn an_element_inserted_mirrored() {
+    let mut s = Session::default();
+    run(&mut s, "add", json!({"name": "s", "op": "sketch", "sketch": {"points": {"o": [0, 0]}}}));
+    let hook = json!({"name": "Hook", "anchors": ["a"],
+        "sketch": {"points": {"a": [0, 0], "b": [2, 0]}, "lines": {"l": {"from": "a", "to": "b"}}}});
+    // Without the flag, the element is placed as it is: b to the right of the spot.
+    let plain = run(&mut s, "insert_element", json!({"name": "s", "element": hook, "at": [[10, 0]]}));
+    assert!(plain["failed"].as_array().unwrap().is_empty(), "{plain}");
+    let sketch = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"];
+    let b = plain["names"]["b"].as_str().unwrap();
+    assert_eq!(sketch["points"][b], json!([12.0, 0.0]), "{sketch}");
+    // Mirrored: b to the left of the spot, and only one copy of the element.
+    let r = run(&mut s, "insert_element", json!({"name": "s", "element": hook, "at": [[20, 0]], "mirror": true}));
+    assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
+    assert_eq!(r["names"].as_object().unwrap().len(), 3, "two points and a line, once: {r}");
+    let sketch = &run(&mut s, "inspect", json!({}))["features"][0]["sketch"];
+    let b = r["names"]["b"].as_str().unwrap();
+    assert_eq!(sketch["points"][b], json!([18.0, 0.0]), "{sketch}");
+    assert_eq!(sketch["points"].as_object().unwrap().len(), 5, "the origin and two copies, not three: {sketch}");
+    assert_eq!(sketch["lines"].as_object().unwrap().len(), 2, "{sketch}");
+}
+
 /// A project's library comes over the built-in one: an element of the same name replaces it.
 #[test]
 fn the_project_library_comes_first() {

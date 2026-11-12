@@ -410,4 +410,21 @@ mod tests {
         assert!(d.click(&e).is_some(), "put by the click");
         assert!(!d.cancel() && d.stage(&e.modes) == Some(Stage::Anchors));
     }
+
+    /// The mirror is sticky and places one mirrored copy, the original left out (D258).
+    #[test]
+    fn an_element_placed_mirrored() {
+        let mut e = editor(json!({"points": {}}));
+        let hook = json!({"name": "Hook", "anchors": ["a"],
+            "sketch": {"points": {"a": [0, 0], "b": [4, 0]}, "lines": {"l": {"from": "a", "to": "b"}},
+                       "constraints": [{"type": "horizontal", "line": "l"}, {"type": "length", "line": "l", "value": 4}]}});
+        e.draft.mirror = true;
+        let p = place_by(&mut e, hook, &[free([10.0, 0.0])]);
+        let points = p["points"].as_object().unwrap();
+        assert_eq!(points.len(), 2, "one copy, not the element and a copy: {p}");
+        let at: Vec<&Json> = points.values().collect();
+        assert!(at.contains(&&json!([10.0, 0.0])) && at.contains(&&json!([6.0, 0.0])), "left of the anchor: {p}");
+        assert_eq!(p["lines"].as_object().unwrap().len(), 1, "{p}");
+        assert!(e.draft.mirror, "sticky across placing");
+    }
 }

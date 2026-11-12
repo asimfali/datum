@@ -6049,6 +6049,7 @@ impl Viewer {
                             }
                         }
                     });
+                    place_mirror(ui, &self.keys, &self.i18n, draft);
                 });
             });
             ui.data_mut(|d| d.insert_temp(filter_id, text));
@@ -6087,8 +6088,13 @@ impl Viewer {
                     "{ $label } — click a { $kind } · Enter skips ({ $left } left)",
                     &[("label", label), ("kind", kind), ("left", &left)],
                 );
+                // The element may be placed mirrored instead (D258): the same switch as its
+                // parameter field below, and the M key, while the element is being placed.
                 egui::Area::new(egui::Id::new("datum_sketch_link")).fixed_pos(pos).order(egui::Order::Foreground).show(ui.ctx(), |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| ui.label(text));
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(text);
+                        place_mirror(ui, &self.keys, &self.i18n, &mut sk.draft);
+                    });
                 });
             }
         }
@@ -6151,7 +6157,10 @@ impl Viewer {
                             });
                         }
                         out = Some(o);
-                    })
+                    });
+                    if asking.is_some() {
+                        place_mirror(ui, &self.keys, &self.i18n, draft);
+                    }
                 });
                 let Some(mut out) = out else { return };
                 // A dimension's or a parameter's value comes selected, to be typed over; a value
@@ -6687,11 +6696,36 @@ fn tool(act: Act) -> Tool {
     }
 }
 
+/// The switch that places a library element mirrored left-right about its insertion point (D258):
+/// the mirror tool's label and key, and the hint that only the mirrored copy goes in. Shown in the
+/// placing popups, where the element is asked, and by the M key while it is being placed.
+fn place_mirror(ui: &mut egui::Ui, keys: &crate::actions::Keys, i18n: &crate::i18n::I18n, draft: &mut crate::draw::Draft) {
+    let label = keys.labelled(ui.ctx(), i18n, Act::Mirror);
+    ui.checkbox(&mut draft.mirror, label.as_str()).on_hover_text(
+        i18n.t(
+            "place-mirror-hint",
+            "Place the element mirrored left-right about its insertion point: only the mirrored copy, the original is not kept",
+        ),
+    );
+}
+
 impl Viewer {
     /// The actions' keys, unless a text field takes them. A button focused (by Tab) does not:
     /// the keys would stop working until a click elsewhere.
     fn shortcuts(&mut self, ui: &egui::Ui) {
         if ui.ctx().text_edit_focused() {
+            return;
+        }
+        // Placing a library element: the mirror tool's key flips the element instead of taking
+        // the tool up (D258). In its parameter field the key is text, as it should be; the
+        // checkbox there flips the element.
+        let placing = self.sketch.as_ref().is_some_and(|sk| sk.draft.tool == Tool::Template);
+        if placing
+            && let Some(key) = self.keys.get(Act::Mirror).copied()
+            && ui.input_mut(|i| crate::actions::pressed(i, &key))
+            && let Some(sk) = &mut self.sketch
+        {
+            sk.draft.mirror = !sk.draft.mirror;
             return;
         }
         for a in &ACTIONS {
@@ -8959,6 +8993,25 @@ mod tests {
         h.run();
         drop(h);
         assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+    }
+
+    /// Placing a library element, the mirror tool's key flips the element; it does not take the
+    /// tool up, and the element stays the one being placed (D258).
+    #[test]
+    fn the_mirror_key_flips_the_element_being_placed() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        v.sketch.as_mut().unwrap().draft.choose(json!({"name": "Dot", "anchors": ["a"],
+            "sketch": {"points": {"a": [0, 0], "b": [1, 0]}, "lines": {"l": {"from": "a", "to": "b"}}}}));
+        assert!(!v.sketch.as_ref().unwrap().draft.mirror);
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::M, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        let sk = v.sketch.as_ref().unwrap();
+        assert!(sk.draft.mirror, "M flips the element being placed");
+        assert_eq!(sk.draft.tool, Tool::Template, "the mirror tool is not taken up");
+        assert!(sk.draft.template.is_some(), "still the same element");
     }
 
     /// A key moved in the settings: the action runs by the new one, no longer by its default.
