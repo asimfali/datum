@@ -1,7 +1,7 @@
 ---
 description: Планирует, принимает решения и ревьюит; реализацию делегирует worker.
 mode: primary
-model: opencode-go/glm-5.3-flash
+model: cliproxy/glm-5.3-flash
 permission:
   edit: allow
   bash: allow
