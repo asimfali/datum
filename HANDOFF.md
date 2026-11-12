@@ -14,6 +14,7 @@
 - MCP `datum` подключён в `opencode.json`; агенты `architect`, `worker`, `reviewer` — в `.opencode/agent/`.
 - Память и роли настроены: `HANDOFF.md`, `opencode.json`, `.opencode/agent/`, правило в `CLAUDE.md`; коммит `chore/agent-memory`.
 - Незакоммиченные тест-прототип `crates/datum-ops/tests/stamp_spike.rs` и пример `examples/stamp-leaf.json`; не мержить без ревью.
+- Зеркало при вставке элемента библиотеки эскиза (D258) сделано и смержено в `main` (`843c20b`, PR #240); ветка удалена. Windows-копия собрана.
 
 ## Решения
 
@@ -22,9 +23,11 @@
 - Оба языка — вырез с трёх сторон и формовка; разница только в форме (лепесток/крючок). В коде не два типа, а один универсальный `stamp`; типы — библиотечные `part`-элементы, которые создаёт конструктор.
 - Гиб прямой; точных размеров пока нет. Параметры, размеры и ограничения обязательны: конструктор задаёт их в редакторе библиотечного элемента.
 - Память: этот файл; агенты: architect — GLM-5.3-Flash, worker — DeepSeek V4.1 Flash, reviewer — DeepSeek V4 Pro.
+- D258: зеркало при вставке элемента библиотеки — галочка в окне постановки (сокеты/размеры) и M, пока элемент ставится; отражение самого элемента до расстановки по вертикали через первый якорь; ставится только зеркальная копия; `library::mirrored`, `insert_element.mirror`; `links` не трогаются, `patterns` — отказ.
 
 ## Следующий шаг
 
+0. Ветка `chore/agent-memory` (память агентов + handoff) — отдельный PR в следующей сессии.
 1. Подтвердить или поправить профиль `examples/stamp-leaf.json` (два гиба, размеры, ограничения).
 2. Параметризовать профиль: `t`, `w`, `R_base`, `R_tip`, `L_face`, `L_lip`, углы; размеры и ограничения — через параметры.
 3. Перейти к листу с вырезом и универсальному `stamp`; затем библиотечный редактор и вставка.
@@ -39,9 +42,11 @@
 
 - `examples/stamp-leaf.json` — текущий профиль.
 - `crates/datum-ops/tests/stamp_spike.rs` — тест-прототип, не production.
-- `ARCHITECTURE.md` D256/D257; `ROADMAP.md` 0.5.5.
+- Зеркало вставки: `crates/datum-model/src/library.rs` (`mirrored`), `session.rs` (`insert_element`), `crates/datum-view/src/draw.rs`, `app.rs`, `locales/ru.ftl`.
+- `ARCHITECTURE.md` D256/D257/D258; `ROADMAP.md` 0.5.5.
 
 ## Проверки
 
 - `cargo run --release -p datum-cli -- build examples/stamp-leaf.json` — проходит.
-- `scripts/check.sh` — последний прогон зелёный до добавления примера и агентов; после изменений только конфиги/документы.
+- `scripts/check.sh` — зелёный после зеркала вставки (exit 0); STEP read-back пропущен без OCP.
+- Windows-копия `C:\Users\Simanov\datum-src`: изменённые исходники синхронизированы, `cargo build --release -p datum-cli` (Windows) — собрано, `datum.exe` от 2026-11-12 09:31; smoke `datum build examples/stamp-leaf.json` — ок.
