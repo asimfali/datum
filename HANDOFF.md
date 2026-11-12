@@ -15,6 +15,7 @@
 - Память и роли настроены: `HANDOFF.md`, `opencode.json`, `.opencode/agent/`, правила в `AGENTS.md` (симлинк `CLAUDE.md` — для Claude Code и старых ссылок); коммит `chore/agent-memory`.
 - OpenCode 2 читает только `AGENTS.md`, фолбэка на `CLAUDE.md` нет — правила до переименования в контекст не попадали.
 - MCP стартует через `cargo run --release`: при пересборке он не успевал за 30 с, отсюда «1 MCP failed». В `opencode.json` стоит `mcp.timeout.startup: 180000`.
+- В `opencode.json` этого проекта разрешён `git push` (в глобальном конфиге он запрещён для остальных проектов); push и PR — только по явной просьбе автора.
 - Незакоммиченные тест-прототип `crates/datum-ops/tests/stamp_spike.rs` и пример `examples/stamp-leaf.json`; не мержить без ревью.
 - Зеркало при вставке элемента библиотеки эскиза (D258) сделано и смержено в `main` (`843c20b`, PR #240); ветка удалена. Windows-копия собрана.
 
