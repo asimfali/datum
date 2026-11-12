@@ -31,6 +31,7 @@
 
 ## Окружение
 - Скилл `wsl-image-paste` (`.claude/skills/wsl-image-paste/`) — вставка картинок из буфера Windows в WSL без GUI: `shotd` кладёт путь к скриншоту в буфер, opencode прикрепляет его как `[Image 1]`.
+- Скиллы ядра (`.claude/skills/`): `add-op` — цепочка новой операции, с молчаливыми местами (`reads_blank`, переименование кривых, правило листа, `reedit`); `add-surface` — поверхность от `Surface` до STEP и развёртки; `geometry-debug` — репро, `inspect_model`, бисекция, детерминизм; `bless-hashes` — перепин эталонов: чистое дерево, `determinism-check`, diff после bless.
 - Связь с домашней машиной — через комментарии в GitHub issue (чат сессий не общий).
 
 ## Следующий шаг
