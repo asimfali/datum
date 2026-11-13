@@ -330,7 +330,7 @@ fn check_tool(e: &Value) -> Result<(), String> {
 /// parameters of its size series. The body is built and checked when the part is used, not here:
 /// this keeps the library readable and lets a part be made before its stamp operation exists.
 fn check_part(e: &Value) -> Result<(), String> {
-    let keys = ["name", "kind", "description", "parameters", "presets", "features", "roles", "anchor", "thickness"];
+    let keys = ["name", "kind", "description", "parameters", "presets", "features", "roles", "anchor", "axis", "fit", "thickness"];
     let o = fields("part", e, &keys, &["kind", "description"])?;
     if o.get("kind").and_then(Value::as_str) != Some("stamp") {
         return Err("a part's `kind`: `stamp`".into());
@@ -339,6 +339,24 @@ fn check_part(e: &Value) -> Result<(), String> {
     if anchor.len() != 3 || anchor.iter().any(|v| v.as_f64().is_none()) {
         return Err("a part's `anchor`: a point [x, y, z]".into());
     }
+    // Placed by a line (a louver along it), the tool's axis turns to the line and its length
+    // feeds the parameter `fit` names (D260), as a sketch element stretches by two anchors.
+    if let Some(a) = o.get("axis") {
+        let a = a.as_array().filter(|a| a.len() == 3 && a.iter().all(Value::is_number)).ok_or("a part's `axis`: a direction [x, y, z]")?;
+        if a.iter().all(|v| v.as_f64().is_some_and(|x| x == 0.0)) {
+            return Err("a part's `axis`: not the zero vector".into());
+        }
+    }
+    let names = parameter_names(e)?;
+    if let Some(f) = o.get("fit") {
+        let f = f.as_str().filter(|f| !f.trim().is_empty()).ok_or("a part's `fit`: a parameter's name")?;
+        if !names.iter().any(|n| n == f) {
+            return Err(format!("a part's `fit`: no parameter `{f}`"));
+        }
+        if o.get("axis").is_none() {
+            return Err("a part's `fit` needs an `axis`: the line's length feeds it".into());
+        }
+    }
     if let Some(t) = o.get("thickness") {
         let t = t.as_array().filter(|t| t.len() == 2 && t.iter().all(Value::is_number)).ok_or("a part's `thickness`: [min, max]")?;
         let (min, max) = (t[0].as_f64().unwrap_or_default(), t[1].as_f64().unwrap_or_default());
@@ -346,7 +364,6 @@ fn check_part(e: &Value) -> Result<(), String> {
             return Err("a part's `thickness`: mm, 0 < min <= max".into());
         }
     }
-    let names = parameter_names(e)?;
     check_presets(e, &names)?;
     let mut graph = Graph::default();
     for p in e.get("parameters").and_then(Value::as_array).into_iter().flatten() {
@@ -1380,6 +1397,21 @@ mod tests {
         let mut bad = stamp.clone();
         bad["features"][0]["op"] = json!({"op": "prism", "polygon": [[0, 0], [1, 0], [1, 1]], "z0": 0});
         assert!(check("part", &bad).unwrap_err().contains("feature `body`"));
+        // Placed by a line: the tool's axis and the parameter its length feeds (D260).
+        let mut louver = stamp.clone();
+        louver["name"] = json!("Жалюзи 30");
+        louver["axis"] = json!([1.0, 0.0, 0.0]);
+        louver["fit"] = json!("w");
+        assert!(check("part", &louver).is_ok());
+        let mut bad = louver.clone();
+        bad["axis"] = json!([0, 0, 0]);
+        assert!(check("part", &bad).unwrap_err().contains("zero vector"));
+        let mut bad = louver.clone();
+        bad["fit"] = json!("none");
+        assert!(check("part", &bad).unwrap_err().contains("no parameter `none`"));
+        let mut bad = louver.clone();
+        bad.as_object_mut().unwrap().remove("axis");
+        assert!(check("part", &bad).unwrap_err().contains("needs an `axis`"));
     }
 
     #[test]
