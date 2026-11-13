@@ -324,7 +324,8 @@ fn the_library_folders_are_groups() {
     let plate = json!({"name": "Плита", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
     let put = |s: &mut Session, group: &str| s.execute("put_library", &json!({"level": "sketch", "element": plate, "group": group}));
     let saved = put(&mut s, "Плиты/Перегородки").unwrap();
-    assert_eq!(saved["saved"], json!(root.join("library/sketch/Плиты/Перегородки/Плита.json").display().to_string()));
+    let saved_path = root.join("library").join("sketch").join("Плиты").join("Перегородки").join("Плита.json");
+    assert_eq!(saved["saved"], json!(saved_path.display().to_string()));
     put(&mut s, "Косынки").unwrap();
     // One name in two groups: both listed, each with its group; the top has none.
     run(&mut s, "put_library", json!({"level": "sketch", "element": {"name": "Верхний", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}}}));
@@ -353,14 +354,14 @@ fn the_library_folders_are_groups() {
     let why = s.execute("insert_element", &json!({"name": "s", "element": "Плита", "at": [[0, 0]]})).unwrap_err();
     assert!(why.contains("Косынки") && why.contains("Плиты/Перегородки") && why.contains("name the group"), "{why}");
     let gone = run(&mut s, "remove_library", json!({"level": "sketch", "name": "Плита", "group": "Косынки"}));
-    assert_eq!(gone["removed"], json!(root.join("library/sketch/Косынки/Плита.json").display().to_string()));
+    assert_eq!(gone["removed"], json!(root.join("library").join("sketch").join("Косынки").join("Плита.json").display().to_string()));
     let lib = run(&mut s, "library", json!({}));
     assert_eq!(lib["elements"].as_array().unwrap().iter().filter(|e| e["name"] == "Плита").count(), 1, "{lib}");
     // The one left is found by its name alone, and kept into a group by `to_library`.
     let r = run(&mut s, "insert_element", json!({"name": "s", "element": "Плита", "at": [[20, 5]]}));
     assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
     let kept = run(&mut s, "to_library", json!({"name": "s", "select": ["l1"], "element": "Отрезок", "group": "Группы/Отрезки"}));
-    assert_eq!(kept["saved"], json!(root.join("library/sketch/Группы/Отрезки/Отрезок.json").display().to_string()));
+    assert_eq!(kept["saved"], json!(root.join("library").join("sketch").join("Группы").join("Отрезки").join("Отрезок.json").display().to_string()));
     let lib = run(&mut s, "library", json!({}));
     let kept = lib["elements"].as_array().unwrap().iter().find(|e| e["name"] == "Отрезок").unwrap();
     assert_eq!(kept["group"], "Группы/Отрезки", "{lib}");
