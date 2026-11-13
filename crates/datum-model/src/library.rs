@@ -51,6 +51,9 @@ pub enum Source {
 pub struct Entry {
     pub source: Source,
     pub element: Value,
+    /// The subfolder of `library/<level>` it is in, its names joined by `/` (D259); none at the
+    /// level's top and for a built-in one.
+    pub group: Option<String>,
     /// The file it was read from; none for a built-in one.
     pub file: Option<PathBuf>,
 }
@@ -72,15 +75,46 @@ impl Library {
     pub fn get(&self, name: &str) -> Option<&Entry> {
         self.entries.iter().find(|e| e.name() == name)
     }
+
+    /// The element `name` of `group` (D259): `None` is the level's top, no built-in in a group.
+    pub fn get_in(&self, group: Option<&str>, name: &str) -> Option<&Entry> {
+        self.entries.iter().find(|e| e.name() == name && e.group.as_deref() == group)
+    }
+
+    /// The one element `name` (D259): none, or the only one; of a name in two groups the answer
+    /// lists them, for the caller to name one.
+    pub fn unique(&self, name: &str) -> Result<Option<&Entry>, String> {
+        let hits: Vec<&Entry> = self.entries.iter().filter(|e| e.name() == name).collect();
+        match hits.as_slice() {
+            [] => Ok(None),
+            [one] => Ok(Some(one)),
+            many => {
+                let mut groups: Vec<&str> = many.iter().map(|e| e.group.as_deref().unwrap_or("the top level")).collect();
+                groups.sort_unstable();
+                groups.dedup();
+                Err(match groups.as_slice() {
+                    [one] => format!("`{name}` is in two files of {one}: name the group or the file"),
+                    _ => format!("`{name}` is in groups {}: name the group", groups.join(", ")),
+                })
+            }
+        }
+    }
+
+    /// The one element `name`, which has to be there (D259).
+    pub fn one(&self, name: &str) -> Result<&Entry, String> {
+        self.unique(name)?.ok_or_else(|| format!("no element `{name}` in the library"))
+    }
 }
 
 /// The elements of `level`: built in, then beside the program, then in `project` (its root),
-/// each folder by file name. One of a name already listed from a less specific place takes its
-/// place; two of a name in one folder are both listed.
+/// each folder by file name, the folders below it as groups (D259). One of a name already listed
+/// from a less specific place takes its place, its group does not matter (an engineer's
+/// `Rectangle` in a group replaces the built-in one); two of a name in one source are both
+/// listed, their groups apart.
 pub fn load(level: &str, project: Option<&Path>) -> Library {
     let mut lib = Library::default();
-    // One of a name from a more specific place takes the place of the other; two of a name in
-    // one folder are both kept.
+    // One of a name from a more specific place takes the place of the other, whatever group each
+    // is in; two of a name in one source are both kept.
     let put = |lib: &mut Library, entry: Entry| match lib
         .entries
         .iter_mut()
@@ -92,7 +126,7 @@ pub fn load(level: &str, project: Option<&Path>) -> Library {
     if level == "sketch" {
         for t in BUILT_IN_SKETCH {
             if let Ok(e) = serde_json::from_str(t) {
-                put(&mut lib, Entry { source: Source::BuiltIn, element: e, file: None });
+                put(&mut lib, Entry { source: Source::BuiltIn, element: e, group: None, file: None });
             }
         }
     }
@@ -113,25 +147,45 @@ pub fn load(level: &str, project: Option<&Path>) -> Library {
             lib.skipped.push(format!("{}: not read, the project keeps its library in {}", old.display(), dir.display()));
         }
         let dir = dir.join(level);
-        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|x| x == "json"))
-            .collect();
-        files.sort();
-        for f in files {
+        let mut files = Vec::new();
+        files_in(&dir, None, &mut files);
+        for (group, f) in files {
             let element = std::fs::read_to_string(&f)
                 .map_err(|e| e.to_string())
                 .and_then(|t| serde_json::from_str::<Value>(&t).map_err(|e| e.to_string()))
                 .and_then(|e| check(level, &e).map(|()| e));
             match element {
-                Ok(e) => put(&mut lib, Entry { source, element: e, file: Some(f) }),
+                Ok(e) => put(&mut lib, Entry { source, element: e, group, file: Some(f) }),
                 Err(why) => lib.skipped.push(format!("{}: {why}", f.display())),
             }
         }
     }
     lib
+}
+
+/// The element files of `dir` and of its folders, each with its group: the path below `dir` of
+/// the folder it is in, `None` at the top. Sorted by path, so the file system's order never
+/// shows; a folder whose name starts with `.` is not read, and a folder that is a symlink is
+/// not entered: a link to an ancestor would loop (D259).
+fn files_in(dir: &Path, group: Option<&str>, out: &mut Vec<(Option<String>, PathBuf)>) {
+    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let mut paths: Vec<(PathBuf, bool)> = read.flatten().filter_map(|e| e.file_type().ok().map(|t| (e.path(), t.is_dir()))).collect();
+    paths.sort();
+    for (path, is_dir) in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        if is_dir {
+            if name.starts_with('.') {
+                continue;
+            }
+            let group = match group {
+                Some(g) => format!("{g}/{name}"),
+                None => name,
+            };
+            files_in(&path, Some(&group), out);
+        } else if path.extension().is_some_and(|x| x == "json") {
+            out.push((group.map(str::to_string), path));
+        }
+    }
 }
 
 /// Whether `e` is an element of `level`: why not, if it is not.
@@ -1091,21 +1145,32 @@ pub fn folder(level: &str, model: Option<&Path>) -> Result<PathBuf, String> {
 
 /// Writes `element` (checked) of `level`, in place of the one named `was` (its own name if
 /// none): into the file of the library's element of that name, renamed for a new name, or else
-/// into the library of `project`, or beside the program without one (a built-in one is so
-/// overridden). A name taken by another element is refused. Where it went.
-pub fn save(level: &str, element: &Value, was: Option<&str>, project: Option<&Path>, lib: &Library) -> Result<PathBuf, String> {
+/// into `group` of the library of `project`, or beside the program without one (a built-in one
+/// is so overridden). `group` is the subfolder of `library/<level>` it goes to, its names joined
+/// by `/`; an element found by `was` in another folder is moved there. A name taken by another
+/// element of the same group is refused. Where it went.
+pub fn save(level: &str, element: &Value, was: Option<&str>, group: Option<&str>, project: Option<&Path>, lib: &Library) -> Result<PathBuf, String> {
     check(level, element)?;
     let name = element["name"].as_str().unwrap_or_default().trim();
+    let given = was.is_some();
     let was = was.unwrap_or(name);
-    let old = lib.get(was).and_then(|e| e.file.clone());
-    if name != was && lib.get(name).is_some() {
-        return Err(format!("`{name}` is in the library already"));
+    // `was` in that group, else, when it is named, the one of its name — but only when the name
+    // is not in two groups: then the group says which (D259). An element moved to another group
+    // is found where it was, and its file goes once written. Without `was`, an element of the
+    // name in another group is another one (D259): this is a new element, not a move.
+    let old = match lib.get_in(group, was) {
+        Some(e) => e.file.clone(),
+        None if given => lib.unique(was)?.and_then(|e| e.file.clone()),
+        None => None,
+    };
+    if name != was && lib.get_in(group, name).is_some() {
+        return Err(format!("`{name}` is in this group already"));
     }
-    let dir = match &old {
-        Some(f) => f.parent().map(Path::to_path_buf).ok_or("no folder")?,
-        None => match project {
-            Some(root) => workspace::folder_in(root, "library")?.join(level),
-            None => folder(level, None)?,
+    let dir = match group {
+        Some(g) => level_folder(level, project)?.join(group_path(g)?),
+        None => match &old {
+            Some(f) => f.parent().map(Path::to_path_buf).ok_or("no folder")?,
+            None => level_folder(level, project)?,
         },
     };
     let path = dir.join(file_name(name));
@@ -1113,22 +1178,41 @@ pub fn save(level: &str, element: &Value, was: Option<&str>, project: Option<&Pa
         return Err(format!("{} exists and is not `{was}`", path.display()));
     }
     write(&path, element)?;
-    if let Some(f) = old.filter(|f| *f != path) {
-        std::fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
+    drop_moved(old.as_deref(), &path)?;
+    Ok(path)
+}
+
+/// The folder of `level` in the workspace of `project`, or beside the program without one.
+fn level_folder(level: &str, project: Option<&Path>) -> Result<PathBuf, String> {
+    match project {
+        Some(root) => Ok(workspace::folder_in(root, "library")?.join(level)),
+        None => folder(level, None),
+    }
+}
+
+/// The folder of `group` under a level's folder (D259): its names, `/` between them. A name is
+/// what a file system takes, as in [`file_name`].
+pub fn group_path(group: &str) -> Result<PathBuf, String> {
+    let mut path = PathBuf::new();
+    for name in group.split('/') {
+        if name.is_empty() || name == "." || name == ".." || name.chars().any(forbidden) {
+            return Err(format!("`{group}` is not a group: its folders are names, `/` between them"));
+        }
+        path.push(name);
     }
     Ok(path)
 }
 
 /// [`save`] kept whole with the other levels (D179): a rule's material must be in the library
 /// (`project`'s, as [`load`] reads it); a material renamed takes its rules along.
-pub fn put(level: &str, element: &Value, was: Option<&str>, project: Option<&Path>) -> Result<PathBuf, String> {
+pub fn put(level: &str, element: &Value, was: Option<&str>, group: Option<&str>, project: Option<&Path>) -> Result<PathBuf, String> {
     if level == "rule" {
         let m = element["material"].as_str().unwrap_or_default();
         if !m.is_empty() && load("material", project).get(m).is_none() {
             return Err(format!("no material `{m}` in the library: a rule is of one"));
         }
     }
-    let path = save(level, element, was, project, &load(level, project))?;
+    let path = save(level, element, was, group, project, &load(level, project))?;
     let name = element["name"].as_str().unwrap_or_default().trim();
     if level == "material"
         && let Some(was) = was.filter(|w| *w != name)
@@ -1145,14 +1229,14 @@ pub fn put(level: &str, element: &Value, was: Option<&str>, project: Option<&Pat
 }
 
 /// [`remove`] kept whole with the other levels: a material with rules stays.
-pub fn delete(level: &str, name: &str, project: Option<&Path>) -> Result<PathBuf, String> {
+pub fn delete(level: &str, name: &str, group: Option<&str>, project: Option<&Path>) -> Result<PathBuf, String> {
     if level == "material" {
         let rules: Vec<String> = rules_of(name, project).iter().map(|r| format!("`{}`", r.name())).collect();
         if !rules.is_empty() {
             return Err(format!("`{name}` has rules ({}): remove them or give them another material first", rules.join(", ")));
         }
     }
-    remove(name, &load(level, project))
+    remove(name, group, &load(level, project))
 }
 
 /// The rules of material `name`.
@@ -1160,9 +1244,21 @@ fn rules_of(name: &str, project: Option<&Path>) -> Vec<Entry> {
     load("rule", project).entries.into_iter().filter(|e| e.element["material"] == name).collect()
 }
 
-/// Removes element `name`'s file, the most specific one; a built-in element stays.
-pub fn remove(name: &str, lib: &Library) -> Result<PathBuf, String> {
-    let e = lib.get(name).ok_or_else(|| format!("no element `{name}` in the library"))?;
+/// Removes element `name`'s file, the most specific one; a built-in element stays. Of a name in
+/// two groups, `group` says which; without it the groups are listed. Two files of the name in
+/// one folder: the first goes, as it did before the groups (D259).
+pub fn remove(name: &str, group: Option<&str>, lib: &Library) -> Result<PathBuf, String> {
+    let hits: Vec<&Entry> = lib.entries.iter().filter(|e| e.name() == name && group.is_none_or(|g| e.group.as_deref() == Some(g))).collect();
+    if hits.len() > 1 && hits.iter().any(|e| e.group != hits[0].group) {
+        let mut groups: Vec<&str> = hits.iter().map(|e| e.group.as_deref().unwrap_or("the top level")).collect();
+        groups.sort_unstable();
+        groups.dedup();
+        return Err(format!("`{name}` is in groups {}: name the group", groups.join(", ")));
+    }
+    let e = hits.first().copied().ok_or_else(|| match group {
+        Some(g) => format!("no element `{name}` in group `{g}` of the library"),
+        None => format!("no element `{name}` in the library"),
+    })?;
     let f = e.file.clone().ok_or_else(|| format!("`{name}` is built in"))?;
     std::fs::remove_file(&f).map_err(|e| format!("{}: {e}", f.display()))?;
     Ok(f)
@@ -1177,10 +1273,29 @@ pub fn write(path: &Path, element: &Value) -> Result<(), String> {
     std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// What a file system refuses in a name (D259): `file_name` replaces it, `group_path` refuses it.
+fn forbidden(c: char) -> bool {
+    c.is_control() || r#"<>:"/\|?*"#.contains(c)
+}
+
 /// A file name for element `name`: what a file system would refuse, replaced.
 pub fn file_name(name: &str) -> String {
-    let stem: String = name.chars().map(|c| if c.is_control() || r#"<>:"/\|?*"#.contains(c) { '_' } else { c }).collect();
+    let stem: String = name.chars().map(|c| if forbidden(c) { '_' } else { c }).collect();
     format!("{}.json", stem.trim())
+}
+
+/// The file an element was moved from (D259): another file than the one just written, gone. The
+/// same place reached the other way is the same file, not a move.
+pub fn drop_moved(old: Option<&Path>, new: &Path) -> Result<(), String> {
+    let Some(old) = old else { return Ok(()) };
+    let same = match (std::fs::canonicalize(old), std::fs::canonicalize(new)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => old == new,
+    };
+    if same {
+        return Ok(());
+    }
+    std::fs::remove_file(old).map_err(|e| format!("{}: {e}", old.display()))
 }
 
 #[cfg(test)]
@@ -1272,13 +1387,10 @@ mod tests {
         let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../../library/");
         let mut materials: Vec<String> = Vec::new();
         for level in ["material", "rule", "tool"] {
-            let mut paths: Vec<_> = std::fs::read_dir(format!("{root}{level}"))
-                .unwrap()
-                .map(|f| f.unwrap().path())
-                .filter(|p| p.extension().is_some_and(|x| x == "json"))
-                .collect();
-            paths.sort();
-            for path in paths {
+            let dir = format!("{root}{level}");
+            let mut paths = Vec::new();
+            files_in(Path::new(&dir), None, &mut paths);
+            for (_, path) in paths {
                 let file = path.display().to_string();
                 let e: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
                 let valid = check(level, &e);
@@ -1462,5 +1574,126 @@ mod tests {
         let mut patterned = e.clone();
         patterned["sketch"]["patterns"] = json!({"grid": {"of": "bottom", "count": 2, "step": [5, 0]}});
         assert!(mirrored(&patterned).unwrap_err().contains("patterns"));
+    }
+
+    /// An empty project of the test: its own folder, so the files do not mix.
+    fn temp(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("datum-library-{name}"));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// A piece of sketch called `name`, as a file of a library.
+    fn piece(name: &str) -> Value {
+        json!({"name": name, "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}})
+    }
+
+    /// The folders of `library/<level>` are groups (D259): a file in one carries the path of the
+    /// folder it is in, two levels deep too; one name in two groups is two elements; a hidden
+    /// folder is not read.
+    #[test]
+    fn the_folders_of_a_level_are_groups() {
+        let root = temp("groups");
+        let dir = root.join("library/sketch");
+        let write = |rel: &str, name: &str| {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, piece(name).to_string()).unwrap();
+        };
+        write("top.json", "Top");
+        write("Плиты/plate.json", "Плита");
+        write("Плиты/Перегородки/deep.json", "Deep");
+        write("Косынки/plate.json", "Плита");
+        write(".hidden/hidden.json", "Hidden");
+        let lib = load("sketch", Some(&root));
+        let groups: Vec<Option<&str>> = lib.entries.iter().filter(|e| e.source == Source::Project).map(|e| e.group.as_deref()).collect();
+        assert!(groups.contains(&None), "{groups:?}");
+        assert!(groups.contains(&Some("Плиты")) && groups.contains(&Some("Плиты/Перегородки")), "{groups:?}");
+        assert_eq!(lib.get_in(None, "Top").and_then(|e| e.group.clone()), None);
+        assert_eq!(lib.get_in(Some("Плиты/Перегородки"), "Deep").and_then(|e| e.file.clone()), Some(dir.join("Плиты/Перегородки/deep.json")));
+        assert_eq!(lib.entries.iter().filter(|e| e.name() == "Плита").count(), 2, "one name in two groups: both");
+        assert!(lib.get("Hidden").is_none(), "a hidden folder is not read");
+    }
+
+    /// An element of a group replaces the one of its name from a less specific place, whatever
+    /// group each is in (D259): the engineer's `Rectangle` in a group replaces the built-in one,
+    /// and the list shows it once.
+    #[test]
+    fn a_grouped_element_replaces_a_less_specific_one() {
+        let root = temp("groups_override");
+        let dir = root.join("library/sketch/Тест");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("rectangle.json"), piece("Rectangle").to_string()).unwrap();
+        let lib = load("sketch", Some(&root));
+        assert_eq!(lib.entries.iter().filter(|e| e.name() == "Rectangle").count(), 1, "one of the name");
+        let e = lib.get("Rectangle").unwrap();
+        assert_eq!(e.source, Source::Project, "the engineer's one shows, not the built-in");
+        assert_eq!(e.group.as_deref(), Some("Тест"));
+    }
+
+    /// Saved into a group, an element makes its folders; named `was`, it moves from the folder it
+    /// was in, its old file gone; a group that is a path is refused (D259).
+    #[test]
+    fn an_element_saved_into_a_group() {
+        let root = temp("save_group");
+        let e = piece("Плита");
+        let path = save("sketch", &e, None, Some("Плиты/Перегородки"), Some(&root), &load("sketch", Some(&root))).unwrap();
+        assert_eq!(path, root.join("library/sketch/Плиты/Перегородки/Плита.json"));
+        assert!(path.exists(), "its folders made");
+        let lib = load("sketch", Some(&root));
+        assert_eq!(lib.get_in(Some("Плиты/Перегородки"), "Плита").and_then(|e| e.group.clone()).as_deref(), Some("Плиты/Перегородки"));
+        // Named, it moves to another group: the file it was in is gone.
+        let moved = save("sketch", &e, Some("Плита"), Some("Косынки"), Some(&root), &lib).unwrap();
+        assert_eq!(moved, root.join("library/sketch/Косынки/Плита.json"));
+        assert!(!path.exists(), "the old file gone");
+        // Another group is another element: a save of the name alone leaves the one it was.
+        let lib = load("sketch", Some(&root));
+        let other = save("sketch", &e, None, Some("Плиты"), Some(&root), &lib).unwrap();
+        assert_eq!(other, root.join("library/sketch/Плиты/Плита.json"));
+        assert!(moved.exists() && other.exists(), "both groups hold it");
+        // A name in two groups: a named move says which, it does not take one silently (D259).
+        let why = save("sketch", &e, Some("Плита"), Some("Новая"), Some(&root), &load("sketch", Some(&root))).unwrap_err();
+        assert!(why.contains("Косынки") && why.contains("Плиты") && why.contains("name the group"), "{why}");
+        for bad in ["../x", "a//b", "a/./b", "a*b", ""] {
+            assert!(save("sketch", &e, None, Some(bad), Some(&root), &load("sketch", Some(&root))).is_err(), "`{bad}` is not a group");
+        }
+    }
+
+    /// The file an element was moved from is gone, unless it is the same file reached the other
+    /// way (D259).
+    #[test]
+    fn a_move_to_the_same_file_keeps_it() {
+        let root = temp("drop_moved");
+        let dir = root.join("a/b");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("one.json");
+        std::fs::write(&file, "{}").unwrap();
+        drop_moved(Some(&dir.join("..").join("b").join("one.json")), &file).unwrap();
+        assert!(file.exists(), "the same file through `..` is not a move");
+        let other = root.join("two.json");
+        std::fs::write(&other, "{}").unwrap();
+        drop_moved(Some(&other), &file).unwrap();
+        assert!(!other.exists(), "another file is a move: the old one gone");
+        drop_moved(None, &file).unwrap();
+        assert!(file.exists(), "no old file: nothing to drop");
+    }
+
+    /// A name in two groups is removed by its group; without one, the groups are listed (D259).
+    #[test]
+    fn a_name_in_two_groups_is_removed_by_its_group() {
+        let root = temp("remove_group");
+        let e = piece("Плита");
+        for g in ["Плиты", "Косынки"] {
+            save("sketch", &e, None, Some(g), Some(&root), &load("sketch", Some(&root))).unwrap();
+        }
+        let lib = load("sketch", Some(&root));
+        let why = remove("Плита", None, &lib).unwrap_err();
+        assert!(why.contains("Плиты") && why.contains("Косынки") && why.contains("name the group"), "{why}");
+        let gone = remove("Плита", Some("Плиты"), &lib).unwrap();
+        assert_eq!(gone, root.join("library/sketch/Плиты/Плита.json"));
+        assert!(!gone.exists());
+        assert_eq!(load("sketch", Some(&root)).entries.iter().filter(|e| e.name() == "Плита").count(), 1, "the other stays");
+        assert!(remove("Плита", Some("Плиты"), &lib).is_err(), "nothing left there");
     }
 }

@@ -2236,8 +2236,8 @@ impl Viewer {
     }
 
     /// The library palette (D117): every sketch element with its outline, name and where it comes
-    /// from; a double click places one (asking its parameters, then its sockets), a drag onto
-    /// the sketch puts its first anchor where it is let go.
+    /// from, in its group's fold (D259); a double click places one (asking its parameters, then
+    /// its sockets), a drag onto the sketch puts its first anchor where it is let go.
     fn palette(&mut self, ui: &mut egui::Ui) {
         ui.heading(self.i18n.t("pane-library", "Library"));
         ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text(self.i18n.t("search", "Search")));
@@ -2248,52 +2248,7 @@ impl Viewer {
         let mut chosen = None;
         let mut edit = None;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            for item in &self.library {
-                let e = &item.entry.element;
-                let (name, description) = (item.entry.name(), e["description"].as_str().unwrap_or_default());
-                if !filter.is_empty() && !name.to_lowercase().contains(&filter) && !description.to_lowercase().contains(&filter) {
-                    continue;
-                }
-                let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::click_and_drag());
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
-                let visuals = ui.visuals();
-                if current.as_ref() == Some(&e["name"]) {
-                    ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill);
-                } else if r.hovered() {
-                    ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
-                }
-                let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(44.0, 44.0));
-                paint_outline(ui.painter(), thumb, &item.outline, visuals.text_color());
-                let text = rect.min + egui::vec2(56.0, 8.0);
-                ui.painter().text(text, egui::Align2::LEFT_TOP, name, egui::FontId::proportional(14.0), visuals.strong_text_color());
-                // Two of a name: which file each is.
-                let twin = self.library.iter().filter(|o| o.entry.name() == name).count() > 1;
-                let file = item.entry.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().to_string()).filter(|_| twin);
-                let from = match file {
-                    Some(f) => format!("{} · {f}", crate::templates::source(&item.entry, &self.i18n)),
-                    None => crate::templates::source(&item.entry, &self.i18n).to_string(),
-                };
-                ui.painter().text(
-                    text + egui::vec2(0.0, 20.0),
-                    egui::Align2::LEFT_TOP,
-                    from,
-                    egui::FontId::proportional(11.0),
-                    visuals.weak_text_color(),
-                );
-                let r = if description.is_empty() { r } else { r.on_hover_text(description) };
-                r.context_menu(|ui| {
-                    if ui.button(self.i18n.t("library-edit", "Edit element…")).clicked() {
-                        edit = Some(Keep::of(&item.entry));
-                        ui.close();
-                    }
-                });
-                if r.double_clicked() {
-                    chosen = Some(e.clone());
-                }
-                if r.drag_started() {
-                    egui::DragAndDrop::set_payload(ui.ctx(), e.clone());
-                }
-            }
+            self.palette_tree(ui, None, &filter, current.as_ref(), &mut chosen, &mut edit);
         });
         // While dragged, the element's name follows the pointer.
         if let (Some(t), Some(pos)) = (egui::DragAndDrop::payload::<Json>(ui.ctx()), ui.input(|i| i.pointer.latest_pos())) {
@@ -2311,6 +2266,115 @@ impl Viewer {
         if edit.is_some() {
             self.keeping = edit;
         }
+    }
+
+    /// The palette of group `prefix` (none: the level's top): its own elements as the list has
+    /// them, then its groups by name, each in a fold; filtered, a group of matches is open.
+    fn palette_tree(
+        &self,
+        ui: &mut egui::Ui,
+        prefix: Option<&str>,
+        filter: &str,
+        current: Option<&Json>,
+        chosen: &mut Option<Json>,
+        edit: &mut Option<Keep>,
+    ) {
+        for item in self.library.iter().filter(|i| i.entry.group.as_deref() == prefix) {
+            self.palette_row(ui, item, filter, current, chosen, edit);
+        }
+        for (name, path) in self.subgroups(prefix) {
+            if !self.group_shown(&path, filter) {
+                continue;
+            }
+            egui::CollapsingHeader::new(&name).id_salt(("datum_library_group", &path)).default_open(!filter.is_empty()).show(ui, |ui| {
+                self.palette_tree(ui, Some(&path), filter, current, chosen, edit);
+            });
+        }
+    }
+
+    /// One element of the palette: its outline, name and where it comes from, placed by a double
+    /// click or dragged onto the sketch.
+    fn palette_row(
+        &self,
+        ui: &mut egui::Ui,
+        item: &crate::templates::Item,
+        filter: &str,
+        current: Option<&Json>,
+        chosen: &mut Option<Json>,
+        edit: &mut Option<Keep>,
+    ) {
+        if !Self::shown(item, filter) {
+            return;
+        }
+        let e = &item.entry.element;
+        let (name, description) = (item.entry.name(), e["description"].as_str().unwrap_or_default());
+        let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 52.0), egui::Sense::click_and_drag());
+        r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, name));
+        let visuals = ui.visuals();
+        if current == Some(&e["name"]) {
+            ui.painter().rect_filled(rect, 4.0, visuals.selection.bg_fill);
+        } else if r.hovered() {
+            ui.painter().rect_filled(rect, 4.0, visuals.widgets.hovered.weak_bg_fill);
+        }
+        let thumb = egui::Rect::from_min_size(rect.min + egui::vec2(4.0, 4.0), egui::vec2(44.0, 44.0));
+        paint_outline(ui.painter(), thumb, &item.outline, visuals.text_color());
+        let text = rect.min + egui::vec2(56.0, 8.0);
+        ui.painter().text(text, egui::Align2::LEFT_TOP, name, egui::FontId::proportional(14.0), visuals.strong_text_color());
+        // Two of a name in one group: which file each is.
+        let twin = self.library.iter().filter(|o| o.entry.name() == name && o.entry.group == item.entry.group).count() > 1;
+        let file = item.entry.file.as_ref().and_then(|f| f.file_name()).map(|f| f.to_string_lossy().to_string()).filter(|_| twin);
+        let from = match file {
+            Some(f) => format!("{} · {f}", crate::templates::source(&item.entry, &self.i18n)),
+            None => crate::templates::source(&item.entry, &self.i18n).to_string(),
+        };
+        ui.painter().text(text + egui::vec2(0.0, 20.0), egui::Align2::LEFT_TOP, from, egui::FontId::proportional(11.0), visuals.weak_text_color());
+        let r = if description.is_empty() { r } else { r.on_hover_text(description) };
+        r.context_menu(|ui| {
+            if ui.button(self.i18n.t("library-edit", "Edit element…")).clicked() {
+                *edit = Some(Keep::of(&item.entry));
+                ui.close();
+            }
+        });
+        if r.double_clicked() {
+            *chosen = Some(e.clone());
+        }
+        if r.drag_started() {
+            egui::DragAndDrop::set_payload(ui.ctx(), e.clone());
+        }
+    }
+
+    /// The groups directly in `prefix` (none: the level's top), by name: the name shown and the
+    /// group's path.
+    fn subgroups(&self, prefix: Option<&str>) -> Vec<(String, String)> {
+        let mut paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for group in self.library.iter().filter_map(|i| i.entry.group.as_deref()) {
+            let rest = match prefix {
+                Some(p) => match group.strip_prefix(p).and_then(|r| r.strip_prefix('/')) {
+                    Some(r) => r,
+                    None => continue,
+                },
+                None => group,
+            };
+            let name = rest.split('/').next().unwrap_or_default();
+            paths.insert(match prefix {
+                Some(p) => format!("{p}/{name}"),
+                None => name.to_string(),
+            });
+        }
+        paths.into_iter().map(|p| (p.rsplit('/').next().unwrap_or_default().to_string(), p)).collect()
+    }
+
+    /// Whether group `path` or a group below it holds an element the filter lets through.
+    fn group_shown(&self, path: &str, filter: &str) -> bool {
+        let inside = |g: &str| g == path || g.strip_prefix(path).is_some_and(|r| r.starts_with('/'));
+        self.library.iter().any(|i| i.entry.group.as_deref().is_some_and(inside) && Self::shown(i, filter))
+    }
+
+    /// Whether element `item` passes the palette's filter: its name or description holds it.
+    fn shown(item: &crate::templates::Item, filter: &str) -> bool {
+        let name = item.entry.name();
+        let description = item.entry.element["description"].as_str().unwrap_or_default();
+        filter.is_empty() || name.to_lowercase().contains(filter) || description.to_lowercase().contains(filter)
     }
 
     /// The dialog keeping a selection in the library: its name, description and the order its
@@ -2553,6 +2617,7 @@ impl Viewer {
                     serde_json::to_string_pretty(&element)
                         .map_err(|e| e.to_string())
                         .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
+                        .and_then(|()| datum_model::library::drop_moved(k.file.as_deref(), &path))
                         .map(|()| true)
                 }
                 None => Ok(false),
@@ -8942,6 +9007,41 @@ mod tests {
         assert_eq!(sk.draft.tool, Tool::Template);
         assert!(sk.draft.clicks.is_empty(), "hangs at the cursor: the base point is not clicked yet");
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command("edit_sketch", _))), "nothing placed yet");
+    }
+
+    /// The palette's groups (D259): an element of a subfolder is under its group's fold, the
+    /// top's ones as they were; a filter opens the groups of matches and hides the others.
+    #[test]
+    fn the_palette_shows_the_groups() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let a = folder("palette-groups", false);
+        let piece = |name: &str| json!({"name": name, "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+        for (rel, name) in [("Плиты/Перегородки/plate.json", "Плита"), ("Косынки/gusset.json", "Косынка")] {
+            let path = a.join("library/sketch").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, piece(name).to_string()).unwrap();
+        }
+        v.open_project(a, false);
+        let ui = |v: &mut Viewer, ui: &mut egui::Ui| {
+            egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| v.palette(ui));
+        };
+        {
+            let mut h = egui_kittest::Harness::builder().with_size([400.0, 600.0]).build_ui(|u| ui(&mut v, u));
+            h.run();
+            // The folds are there, their elements are not drawn until opened.
+            h.get_by_label("Плиты");
+            h.get_by_label("Косынки");
+            assert!(h.query_by_label("Плита").is_none() && h.query_by_label("Rectangle").is_some(), "folded: only the top's elements");
+        }
+        {
+            v.library_filter = "плита".into();
+            let mut h = egui_kittest::Harness::builder().with_size([400.0, 600.0]).build_ui(|u| ui(&mut v, u));
+            h.run();
+            // A group of matches is open, its nested group too; the others are gone.
+            h.get_by_label("Плита");
+            assert!(h.query_by_label("Косынки").is_none(), "a group of no matches is not shown");
+            assert!(h.query_by_label("Косынка").is_none());
+        }
     }
 
     /// The plate's sketch in the window: the `button` of a constraint, then a click on each

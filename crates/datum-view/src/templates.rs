@@ -14,7 +14,8 @@ use crate::draw::{Draft, Patch, Snap, Spot};
 use crate::i18n::I18n;
 use crate::sketch::{Pick, SketchEdit};
 
-/// An element of the library as the palette shows it: with its outline, drawn once.
+/// An element of the library as the palette shows it: with its outline, drawn once. The
+/// subfolder of `library/sketch` it is in (D259) is `entry.group`.
 pub struct Item {
     pub entry: Entry,
     pub outline: Vec<Vec<[f64; 2]>>,
@@ -234,6 +235,24 @@ mod tests {
         let names: Vec<String> = library(None).iter().map(|t| format!("{} ({})", t.entry.name(), source(&t.entry, &I18n::default()))).collect();
         assert!(library(None).iter().all(|t| t.outline.len() == 4 || t.outline.len() == 6), "outlines drawn for the palette");
         assert_eq!(names, ["Rectangle (built in)", "Center rectangle (built in)"]);
+    }
+
+    /// A file in a subfolder of the library is a grouped element (D259): the palette's item
+    /// carries the group, and a top-level one carries none.
+    #[test]
+    fn an_element_of_a_subfolder_keeps_its_group() {
+        let root = std::env::temp_dir().join("datum-view-library-groups");
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("library/sketch/Плиты/Перегородки");
+        std::fs::create_dir_all(&dir).unwrap();
+        let piece = |name: &str| json!({"name": name, "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+        std::fs::write(dir.join("plate.json"), piece("Плита").to_string()).unwrap();
+        std::fs::write(root.join("library/sketch/top.json"), piece("Верхний").to_string()).unwrap();
+        let items = library(Some(&root));
+        let group = |name: &str| items.iter().find(|i| i.entry.name() == name).and_then(|i| i.entry.group.clone());
+        assert_eq!(group("Плита").as_deref(), Some("Плиты/Перегородки"));
+        assert_eq!(group("Верхний"), None);
+        assert_eq!(group("Rectangle"), None, "a built-in one has no group");
     }
 
     #[test]

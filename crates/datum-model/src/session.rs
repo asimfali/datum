@@ -412,7 +412,8 @@ const COMMANDS: &[Command] = &[
         name: "library",
         description: "The library's elements of a `level` (VISION §10; `sketch`, `material`, `rule`, `part` or `tool`, the punch press's): built in, then from `library/<level>` \
                       beside the program, then from `library/<level>` of the model's project (the nearest folder above the model \
-                      file with `datum-project.json`); one of a name already listed takes its place. Each with its `source` and \
+                      file with `datum-project.json`); one of a name already listed takes its place. Each with its `source`, \
+                      `group` (the subfolder of `library/<level>` it lives in; none at the top) and \
                       all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
                       by name) and `anchors`; a material's `designation` and `density`; a rule's `kind`, `material`, `thickness` and \
                       `radius`, `k_factor`; a part's `kind`, `features`, `roles`, `anchor`, `thickness` and size series. `skipped`: files that are not elements, \
@@ -426,7 +427,10 @@ const COMMANDS: &[Command] = &[
                 .iter()
                 .map(|e| {
                     let mut v = json!({"source": e.source});
-                    for (k, x) in e.element.as_object().into_iter().flatten().filter(|(k, _)| *k != "sketch") {
+                    if let Some(g) = &e.group {
+                        v["group"] = json!(g);
+                    }
+                    for (k, x) in e.element.as_object().into_iter().flatten().filter(|(k, _)| *k != "sketch" && *k != "group") {
                         v[k] = x.clone();
                     }
                     v
@@ -443,8 +447,9 @@ const COMMANDS: &[Command] = &[
                       (along the axes, the default) or `align` (turned toward the second: a section of a chain). The model's \
                       parameters its dimensions name become the element's, with their values now, and so do the dimensions \
                       `ask` names (as `dimensions` of the reply lists them: `length l5` → its parameter name); `order` gives the order they are asked in (the rest follow). Saved as `element` (its name) \
-                      with `description` to `path`, or else to `library/sketch` of the model's project (beside the program \
-                      without one); an existing file is kept unless `replace`. The reply has the element and where it went.",
+                      with `description` to `path`, or else to `group` of `library/sketch` of the model's project (beside the program \
+                      without one); an existing file is kept unless `replace`. `group`: the subfolder of `library/sketch` it lives in. \
+                      The reply has the element and where it went.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -455,6 +460,7 @@ const COMMANDS: &[Command] = &[
                 "anchors": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 2},
                 "ask": {"type": "object", "additionalProperties": {"type": "string"}},
                 "fit": {"type": "string", "enum": ["stretch", "align"]},
+                "group": {"type": "string"},
                 "path": {"type": "string"},
                 "replace": {"type": "boolean"}
             }, "required": ["name", "select", "element"], "additionalProperties": false})
@@ -496,7 +502,13 @@ const COMMANDS: &[Command] = &[
             library::check("sketch", &element)?;
             let path = match p.get("path").and_then(Value::as_str) {
                 Some(x) => PathBuf::from(x),
-                None => library::folder("sketch", s.path.as_deref())?.join(library::file_name(element_name)),
+                None => {
+                    let dir = match p.get("group").and_then(Value::as_str) {
+                        Some(g) => library::folder("sketch", s.path.as_deref())?.join(library::group_path(g)?),
+                        None => library::folder("sketch", s.path.as_deref())?,
+                    };
+                    dir.join(library::file_name(element_name))
+                }
             };
             if path.exists() && !p.get("replace").and_then(Value::as_bool).unwrap_or(false) {
                 return Err(format!("{} exists: give `replace` to write over it", path.display()));
@@ -510,7 +522,9 @@ const COMMANDS: &[Command] = &[
         name: "put_library",
         description: "Write library element `element` of `level` (D178): a new one, or in place of the one named `was` (renamed \
                       if its name differs; without `was`, the one of its own name). It goes into the file of the element it \
-                      replaces, else into `library/<level>` of the model's project (beside the program without one). Materials \
+                      replaces, else into `group` of `library/<level>` of the model's project (beside the program without one). \
+                      `group`: the subfolder of `library/<level>` it lives in, its names joined by `/`; an element of `was` in \
+                      another folder is moved there. Materials \
                       are the enterprise's own, none built in: fill them in when the engineer asks, from the enterprise's \
                       standards. A material: `name` (as the engineer calls it: `08пс`, `Ст3 лист`), `designation` as written in \
                       the title block — a word, then a fraction `[over | under]`: the gauge and its standard over the bar, the \
@@ -525,12 +539,14 @@ const COMMANDS: &[Command] = &[
             json!({"type": "object", "properties": {
                 "level": {"type": "string", "enum": library::LEVELS},
                 "element": {"type": "object"},
-                "was": {"type": "string"}
+                "was": {"type": "string"},
+                "group": {"type": "string"}
             }, "required": ["level", "element"], "additionalProperties": false})
         },
         run: |s, p| {
             let level = text(p, "level")?;
-            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), s.project().as_deref())?;
+            let group = p.get("group").and_then(Value::as_str);
+            let path = library::put(level, &p["element"], p.get("was").and_then(Value::as_str), group, s.project().as_deref())?;
             // A rule edited: the sheets made by it take its thickness (D193).
             if level == "rule" {
                 s.rebuild();
@@ -541,16 +557,18 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "remove_library",
         description: "Remove library element `name` of `level`: its file, the most specific one (one of the same name from a less \
-                      specific place shows again); a built-in element stays, and so does a material with rules.",
+                      specific place shows again); a built-in element stays, and so does a material with rules. `group`: the \
+                      subfolder of `library/<level>` it lives in — needed when two groups hold the name.",
         params: || {
             json!({"type": "object", "properties": {
                 "level": {"type": "string", "enum": library::LEVELS},
-                "name": {"type": "string"}
+                "name": {"type": "string"},
+                "group": {"type": "string"}
             }, "required": ["level", "name"], "additionalProperties": false})
         },
         run: |s, p| {
             let level = text(p, "level")?;
-            let path = library::delete(level, text(p, "name")?, s.project().as_deref())?;
+            let path = library::delete(level, text(p, "name")?, p.get("group").and_then(Value::as_str), s.project().as_deref())?;
             if level == "rule" {
                 s.rebuild();
             }
@@ -561,7 +579,8 @@ const COMMANDS: &[Command] = &[
         name: "insert_element",
         description: "Insert a library element into sketch feature `name` as a copy (D98): its geometry, constraints and \
                       dimensions under new names, nothing tied to the library. `element`: a name from `library`, or an element \
-                      object itself. Parameter values: the element's, over them `preset`'s, over those `values` (a number, or an \
+                      object itself; `group`: the subfolder of `library/sketch` the named one lives in, when two groups hold \
+                      the name. Parameter values: the element's, over them `preset`'s, over those `values` (a number, or an \
                       expression of the model's parameters); with a spot for each of two anchors of a stretched element, a parameter \
                       not given that a dimension holds alone is measured between the spots. `at`: a spot for the first anchor or for each, a point of the sketch \
                       by name (the anchor is made coincident with it) or `[x, y]`; two anchors stretch the element along the \
@@ -576,6 +595,7 @@ const COMMANDS: &[Command] = &[
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
                 "element": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+                "group": {"type": "string"},
                 "preset": {"type": "string"},
                 "values": {"type": "object", "additionalProperties": {"oneOf": [{"type": "number"}, {"type": "string"}]}},
                 "at": {"type": "array", "minItems": 1, "maxItems": 2,
@@ -589,10 +609,14 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             let name = text(p, "name")?;
             let mut element = match &p["element"] {
-                Value::String(n) => library::load("sketch", s.project().as_deref())
-                    .get(n)
-                    .map(|e| e.element.clone())
-                    .ok_or_else(|| format!("no element `{n}` in the library"))?,
+                Value::String(n) => {
+                    let lib = library::load("sketch", s.project().as_deref());
+                    let found = match p.get("group").and_then(Value::as_str) {
+                        Some(g) => lib.get_in(Some(g), n).ok_or_else(|| format!("no element `{n}` in group `{g}` of the library"))?,
+                        None => lib.one(n)?,
+                    };
+                    found.element.clone()
+                }
                 e => {
                     library::check("sketch", e)?;
                     e.clone()
