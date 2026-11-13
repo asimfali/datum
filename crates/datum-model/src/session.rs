@@ -430,7 +430,7 @@ const COMMANDS: &[Command] = &[
                     if let Some(g) = &e.group {
                         v["group"] = json!(g);
                     }
-                    for (k, x) in e.element.as_object().into_iter().flatten().filter(|(k, _)| *k != "sketch") {
+                    for (k, x) in e.element.as_object().into_iter().flatten().filter(|(k, _)| *k != "sketch" && *k != "group") {
                         v[k] = x.clone();
                     }
                     v
@@ -611,15 +611,11 @@ const COMMANDS: &[Command] = &[
             let mut element = match &p["element"] {
                 Value::String(n) => {
                     let lib = library::load("sketch", s.project().as_deref());
-                    let group = p.get("group").and_then(Value::as_str);
-                    let found = match group {
-                        Some(g) => lib.get_in(Some(g), n),
-                        None => lib.get(n),
+                    let found = match p.get("group").and_then(Value::as_str) {
+                        Some(g) => lib.get_in(Some(g), n).ok_or_else(|| format!("no element `{n}` in group `{g}` of the library"))?,
+                        None => lib.one(n)?,
                     };
-                    found.map(|e| e.element.clone()).ok_or_else(|| match group {
-                        Some(g) => format!("no element `{n}` in group `{g}` of the library"),
-                        None => format!("no element `{n}` in the library"),
-                    })?
+                    found.element.clone()
                 }
                 e => {
                     library::check("sketch", e)?;

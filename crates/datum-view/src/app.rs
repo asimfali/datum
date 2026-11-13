@@ -2617,12 +2617,7 @@ impl Viewer {
                     serde_json::to_string_pretty(&element)
                         .map_err(|e| e.to_string())
                         .and_then(|t| std::fs::write(&path, t).map_err(|e| format!("{}: {e}", path.display())))
-                        .and_then(|()| match k.file.as_ref().filter(|f| **f != path) {
-                            // Moved to another file: the one it was is gone, as `library::save`
-                            // does it (D259).
-                            Some(old) => std::fs::remove_file(old).map_err(|e| format!("{}: {e}", old.display())),
-                            None => Ok(()),
-                        })
+                        .and_then(|()| datum_model::library::drop_moved(k.file.as_deref(), &path))
                         .map(|()| true)
                 }
                 None => Ok(false),

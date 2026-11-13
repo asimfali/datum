@@ -349,6 +349,9 @@ fn the_library_folders_are_groups() {
     assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
     let wrong = s.execute("insert_element", &json!({"name": "s", "element": "Плита", "group": "Нет", "at": [[0, 0]]})).unwrap_err();
     assert!(wrong.contains("in group `Нет`"), "{wrong}");
+    // A name in two groups without a group: the groups are listed, nothing is taken silently.
+    let why = s.execute("insert_element", &json!({"name": "s", "element": "Плита", "at": [[0, 0]]})).unwrap_err();
+    assert!(why.contains("Косынки") && why.contains("Плиты/Перегородки") && why.contains("name the group"), "{why}");
     let gone = run(&mut s, "remove_library", json!({"level": "sketch", "name": "Плита", "group": "Косынки"}));
     assert_eq!(gone["removed"], json!(root.join("library/sketch/Косынки/Плита.json").display().to_string()));
     let lib = run(&mut s, "library", json!({}));
