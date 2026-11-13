@@ -340,7 +340,8 @@ fn check_part(e: &Value) -> Result<(), String> {
         return Err("a part's `anchor`: a point [x, y, z]".into());
     }
     // Placed by a line (a louver along it), the tool's axis turns to the line and its length
-    // feeds the parameter `fit` names (D260), as a sketch element stretches by two anchors.
+    // feeds the parameter `fit` names (D260), as a sketch element stretches by two anchors. An
+    // axis without a `fit` stays: the axis orients a point placement too.
     if let Some(a) = o.get("axis") {
         let a = a.as_array().filter(|a| a.len() == 3 && a.iter().all(Value::is_number)).ok_or("a part's `axis`: a direction [x, y, z]")?;
         if a.iter().all(|v| v.as_f64().is_some_and(|x| x == 0.0)) {
@@ -1412,6 +1413,20 @@ mod tests {
         let mut bad = louver.clone();
         bad.as_object_mut().unwrap().remove("axis");
         assert!(check("part", &bad).unwrap_err().contains("needs an `axis`"));
+        let mut bad = louver.clone();
+        bad["axis"] = json!(["x", 0, 0]);
+        assert!(check("part", &bad).unwrap_err().contains("a direction"));
+        let mut bad = louver.clone();
+        bad["fit"] = json!(3);
+        assert!(check("part", &bad).unwrap_err().contains("`fit`"));
+        let mut bad = louver.clone();
+        bad["fit"] = json!("  ");
+        assert!(check("part", &bad).unwrap_err().contains("`fit`"));
+        // An axis without a `fit` stays: it orients a point placement too (D260).
+        let mut only = louver.clone();
+        only["fit"] = serde_json::Value::Null;
+        only.as_object_mut().unwrap().remove("fit");
+        assert!(check("part", &only).is_ok());
     }
 
     #[test]
