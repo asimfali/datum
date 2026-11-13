@@ -416,7 +416,7 @@ const COMMANDS: &[Command] = &[
                       `group` (the subfolder of `library/<level>` it lives in; none at the top) and \
                       all but its geometry: a sketch element's `parameters` in the order they are asked, `presets` (typical values \
                       by name) and `anchors`; a material's `designation` and `density`; a rule's `kind`, `material`, `thickness` and \
-                      `radius`, `k_factor`; a part's `kind`, `features`, `roles`, `anchor`, `thickness` and size series. `skipped`: files that are not elements, \
+                      `radius`, `k_factor`; a part's `kind`, `features`, `roles`, `anchor`, `axis` and `fit` (placed by a line, its length feeds the parameter), `thickness` and size series. `skipped`: files that are not elements, \
                       with why.",
         params: || json!({"type": "object", "properties": {"level": {"type": "string", "enum": library::LEVELS}}}),
         run: |s, p| {
