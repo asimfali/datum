@@ -310,6 +310,59 @@ fn the_project_library_comes_first() {
     assert_eq!(datum_model::library::folder("sketch", Some(&model)), Ok(root.join("Библиотека/sketch")));
 }
 
+/// The subfolders of `library/<level>` group elements (D259): one name in two groups is two
+/// elements; `library` tells each one's group, and `put_library`, `remove_library`, `to_library`
+/// and `insert_element` address one by it.
+#[test]
+fn the_library_folders_are_groups() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("library_groups");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let mut s = Session::default();
+    run(&mut s, "save", json!({"path": root.join("part/plate.json")}));
+    let plate = json!({"name": "Плита", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}});
+    let put = |s: &mut Session, group: &str| s.execute("put_library", &json!({"level": "sketch", "element": plate, "group": group}));
+    let saved = put(&mut s, "Плиты/Перегородки").unwrap();
+    assert_eq!(saved["saved"], json!(root.join("library/sketch/Плиты/Перегородки/Плита.json").display().to_string()));
+    put(&mut s, "Косынки").unwrap();
+    // One name in two groups: both listed, each with its group; the top has none.
+    run(&mut s, "put_library", json!({"level": "sketch", "element": {"name": "Верхний", "anchors": ["a"], "sketch": {"points": {"a": [0, 0]}}}}));
+    let lib = run(&mut s, "library", json!({}));
+    let of =
+        |name: &str| -> Vec<Value> { lib["elements"].as_array().unwrap().iter().filter(|e| e["name"] == name).map(|e| e["group"].clone()).collect() };
+    assert_eq!(of("Плита"), [json!("Косынки"), json!("Плиты/Перегородки")], "{lib}");
+    assert_eq!(of("Верхний"), [Value::Null], "no group at the top: {lib}");
+    // A name in two groups is removed by its group; without one the groups are listed.
+    let why = s.execute("remove_library", &json!({"level": "sketch", "name": "Плита"})).unwrap_err();
+    assert!(why.contains("Косынки") && why.contains("Плиты/Перегородки") && why.contains("name the group"), "{why}");
+    // Inserted by its group: the element of that group, not the other.
+    run(
+        &mut s,
+        "add",
+        json!({"name": "s", "op": "sketch", "sketch": {
+        "points": {"p1": [0, 0], "p2": [10, 0]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}},
+        "constraints": [{"type": "fix", "point": "p1"}, {"type": "fix", "point": "p2"}]}}),
+    );
+    let r = run(&mut s, "insert_element", json!({"name": "s", "element": "Плита", "group": "Косынки", "at": [[5, 5]]}));
+    assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
+    let wrong = s.execute("insert_element", &json!({"name": "s", "element": "Плита", "group": "Нет", "at": [[0, 0]]})).unwrap_err();
+    assert!(wrong.contains("in group `Нет`"), "{wrong}");
+    let gone = run(&mut s, "remove_library", json!({"level": "sketch", "name": "Плита", "group": "Косынки"}));
+    assert_eq!(gone["removed"], json!(root.join("library/sketch/Косынки/Плита.json").display().to_string()));
+    let lib = run(&mut s, "library", json!({}));
+    assert_eq!(lib["elements"].as_array().unwrap().iter().filter(|e| e["name"] == "Плита").count(), 1, "{lib}");
+    // The one left is found by its name alone, and kept into a group by `to_library`.
+    let r = run(&mut s, "insert_element", json!({"name": "s", "element": "Плита", "at": [[20, 5]]}));
+    assert!(r["failed"].as_array().unwrap().is_empty(), "{r}");
+    let kept = run(&mut s, "to_library", json!({"name": "s", "select": ["l1"], "element": "Отрезок", "group": "Группы/Отрезки"}));
+    assert_eq!(kept["saved"], json!(root.join("library/sketch/Группы/Отрезки/Отрезок.json").display().to_string()));
+    let lib = run(&mut s, "library", json!({}));
+    let kept = lib["elements"].as_array().unwrap().iter().find(|e| e["name"] == "Отрезок").unwrap();
+    assert_eq!(kept["group"], "Группы/Отрезки", "{lib}");
+}
+
 /// Materials are the enterprise's own (D178): none built in; written, renamed and removed as
 /// files of the project's library, as the table editor and an agent do it.
 #[test]
