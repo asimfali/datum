@@ -259,9 +259,9 @@ fn what_a_component_refuses() {
     ]);
     body_first["roles"] = json!({"cut": "hole"});
     says("is not an extrusion of a sketch", &fail(&component(body_first, one.clone(), json!({}))));
-    // Forming and the hinge come next.
+    // A part that cuts and forms, or hinges, comes next.
     says(
-        "forming comes next",
+        "a cut agreed with the die comes later",
         &fail(&component(
             part_with(part()["features"][0]["op"].clone(), json!({"op": "extrude", "z0": 0, "z1": 1}), json!({"cut": "body", "form": "body"})),
             one.clone(),

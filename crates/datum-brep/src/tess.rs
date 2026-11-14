@@ -310,6 +310,8 @@ fn torus_mesh(body: &Body, f: Ix, t: &crate::Torus, chord: f64) -> Result<FaceMe
         .collect();
     let round = |radius: f64| radius * TAU / crate::curve::per_turn(radius, chord);
     let step = if sphere.is_some() { [round(r); 2] } else { [round(wide), round(r)] };
+    #[allow(clippy::dbg_macro)]
+    std::eprintln!("ZZT face {:?} sphere={} flat={flat:?} next={next:?}", body.faces()[f as usize].id, sphere.is_some());
     let mut triangles = Polygon::new(&flat, next)
         .and_then(|poly| poly.triangulate(true))
         .map_err(|()| BrepError::Degenerate(format!("face {:?} cannot be triangulated", body.faces()[f as usize].id)))?;

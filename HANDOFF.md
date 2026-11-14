@@ -64,3 +64,4 @@
 - `cargo run --release -p datum-cli -- build examples/stamp-leaf.json` — проходит.
 - `scripts/check.sh` — зелёный после зеркала вставки (exit 0); STEP read-back пропущен без OCP.
 - Windows-копия `C:\Users\Simanov\datum-src`: изменённые исходники синхронизированы, `cargo build --release -p datum-cli` (Windows) — собрано, `datum.exe` от 2026-11-12 09:31; smoke `datum build examples/stamp-leaf.json` — ок.
+- Windows-сборка, как отличить машины: имя пользователя Windows — `simfali` значит дом (сборка в `C:\develop\datum\target\debug`, `cargo build -p datum-cli` с Windows-стороны), `Simanov` значит работа (сборка в release). Копия дома: `C:\develop\datum`, работа: `C:\Users\Simanov\datum-src`; домашняя копия догоняет ветку fetch'ем из локального репозитория WSL (путь как remote), без пуша на GitHub.

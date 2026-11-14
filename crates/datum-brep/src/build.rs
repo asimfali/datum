@@ -181,6 +181,33 @@ fn attach_curves(body: &mut Body, curves: Vec<CurveSpec>) -> Result<(), BrepErro
     if found != curves.len() {
         return Err(BrepError::Invalid("a curve names no edge of the faces".into()));
     }
+    // TEMPORARY (louver debugging): every stored arc's ends must lie on its circle, and its
+    // parametrization must run from one end to the other the short way.
+    for e in 0..body.edges.len() {
+        let he = &body.half_edges[body.edges[e].half as usize];
+        let (u, v) = (body.vertices[he.origin as usize].point, body.vertices[body.half_edges[he.twin as usize].origin as usize].point);
+        let Some(k) = body.edges[e].curve else { continue };
+        if let Curve::Arc(a) = &body.curves[k as usize] {
+            let bad = |what: String| -> Result<(), BrepError> {
+                std::eprintln!("ZZB edge {e}: {what}: u {u:?} v {v:?} arc center {:?} axis {:?} radius {}", a.center, a.axis, a.radius);
+                Err(BrepError::Invalid(format!("ZZB broken arc on edge {e}: {what}")))
+            };
+            let (du, dv) = ((u - a.center).dot(u - a.center), (v - a.center).dot(v - a.center));
+            let r2 = a.radius * a.radius;
+            let size = r2.max(1.0);
+            if (du - r2).abs() > 1e-9 * size || (dv - r2).abs() > 1e-9 * size {
+                return bad(format!("an end off the circle: |u−c|²−r² = {}, |v−c|²−r² = {}", du - r2, dv - r2));
+            }
+            let sweep = a.sweep(u, v);
+            let at = a.at(u, sweep);
+            if (at - v).dot(at - v) > 1e-12 * size {
+                return bad(format!("at(u, sweep {sweep}) misses v"));
+            }
+            if sweep > std::f64::consts::PI + 1e-9 && (u - v).dot(u - v) > 1e-12 * size {
+                std::eprintln!("ZZC edge {e}: sweep {sweep} (> π): u {u:?} v {v:?} arc center {:?} axis {:?} radius {}", a.center, a.axis, a.radius);
+            }
+        }
+    }
     Ok(())
 }
 

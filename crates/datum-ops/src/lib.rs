@@ -357,11 +357,19 @@ pub enum Op {
     /// tool's `axis` along a line of the input sketch and feeds the line's length to the
     /// parameter `fit`; a `point` placement puts it at a point of the sketch, its axis unturned.
     /// The profile, laid on the wall the placement's sketch lies on, punches one wall through as
-    /// a press punch does (D196); the sheet and its blank take the cut, nothing else does.
-    /// Inputs: the sheet, then the sketch the placements name. Refused: a parameter the part has
-    /// not, no placements, a line or a point the sketch has not, a line placement of a part
-    /// without an `axis`, a `cut` role that is no extrusion of a sketch, a profile off the wall's
-    /// plane; a part that forms or hinges the sheet comes next.
+    /// a press punch does (D196); the sheet and its blank take the cut, nothing else does. A
+    /// part whose `form` role is set forms the sheet instead, along each line placement (D261):
+    /// the `form` role's section, extruded, is the die's working curve; the wall's material in
+    /// the forming zone is laid along it, a thickness `thickness` off, and the zone's contour is
+    /// cut into the blank (its DXF). `thickness` and `radius` come from the part's sheet rule
+    /// when the model is built: the forming transitions are arcs of `radius` tangent to the
+    /// sheet's faces. Inputs: the sheet, then the sketch the placements name. Refused: a
+    /// parameter the part has not, no placements, a line or a point the sketch has not, a line
+    /// placement of a part without an `axis`, a `cut` role that is no extrusion of a sketch, a
+    /// profile off the wall's plane; a part that forms at a point, a `form` role that is no
+    /// extrusion of a sketch or whose section is no chain of lines and arcs, a sheet thickness
+    /// outside the part's range, a die the transitions do not reach; a part with both roles, or
+    /// with a `hinge`, comes next.
     Component {
         part: PartDef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -371,6 +379,12 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         params: BTreeMap<String, Num>,
         placements: Vec<Placement>,
+        /// The sheet's thickness, from the part's sheet rule: put here when the model is built.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<Num>,
+        /// The sheet's bend radius, from the part's sheet rule: the forming transitions' radius.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius: Option<Num>,
     },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
@@ -385,6 +399,9 @@ const NO_SHEET_RULE: &str = "sheet metal takes its thickness and bend radius fro
 /// Said when rolled sheet metal is built with no rule giving its thickness and K-factor.
 const NO_ROLL_RULE: &str =
     "rolled sheet metal takes its thickness and K-factor (for the gap at its seam) from the part's sheet rule: give the part one with both";
+
+/// Said when a library part forms a sheet built with no rule giving its thickness and bend radius.
+const NO_FORM_RULE: &str = "a placed part forms the sheet by its thickness and bend radius, from the part's sheet rule: give the part one with both";
 
 /// What an extrusion does with its target body (D185).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -781,12 +798,14 @@ impl Op {
             // The definition keeps its own numbers: they resolve inside the tool, against its
             // parameters (D260). What the occurrence gives them, and where it is placed, are the
             // model's numbers, as everywhere else.
-            Self::Component { part, library, group, params, placements } => Self::Component {
+            Self::Component { part, library, group, params, placements, thickness, radius } => Self::Component {
                 part: part.clone(),
                 library: library.clone(),
                 group: group.clone(),
                 params: params.iter().map(|(name, n)| Ok((name.clone(), r(n, name)?))).collect::<Result<_, String>>()?,
                 placements: placements.iter().map(|p| p.resolved(lookup)).collect::<Result<_, String>>()?,
+                thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
+                radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
@@ -1002,8 +1021,12 @@ impl Op {
                 return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
-            Self::Component { part, params, placements, .. } => {
-                return component::cut(feature, part, params, placements, values);
+            Self::Component { part, params, placements, thickness, radius, .. } => {
+                return if part.roles.form.is_some() {
+                    component::form(feature, part, params, placements, thickness.clone(), radius.clone(), values)
+                } else {
+                    component::cut(feature, part, params, placements, values)
+                };
             }
             Self::Trim { flip, k_factor } => {
                 let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
