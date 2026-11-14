@@ -17,10 +17,9 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use datum_graph::Graph;
 use datum_math::Vec2;
-use datum_math::expr::{ExprError, Num, eval, substitute, valid_name};
-use datum_ops::Op;
+use datum_math::expr::{ExprError, eval, substitute, valid_name};
+use datum_ops::PartDef;
 use datum_sketch::{Constraint, Sketch};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -330,81 +329,8 @@ fn check_tool(e: &Value) -> Result<(), String> {
 /// parameters of its size series. The body is built and checked when the part is used, not here:
 /// this keeps the library readable and lets a part be made before its stamp operation exists.
 fn check_part(e: &Value) -> Result<(), String> {
-    let keys = ["name", "kind", "description", "parameters", "presets", "features", "roles", "anchor", "axis", "fit", "thickness"];
-    let o = fields("part", e, &keys, &["kind", "description"])?;
-    if o.get("kind").and_then(Value::as_str) != Some("stamp") {
-        return Err("a part's `kind`: `stamp`".into());
-    }
-    let anchor = o.get("anchor").and_then(Value::as_array).ok_or("a part's `anchor`: a point [x, y, z]")?;
-    if anchor.len() != 3 || anchor.iter().any(|v| v.as_f64().is_none()) {
-        return Err("a part's `anchor`: a point [x, y, z]".into());
-    }
-    // Placed by a line (a louver along it), the tool's axis turns to the line and its length
-    // feeds the parameter `fit` names (D260), as a sketch element stretches by two anchors. An
-    // axis without a `fit` stays: the axis orients a point placement too.
-    if let Some(a) = o.get("axis") {
-        let a = a.as_array().filter(|a| a.len() == 3 && a.iter().all(Value::is_number)).ok_or("a part's `axis`: a direction [x, y, z]")?;
-        if a.iter().all(|v| v.as_f64().is_some_and(|x| x == 0.0)) {
-            return Err("a part's `axis`: not the zero vector".into());
-        }
-    }
-    let names = parameter_names(e)?;
-    if let Some(f) = o.get("fit") {
-        let f = f.as_str().filter(|f| !f.trim().is_empty()).ok_or("a part's `fit`: a parameter's name")?;
-        if !names.iter().any(|n| n == f) {
-            return Err(format!("a part's `fit`: no parameter `{f}`"));
-        }
-        if o.get("axis").is_none() {
-            return Err("a part's `fit` needs an `axis`: the line's length feeds it".into());
-        }
-    }
-    if let Some(t) = o.get("thickness") {
-        let t = t.as_array().filter(|t| t.len() == 2 && t.iter().all(Value::is_number)).ok_or("a part's `thickness`: [min, max]")?;
-        let (min, max) = (t[0].as_f64().unwrap_or_default(), t[1].as_f64().unwrap_or_default());
-        if !(min > 0.0 && max >= min) {
-            return Err("a part's `thickness`: mm, 0 < min <= max".into());
-        }
-    }
-    check_presets(e, &names)?;
-    let mut graph = Graph::default();
-    for p in e.get("parameters").and_then(Value::as_array).into_iter().flatten() {
-        let name = p["name"].as_str().unwrap_or_default();
-        let value: Num = serde_json::from_value(p["value"].clone()).map_err(|err| format!("parameter `{name}`: {err}"))?;
-        graph.set_parameter(name, value).map_err(|err| err.to_string())?;
-    }
-    let features = o.get("features").and_then(Value::as_array).filter(|f| !f.is_empty()).ok_or("a part's `features`: a non-empty list")?;
-    for f in features {
-        let f = fields("feature", f, &["name", "op", "inputs"], &[])?;
-        let name = f.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty()).ok_or("a feature's `name`: text")?;
-        let op: Op = serde_json::from_value(f["op"].clone()).map_err(|err| format!("feature `{name}`: {err}"))?;
-        let inputs: Vec<&str> = match f.get("inputs") {
-            None => Vec::new(),
-            Some(v) => v
-                .as_array()
-                .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<_>>>())
-                .ok_or_else(|| format!("feature `{name}`: `inputs` are feature names"))?,
-        };
-        let mut at = Vec::with_capacity(inputs.len());
-        for input in inputs {
-            let ix = graph.find(input).ok_or_else(|| format!("feature `{name}`: input `{input}` is not an earlier feature"))?;
-            at.push(ix);
-        }
-        graph.add(name, op, &at).map_err(|err| err.to_string())?;
-    }
-    let roles = o.get("roles").and_then(Value::as_object).ok_or("a part's `roles`: `cut`, `form` or `hinge`")?;
-    if let Some(k) = roles.keys().find(|k| !["cut", "form", "hinge"].contains(&k.as_str())) {
-        return Err(format!("a part's role `{k}`: `cut`, `form` or `hinge`"));
-    }
-    for (role, name) in roles {
-        let name = name.as_str().ok_or_else(|| format!("a part's role `{role}`: a feature name"))?;
-        if graph.find(name).is_none() {
-            return Err(format!("a part's role `{role}`: no feature `{name}`"));
-        }
-    }
-    if !roles.contains_key("cut") && !roles.contains_key("form") {
-        return Err("a part's `roles`: `cut` or `form`".into());
-    }
-    Ok(())
+    let def: PartDef = serde_json::from_value(e.clone()).map_err(|err| err.to_string())?;
+    def.validate()
 }
 
 /// A length of a sheet rule (mm, or a formula of `t`: the bend radius, the corner gap, the

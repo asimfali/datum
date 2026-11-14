@@ -878,9 +878,18 @@ pub(crate) fn torus(acc: &mut Integrals, t: &Torus, paths: impl Iterator<Item = 
         let m = x * (6.0 * area * height);
         [area, 2.0 * area * height, m.x, m.y, m.z, area * nv.x, area * nv.y, area * nv.z]
     };
-    let parallels: Vec<(Arc, Vec3, Vec3)> = paths.filter_map(|p| if let Path::Arc(arc, u, v) = p { Some((arc, u, v)) } else { None }).collect();
+    // The parallels, and — for a sphere — every path, to find the pole its meridians reach.
+    let (parallels, sphere_paths) = if big == 0.0 {
+        let all: Vec<Path> = paths.collect();
+        (all.iter().filter_map(|p| if let Path::Arc(arc, u, v) = p { Some((*arc, *u, *v)) } else { None }).collect::<Vec<_>>(), Some(all))
+    } else {
+        (paths.filter_map(|p| if let Path::Arc(arc, u, v) = p { Some((arc, u, v)) } else { None }).collect::<Vec<_>>(), None)
+    };
     let Some(&(_, first, _)) = parallels.first() else { return };
     let reference = t.angles(&fr, first).1;
+    // A curve's axis along the torus's is a parallel's, square to it a meridian's: the dot tells,
+    // 0.5 the middle between the two.
+    let meridian = |arc: &Arc| arc.axis.dot(a).abs() < 0.5;
     let branch = |p: Vec3| {
         let ph = t.angles(&fr, p).1;
         ph + TAU * libm::round((reference - ph) / TAU)
@@ -889,15 +898,31 @@ pub(crate) fn torus(acc: &mut Integrals, t: &Torus, paths: impl Iterator<Item = 
         let ph = branch(u);
         (lo.min(ph), hi.max(ph))
     });
-    let base = match (big == 0.0, hi.abs() >= lo.abs()) {
+    // A sphere's base is the pole its meridians reach: integrating from the other one would cross
+    // the fold, where the parametrization turns back and `q` changes sign. A face with no meridian
+    // end on a pole keeps the pole the parallels lean to; a face whose meridians reach both poles
+    // wraps the whole minor circle, where the base cancels between the parallels' paths.
+    let pole = |p: Vec3| {
+        let ph = t.angles(&fr, p).1;
+        // At a pole the atan2 leaves φ at ±π/2 to its own bits (D229): no more.
+        if (ph.abs() - FRAC_PI_2).abs() <= 64.0 * f64::EPSILON * FRAC_PI_2 { Some(if ph > 0.0 { FRAC_PI_2 } else { -FRAC_PI_2 }) } else { None }
+    };
+    let reached = sphere_paths.and_then(|all| {
+        all.iter().find_map(|p| match p {
+            Path::Arc(arc, u, v) if meridian(arc) => pole(*u).or_else(|| pole(*v)),
+            _ => None,
+        })
+    });
+    let base = match (big == 0.0, reached) {
         (false, _) => reference,
-        (true, true) => FRAC_PI_2,
-        (true, false) => -FRAC_PI_2,
+        (true, Some(pole)) => pole,
+        (true, None) if hi.abs() >= lo.abs() => FRAC_PI_2,
+        (true, None) => -FRAC_PI_2,
     };
     let mut sum = [0.0; 8];
     for (arc, u, v) in parallels {
         // Meridians turn about an axis square to the torus's, parallels about its own.
-        if arc.axis.dot(a).abs() < 0.5 {
+        if meridian(&arc) {
             continue;
         }
         let dtheta = arc.sweep(u, v) * if arc.axis.dot(a) > 0.0 { 1.0 } else { -1.0 };

@@ -336,14 +336,20 @@ impl Doc {
     /// [`DocLevels::built`] after the tools: the rules' numbers.
     fn ruled<'g>(&self, g: &'g Graph, level: Option<&str>, project: Option<&std::path::Path>) -> Cow<'g, Graph> {
         // A sheet or a face of sheet metal by its part's rule; a flange or a trim by the rule of
-        // the part whose body it is on (D205, D211).
+        // the part whose body it is on (D205, D211); a library part forms the sheet it is placed
+        // in: the sheet part's rule.
         let sheets: Vec<(usize, String)> = g
             .nodes()
             .iter()
             .enumerate()
             .filter_map(|(ix, n)| match n.op {
                 Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
-                Op::Flange { .. } | Op::Trim { .. } | Op::Saddle { .. } | Op::BranchHole { .. } | Op::Extrude { wall: true, .. } => {
+                Op::Flange { .. }
+                | Op::Trim { .. }
+                | Op::Saddle { .. }
+                | Op::BranchHole { .. }
+                | Op::Extrude { wall: true, .. }
+                | Op::Component { .. } => {
                     let begun = *body_history(g, ix as NodeIx).last()?;
                     Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
                 }
@@ -383,6 +389,8 @@ impl Doc {
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
+                // A placed part forms the sheet by the rule's thickness and bend radius (D261).
+                Op::Component { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
                 Op::Flange { radius, relief_diameter, k_factor, corner_gap, bend_relief_width, bend_relief_depth, .. } => {
                     *radius = Some(Num::Value(r));

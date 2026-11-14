@@ -9,7 +9,7 @@ use datum_brep::{Body, Curve, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use datum_math::expr::{ExprError, Num, parameter_values};
-use datum_ops::Flat;
+use datum_ops::{Flat, PartDef, Placement};
 use serde_json::{Map, Value, json};
 
 use crate::levels::Doc;
@@ -177,6 +177,9 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             if p.get("op").and_then(Value::as_str) == Some("extrude") && !p.contains_key("mode") {
                 return Err(extrude::MODE_REQUIRED.into());
+            }
+            if p.get("op").and_then(Value::as_str) == Some("component") {
+                component_of(p)?;
             }
             let ix = add_feature(&mut s.graph, p.clone())?;
             Ok(s.rebuild_recording(ix))
@@ -1079,6 +1082,40 @@ fn name_param() -> Value {
     json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
 }
 
+/// Said when a component is added without what places it: the definition of the tool and where
+/// it goes.
+const COMPONENT_REQUIRED: &str = "a component needs `part` (the definition of the tool: its features and roles) and `placements` \
+                                  (where it goes: at least one point or line of the sketch)";
+
+/// What a component given as `p` must have (D260): a `part` that is a part of the library, and
+/// `placements`, each a point or a line of a sketch it names. The definition is checked as the
+/// library checks it; its body is built when the model is.
+fn component_of(p: &Map<String, Value>) -> Result<(), String> {
+    let def: PartDef = serde_json::from_value(p.get("part").cloned().ok_or(COMPONENT_REQUIRED)?).map_err(|e| format!("`part`: {e}"))?;
+    def.validate().map_err(|e| format!("`part`: {e}"))?;
+    match p.get("placements").and_then(Value::as_array) {
+        Some(a) if !a.is_empty() => a.iter().try_for_each(placement_of),
+        _ => Err(COMPONENT_REQUIRED.into()),
+    }
+}
+
+/// What a placement given as `v` must have: `placement` `point` or `line`; a point one of a `point`
+/// of the sketch or `at` [x, y], exactly one; a line a `line` of the sketch.
+fn placement_of(v: &Value) -> Result<(), String> {
+    match v.get("placement").and_then(Value::as_str) {
+        Some("point") => {
+            let point = v.get("point").and_then(Value::as_str).is_some();
+            // `at` is `[x, y]`, each a number or an expression of the part's parameters.
+            let num = |v: &Value| v.is_number() || v.is_string();
+            let at = matches!(v.get("at").and_then(Value::as_array).map(std::vec::Vec::as_slice), Some([x, y]) if num(x) && num(y));
+            if point == at { Err("a point placement is a `point` of the sketch or `at` [x, y], exactly one".into()) } else { Ok(()) }
+        }
+        Some("line") if v.get("line").and_then(Value::as_str).is_some() => Ok(()),
+        Some("line") => Err("a line placement is a `line` of the sketch".into()),
+        _ => Err("a placement is `point` or `line`".into()),
+    }
+}
+
 /// A feature object: the operation's generated schema plus `name` and `inputs`.
 fn feature_schema() -> Value {
     json!({
@@ -1654,6 +1691,17 @@ impl Session {
                     let k = n.inputs.iter().position(|&i| i == ix);
                     points.iter_mut().filter(|p| p.input == k).filter_map(|p| p.point.as_mut()).for_each(&mut follow);
                     line.iter_mut().filter(|l| Some(l.input) == k).for_each(|l| follow(&mut l.line));
+                }
+                // A component placed along a line or at a point of this sketch (D260).
+                Op::Component { placements, .. } => {
+                    let k = n.inputs.iter().position(|&i| i == ix);
+                    for placement in placements.iter_mut() {
+                        match placement {
+                            Placement::Line(l) if Some(l.input) == k => follow(&mut l.line),
+                            Placement::Point(a) if Some(a.input) == k => a.point.as_mut().into_iter().for_each(&mut follow),
+                            _ => {}
+                        }
+                    }
                 }
                 _ => {}
             }

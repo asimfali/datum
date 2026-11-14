@@ -1,0 +1,182 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            200,
+            0
+          ],
+          "c": [
+            200,
+            100
+          ],
+          "d": [
+            0,
+            100
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "plate",
+      "op": "plate",
+      "inputs": [
+        "outline"
+      ],
+      "thickness": 2
+    },
+    {
+      "name": "places",
+      "op": "sketch",
+      "inputs": [
+        "plate"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "sketch": {
+        "points": {
+          "p1": [
+            40,
+            30
+          ],
+          "p2": [
+            70,
+            30
+          ],
+          "l1": [
+            130,
+            30
+          ],
+          "l2": [
+            150,
+            30
+          ]
+        },
+        "lines": {
+          "l": {
+            "from": "l1",
+            "to": "l2"
+          }
+        }
+      }
+    },
+    {
+      "name": "stamp",
+      "op": "component",
+      "inputs": [
+        "plate",
+        "places"
+      ],
+      "part": {
+        "name": "Пробивка 10",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "axis": [
+          1,
+          0,
+          0
+        ],
+        "parameters": [
+          {
+            "name": "w",
+            "value": 10
+          }
+        ],
+        "fit": "w",
+        "features": [
+          {
+            "name": "profile",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "sketch": {
+                "points": {
+                  "h": [
+                    0,
+                    0
+                  ]
+                },
+                "circles": {
+                  "c": {
+                    "center": "h",
+                    "diameter": "w"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "body",
+            "inputs": [
+              "profile"
+            ],
+            "op": {
+              "op": "extrude",
+              "z0": 0,
+              "z1": "w"
+            }
+          }
+        ],
+        "roles": {
+          "cut": "body"
+        }
+      },
+      "params": {},
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "p1"
+        },
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "p2"
+        },
+        {
+          "placement": "line",
+          "input": 1,
+          "line": "l"
+        }
+      ]
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "inputs": [
+        "stamp"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "k_factor": 0.5
+    }
+  ]
+}
