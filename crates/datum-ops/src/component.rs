@@ -216,10 +216,15 @@ impl PartDef {
         let Some(a) = &self.axis else { return Ok(None) };
         let a = crate::vec3(a)?;
         let length = a.dot(a).sqrt();
+        let none = || BrepError::Degenerate(format!("component: part `{}` has an `axis` of no length", self.name));
         if length == 0.0 {
-            return Err(BrepError::Degenerate(format!("component: part `{}` has an `axis` of no length", self.name)));
+            return Err(none());
         }
-        Ok(Some(a * (1.0 / length)))
+        let along = a * (1.0 / length);
+        if !along.to_array().iter().all(|x| x.is_finite()) {
+            return Err(none());
+        }
+        Ok(Some(along))
     }
 }
 
@@ -425,10 +430,15 @@ fn line(def: &PartDef, l: &LineOf, values: &[&Value]) -> Result<(Vec3, Vec3, f64
     let (a, b) = line_ends(s, &l.line, l.input)?;
     let d = b - a;
     let length = d.dot(d).sqrt();
+    let none = || BrepError::Degenerate(format!("component: part `{}` is placed along line `{}`, which has no length", def.name, l.line));
     if length == 0.0 {
-        return Err(BrepError::Degenerate(format!("component: part `{}` is placed along line `{}`, which has no length", def.name, l.line)));
+        return Err(none());
     }
-    Ok((a, d * (1.0 / length), length))
+    let along = d * (1.0 / length);
+    if !along.to_array().iter().all(|x| x.is_finite()) {
+        return Err(none());
+    }
+    Ok((a, along, length))
 }
 
 /// Where point placement `p` puts the tool: a point of its sketch by name, or sketch coordinates.
@@ -451,7 +461,7 @@ fn at(def: &PartDef, p: &crate::At, values: &[&Value]) -> Result<Vec3, BrepError
 fn turning(from: Vec3, to: Vec3) -> Rigid {
     let cross = from.cross(to);
     let dot = from.dot(to);
-    if cross.dot(cross) == 0.0 {
+    if nearly_parallel(from, to) {
         // Along it, or against it: a half turn about any direction square to it.
         return if dot > 0.0 { Rigid::IDENTITY } else { Rigid::half_turn(perpendicular(from)) };
     }
@@ -490,13 +500,16 @@ struct Strip {
     pieces: Vec<Piece>,
     /// The free end's distance from the axis: where the strip's middle ends.
     u: f64,
+    /// The section's scale: the largest coordinate its points are worked out from (D229).
+    size: f64,
 }
 
 /// The strip's section from the `form` role's sketch `s`, in the section's plane: x from the
-/// louver's axis (the hinge, x = 0) out to the free end, y up from the sheet's face (y = 0). The
-/// section is one closed outline of lines and arcs; its working curve is the side below the chord
-/// between its widest points, from the hinge on the axis to the free end, dipping below the face.
-/// The strip is that curve and its offset a thickness `t` into the material.
+/// louver's axis (the hinge, on the axis within the rounding, D229) out to the free end, y up from
+/// the sheet's face (y = 0). The section is one closed outline of lines and arcs; its working
+/// curve is the side below the chord between its widest points, from the hinge on the axis to the
+/// free end, dipping below the face. The strip is that curve and its offset a thickness `t` into
+/// the material.
 fn strip_of(s: &Placed, t: f64) -> Result<Strip, BrepError> {
     let later = |m: &str| BrepError::Unsupported(format!("component: {m}"));
     let short = |m: &str| BrepError::Degenerate(format!("component: {m}"));
@@ -529,10 +542,10 @@ fn strip_of(s: &Placed, t: f64) -> Result<Strip, BrepError> {
                 .into(),
         ));
     }
-    if verts.iter().all(|p| p.y == 0.0) {
+    if verts.iter().all(|p| within_rounding(p.y, size)) {
         return Err(short("the strip's section does not leave the sheet's face: it stays on it"));
     }
-    if verts.windows(2).any(|w| w[0].x >= w[1].x) {
+    if verts.windows(2).any(|w| w[1].x - w[0].x <= 0.0 || within_rounding(w[1].x - w[0].x, size)) {
         return Err(later("the strip's section runs from its hinge line out to its free end, once"));
     }
     // The ends of the domes fix their way round only under a half turn.
@@ -564,7 +577,7 @@ fn strip_of(s: &Placed, t: f64) -> Result<Strip, BrepError> {
         loop_pieces.push(reverse_piece(&low_p[k]));
     }
     loop_pieces.push(Piece::Line);
-    Ok(Strip { points, pieces: loop_pieces, u })
+    Ok(Strip { points, pieces: loop_pieces, u, size })
 }
 
 /// The arc of `radius` from `from` to `to` about `center`, its axis the short way's: these arcs
@@ -691,13 +704,13 @@ impl Stand {
 
 /// The strip's body at placement `p` (D261): its middle from `start` to `end` along the louver,
 /// and a half turn of the strip out of each end, the turn cut at a right angle into two quarters
-/// (a quarter's ends and axis fix its piece of the circle alone). A point on the hinge line
-/// (x = 0) does not move under the turn: its quarter vertex is its own.
+/// (a quarter's ends and axis fix its piece of the circle alone). A point on the hinge line (on the
+/// axis within the rounding, D229) does not move under the turn: its quarter vertex is its own.
 fn strip(feature: TopoId, p: usize, st: &Strip, start: Stand, end: Stand) -> Result<Body, BrepError> {
     let m = st.pieces.len();
     let tag = |name: &str, station: u64, k: usize| TopoId::derive(name).id(feature).index(p as u64).index(station).index(k as u64).finish();
     let stand = |station: u64| if station == 0 { start } else { end };
-    let on_axis = |k: usize| st.points[k].x == 0.0;
+    let on_axis = |k: usize| within_rounding(st.points[k].x, st.size);
     let vid = |station: u64, k: usize| tag("component.strip.v", station, k);
     let cvid = |station: u64, k: usize| tag("component.strip.c", station, k);
     let qvid = |station: u64, k: usize| if on_axis(k) { vid(station, k) } else { tag("component.strip.q", station, k) };
@@ -748,7 +761,7 @@ fn strip(feature: TopoId, p: usize, st: &Strip, start: Stand, end: Stand) -> Res
     for station in 0..2u64 {
         let at = stand(station);
         for k in 0..m - 1 {
-            let surface = turned(&st.pieces[k], st.points[k], st.points[k + 1], at)?;
+            let surface = turned(&st.pieces[k], st.points[k], st.points[k + 1], at, st.size)?;
             let mut first = vec![vid(station, k), vid(station, k + 1), qvid(station, k + 1), qvid(station, k)];
             let mut second = vec![qvid(station, k), qvid(station, k + 1), rvid(station, k + 1), rvid(station, k)];
             if station == 1 {
@@ -820,27 +833,32 @@ fn swept(piece: &Piece, a: Vec2, b: Vec2, at: Stand) -> Result<Surface, BrepErro
 }
 
 /// The surface of the piece of the section turned about the sheet's normal at the strip's end:
-/// a line a plane, a cylinder or a cone, an arc a torus (a sphere about its centre).
-fn turned(piece: &Piece, a: Vec2, b: Vec2, at: Stand) -> Result<Surface, BrepError> {
+/// a line a plane, a cylinder or a cone, an arc a torus (a sphere about its centre). The piece
+/// lies in the section's plane up to its scale `size`: a line level with the face, or square to it
+/// (within the rounding, D229), is a plane or a cylinder; a corner standing on the axis within
+/// the rounding gives a dome that comes to a point, refused.
+fn turned(piece: &Piece, a: Vec2, b: Vec2, at: Stand, size: f64) -> Result<Surface, BrepError> {
     let axis = at.y;
     let origin = at.point(Vec2::new(0.0, 0.0));
     Ok(match *piece {
         Piece::Line => {
             let d = Vec2::new(b.x - a.x, b.y - a.y);
             let left = Vec2::new(-d.y, d.x);
-            if a.y == b.y {
+            if within_rounding(a.y - b.y, size) {
                 Surface::Plane(Plane { origin: at.point(a), normal: if d.x > 0.0 { axis } else { axis * -1.0 } })
-            } else if a.x == b.x {
-                Surface::Cylinder(Cylinder { origin, axis, radius: a.x.abs(), convex: left.x * a.x > 0.0 })
             } else {
-                if a.x == 0.0 || b.x == 0.0 {
+                if within_rounding(a.x, size) || within_rounding(b.x, size) {
                     return Err(BrepError::Degenerate(
                         "component: the strip's section has a corner on the louver's axis: the end dome would come to a point".into(),
                     ));
                 }
-                let slope = d.x / d.y * if a.x > 0.0 { 1.0 } else { -1.0 };
-                // The cone's apex is on the louver's axis; its origin at `a`'s height there.
-                Surface::Cone(Cone { origin: at.point(Vec2::new(0.0, a.y)), axis, radius: a.x.abs(), slope, convex: left.x * a.x > 0.0 })
+                if within_rounding(a.x - b.x, size) {
+                    Surface::Cylinder(Cylinder { origin, axis, radius: a.x.abs(), convex: left.x * a.x > 0.0 })
+                } else {
+                    let slope = d.x / d.y * if a.x > 0.0 { 1.0 } else { -1.0 };
+                    // The cone's apex is on the louver's axis; its origin at `a`'s height there.
+                    Surface::Cone(Cone { origin: at.point(Vec2::new(0.0, a.y)), axis, radius: a.x.abs(), slope, convex: left.x * a.x > 0.0 })
+                }
             }
         }
         Piece::Arc { center, ccw } => {

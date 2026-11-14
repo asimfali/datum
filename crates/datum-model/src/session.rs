@@ -1088,14 +1088,31 @@ const COMPONENT_REQUIRED: &str = "a component needs `part` (the definition of th
                                   (where it goes: at least one point or line of the sketch)";
 
 /// What a component given as `p` must have (D260): a `part` that is a part of the library, and
-/// `placements`. The definition is checked as the library checks it; its body is built when the
-/// model is.
+/// `placements`, each a point or a line of a sketch it names. The definition is checked as the
+/// library checks it; its body is built when the model is.
 fn component_of(p: &Map<String, Value>) -> Result<(), String> {
     let def: PartDef = serde_json::from_value(p.get("part").cloned().ok_or(COMPONENT_REQUIRED)?).map_err(|e| format!("`part`: {e}"))?;
     def.validate().map_err(|e| format!("`part`: {e}"))?;
     match p.get("placements").and_then(Value::as_array) {
-        Some(a) if !a.is_empty() => Ok(()),
+        Some(a) if !a.is_empty() => a.iter().try_for_each(placement_of),
         _ => Err(COMPONENT_REQUIRED.into()),
+    }
+}
+
+/// What a placement given as `v` must have: `placement` `point` or `line`; a point one of a `point`
+/// of the sketch or `at` [x, y], exactly one; a line a `line` of the sketch.
+fn placement_of(v: &Value) -> Result<(), String> {
+    match v.get("placement").and_then(Value::as_str) {
+        Some("point") => {
+            let point = v.get("point").and_then(Value::as_str).is_some();
+            // `at` is `[x, y]`, each a number or an expression of the part's parameters.
+            let num = |v: &Value| v.is_number() || v.is_string();
+            let at = matches!(v.get("at").and_then(Value::as_array).map(std::vec::Vec::as_slice), Some([x, y]) if num(x) && num(y));
+            if point == at { Err("a point placement is a `point` of the sketch or `at` [x, y], exactly one".into()) } else { Ok(()) }
+        }
+        Some("line") if v.get("line").and_then(Value::as_str).is_some() => Ok(()),
+        Some("line") => Err("a line placement is a `line` of the sketch".into()),
+        _ => Err("a placement is `point` or `line`".into()),
     }
 }
 

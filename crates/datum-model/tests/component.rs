@@ -75,3 +75,36 @@ fn renames_carry_into_a_components_placements() {
     assert_eq!((&f["placements"][0]["point"], &f["placements"][1]["line"]), (&json!("stamp"), &json!("edge")), "{f}");
     assert!(f.get("error").is_none(), "{f}");
 }
+
+/// A placement is checked when the component is added, not when the model is built: a point is a
+/// `point` of the sketch or `at` [x, y], exactly one; a line is a `line` of it.
+#[test]
+fn a_placement_is_checked_when_it_is_added() {
+    let mut s = model();
+    let add = |s: &mut Session, name: &str, placements: Value| {
+        s.execute("add", &json!({"name": name, "op": "component", "inputs": ["sheet", "placements"], "part": part(), "placements": placements}))
+    };
+    for (k, placements) in [
+        json!([{"placement": "point", "input": 1}]),
+        json!([{"placement": "point", "input": 1, "point": "p", "at": [50, 30]}]),
+        json!([{"placement": "point", "input": 1, "at": [50]}]),
+        json!([{"placement": "line", "input": 1}]),
+        json!([{"placement": "spot", "input": 1}]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let e = add(&mut s, &format!("no{k}"), placements).unwrap_err();
+        assert!(e.contains("placement"), "no{k}: {e}");
+    }
+    for (k, placements) in [
+        json!([{"placement": "point", "input": 1, "point": "p"}]),
+        json!([{"placement": "point", "input": 1, "at": [50, 30]}]),
+        json!([{"placement": "line", "input": 1, "line": "l"}]),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        add(&mut s, &format!("yes{k}"), placements).unwrap();
+    }
+}
