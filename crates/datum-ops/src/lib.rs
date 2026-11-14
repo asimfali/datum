@@ -16,6 +16,7 @@ mod revolve;
 mod rib;
 mod sheet;
 mod sketch;
+mod transition;
 mod trim;
 mod unfold;
 
@@ -387,6 +388,39 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         radius: Option<Num>,
     },
+    /// A faceted transition between two closed profiles on parallel planes (D264), a new sheet
+    /// body: over each straight piece of profile `a` (a curve of the first input sketch) a flat
+    /// triangular facet (base the piece, apex the point of the second sketch's profile `b` over
+    /// its middle); over each vertex of `a` a cone (apex the vertex, base `b`'s arc between the
+    /// two adjacent apex points), a fan of triangles within `tolerance`: a chord of the fan strays
+    /// no more from the cone's arc than that. Every edge between two facets is a real bend of the
+    /// part's rule's inner `radius`, the facets trimmed at the bend's tangent lines, its ends
+    /// sections square to the bend's axis; the fan's own edges are bends too (bump bends on the
+    /// press). `side` is where the sheet lies from the profiles, as a sheet path's: `left` (the
+    /// profiles are the outer face, the material within), `right` (the inner face), `middle` (half
+    /// each way). A whole turn leaves `gap` millimetres open at the seam (none or 0 is refused:
+    /// the sheet would close and not unroll), a cut through the middle of one flat triangle.
+    /// `tolerance` defaults to 0.5 mm. The thickness, bend radius and K-factor are the part's
+    /// sheet rule's, put here when the model is built. Inputs: the two sketches, `a` then `b`.
+    /// Refused: planes not parallel, an arc among the pieces of `a`, no unique apex over a piece,
+    /// a bend radius that eats a facet; the body is refused at the vertices of `a` until the
+    /// sector relief there is built (D264).
+    Transition {
+        a: String,
+        b: String,
+        side: Side,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gap: Option<Num>,
+        #[serde(default = "half_tolerance")]
+        tolerance: Num,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<Num>,
+        /// The part's rule's bend radius, from the rule: put here when the model is built.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        radius: Option<Num>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -403,6 +437,9 @@ const NO_ROLL_RULE: &str =
 
 /// Said when a library part forms a sheet built with no rule giving its thickness and bend radius.
 const NO_FORM_RULE: &str = "a placed part forms the sheet by its thickness and bend radius, from the part's sheet rule: give the part one with both";
+
+/// Said when a transition is built with no rule giving its thickness, bend radius and K-factor.
+const NO_TRANSITION_RULE: &str = "a transition takes its thickness, bend radius and K-factor from the part's sheet rule: give the part one with all";
 
 /// What an extrusion does with its target body (D185).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -605,6 +642,11 @@ fn full_turn() -> Num {
     Num::Value(360.0)
 }
 
+/// How far a fan's chord may stray from its cone's arc when `tolerance` is left out (D264).
+fn half_tolerance() -> Num {
+    Num::Value(0.5)
+}
+
 fn z_axis() -> Vec3 {
     Vec3::new(0.0, 0.0, 1.0)
 }
@@ -628,6 +670,7 @@ impl Op {
             Self::Unfold { .. } => "unfold",
             Self::Rib { .. } => "rib",
             Self::Component { .. } => "component",
+            Self::Transition { .. } => "transition",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
             Self::Flange { .. } => "flange",
@@ -662,7 +705,12 @@ impl Op {
             | Self::Rolled { .. } => 1..=1,
             Self::Flange { .. } => 1..=4,
             Self::Boolean { .. } => 2..=usize::MAX,
-            Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } | Self::Rib { .. } | Self::Component { .. } => 2..=2,
+            Self::Trim { .. }
+            | Self::Saddle { .. }
+            | Self::BranchHole { .. }
+            | Self::Rib { .. }
+            | Self::Component { .. }
+            | Self::Transition { .. } => 2..=2,
         }
     }
 
@@ -808,6 +856,16 @@ impl Op {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
             },
+            Self::Transition { a, b, side, gap, tolerance, thickness, radius, k_factor } => Self::Transition {
+                a: a.clone(),
+                b: b.clone(),
+                side: *side,
+                gap: gap.as_ref().map(|n| r(n, "gap")).transpose()?,
+                tolerance: r(tolerance, "tolerance")?,
+                thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
+                radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
+                k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
+            },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
     }
@@ -865,7 +923,8 @@ impl Op {
             | Self::Saddle { .. }
             | Self::BranchHole { .. }
             | Self::Rib { .. }
-            | Self::Component { .. } => {
+            | Self::Component { .. }
+            | Self::Transition { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -941,7 +1000,8 @@ impl Op {
             | Self::Mirror { .. }
             | Self::Rib { .. }
             | Self::Trim { .. }
-            | Self::Component { .. } => Vec::new(),
+            | Self::Component { .. }
+            | Self::Transition { .. } => Vec::new(),
             // The sheet; its work planes are read by name.
             Self::Flange { .. } => {
                 vec![values[0].body().ok_or_else(|| BrepError::Sketch("flange takes bodies, input 1 is a sketch".into()))?]
@@ -1028,6 +1088,23 @@ impl Op {
                 } else {
                     component::cut(feature, part, params, placements, values)
                 };
+            }
+            Self::Transition { a, b, side, gap, tolerance, thickness, radius, k_factor } => {
+                let (Some(thickness), Some(radius), Some(k)) = (thickness, radius, k_factor) else {
+                    return Err(BrepError::Invalid(NO_TRANSITION_RULE.into()));
+                };
+                let Some(gap) = gap else {
+                    return Err(BrepError::Degenerate("a transition needs a `gap` at its seam, or it closes and cannot be unrolled".into()));
+                };
+                let dims = transition::TransitionDims {
+                    thickness: num(thickness)?,
+                    radius: num(radius)?,
+                    k_factor: num(k)?,
+                    side: *side,
+                    gap: num(gap)?,
+                    tolerance: num(tolerance)?,
+                };
+                transition::transition(feature, sketch(0)?, a, sketch(1)?, b, dims)?
             }
             Self::Trim { flip, k_factor } => {
                 let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
