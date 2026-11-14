@@ -687,6 +687,45 @@ fn arc_between(center: Vec3, from: Vec3, to: Vec3, radius: f64) -> Option<Arc> {
     (cross.dot(cross) > 0.0).then(|| Arc { center, axis: unit(cross), radius })
 }
 
+/// Puts the arc between the two vertices; the same pair may come twice (the patches of two
+/// pieces share the parallel) but with the same piece of the circle: otherwise the indexes
+/// disagree. Returns why not, naming both arcs.
+fn put(curves: &mut BTreeMap<(TopoId, TopoId), (TopoId, Arc)>, from: TopoId, to: TopoId, arc: Arc) -> Result<(), BrepError> {
+    let key = (from.min(to), from.max(to));
+    let Some(&(was_from, was)) = curves.get(&key) else {
+        curves.insert(key, (from, arc));
+        return Ok(());
+    };
+    // The patches of two pieces by the same parallel: the same piece of the circle. The arcs come
+    // from the die's own numbers by rigid turns, so theirs agree to the bits a turn leaves (D229);
+    // anything more is indexes that disagree.
+    let size = was.radius.max(1.0);
+    let off = arc.center - was.center;
+    let cross = arc.axis.cross(was.axis);
+    let same_way = arc.axis.dot(was.axis) > 0.0;
+    let was_to = if was_from == key.0 { key.1 } else { key.0 };
+    let agrees = within_rounding(arc.radius - was.radius, size)
+        && within_rounding(off.dot(off).sqrt(), size)
+        && within_rounding(cross.dot(cross).sqrt(), 1.0)
+        && ((from == was_from && same_way) || (from == was_to && !same_way));
+    if agrees {
+        return Ok(());
+    }
+    Err(BrepError::Invalid(format!(
+        "component: two arcs between the same two points disagree: first {:?} -> {:?} about {:?} r {} axis {:?}, again {:?} -> {:?} about {:?} r {} axis {:?}",
+        was_from,
+        was_to,
+        was.center.to_array(),
+        was.radius,
+        was.axis.to_array(),
+        from,
+        to,
+        arc.center.to_array(),
+        arc.radius,
+        arc.axis.to_array()
+    )))
+}
+
 /// `p` mirrored across the louver's axis.
 fn mirror(p: Vec2) -> Vec2 {
     Vec2::new(-p.x, p.y)
@@ -894,7 +933,7 @@ fn louver(feature: TopoId, p: usize, die: &Die, start: Stand, end: Stand) -> Res
     };
     let stand = |station: u64| if station == 0 { start } else { end };
     let mut vertices = Vec::with_capacity(2 * (m + 1));
-    let mut curves: BTreeMap<(TopoId, TopoId), Curve> = BTreeMap::new();
+    let mut curves: BTreeMap<(TopoId, TopoId), (TopoId, Arc)> = BTreeMap::new();
     for station in 0..2u64 {
         let at = stand(station);
         for (k, q) in die.points.iter().enumerate() {
@@ -905,7 +944,7 @@ fn louver(feature: TopoId, p: usize, die: &Die, start: Stand, end: Stand) -> Res
                 let a = die.points[k];
                 let rho = libm::hypot(a.x - center.x, a.y - center.y);
                 let arc = Arc { center: at.point(center), axis: at.z * if ccw { 1.0 } else { -1.0 }, radius: rho };
-                curves.insert((vid(station, k), vid(station, k + 1)), Curve::Arc(arc));
+                put(&mut curves, vid(station, k), vid(station, k + 1), arc)?;
             }
         }
     }
@@ -993,7 +1032,7 @@ fn louver(feature: TopoId, p: usize, die: &Die, start: Stand, end: Stand) -> Res
                         continue;
                     }
                     let Some(arc) = arc_between(center, fp, tp, radius) else { continue };
-                    curves.insert((from.min(to), from.max(to)), Curve::Arc(arc));
+                    put(&mut curves, from, to, arc)?;
                 }
             }
             // The meridian at the right angle: the piece turned there.
@@ -1002,7 +1041,7 @@ fn louver(feature: TopoId, p: usize, die: &Die, start: Stand, end: Stand) -> Res
                 let rho = libm::hypot(a.x - center.x, a.y - center.y);
                 let arc = Arc { center: at.quarter(center), axis: at.x * if ccw { 1.0 } else { -1.0 }, radius: rho };
                 let (from, to) = (qvid(station, k), qvid(station, k + 1));
-                curves.insert((from.min(to), from.max(to)), Curve::Arc(arc));
+                put(&mut curves, from, to, arc)?;
             }
             tongue.push(FaceSpec { id: fid("dome", k, station), surface, loops: vec![first] });
             tongue.push(FaceSpec { id: fid("dome.q", k, station), surface, loops: vec![second] });
@@ -1027,6 +1066,8 @@ fn louver(feature: TopoId, p: usize, die: &Die, start: Stand, end: Stand) -> Res
     let mut wall_curves: Vec<CurveSpec> = Vec::with_capacity(4);
     for station in 0..2u64 {
         let at = stand(station);
+        // The ends of the zone's contour are half circles: their ends are one point apart across
+        // the circle, which fixes no way round, so the axis says it: out of the middle.
         let side = at.y * if station == 0 { -1.0 } else { 1.0 };
         for (a, b, height) in [(0, n, 0.0), (2 * n + 1, n + 1, -die.t)] {
             let arc = Arc { center: at.point(Vec2::new(0.0, height)), axis: side, radius: die.w };
@@ -1094,7 +1135,10 @@ fn louver(feature: TopoId, p: usize, die: &Die, start: Stand, end: Stand) -> Res
     ];
     Ok(Louver {
         vertices,
-        curves: curves.into_iter().map(|(k, curve)| CurveSpec { from: k.0, to: k.1, curve }).collect(),
+        curves: curves
+            .into_iter()
+            .map(|((low, high), (from, arc))| CurveSpec { from, to: if from == low { high } else { low }, curve: Curve::Arc(arc) })
+            .collect(),
         tongue: tongue.into_iter().chain(rim).collect(),
         hole: wall,
         hole_curves: wall_curves,
@@ -1152,7 +1196,12 @@ fn turned(piece: &Piece, a: Vec2, b: Vec2, at: Stand) -> Result<Surface, BrepErr
 
 /// `body` with louver `l` on its wall's faces `f` and `g`: the zone's contour cut into them, and
 /// either the tongue that fills it or the zone's wall across the thickness (the blank's).
-fn with_louver(body: &Body, f: usize, g: usize, l: &Louver, tongue: bool, curves: &[CurveSpec]) -> Result<Body, BrepError> {
+fn with_louver(body: &Body, f: TopoId, g: TopoId, l: &Louver, tongue: bool, curves: &[CurveSpec]) -> Result<Body, BrepError> {
+    // By ID: the body and its blank hold different faces, so an index of one is none of the other.
+    let at = |id: TopoId| {
+        body.faces().binary_search_by_key(&id, |x| x.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the body")))
+    };
+    let (f, g) = (at(f)?, at(g)?);
     let mut faces: Vec<FaceSpec> = Vec::with_capacity(body.faces().len() + l.tongue.len() + l.hole.len());
     for x in 0..body.faces().len() {
         let mut spec = body.face_spec(x as u32);
@@ -1306,6 +1355,7 @@ pub(crate) fn form(
         };
         let centre = Vec2::new(0.0, 0.5 * length);
         let g = opposite_wall(&body, f, &frame, centre, def, t)?;
+        let bottom = body.faces()[g].id;
         for h in [f, g] {
             let loops = crate::cut::outline(&body, h as u32, &frame)?;
             let inside = loops.first().is_some_and(|lp| lp.winding(centre) != 0) && loops[1..].iter().all(|lp| lp.winding(centre) == 0);
@@ -1322,8 +1372,8 @@ pub(crate) fn form(
         let louv = louver(feature, p, &die, start_at, end_at)?;
         let mut body_curves = louv.hole_curves.clone();
         body_curves.extend(louv.curves.iter().copied());
-        body = with_louver(&body, f, g, &louv, true, &body_curves)?;
-        blank = with_louver(&blank, f, g, &louv, false, &louv.hole_curves)?;
+        body = with_louver(&body, face, bottom, &louv, true, &body_curves)?;
+        blank = with_louver(&blank, face, bottom, &louv, false, &louv.hole_curves)?;
     }
     crate::validated(&body)?;
     crate::validated(&blank)?;
