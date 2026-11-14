@@ -349,7 +349,8 @@ impl Doc {
                 | Op::Saddle { .. }
                 | Op::BranchHole { .. }
                 | Op::Extrude { wall: true, .. }
-                | Op::Component { .. } => {
+                | Op::Component { .. }
+                | Op::Transition { .. } => {
                     let begun = *body_history(g, ix as NodeIx).last()?;
                     Some((ix, self.rule(&g.nodes()[begun as usize].name, level)?))
                 }
@@ -391,6 +392,10 @@ impl Doc {
                 Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
                 // A placed part forms the sheet by the rule's thickness and bend radius (D261).
                 Op::Component { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
+                // A transition takes the rule's thickness, bend radius and K-factor (D264).
+                Op::Transition { thickness, radius, k_factor, .. } => {
+                    (*thickness, *radius, *k_factor) = (Some(Num::Value(t)), Some(Num::Value(r)), Some(k_of(&ks, ix as NodeIx)));
+                }
                 Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
                 Op::Flange { radius, relief_diameter, k_factor, corner_gap, bend_relief_width, bend_relief_depth, .. } => {
                     *radius = Some(Num::Value(r));

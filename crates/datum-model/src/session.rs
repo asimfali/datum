@@ -1703,6 +1703,13 @@ impl Session {
                         }
                     }
                 }
+                // A transition's profile in this sketch, `a` for the first input and `b` for the
+                // second (D264).
+                Op::Transition { a, b, .. } => match n.inputs.iter().position(|&i| i == ix) {
+                    Some(0) => follow(a),
+                    Some(1) => follow(b),
+                    _ => {}
+                },
                 _ => {}
             }
             if op != n.op {
