@@ -350,14 +350,18 @@ pub enum Op {
         min_length: Option<Num>,
     },
     /// A library part placed in the part (D260, D261): `part` is the tool's definition, written
-    /// into the model — its features build one body, placed as a copy at each placement. `params`
-    /// give the definition's parameters other values; `library` and `group` say which library
-    /// element it came from (to update it from the library later), the model is built without the
-    /// library. A `line` placement turns the tool's `axis` along a line of the input sketch and
-    /// feeds the line's length to the parameter `fit`; a `point` placement puts it at a point of
-    /// the sketch, its axis unturned. Inputs: the sheet, then the sketch the placements name
-    /// (the sheet is not cut or formed yet). Refused: a parameter the part has not, no placements,
-    /// a line or a point the sketch has not, a line placement of a part without an `axis`.
+    /// into the model — its features build its body, the `cut` role's extrusion cuts the sheet
+    /// with its sketch's profile. `params` give the definition's parameters other values;
+    /// `library` and `group` say which library element it came from (to update it from the
+    /// library later), the model is built without the library. A `line` placement turns the
+    /// tool's `axis` along a line of the input sketch and feeds the line's length to the
+    /// parameter `fit`; a `point` placement puts it at a point of the sketch, its axis unturned.
+    /// The profile, laid on the wall the placement's sketch lies on, punches one wall through as
+    /// a press punch does (D196); the sheet and its blank take the cut, nothing else does.
+    /// Inputs: the sheet, then the sketch the placements name. Refused: a parameter the part has
+    /// not, no placements, a line or a point the sketch has not, a line placement of a part
+    /// without an `axis`, a `cut` role that is no extrusion of a sketch, a profile off the wall's
+    /// plane; a part that forms or hinges the sheet comes next.
     Component {
         part: PartDef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -998,7 +1002,9 @@ impl Op {
                 return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
-            Self::Component { part, params, placements, .. } => component::placed(feature, part, params, placements, values)?,
+            Self::Component { part, params, placements, .. } => {
+                return component::cut(feature, part, params, placements, values);
+            }
             Self::Trim { flip, k_factor } => {
                 let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
                 let body = values[0].body().ok_or_else(|| BrepError::Sketch("trim takes a body, then a work plane".into()))?;

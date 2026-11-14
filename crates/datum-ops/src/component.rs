@@ -5,12 +5,13 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use datum_brep::{Body, BrepError, CurveSpec, FaceSpec, TopoId, Vertex, build_with_curves};
+use datum_brep::{Body, BrepError, Surface, TopoId};
 use datum_math::expr::{ExprError, Num, parameter_values, valid_name};
 use datum_math::{Rigid, Vec3};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::sketch::{Placed, nearly_parallel, within_rounding};
 use crate::{LineOf, Placement, Value, describe_arity, input_sketch, line_ends, num, sketch_point};
 
 /// A part of the library (D256, D260), written into the model: its `kind` (`stamp` so far), the
@@ -220,13 +221,16 @@ impl PartDef {
 }
 
 /// The body of a placed tool and its roles (D256, D260): the body of the definition's last
-/// feature, and the bodies of the features the roles name, for the tasks that cut and form the
-/// sheet.
+/// feature, the bodies of the features the roles name, for the tasks that cut and form the
+/// sheet, and the profile the `cut` role cuts with.
 pub struct Tool {
     pub body: Body,
     pub cut: Option<Body>,
     pub form: Option<Body>,
     pub hinge: Option<Body>,
+    /// The solved sketch of the `cut` role's extrusion, in the tool's own frame: its plane is the
+    /// anchor plane (z = 0), which a placement lays on a wall of the sheet.
+    pub cut_sketch: Option<Placed>,
 }
 
 /// The tool of `def`, its features built in order, `params` giving its parameters other values
@@ -266,7 +270,22 @@ pub fn tool(def: &PartDef, feature: TopoId, params: &BTreeMap<String, Num>) -> R
         .and_then(Value::body)
         .cloned()
         .ok_or_else(|| BrepError::Invalid(format!("component: the last feature of part `{}` is no body", def.name)))?;
-    Ok(Tool { body: last, cut: role(&def.roles.cut)?, form: role(&def.roles.form)?, hinge: role(&def.roles.hinge)? })
+    let cut_sketch = def.roles.cut.as_deref().map(|name| cut_profile(def, name, &made)).transpose()?;
+    Ok(Tool { body: last, cut: role(&def.roles.cut)?, form: role(&def.roles.form)?, hinge: role(&def.roles.hinge)?, cut_sketch })
+}
+
+/// The sketch the role `role` cuts with: the first input of its extrusion, a sketch feature of
+/// the definition, as it was solved (in the tool's own frame).
+fn cut_profile(def: &PartDef, role: &str, made: &[Value]) -> Result<Placed, BrepError> {
+    let not = || BrepError::Invalid(format!("component: the cut role `{role}` of part `{}` is not an extrusion of a sketch", def.name));
+    let k = def.features.iter().position(|f| f.name == role).ok_or_else(not)?;
+    let f = &def.features[k];
+    if !matches!(f.op, crate::Op::Extrude { .. }) {
+        return Err(not());
+    }
+    let first = f.inputs.first().ok_or_else(not)?;
+    let j = def.features[..k].iter().position(|g| g.name == *first).ok_or_else(not)?;
+    made[j].sketch().cloned().ok_or_else(not)
 }
 
 /// The definition's parameter values, `params` over them; a name the part has not is refused.
@@ -279,26 +298,39 @@ fn parameters(def: &PartDef, params: &BTreeMap<String, Num>) -> Result<BTreeMap<
     Ok(out)
 }
 
-/// The tool of `def` placed at each of `placements`, as one body: a copy per placement, its
-/// elements named by the occurrence, the placement's place and the tool's (§4.2). The body is
-/// built once for a definition and a set of parameter values: placements that feed the same
-/// length to `fit` share it.
-pub fn placed(
+/// The sheet `values[0]` cut where the tool of `def` at each placement crosses its wall (D260):
+/// the `cut` role's profile, laid on the wall by the placement, punches one wall through, as a
+/// press punch does (D196), and the cut is recorded in the blank and its DXF. Refused: a part
+/// that forms or hinges the sheet (the next step), a sheet with ribs (its blank cannot be laid
+/// from the ribbed body: the cut and the ribs laid again come later), a `cut` role that is no
+/// extrusion of a sketch, a placement whose profile does not lie in the plane of the wall, a
+/// placement on a face the sheet has not.
+pub(crate) fn cut(
     feature: TopoId,
     def: &PartDef,
     params: &BTreeMap<String, Num>,
     placements: &[Placement],
     values: &[&Value],
-) -> Result<Body, BrepError> {
+) -> Result<Value, BrepError> {
+    let later = |m: String| BrepError::Unsupported(format!("component: {m}"));
+    if def.roles.form.is_some() {
+        return Err(later(format!("part `{}` forms the sheet: forming comes next", def.name)));
+    }
+    if def.roles.hinge.is_some() {
+        return Err(later(format!("part `{}` has a `hinge`: forming comes next", def.name)));
+    }
     if placements.is_empty() {
         return Err(BrepError::Invalid(format!("component: part `{}` is placed nowhere: `placements` is empty", def.name)));
     }
+    let mut body = match values.first() {
+        Some(Value::Formed(_)) => return Err(later("cutting sheet metal with ribs comes later".into())),
+        Some(v) => v.body().cloned().ok_or_else(|| BrepError::Sketch("a component takes the sheet, then a sketch the placements name".into()))?,
+        None => return Err(BrepError::Invalid("a component takes the sheet, then a sketch the placements name".into())),
+    };
     let mut tools: BTreeMap<Option<u64>, Tool> = BTreeMap::new();
-    let (mut vertices, mut faces, mut curves) = (Vec::new(), Vec::new(), Vec::new());
     for (p, placement) in placements.iter().enumerate() {
         let (rigid, fit) = place(def, placement, values)?;
-        let key = fit.map(f64::to_bits);
-        let made = match tools.entry(key) {
+        let made = match tools.entry(fit.map(f64::to_bits)) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
                 let mut overrides = params.clone();
@@ -308,13 +340,61 @@ pub fn placed(
                 e.insert(tool(def, feature, &overrides)?)
             }
         };
-        let id = |t: TopoId| TopoId::derive("component.copy").id(feature).index(p as u64).id(t).finish();
-        let (v, f, c) = copy(&made.body, &rigid, &id);
-        vertices.extend(v);
-        faces.extend(f);
-        curves.extend(c);
+        let profile = made
+            .cut_sketch
+            .as_ref()
+            .ok_or_else(|| BrepError::Invalid(format!("component: part `{}` has no `cut` role: nothing cuts the sheet", def.name)))?;
+        let placed = laid(def, profile, rigid, placement, values, &body)?;
+        // Each placement cuts by an ID of its own: its hole is a new element of the sheet (§4.2).
+        let id = TopoId::derive("component.cut").id(feature).index(p as u64).finish();
+        body = crate::bent::punch(id, &body, &placed, false)?;
     }
-    build_with_curves(vertices, faces, curves)
+    crate::validated(&body)?;
+    Ok(Value::Body(body))
+}
+
+/// The tool's cut profile at `placement`: its frame moved by `rigid` onto the wall the placement's
+/// sketch lies on, that sketch's face and K-factor. Refused unless the profile lies in the wall's
+/// plane.
+fn laid(def: &PartDef, profile: &Placed, rigid: Rigid, placement: &Placement, values: &[&Value], target: &Body) -> Result<Placed, BrepError> {
+    let mut placed = profile.clone();
+    let [o, x, y, z] = profile.frame;
+    placed.frame = [rigid.apply(o), rigid.apply_vector(x), rigid.apply_vector(y), rigid.apply_vector(z)];
+    let k = match placement {
+        Placement::Line(l) => l.input,
+        Placement::Point(p) => p.input,
+    };
+    let on = input_sketch(values, k, "a component's placement")?;
+    placed.face = on.face;
+    placed.k_factor = on.k_factor;
+    on_wall(def, target, &placed)?;
+    Ok(placed)
+}
+
+/// Whether the cut profile `placed` lies in the plane of the face of `target` its placement names:
+/// its origin on that plane and its normal along the face's, out of the sheet, to the bits a turn
+/// leaves (D229). A part whose profile is not laid on the wall cannot cut it.
+fn on_wall(def: &PartDef, target: &Body, placed: &Placed) -> Result<(), BrepError> {
+    let wrong = || {
+        BrepError::Invalid(format!(
+            "component: the cut of part `{}` is not in the plane of its anchor, facing out of the sheet: its profile is off the face the placement names",
+            def.name
+        ))
+    };
+    let id = placed.face.ok_or_else(|| {
+        BrepError::Invalid(format!("component: a cut takes a sketch placed on a face of the sheet: part `{}` is placed on none", def.name))
+    })?;
+    let f = target.faces().binary_search_by_key(&id, |g| g.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the body")))?;
+    let Surface::Plane(plane) = target.faces()[f].surface else {
+        return Err(BrepError::Unsupported(format!("component: a cut of part `{}` on a face that is not plane comes later", def.name)));
+    };
+    let n = unit(plane.normal);
+    let [o, _, _, z] = placed.frame;
+    let size = o.to_array().iter().chain(plane.origin.to_array().iter()).fold(1.0_f64, |m, x| m.max(x.abs()));
+    if !within_rounding((o - plane.origin).dot(n), size) || !nearly_parallel(z, n) || z.dot(n) <= 0.0 {
+        return Err(wrong());
+    }
+    Ok(())
 }
 
 /// Where placement `placement` puts the tool: its motion, and the length a line feeds to `fit`.
@@ -379,18 +459,7 @@ fn perpendicular(v: Vec3) -> Vec3 {
     v.cross([Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0)][k])
 }
 
-/// `body` moved by `m` as vertex, face and curve specs, its elements named by `id`.
-fn copy(body: &Body, m: &Rigid, id: &impl Fn(TopoId) -> TopoId) -> (Vec<Vertex>, Vec<FaceSpec>, Vec<CurveSpec>) {
-    let vertices = body.vertices().iter().map(|v| Vertex { id: id(v.id), point: m.apply(v.point) }).collect();
-    let faces = (0..body.faces().len() as u32)
-        .map(|f| {
-            let mut spec = body.face_spec(f);
-            spec.id = id(spec.id);
-            spec.surface = spec.surface.moved(m);
-            spec.loops.iter_mut().flatten().for_each(|v| *v = id(*v));
-            spec
-        })
-        .collect();
-    let curves = body.curve_specs().into_iter().map(|c| CurveSpec { from: id(c.from), to: id(c.to), curve: c.curve.moved(m) }).collect();
-    (vertices, faces, curves)
+/// `v` as a unit direction.
+fn unit(v: Vec3) -> Vec3 {
+    v * (1.0 / v.dot(v).sqrt())
 }

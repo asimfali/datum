@@ -9,7 +9,7 @@ use datum_brep::{Body, Curve, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use datum_math::expr::{ExprError, Num, parameter_values};
-use datum_ops::{Flat, PartDef};
+use datum_ops::{Flat, PartDef, Placement};
 use serde_json::{Map, Value, json};
 
 use crate::levels::Doc;
@@ -1674,6 +1674,17 @@ impl Session {
                     let k = n.inputs.iter().position(|&i| i == ix);
                     points.iter_mut().filter(|p| p.input == k).filter_map(|p| p.point.as_mut()).for_each(&mut follow);
                     line.iter_mut().filter(|l| Some(l.input) == k).for_each(|l| follow(&mut l.line));
+                }
+                // A component placed along a line or at a point of this sketch (D260).
+                Op::Component { placements, .. } => {
+                    let k = n.inputs.iter().position(|&i| i == ix);
+                    for placement in placements.iter_mut() {
+                        match placement {
+                            Placement::Line(l) if Some(l.input) == k => follow(&mut l.line),
+                            Placement::Point(a) if Some(a.input) == k => a.point.as_mut().into_iter().for_each(&mut follow),
+                            _ => {}
+                        }
+                    }
                 }
                 _ => {}
             }
