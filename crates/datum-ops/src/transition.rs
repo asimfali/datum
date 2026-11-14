@@ -92,6 +92,24 @@ pub(crate) struct Seam {
     pub(crate) gap: f64,
 }
 
+/// The relief at a sharp vertex of `a` (D264): a sector from the vertex, its sides along the
+/// extreme bends, its far boundary the end sections of every bend (each square to the bend's axis,
+/// through the point where its tangent line meets its neighbour's). The bands cut by it do not
+/// cross.
+#[derive(Clone, Debug)]
+pub(crate) struct Relief {
+    /// The vertex of `a`.
+    pub(crate) at: Vec3,
+    /// The point on each fan facet where the two bends' tangent lines meet, one per facet.
+    pub(crate) q: Vec<Vec3>,
+    /// The end plane of each bend, `(axis, a point of the plane)`: the bend's way from the vertex
+    /// and the point `q` (the last bend, having no next, takes the last `q`).
+    pub(crate) ends: Vec<(Vec3, Vec3)>,
+    /// The two side planes, `(point, unit normal)`: each holds the vertex and one extreme bend's
+    /// axis, square to the shell.
+    pub(crate) sides: [(Vec3, Vec3); 2],
+}
+
 /// The разметка of a transition (D264): where every facet is, every bend, and the rims.
 #[derive(Clone, Debug)]
 pub(crate) struct Layout {
@@ -109,6 +127,8 @@ pub(crate) struct Layout {
     /// The lengths of the pieces of the first profile (the bottom rim).
     pub(crate) bottom_rim: Vec<f64>,
     pub(crate) seam: Seam,
+    /// The relief at each vertex of `a`, in its order.
+    pub(crate) reliefs: Vec<Relief>,
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -664,6 +684,44 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
             _ => {}
         }
     }
+    // The relief at each vertex of `a`: the sector from it, its far boundary the bends' end
+    // sections (D264). The point on a fan facet where the two bends' tangent lines meet is the
+    // point at the trim distance from both of its edges, on their bisector.
+    let by_edge: BTreeMap<(TopoId, TopoId), usize> =
+        bends.iter().enumerate().map(|(i, b)| ((b.edge[0].min(b.edge[1]), b.edge[0].max(b.edge[1])), i)).collect();
+    let trim = radius_out - outer;
+    let mut reliefs: Vec<Relief> = Vec::with_capacity(n);
+    for j in 0..n {
+        let m = fans[j];
+        let mut q: Vec<Vec3> = Vec::with_capacity(m);
+        for k in 0..m {
+            let (p0, p1, p2) = (a3[j], fan3[j][k], fan3[j][k + 1]);
+            let (e1, e2) = (unit3(p1 - p0), unit3(p2 - p0));
+            let half = ((1.0 - e1.dot(e2).clamp(-1.0, 1.0)) * 0.5).sqrt();
+            let bisector = e1 + e2;
+            if half <= 0.0 || !half.is_finite() || bisector.dot(bisector) == 0.0 {
+                return Err(BrepError::Degenerate("a transition's fan folds back on itself at a vertex".into()));
+            }
+            q.push(p0 + unit3(bisector) * (trim / half));
+        }
+        let mut ends: Vec<(Vec3, Vec3)> = Vec::with_capacity(m + 1);
+        for k in 0..=m {
+            let axis = unit3(fan3[j][k] - a3[j]);
+            ends.push((axis, if k < m { q[k] } else { q[m - 1] }));
+        }
+        let side = |k: usize| -> Result<(Vec3, Vec3), BrepError> {
+            let axis = unit3(fan3[j][k] - a3[j]);
+            let edge = (a_id(j).min(fan_vid(j, k, m)), a_id(j).max(fan_vid(j, k, m)));
+            let bend = by_edge.get(&edge).ok_or_else(|| BrepError::Invalid("transition: a fan edge has no bend".into()))?;
+            let normal = axis.cross(bends[*bend].at - a3[j]);
+            if normal.dot(normal) == 0.0 {
+                return Err(BrepError::Degenerate("a transition's extreme bend runs through its vertex".into()));
+            }
+            Ok((a3[j], unit3(normal)))
+        };
+        let sides = [side(0)?, side(m)?];
+        reliefs.push(Relief { at: a3[j], q, ends, sides });
+    }
     // The rims, and the seam through the middle of the flat triangle over the first piece.
     let bottom_rim: Vec<f64> = (0..n).map(|i| (a3[(i + 1) % n] - a3[i]).dot(a3[(i + 1) % n] - a3[i]).sqrt()).collect();
     let top_rim: Vec<f64> = fan3.iter().flat_map(|pts| pts.windows(2)).map(|w| (w[1] - w[0]).dot(w[1] - w[0]).sqrt()).collect();
@@ -684,7 +742,7 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
             )));
         }
     }
-    Ok(Layout { vertices, a: a3, b: b3, fans, facets, bends, top_rim, bottom_rim, seam })
+    Ok(Layout { vertices, a: a3, b: b3, fans, facets, bends, top_rim, bottom_rim, seam, reliefs })
 }
 
 /// The transition between the profiles: refused at the fan's corners until their relief is settled.
@@ -718,11 +776,12 @@ pub(crate) fn transition(
     let rims: f64 = layout.top_rim.iter().chain(&layout.bottom_rim).sum();
     let seam = (layout.seam.to - layout.seam.from).dot(layout.seam.to - layout.seam.from).sqrt();
     Err(BrepError::Unsupported(format!(
-        "{CORNER}: {} facets, {} bends ({:.3} rad), {} fan corners, rims {:.3} mm, the seam {:.3} mm open by {} mm",
+        "{CORNER}: {} facets, {} bends ({:.3} rad), {} relief sectors ({} end planes), rims {:.3} mm, the seam {:.3} mm open by {} mm",
         layout.facets.len(),
         layout.bends.len(),
         layout.bends.iter().map(|b| b.sweep).sum::<f64>(),
-        layout.fans.len(),
+        layout.reliefs.len(),
+        layout.reliefs.iter().map(|r| r.ends.len()).sum::<usize>(),
         rims,
         seam,
         layout.seam.gap
@@ -779,6 +838,35 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     let seam = &layout.seam;
     if seam.facet >= layout.facets.len() || !(seam.gap > 0.0 && seam.gap.is_finite()) {
         return Err(BrepError::Invalid("transition: the seam names no facet, or has no gap".into()));
+    }
+    if layout.reliefs.len() != layout.a.len() {
+        return Err(BrepError::Invalid("transition: not one relief at every vertex of the first profile".into()));
+    }
+    for (j, r) in layout.reliefs.iter().enumerate() {
+        if r.q.len() != layout.fans[j] || r.ends.len() != r.q.len() + 1 {
+            return Err(BrepError::Invalid(format!(
+                "transition: the relief at vertex {j} has {} points for {} fan facets",
+                r.q.len(),
+                layout.fans[j]
+            )));
+        }
+        // Each end plane stands square to its bend, through the point its tangent line meets its
+        // neighbour's; the two extreme ones are square to the shell.
+        for (k, (axis, point)) in r.ends.iter().enumerate() {
+            let want = if k < r.q.len() { r.q[k] } else { r.q[r.q.len() - 1] };
+            if !within_rounding(axis.dot(*axis) - 1.0, 1.0) || !within_rounding((*point - want).dot(*point - want).sqrt(), size) {
+                return Err(BrepError::Invalid(format!("transition: the relief's end plane {k} at vertex {j} is off")));
+            }
+        }
+        for (side, k) in [(r.sides[0], 0), (r.sides[1], r.q.len())] {
+            let (point, normal) = side;
+            if !within_rounding(normal.dot(normal) - 1.0, 1.0) || !within_rounding(normal.dot(r.ends[k].0), 1.0) {
+                return Err(BrepError::Invalid(format!("transition: the relief's side plane at vertex {j} is off")));
+            }
+            if !within_rounding((point - r.at).dot(normal), size) {
+                return Err(BrepError::Invalid(format!("transition: the relief's side plane misses its vertex {j}")));
+            }
+        }
     }
     Ok(())
 }
@@ -850,6 +938,10 @@ mod tests {
         assert!(layout.bends.iter().all(|b| b.radius_in == 8.0 && b.radius_out == 10.0 && b.sweep > 0.0 && b.sweep < PI));
         // The seam runs from the middle of the first side to its apex.
         assert!((layout.seam.from - layout.seam.to).dot(layout.seam.from - layout.seam.to).sqrt() > 0.0);
+        // A relief sector at each vertex: one end plane per bend (7 at a fan of 6) and two sides.
+        assert_eq!(layout.reliefs.len(), 4);
+        assert!(layout.reliefs.iter().all(|r| r.q.len() == 6 && r.ends.len() == 7));
+        assert!(layout.reliefs.iter().all(|r| r.sides.iter().all(|(_, n)| (n.dot(*n) - 1.0).abs() < 1e-9)));
     }
 
     #[test]
