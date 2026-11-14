@@ -59,4 +59,4 @@
 
 - `scripts/check.sh` — exit 0 после задачи C (fmt, clippy, 65 моделей, детерминизм; STEP read-back пропущен без OCP).
 - `cargo run --release -p datum-cli -- build tests/models/louver.json` — 12039.636933; хеши в `tests/model-hashes.json` (bless по скиллу).
-- Windows-копия `C:\develop\datum` (дом): не обновлена (4b837fe); рабочая `C:\Users\Simanov\datum-src`: PR #249 в main не подтянут, datum.exe от 2026-11-12.
+- Windows-копия `C:\develop\datum` (дом): ветка `feat/component` на `e6f64bc`, `target\debug\datum.exe` собран (debug), smoke `datum build tests/models/louver.json` — 12039.636933, хеш `e090d561` совпадает с WSL (детерминизм между машинами); рабочая `C:\Users\Simanov\datum-src`: PR #249 в main не подтянут, datum.exe от 2026-11-12.
