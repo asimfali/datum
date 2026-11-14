@@ -8,15 +8,13 @@
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
 
+#[cfg(test)]
+use datum_brep::{Body, FaceSpec, Plane, Surface, Vertex, build_with_curves};
 use datum_brep::{BrepError, ProfileArc, ProfileLoop, TopoId};
 use datum_math::{Vec2, Vec3};
 
 use crate::sheet::Side;
 use crate::sketch::{Placed, chosen, nearly_parallel, profile_regions, within_rounding};
-
-/// Said when a fan's bends meet at a vertex of the first profile: the relief there is not designed
-/// yet (D264, the author's answer is pending).
-const CORNER: &str = "transition: the corner relief (a sector from the vertex, D264) is not built yet";
 
 /// A transition's numbers: the part's rule's thickness, bend radius and K-factor, where the sheet
 /// lies from the profiles, the seam's gap and the tolerance of the fan's chords.
@@ -745,6 +743,106 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
     Ok(Layout { vertices, a: a3, b: b3, fans, facets, bends, top_rim, bottom_rim, seam, reliefs })
 }
 
+/// A planar face through `points`, its loop `ids` turned to face `reference`.
+#[cfg(test)]
+fn planar(id: TopoId, mut ids: Vec<TopoId>, points: &[Vec3], reference: Vec3) -> Result<FaceSpec, BrepError> {
+    let n = (points[1] - points[0]).cross(points[2] - points[0]);
+    if n.dot(n) == 0.0 {
+        return Err(BrepError::Degenerate(format!("transition: face {id:?} has no area")));
+    }
+    let n = if n.dot(reference) < 0.0 {
+        ids.reverse();
+        -n
+    } else {
+        n
+    };
+    Ok(FaceSpec { id, surface: Surface::Plane(Plane { origin: points[0], normal: unit3(n) }), loops: vec![ids] })
+}
+
+/// The sharp faceted shell: the outer facets, the inner one a thickness off, and the rims (the
+/// first stage of the body, D264; the bends and the corner reliefs go on top of it).
+#[cfg(test)]
+fn shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body, BrepError> {
+    let n = layout.a.len();
+    let a_id = |i: usize| TopoId::derive("transition.a").id(feature).index(i as u64).finish();
+    let b_id = |i: usize| TopoId::derive("transition.b").id(feature).index(i as u64).finish();
+    let f_id = |j: usize, k: usize| TopoId::derive("transition.fan").id(feature).index(j as u64).index(k as u64).finish();
+    let inner_id = |v: TopoId| TopoId::derive("transition.inner").id(feature).id(v).finish();
+    let fan_vid = |j: usize, k: usize, m: usize| -> TopoId {
+        if k == 0 {
+            b_id((j + n - 1) % n)
+        } else if k == m {
+            b_id(j)
+        } else {
+            f_id(j, k)
+        }
+    };
+    // The inner vertex is the outer one a thickness along the facets' normals there.
+    let mut incident: BTreeMap<TopoId, Vec<usize>> = BTreeMap::new();
+    for (fi, f) in layout.facets.iter().enumerate() {
+        for &v in &f.loop_ {
+            incident.entry(v).or_default().push(fi);
+        }
+    }
+    let mut vertices: Vec<Vertex> = layout.vertices.iter().map(|(&id, &point)| Vertex { id, point }).collect();
+    let mut point_of: BTreeMap<TopoId, Vec3> = layout.vertices.clone();
+    for (&v, &p) in &layout.vertices {
+        let mut s = Vec3::ZERO;
+        for &fi in incident.get(&v).map(Vec::as_slice).unwrap_or(&[]) {
+            s = s + layout.facets[fi].normal;
+        }
+        let q = if s.dot(s) > 0.0 { p - unit3(s) * dims.thickness } else { p };
+        point_of.insert(inner_id(v), q);
+        vertices.push(Vertex { id: inner_id(v), point: q });
+    }
+    let get = |v: TopoId| -> Result<Vec3, BrepError> {
+        point_of.get(&v).copied().ok_or_else(|| BrepError::Invalid(format!("transition: no point for vertex {v:?}")))
+    };
+    let centroid = |ids: &[TopoId]| -> Result<Vec3, BrepError> {
+        let mut s = Vec3::ZERO;
+        for &v in ids {
+            s = s + get(v)?;
+        }
+        Ok(s * (1.0 / ids.len() as f64))
+    };
+    let mut faces: Vec<FaceSpec> = Vec::new();
+    for (fi, f) in layout.facets.iter().enumerate() {
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.outer").id(feature).index(fi as u64).finish(),
+            surface: Surface::Plane(Plane { origin: f.origin, normal: f.normal }),
+            loops: vec![f.loop_.clone()],
+        });
+        let loop_: Vec<TopoId> = f.loop_.iter().rev().map(|&v| inner_id(v)).collect();
+        let origin = get(inner_id(f.loop_[0]))?;
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.inside").id(feature).index(fi as u64).finish(),
+            surface: Surface::Plane(Plane { origin, normal: -f.normal }),
+            loops: vec![loop_],
+        });
+    }
+    // The bottom rims, one per piece of `a`; the top rims, one per chord.
+    for i in 0..n {
+        let (u, w) = (a_id(i), a_id((i + 1) % n));
+        let ids = vec![u, w, inner_id(w), inner_id(u)];
+        let pts = ids.iter().map(|&v| get(v)).collect::<Result<Vec<Vec3>, _>>()?;
+        let reference = average(&pts) - centroid(&layout.facets[i].loop_)?;
+        faces.push(planar(TopoId::derive("transition.rim").id(feature).index(i as u64).finish(), ids, &pts, reference)?);
+    }
+    let mut fan_at = n;
+    for j in 0..n {
+        let m = layout.fans[j];
+        for k in 0..m {
+            let (u, w) = (fan_vid(j, k, m), fan_vid(j, k + 1, m));
+            let ids = vec![u, w, inner_id(w), inner_id(u)];
+            let pts = ids.iter().map(|&v| get(v)).collect::<Result<Vec<Vec3>, _>>()?;
+            let reference = average(&pts) - centroid(&layout.facets[fan_at + k].loop_)?;
+            faces.push(planar(TopoId::derive("transition.top").id(feature).index((fan_at + k) as u64).finish(), ids, &pts, reference)?);
+        }
+        fan_at += m;
+    }
+    build_with_curves(vertices, faces, Vec::new())
+}
+
 /// The transition between the profiles: refused at the fan's corners until their relief is settled.
 pub(crate) fn transition(
     feature: TopoId,
@@ -771,20 +869,18 @@ pub(crate) fn transition(
     }
     let layout = layout(feature, a, a_name, b, b_name, &dims)?;
     verify(&layout, &dims)?;
-    // Every closed profile has a vertex where its fan's bends meet; the press cannot form them
-    // together, so a relief is cut there. Its shape waits for the author (D264).
+    // The faceted shell (facets, the inner offset, the rims) validates; the bends and the corner
+    // relief that make it the D264 body are being built (the layout's bends and reliefs are
+    // verified above). Until then a body is refused rather than a sharp one blessed.
     let rims: f64 = layout.top_rim.iter().chain(&layout.bottom_rim).sum();
-    let seam = (layout.seam.to - layout.seam.from).dot(layout.seam.to - layout.seam.from).sqrt();
     Err(BrepError::Unsupported(format!(
-        "{CORNER}: {} facets, {} bends ({:.3} rad), {} relief sectors ({} end planes), rims {:.3} mm, the seam {:.3} mm open by {} mm",
+        "transition: the rounded body (the bends and the corner relief) is not built yet: {} facets, {} bends ({:.3} rad), {} relief sectors, rims {:.3} mm, the seam {:.3} mm",
         layout.facets.len(),
         layout.bends.len(),
         layout.bends.iter().map(|b| b.sweep).sum::<f64>(),
         layout.reliefs.len(),
-        layout.reliefs.iter().map(|r| r.ends.len()).sum::<usize>(),
         rims,
-        seam,
-        layout.seam.gap
+        (layout.seam.to - layout.seam.from).dot(layout.seam.to - layout.seam.from).sqrt()
     )))
 }
 
@@ -985,8 +1081,13 @@ mod tests {
     }
 
     #[test]
-    fn the_body_waits_for_the_corner_relief() {
-        let e = transition(id("t"), &square(), "ab", &circle(), "c", dims()).unwrap_err();
-        assert!(e.to_string().contains("the corner relief (a sector from the vertex, D264) is not built yet"), "{e}");
+    fn the_shell_of_the_etalon_validates() {
+        let d = dims();
+        let layout = layout(id("t"), &square(), "ab", &circle(), "c", &d).unwrap();
+        let body = shell(id("t"), &layout, &d).unwrap();
+        body.validate().unwrap();
+        let mesh = datum_brep::tessellate(&body).unwrap();
+        assert!(!mesh.triangles.is_empty());
+        assert!(body.volume() > 0.0);
     }
 }
