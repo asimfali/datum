@@ -26,6 +26,7 @@ use std::ops::RangeInclusive;
 pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
 pub use bounded::ChainCopy;
+pub use component::strip_body; // TEMPORARY: the strip's step, before its placement into the sheet
 pub use component::{PartDef, PartFeature, PartParameter, Roles, Tool, tool};
 pub use copies::{Copies, Place};
 use cut::{Reach, from_face, through_walls};
