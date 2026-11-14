@@ -69,10 +69,10 @@ fn the_op_is_a_transition_of_two_inputs() {
 }
 
 #[test]
-fn the_etalon_is_refused_at_the_corner() {
+fn the_etalon_is_refused_until_the_bends_are_built() {
     let e = eval(transition(), &square(), &circle()).unwrap_err();
     let m = e.to_string();
-    assert!(m.contains("the corner relief (a sector from the vertex, D264) is not built yet"), "{m}");
+    assert!(m.contains("the rounded body (the bends and the corner relief) is not built yet"), "{m}");
     // The layout is still made: 28 facets and 28 bends at tolerance 1 (D264).
     assert!(m.contains("28 facets"), "{m}");
     assert!(m.contains("28 bends"), "{m}");
