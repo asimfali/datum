@@ -1,9 +1,10 @@
 //! A faceted transition between two closed profiles on parallel planes (D264): flat triangles
 //! over the straight pieces of the first profile, faceted cones (fans) over its vertices, and a
 //! real bend of the rule's radius on every edge between two facets. The blank edge follows the
-//! facets. The corner where a fan's bends meet needs a relief the press can make; its shape waits
-//! for the author (D264), so a body is refused there until it is settled — the разметка, the
-//! bends and the checks below are what that relief is built on.
+//! facets. The relief at every vertex of the first profile (D264): a sector from the vertex, its
+//! sides along the extreme bends' axes, its far boundary the bends' end sections — cut at the
+//! bottom and at the top rim (the bands stop short of the rim). The разметка below is what the
+//! body is assembled from; `transition` refuses until the whole body validates.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -75,7 +76,7 @@ pub(crate) struct Bend {
     pub(crate) axis: Vec3,
     pub(crate) radius_in: f64,
     pub(crate) radius_out: f64,
-    /// The tangent points on the two facets' planes.
+    /// The tangent points on the two facets' own planes: the axis's feet on them.
     pub(crate) tangent: [Vec3; 2],
     /// The angle the outer surface turns through: between the two facets' outward normals.
     pub(crate) sweep: f64,
@@ -100,6 +101,8 @@ pub(crate) struct Relief {
     pub(crate) at: Vec3,
     /// The point on each fan facet where the two bends' tangent lines meet, one per facet.
     pub(crate) q: Vec<Vec3>,
+    /// The bend at each rib, `m + 1` of them in the fan's order (D264).
+    pub(crate) ribs: Vec<usize>,
     /// The end plane of each bend, `(axis, a point of the plane)`: the bend's way from the vertex
     /// and the point `q` (the last bend, having no next, takes the last `q`).
     pub(crate) ends: Vec<(Vec3, Vec3)>,
@@ -510,6 +513,20 @@ fn clip(poly: &[Vec3], at: Vec3, n: Vec3) -> Vec<Vec3> {
     out
 }
 
+/// Where two lines meet: the point of `p0 + d0·s` = `p1 + d1·u` (both in one plane, not parallel).
+fn meet(p0: Vec3, d0: Vec3, p1: Vec3, d1: Vec3) -> Result<Vec3, BrepError> {
+    let n = d0.cross(d1);
+    let denom = n.dot(n);
+    if denom == 0.0 || !denom.is_finite() {
+        return Err(BrepError::Degenerate("transition: two tangent lines are parallel: their bends' trims do not meet".into()));
+    }
+    let s = (p1 - p0).cross(d1).dot(n) / denom;
+    if !s.is_finite() {
+        return Err(BrepError::Degenerate("transition: two tangent lines meet nowhere".into()));
+    }
+    Ok(p0 + d0 * s)
+}
+
 /// The разметка of the transition between profile `a_name` of sketch `a` and `b_name` of `b`.
 pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_name: &str, dims: &TransitionDims) -> Result<Layout, BrepError> {
     let [ao, _ax, _ay, az] = a.frame;
@@ -662,7 +679,7 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
                 let x0 = solve(f.normal, bf, g.normal, bg)?;
                 let m = (p1 + p2) * 0.5;
                 let at = x0 + d * (m - x0).dot(d);
-                let tangent = [at + f.normal * radius_out, at + g.normal * radius_out];
+                let tangent = [at + f.normal * (radius_out - outer), at + g.normal * (radius_out - outer)];
                 let sweep = libm::acos(f.normal.dot(g.normal).clamp(-1.0, 1.0));
                 for (facet, _) in [(*fi, tangent[0]), (*gi, tangent[1])] {
                     let nrm = facets[facet].normal;
@@ -683,42 +700,59 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
         }
     }
     // The relief at each vertex of `a`: the sector from it, its far boundary the bends' end
-    // sections (D264). The point on a fan facet where the two bends' tangent lines meet is the
-    // point at the trim distance from both of its edges, on their bisector.
+    // sections (D264). On each fan facet, the point where its two bends' tangent lines meet: a
+    // bend's tangent line runs along its rib, through the axis's foot on the facet's own plane,
+    // that far off the rib as (radius_out - outer)·tan(sweep/2).
     let by_edge: BTreeMap<(TopoId, TopoId), usize> =
         bends.iter().enumerate().map(|(i, b)| ((b.edge[0].min(b.edge[1]), b.edge[0].max(b.edge[1])), i)).collect();
     let trim = radius_out - outer;
     let mut reliefs: Vec<Relief> = Vec::with_capacity(n);
+    let mut fan_base = n;
     for j in 0..n {
         let m = fans[j];
+        // The bend at the rib out to `fan3[j][k]`: its index, axis point and the rib's direction.
+        let bend_at_rib = |k: usize| -> Result<usize, BrepError> {
+            let edge = (a_id(j).min(fan_vid(j, k, m)), a_id(j).max(fan_vid(j, k, m)));
+            by_edge.get(&edge).copied().ok_or_else(|| BrepError::Invalid("transition: a fan edge has no bend".into()))
+        };
+        let ribs: Vec<usize> = (0..=m).map(bend_at_rib).collect::<Result<_, _>>()?;
+        let rib = |k: usize| -> Result<(Vec3, Vec3), BrepError> {
+            let b = &bends[ribs[k]];
+            Ok((b.at, unit3(fan3[j][k] - a3[j])))
+        };
         let mut q: Vec<Vec3> = Vec::with_capacity(m);
         for k in 0..m {
-            let (p0, p1, p2) = (a3[j], fan3[j][k], fan3[j][k + 1]);
-            let (e1, e2) = (unit3(p1 - p0), unit3(p2 - p0));
-            let half = ((1.0 - e1.dot(e2).clamp(-1.0, 1.0)) * 0.5).sqrt();
-            let bisector = e1 + e2;
-            if half <= 0.0 || !half.is_finite() || bisector.dot(bisector) == 0.0 {
+            let n = facets[fan_base + k].normal;
+            let ((at0, d0), (at1, d1)) = (rib(k)?, rib(k + 1)?);
+            if d0.dot(d1) <= 0.0 {
                 return Err(BrepError::Degenerate("a transition's fan folds back on itself at a vertex".into()));
             }
-            q.push(p0 + unit3(bisector) * (trim / half));
+            let (t0, t1) = (at0 + n * trim, at1 + n * trim);
+            q.push(meet(t0, d0, t1, d1)?);
         }
         let mut ends: Vec<(Vec3, Vec3)> = Vec::with_capacity(m + 1);
         for k in 0..=m {
             let axis = unit3(fan3[j][k] - a3[j]);
             ends.push((axis, if k < m { q[k] } else { q[m - 1] }));
         }
+        // The sides: the planes through the vertex and the extreme bends' axes, their normals
+        // into the sector, toward the fan's middle.
+        let mid = average(&fan3[j]) - a3[j];
         let side = |k: usize| -> Result<(Vec3, Vec3), BrepError> {
-            let axis = unit3(fan3[j][k] - a3[j]);
-            let edge = (a_id(j).min(fan_vid(j, k, m)), a_id(j).max(fan_vid(j, k, m)));
-            let bend = by_edge.get(&edge).ok_or_else(|| BrepError::Invalid("transition: a fan edge has no bend".into()))?;
-            let normal = axis.cross(bends[*bend].at - a3[j]);
+            let (at, axis) = rib(k)?;
+            let normal = axis.cross(at - a3[j]);
             if normal.dot(normal) == 0.0 {
                 return Err(BrepError::Degenerate("a transition's extreme bend runs through its vertex".into()));
             }
-            Ok((a3[j], unit3(normal)))
+            let mut normal = unit3(normal);
+            if normal.dot(mid) < 0.0 {
+                normal = -normal;
+            }
+            Ok((a3[j], normal))
         };
         let sides = [side(0)?, side(m)?];
-        reliefs.push(Relief { at: a3[j], q, ends, sides });
+        reliefs.push(Relief { at: a3[j], q, ribs, ends, sides });
+        fan_base += m;
     }
     // The rims, and the seam through the middle of the flat triangle over the first piece.
     let bottom_rim: Vec<f64> = (0..n).map(|i| (a3[(i + 1) % n] - a3[i]).dot(a3[(i + 1) % n] - a3[i]).sqrt()).collect();
@@ -886,8 +920,9 @@ pub(crate) fn transition(
 
 /// Checks the разметка against itself (D264: a wrong layout is turned away here, before it is
 /// developed): every facet's vertices lie on its plane, every bend's axis along its edge and at the
-/// outer radius from both facets, its tangents at that radius from the axis, its sweep the angle
-/// between the facets' normals.
+/// outer radius from both facets, its tangents the axis's feet on the facets' own planes, each
+/// tangent line at the tangent offset `(radius_out - outer)·tan(sweep/2)` from its edge, its sweep
+/// the angle between the facets' normals, and each relief's point on its facet's two tangent lines.
 fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     let size = layout
         .vertices
@@ -904,11 +939,13 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
         }
     }
     let (outer, _) = shifts(dims.side, dims.thickness);
+    let radius_out = dims.radius + dims.thickness;
     for b in &layout.bends {
         let (u, v) = (b.edge[0], b.edge[1]);
         let p1 = *layout.vertices.get(&u).ok_or_else(|| BrepError::Invalid(format!("transition: bend vertex {u:?} is missing")))?;
         let p2 = *layout.vertices.get(&v).ok_or_else(|| BrepError::Invalid(format!("transition: bend vertex {v:?} is missing")))?;
-        if !nearly_parallel(unit3(p2 - p1), b.axis) {
+        let e = unit3(p2 - p1);
+        if !nearly_parallel(e, b.axis) {
             return Err(BrepError::Invalid("transition: a bend's axis is not along its edge".into()));
         }
         for (fi, t) in b.facets.iter().zip(b.tangent) {
@@ -917,9 +954,17 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             if !within_rounding(dist + b.radius_out, size) {
                 return Err(BrepError::Invalid("transition: a bend's axis is not at the outer radius from a facet".into()));
             }
+            // The tangent point is the axis's foot on the facet's own plane, that far off the
+            // shared edge as (radius_out - outer)·tan(sweep/2).
+            let trim = b.radius_out - outer;
             let w = t - b.at;
-            if !within_rounding(w.dot(w).sqrt() - b.radius_out, size) || !within_rounding(w.dot(f.normal) - b.radius_out, size) {
+            if !within_rounding(w.dot(w).sqrt() - trim, size) || !within_rounding(w.dot(f.normal) - trim, size) {
                 return Err(BrepError::Invalid("transition: a bend's tangent point is off its facet".into()));
+            }
+            let u = t - p1;
+            let off = (u - e * u.dot(e)).dot(u - e * u.dot(e)).sqrt();
+            if !within_rounding(off - trim * libm::tan(b.sweep / 2.0), size) {
+                return Err(BrepError::Invalid("transition: a bend's tangent line is not at the tangent offset from its edge".into()));
             }
         }
         if !within_rounding(b.radius_in + dims.thickness - b.radius_out, size) {
@@ -938,29 +983,85 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     if layout.reliefs.len() != layout.a.len() {
         return Err(BrepError::Invalid("transition: not one relief at every vertex of the first profile".into()));
     }
+    let mut fan_base = layout.a.len();
     for (j, r) in layout.reliefs.iter().enumerate() {
-        if r.q.len() != layout.fans[j] || r.ends.len() != r.q.len() + 1 {
+        let m = layout.fans[j];
+        if r.q.len() != m || r.ribs.len() != m + 1 || r.ends.len() != m + 1 {
             return Err(BrepError::Invalid(format!(
-                "transition: the relief at vertex {j} has {} points for {} fan facets",
+                "transition: the relief at vertex {j} has {} points, {} ribs for {} fan facets",
                 r.q.len(),
-                layout.fans[j]
+                r.ribs.len(),
+                m
             )));
         }
-        // Each end plane stands square to its bend, through the point its tangent line meets its
-        // neighbour's; the two extreme ones are square to the shell.
+        // The bend of each rib lies on the rib: its axis along it, from the vertex out to the fan.
+        let rib = |k: usize| -> Result<(Vec3, Vec3), BrepError> {
+            let b = &layout.bends[r.ribs[k]];
+            let p1 = *layout.vertices.get(&b.edge[0]).ok_or_else(|| BrepError::Invalid("transition: bend vertex is missing".into()))?;
+            let p2 = *layout.vertices.get(&b.edge[1]).ok_or_else(|| BrepError::Invalid("transition: bend vertex is missing".into()))?;
+            let far = if (p1 - r.at).dot(p1 - r.at) <= (p2 - r.at).dot(p2 - r.at) { p2 } else { p1 };
+            Ok((b.at, unit3(far - r.at)))
+        };
+        // Each point lies on both tangent lines of its fan facet — the bend at each of its ribs,
+        // through the axis's foot on the facet's own plane, along the rib — and stays inside the
+        // facet, between its three edges.
+        let trim = radius_out - outer;
+        for k in 0..m {
+            let f = &layout.facets[fan_base + k];
+            let line = |rib_i: usize| -> Result<(Vec3, Vec3), BrepError> {
+                let (at, dir) = rib(rib_i)?;
+                Ok((at + f.normal * trim, dir))
+            };
+            let (t0, d0) = line(k)?;
+            let (t1, d1) = line(k + 1)?;
+            for (t, d) in [(t0, d0), (t1, d1)] {
+                let w = r.q[k] - t;
+                let miss = (w - d * w.dot(d)).dot(w - d * w.dot(d)).sqrt();
+                if !within_rounding(miss, size) {
+                    return Err(BrepError::Invalid(format!("transition: the relief's point {k} at vertex {j} is off a tangent line")));
+                }
+            }
+            let tri: Vec<Vec3> = f
+                .loop_
+                .iter()
+                .map(|v| layout.vertices.get(v).copied().ok_or_else(|| BrepError::Invalid("transition: facet vertex is missing".into())))
+                .collect::<Result<_, _>>()?;
+            for i in 0..3 {
+                let (a, b, c) = (tri[i], tri[(i + 1) % 3], tri[(i + 2) % 3]);
+                let e = unit3(b - a);
+                let side_p = e.cross(r.q[k] - a).dot(f.normal);
+                let side_c = e.cross(c - a).dot(f.normal);
+                if side_p * side_c < 0.0 && !within_rounding(side_p, size) && !within_rounding(side_c, size) {
+                    return Err(BrepError::Invalid(format!("transition: the relief's point {k} at vertex {j} leaves its fan facet")));
+                }
+            }
+        }
+        fan_base += m;
+        // Each end plane stands square to its bend: its axis along the rib, through the point the
+        // bend's tangent line meets its neighbour's.
         for (k, (axis, point)) in r.ends.iter().enumerate() {
-            let want = if k < r.q.len() { r.q[k] } else { r.q[r.q.len() - 1] };
+            let (_, rib_dir) = rib(k)?;
+            if !nearly_parallel(*axis, rib_dir) {
+                return Err(BrepError::Invalid(format!("transition: the relief's end plane {k} at vertex {j} is off its bend")));
+            }
+            let want = if k < m { r.q[k] } else { r.q[m - 1] };
             if !within_rounding(axis.dot(*axis) - 1.0, 1.0) || !within_rounding((*point - want).dot(*point - want).sqrt(), size) {
                 return Err(BrepError::Invalid(format!("transition: the relief's end plane {k} at vertex {j} is off")));
             }
         }
-        for (side, k) in [(r.sides[0], 0), (r.sides[1], r.q.len())] {
+        // The two side planes hold the vertex and their extreme bends' axes; the two extreme ones
+        // are square to the shell.
+        for (side, k) in [(r.sides[0], 0), (r.sides[1], m)] {
             let (point, normal) = side;
             if !within_rounding(normal.dot(normal) - 1.0, 1.0) || !within_rounding(normal.dot(r.ends[k].0), 1.0) {
                 return Err(BrepError::Invalid(format!("transition: the relief's side plane at vertex {j} is off")));
             }
             if !within_rounding((point - r.at).dot(normal), size) {
                 return Err(BrepError::Invalid(format!("transition: the relief's side plane misses its vertex {j}")));
+            }
+            let (at, _) = rib(k)?;
+            if !within_rounding((at - r.at).dot(normal), size) {
+                return Err(BrepError::Invalid(format!("transition: the relief's side plane misses its bend at vertex {j}")));
             }
         }
     }
@@ -1036,8 +1137,17 @@ mod tests {
         assert!((layout.seam.from - layout.seam.to).dot(layout.seam.from - layout.seam.to).sqrt() > 0.0);
         // A relief sector at each vertex: one end plane per bend (7 at a fan of 6) and two sides.
         assert_eq!(layout.reliefs.len(), 4);
-        assert!(layout.reliefs.iter().all(|r| r.q.len() == 6 && r.ends.len() == 7));
+        assert!(layout.reliefs.iter().all(|r| r.q.len() == 6 && r.ribs.len() == 7 && r.ends.len() == 7));
         assert!(layout.reliefs.iter().all(|r| r.sides.iter().all(|(_, n)| (n.dot(*n) - 1.0).abs() < 1e-9)));
+        // Each tangent-line meeting sits by its vertex, a dozen millimetres up the fan: the
+        // tangent offset is (radius_out - outer)·tan(sweep/2), ~1.3 mm at the fan's ~14.5° bends.
+        for r in &layout.reliefs {
+            let mut z: Vec<f64> = r.q.iter().map(|q| q.z).collect();
+            z.sort_by(|a, b| a.total_cmp(b));
+            for (got, want) in z.iter().zip([10.1138, 10.1138, 13.0519, 13.0519, 13.2608, 13.2608]) {
+                assert!((got - want).abs() < 1e-3, "relief point heights {z:?}");
+            }
+        }
     }
 
     #[test]
