@@ -9,7 +9,7 @@ use datum_brep::{Body, Curve, Ix, Surface};
 use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
 use datum_math::Vec3;
 use datum_math::expr::{ExprError, Num, parameter_values};
-use datum_ops::Flat;
+use datum_ops::{Flat, PartDef};
 use serde_json::{Map, Value, json};
 
 use crate::levels::Doc;
@@ -177,6 +177,9 @@ const COMMANDS: &[Command] = &[
         run: |s, p| {
             if p.get("op").and_then(Value::as_str) == Some("extrude") && !p.contains_key("mode") {
                 return Err(extrude::MODE_REQUIRED.into());
+            }
+            if p.get("op").and_then(Value::as_str) == Some("component") {
+                component_of(p)?;
             }
             let ix = add_feature(&mut s.graph, p.clone())?;
             Ok(s.rebuild_recording(ix))
@@ -1077,6 +1080,23 @@ fn no_params() -> Value {
 
 fn name_param() -> Value {
     json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]})
+}
+
+/// Said when a component is added without what places it: the definition of the tool and where
+/// it goes.
+const COMPONENT_REQUIRED: &str = "a component needs `part` (the definition of the tool: its features and roles) and `placements` \
+                                  (where it goes: at least one point or line of the sketch)";
+
+/// What a component given as `p` must have (D260): a `part` that is a part of the library, and
+/// `placements`. The definition is checked as the library checks it; its body is built when the
+/// model is.
+fn component_of(p: &Map<String, Value>) -> Result<(), String> {
+    let def: PartDef = serde_json::from_value(p.get("part").cloned().ok_or(COMPONENT_REQUIRED)?).map_err(|e| format!("`part`: {e}"))?;
+    def.validate().map_err(|e| format!("`part`: {e}"))?;
+    match p.get("placements").and_then(Value::as_array) {
+        Some(a) if !a.is_empty() => Ok(()),
+        _ => Err(COMPONENT_REQUIRED.into()),
+    }
 }
 
 /// A feature object: the operation's generated schema plus `name` and `inputs`.

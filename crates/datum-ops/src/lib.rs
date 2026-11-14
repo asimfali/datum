@@ -6,6 +6,7 @@ mod boolean;
 mod bounded;
 mod bounds;
 mod branch;
+mod component;
 mod copies;
 mod cut;
 mod flange;
@@ -25,6 +26,7 @@ use std::ops::RangeInclusive;
 pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
 pub use bounded::ChainCopy;
+pub use component::{PartDef, PartFeature, PartParameter, Roles, Tool, tool};
 pub use copies::{Copies, Place};
 use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
@@ -347,6 +349,25 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         min_length: Option<Num>,
     },
+    /// A library part placed in the part (D260, D261): `part` is the tool's definition, written
+    /// into the model — its features build one body, placed as a copy at each placement. `params`
+    /// give the definition's parameters other values; `library` and `group` say which library
+    /// element it came from (to update it from the library later), the model is built without the
+    /// library. A `line` placement turns the tool's `axis` along a line of the input sketch and
+    /// feeds the line's length to the parameter `fit`; a `point` placement puts it at a point of
+    /// the sketch, its axis unturned. Inputs: the sheet, then the sketch the placements name
+    /// (the sheet is not cut or formed yet). Refused: a parameter the part has not, no placements,
+    /// a line or a point the sketch has not, a line placement of a part without an `axis`.
+    Component {
+        part: PartDef,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        library: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        params: BTreeMap<String, Num>,
+        placements: Vec<Placement>,
+    },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
     /// layer at `k_factor` of the thickness (the K-factor cuts on bends were sketched with). Seen
@@ -584,6 +605,7 @@ impl Op {
             Self::BranchHole { .. } => "branch_hole",
             Self::Unfold { .. } => "unfold",
             Self::Rib { .. } => "rib",
+            Self::Component { .. } => "component",
             Self::Sheet { .. } => "sheet",
             Self::Plate { .. } => "plate",
             Self::Flange { .. } => "flange",
@@ -618,7 +640,7 @@ impl Op {
             | Self::Rolled { .. } => 1..=1,
             Self::Flange { .. } => 1..=4,
             Self::Boolean { .. } => 2..=usize::MAX,
-            Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } | Self::Rib { .. } => 2..=2,
+            Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } | Self::Rib { .. } | Self::Component { .. } => 2..=2,
         }
     }
 
@@ -752,6 +774,16 @@ impl Op {
                 bend_position: *bend_position,
                 to: to.map(|p| Ok::<_, String>(PlaneTo { plane: p.plane.clone(), gap: r(&p.gap, "to: gap")? }))?,
             },
+            // The definition keeps its own numbers: they resolve inside the tool, against its
+            // parameters (D260). What the occurrence gives them, and where it is placed, are the
+            // model's numbers, as everywhere else.
+            Self::Component { part, library, group, params, placements } => Self::Component {
+                part: part.clone(),
+                library: library.clone(),
+                group: group.clone(),
+                params: params.iter().map(|(name, n)| Ok((name.clone(), r(n, name)?))).collect::<Result<_, String>>()?,
+                placements: placements.iter().map(|p| p.resolved(lookup)).collect::<Result<_, String>>()?,
+            },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
     }
@@ -808,7 +840,8 @@ impl Op {
             | Self::Trim { .. }
             | Self::Saddle { .. }
             | Self::BranchHole { .. }
-            | Self::Rib { .. } => {
+            | Self::Rib { .. }
+            | Self::Component { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -883,7 +916,8 @@ impl Op {
             | Self::Rolled { .. }
             | Self::Mirror { .. }
             | Self::Rib { .. }
-            | Self::Trim { .. } => Vec::new(),
+            | Self::Trim { .. }
+            | Self::Component { .. } => Vec::new(),
             // The sheet; its work planes are read by name.
             Self::Flange { .. } => {
                 vec![values[0].body().ok_or_else(|| BrepError::Sketch("flange takes bodies, input 1 is a sketch".into()))?]
@@ -964,6 +998,7 @@ impl Op {
                 return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
+            Self::Component { part, params, placements, .. } => component::placed(feature, part, params, placements, values)?,
             Self::Trim { flip, k_factor } => {
                 let Some(k) = k_factor else { return Err(BrepError::Invalid(NO_ROLL_RULE.into())) };
                 let body = values[0].body().ok_or_else(|| BrepError::Sketch("trim takes a body, then a work plane".into()))?;
@@ -1135,9 +1170,58 @@ impl Spot {
 
 /// A line of the sketch that is input `input` of a work plane.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct LineOf {
     pub input: usize,
     pub line: String,
+}
+
+/// Where a component is placed (D260, D261): along a line of an input sketch, or at a point of
+/// one. The line is the tool's axis and its length feeds `fit`; the point puts it where it is,
+/// its axis unturned.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "placement", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Placement {
+    Line(LineOf),
+    Point(At),
+}
+
+impl Placement {
+    /// The placement with its numbers evaluated, a point's `at` by `lookup`.
+    fn resolved(&self, lookup: &impl Fn(&str) -> Result<f64, ExprError>) -> Result<Self, String> {
+        let r = |n: &Num, field: &str| n.resolve(lookup).map(Num::Value).map_err(|e| format!("`{field}`: {e}"));
+        Ok(match self {
+            Self::Line(l) => Self::Line(l.clone()),
+            Self::Point(a) => Self::Point(At {
+                input: a.input,
+                point: a.point.clone(),
+                at: a.at.as_ref().map(|[x, y]| Ok::<[Num; 2], String>([r(x, "at")?, r(y, "at")?])).transpose()?,
+            }),
+        })
+    }
+}
+
+/// A point of the sketch that is input `input`: by the name of one of its points, or by its
+/// coordinates `at` `[x, y]`; exactly one of the two.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct At {
+    pub input: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub point: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[Num; 2]>,
+}
+
+/// The sketch that is input `k` of `what`, or why it is none.
+fn input_sketch<'a>(values: &'a [&Value], k: usize, what: &str) -> Result<&'a sketch::Placed, BrepError> {
+    values.get(k).and_then(|v| v.sketch()).ok_or_else(|| BrepError::Sketch(format!("{what} is of input {k}, which is no sketch")))
+}
+
+/// The ends of line `name` of sketch `s`, input `k`.
+fn line_ends(s: &sketch::Placed, name: &str, k: usize) -> Result<(Vec3, Vec3), BrepError> {
+    let line = s.lines.get(name).ok_or_else(|| BrepError::LostReference(format!("no line `{name}` in the sketch of input {k}")))?;
+    Ok((sketch_point(s, &line.from, k)?, sketch_point(s, &line.to, k)?))
 }
 
 /// Where point `name` of sketch `s`, input `k` of a work plane, lies.
@@ -1153,12 +1237,8 @@ fn sketch_point(s: &Placed, name: &str, k: usize) -> Result<Vec3, BrepError> {
 /// The plane through line `l` of `values`, square to the line's sketch: origin the line's start, X
 /// along it.
 fn square_to_sketch(l: &LineOf, values: &[&Value]) -> Result<SketchPlane, BrepError> {
-    let s = values
-        .get(l.input)
-        .and_then(|v| v.sketch())
-        .ok_or_else(|| BrepError::Sketch(format!("a plane's line is of input {}, which is no sketch", l.input)))?;
-    let line = s.lines.get(&l.line).ok_or_else(|| BrepError::LostReference(format!("no line `{}` in the sketch of input {}", l.line, l.input)))?;
-    let (a, b) = (sketch_point(s, &line.from, l.input)?, sketch_point(s, &line.to, l.input)?);
+    let s = input_sketch(values, l.input, "a plane's line")?;
+    let (a, b) = line_ends(s, &l.line, l.input)?;
     let d = b - a;
     let n = d.cross(s.frame[3]);
     Ok(SketchPlane { origin: a, x_axis: d * (1.0 / d.dot(d).sqrt()), normal: n * (1.0 / n.dot(n).sqrt()) })

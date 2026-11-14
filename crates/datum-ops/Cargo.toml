@@ -17,6 +17,7 @@ blake3 = { workspace = true }
 rayon = { workspace = true }
 smallvec = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 schemars = { workspace = true }
 datum-sketch = { workspace = true }
 
