@@ -1,28 +1,50 @@
 #!/usr/bin/env bash
-# Syncs a branch from this WSL repo into the local Windows checkout (C:\develop\datum)
-# and builds datum.exe there with the Windows toolchain. Usage: win-build.sh [branch].
+# Mirrors a committed branch from this WSL repo into the Windows checkout (C:\develop\datum,
+# left detached at the built commit) and builds datum.exe there with the Windows toolchain.
+# Usage: win-build.sh [branch] [--test]   (--test also runs the pinned-hash check there, C4).
 set -euo pipefail
-WSL=/home/simfali/develop/datum
-WIN=/mnt/c/develop/datum
-branch="${1:-$(git -C "$WSL" branch --show-current)}"
+
+WSL=$(git rev-parse --show-toplevel)
+WIN=${DATUM_WIN:-/mnt/c/develop/datum}
+WIN_DOS=$(wslpath -w "$WIN")
+branch=""
+test=0
+for arg in "$@"; do
+  case "$arg" in
+    --test) test=1 ;;
+    *) branch=$arg ;;
+  esac
+done
+[ -n "$branch" ] || branch=$(git -C "$WSL" branch --show-current)
+[ -n "$branch" ] || { echo "detached HEAD in WSL: pass a branch name" >&2; exit 1; }
+
+gw() { git -C "$WIN" -c safe.directory="$WIN" "$@"; }
 
 # The Windows tree must be clean: nothing is discarded here.
-dirty=$(git -C "$WIN" -c safe.directory=/mnt/c/develop/datum status --porcelain | head -1)
-if [ -n "$dirty" ]; then
-  echo "C:\\develop\\datum has uncommitted changes; commit or stash them there first" >&2
+dirty=$(gw status --porcelain)
+[ -z "$dirty" ] || { echo "$WIN_DOS has uncommitted changes; commit or stash them there first" >&2; exit 1; }
+
+# Uncommitted WSL edits are not built: warn loudly instead of building stale code silently.
+wsl_dirty=$(git -C "$WSL" status --porcelain --untracked-files=no)
+[ -z "$wsl_dirty" ] || echo "warning: the WSL tree has uncommitted changes; they are NOT built" >&2
+
+# Separate statements: a failed fetch must stop the script, not skip the checkout (set -e only
+# ignores a failure of a non-last command in an AND list).
+gw fetch --quiet "$WSL" "$branch"
+gw checkout --quiet --detach FETCH_HEAD
+sha=$(gw rev-parse --short HEAD)
+
+run_win() { /mnt/c/Windows/System32/cmd.exe /C "cd /d $WIN_DOS && $1"; }
+log=$(mktemp)
+if ! run_win "cargo build -q -p datum-cli" >"$log" 2>&1; then
+  tail -n 40 "$log" >&2
   exit 1
 fi
-
-# Bring the branch over. When it is checked out in Windows, git refuses to move it by fetch:
-# fetch to a temp ref and fast-forward instead.
-current=$(git -C "$WIN" -c safe.directory=/mnt/c/develop/datum branch --show-current)
-if [ "$current" = "$branch" ]; then
-  git -C "$WIN" -c safe.directory=/mnt/c/develop/datum fetch "$WSL" "$branch" &&
-    git -C "$WIN" -c safe.directory=/mnt/c/develop/datum merge --ff-only FETCH_HEAD
-else
-  git -C "$WIN" -c safe.directory=/mnt/c/develop/datum fetch "$WSL" "$branch:$branch"
-  git -C "$WIN" -c safe.directory=/mnt/c/develop/datum switch "$branch"
+if [ "$test" = 1 ]; then
+  if ! run_win "cargo run -q -p datum-cli -- determinism-check tests/models" >"$log" 2>&1; then
+    tail -n 40 "$log" >&2
+    echo "the pinned hashes differ on Windows (C4)" >&2
+    exit 1
+  fi
 fi
-
-/mnt/c/Windows/System32/cmd.exe /C "cd /d C:\\develop\\datum && cargo build -p datum-cli"
-echo "built: C:\\develop\\datum\\target\\debug\\datum.exe (branch $branch)"
+echo "built $sha ($branch): $WIN_DOS\\target\\debug\\datum.exe"
