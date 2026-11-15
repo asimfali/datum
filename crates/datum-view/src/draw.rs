@@ -201,13 +201,8 @@ pub struct Draft {
     pub mirror: bool,
     /// Line tool: the chain's end.
     pub chain: Option<Chain>,
-    /// Arc tool: centre, then start; circle tool: centre.
+    /// Arc tool: the start, then the end; circle tool: the centre.
     pub clicks: Vec<Spot>,
-    /// Arc tool: the angle swept from the start, following the mouse (counterclockwise > 0).
-    pub sweep: f64,
-    /// Arc tool: the start's lean to the centre, and its radius as typed.
-    pub start_lean: Option<Lean>,
-    pub start_radius: Option<Json>,
     /// A value typed while drawing (the field by the cursor), and what it comes to: the length
     /// of the line, the circle's diameter, the arc's radius.
     pub typed: Option<(Json, f64)>,
@@ -269,9 +264,6 @@ impl Default for Draft {
             mirror: false,
             chain: None,
             clicks: Vec::new(),
-            sweep: 0.0,
-            start_lean: None,
-            start_radius: None,
             typed: None,
             picks: Vec::new(),
             axis: None,
@@ -640,12 +632,12 @@ impl Draft {
     }
 
     /// Whether a value typed now would size what is being drawn: a line from the chain's end,
-    /// a circle from its centre, an arc's radius from its centre.
+    /// a circle from its centre, an arc's radius from its start.
     pub fn takes_value(&self) -> bool {
         match self.tool {
             Tool::Line => self.chain.is_some() && !self.tangent,
             Tool::Circle => self.clicks.len() == 1,
-            Tool::Arc => self.clicks.len() == 1,
+            Tool::Arc => self.clicks.len() == 2,
             Tool::Fillet | Tool::Offset => true,
             _ => false,
         }
@@ -859,7 +851,6 @@ impl Draft {
                 // Straight on: a line, leaning as one does.
                 None => self.lean(edit, c.at, spot.at, c.last.as_ref()),
             },
-            (Tool::Arc, _, [c] | [c, _]) => axis_lean(c.at, spot.at),
             _ => None,
         };
         if let Some((lean, at)) = found {
@@ -880,7 +871,7 @@ impl Draft {
         let from = match (self.tool, &self.chain, &self.clicks[..]) {
             (Tool::Line, Some(c), _) if !self.tangent => Some((c.at, 1.0)),
             (Tool::Circle, _, [c]) => Some((c.at, 0.5)),
-            (Tool::Arc, _, [c]) => Some((c.at, 1.0)),
+            (Tool::Arc, _, [s, _]) => Some((s.at, 1.0)),
             _ => None,
         };
         if let (Some((_, size)), Some((o, k))) = (&self.typed, from) {
@@ -889,12 +880,6 @@ impl Draft {
             if len > 0.0 && *size > 0.0 {
                 spot = Spot { at: [o[0] + d[0] / len * size * k, o[1] + d[1] / len * size * k], snap: Snap::Free };
             }
-        }
-        if let (Tool::Arc, [c, s]) = (self.tool, &self.clicks[..]) {
-            let angle = |q: [f64; 2]| libm::atan2(q[1] - c.at[1], q[0] - c.at[0]);
-            let before = self.cursor.as_ref().map_or(angle(s.at), |k| angle(k.at));
-            let step = (angle(spot.at) - before + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
-            self.sweep += step;
         }
         self.cursor = Some(spot);
     }
@@ -963,35 +948,22 @@ impl Draft {
                 self.clicks.clear();
             }
             Tool::Arc => {
+                // The start, then the end; the cursor gives the radius, a typed one fixes it.
                 if self.clicks.len() < 2 {
-                    if self.clicks.len() == 1 {
-                        self.sweep = 0.0;
-                        self.start_lean = self.lean.clone();
-                        self.start_radius = self.typed.take().map(|t| t.0);
+                    if self.clicks.first().is_some_and(|s| s.at == spot.at) {
+                        return None;
                     }
                     self.clicks.push(spot);
                     return None;
                 }
-                let (c, s) = (self.clicks[0].clone(), self.clicks[1].clone());
-                let r = libm::hypot(s.at[0] - c.at[0], s.at[1] - c.at[1]);
-                let d = libm::hypot(spot.at[0] - c.at[0], spot.at[1] - c.at[1]);
-                if r == 0.0 || d == 0.0 || self.sweep == 0.0 {
-                    return None;
-                }
-                // The end at the start's distance from the centre, toward the cursor.
-                let end = match spot.snap {
-                    Snap::Point(_) => spot,
-                    _ => Spot { at: [c.at[0] + (spot.at[0] - c.at[0]) * r / d, c.at[1] + (spot.at[1] - c.at[1]) * r / d], snap: Snap::Free },
-                };
-                let (cn, sn, en) = (patch.point(&c), patch.point(&s), patch.point(&end));
+                let (s, e) = (self.clicks[0].clone(), self.clicks[1].clone());
+                let (centre, _, sweep) = arc_through(s.at, e.at, spot.at, self.typed.as_ref().map(|t| t.1))?;
+                let (cn, sn, en) = (patch.point(&Spot { at: centre, snap: Snap::Free }), patch.point(&s), patch.point(&e));
                 let name = patch.fresh("a");
-                let (from, to) = if self.sweep > 0.0 { (sn.clone(), en.clone()) } else { (en.clone(), sn.clone()) };
+                let (from, to) = if sweep > 0.0 { (sn, en) } else { (en, sn) };
                 patch.add("arcs", &name, json!({"center": cn, "from": from, "to": to}), self.construction);
-                for (lean, p) in [(self.start_lean.take(), sn), (self.lean.clone(), en)] {
-                    patch.level(lean.as_ref(), &cn, &p);
-                }
-                if let Some(r) = self.start_radius.take() {
-                    patch.constrain(json!({"type": "radius", "arc": name, "value": r}));
+                if let Some((value, _)) = self.typed.take() {
+                    patch.constrain(json!({"type": "radius", "arc": name, "value": value}));
                 }
                 self.clicks.clear();
             }
@@ -1142,7 +1114,7 @@ impl Draft {
                 let r = libm::hypot(spot.at[0] - c.at[0], spot.at[1] - c.at[1]);
                 polyline(arc(c.at, r, 0.0, std::f64::consts::TAU));
             }
-            (Tool::Arc, _, [c]) => polyline(vec![c.at, spot.at]),
+            (Tool::Arc, _, [s]) => polyline(vec![s.at, spot.at]),
             (Tool::Template, _, clicks) => {
                 // The cursor is the anchor asked; once they are clicked, the element stays there.
                 let asked = (self.stage(&edit.modes) == Some(Stage::Anchors)).then_some(spot.at);
@@ -1153,9 +1125,10 @@ impl Draft {
                     }
                 }
             }
-            (Tool::Arc, _, [c, s]) => {
-                let r = libm::hypot(s.at[0] - c.at[0], s.at[1] - c.at[1]);
-                polyline(arc(c.at, r, libm::atan2(s.at[1] - c.at[1], s.at[0] - c.at[0]), self.sweep));
+            (Tool::Arc, _, [s, e]) => {
+                if let Some((c, r, sweep)) = arc_through(s.at, e.at, spot.at, self.typed.as_ref().map(|t| t.1)) {
+                    polyline(arc(c, r, libm::atan2(s.at[1] - c[1], s.at[0] - c[0]), sweep));
+                }
             }
             _ => {}
         }
@@ -1346,13 +1319,36 @@ fn degrees(a: [f64; 2], b: [f64; 2]) -> f64 {
     libm::atan2(a[0] * b[1] - a[1] * b[0], a[0] * b[0] + a[1] * b[1]).abs().to_degrees()
 }
 
-/// A point `q` near the horizontal or vertical through centre `c`: projected onto it, as a
-/// line's end is.
-fn axis_lean(c: [f64; 2], q: [f64; 2]) -> Option<(Lean, [f64; 2])> {
-    let w = [q[0] - c[0], q[1] - c[1]];
-    let (u, lean) = AXES.into_iter().find(|(u, _)| w != [0.0, 0.0] && degrees(w, *u) <= LEAN_DEG)?;
-    let t = w[0] * u[0] + w[1] * u[1];
-    Some((lean, [c[0] + u[0] * t, c[1] + u[1] * t]))
+/// The centre, the radius and the sweep from `start` of the arc from `start` to `end` that the
+/// cursor draws: the centre on the chord's perpendicular bisector, on the cursor's side, the
+/// radius the cursor's distance to the start (or as typed), so the arc bows away from the cursor.
+/// None where no arc goes: the ends alike, the cursor on the chord, a radius under half the chord.
+fn arc_through(start: [f64; 2], end: [f64; 2], cursor: [f64; 2], radius: Option<f64>) -> Option<([f64; 2], f64, f64)> {
+    let v = [end[0] - start[0], end[1] - start[1]];
+    let chord = libm::hypot(v[0], v[1]);
+    if chord == 0.0 {
+        return None;
+    }
+    let mid = [0.5 * (start[0] + end[0]), 0.5 * (start[1] + end[1])];
+    let n = [-v[1] / chord, v[0] / chord];
+    let side = (cursor[0] - mid[0]) * n[0] + (cursor[1] - mid[1]) * n[1];
+    if side == 0.0 {
+        return None;
+    }
+    let r = radius.unwrap_or_else(|| libm::hypot(cursor[0] - start[0], cursor[1] - start[1]));
+    let half = 0.5 * chord;
+    if r < half {
+        return None;
+    }
+    let k = libm::sqrt((r * r - half * half).max(0.0));
+    let sign = if side > 0.0 { 1.0 } else { -1.0 };
+    let centre = [mid[0] + n[0] * sign * k, mid[1] + n[1] * sign * k];
+    let angle = |q: [f64; 2]| libm::atan2(q[1] - centre[1], q[0] - centre[0]);
+    let mut sweep = (angle(end) - angle(start)).rem_euclid(std::f64::consts::TAU);
+    if sweep > std::f64::consts::PI {
+        sweep -= std::f64::consts::TAU;
+    }
+    Some((centre, r, sweep))
 }
 
 /// The end of a tangent arc from `from` along `dir` near level with or plumb above its centre:
@@ -1802,27 +1798,55 @@ pub(crate) mod tests {
         assert_eq!(p["add_constraints"], json!([{"type": "perpendicular", "lines": ["l1", "l2"]}]), "{p}");
     }
 
-    /// The arc tool's start and end level with or plumb above the centre take that constraint.
+    /// The arc goes from the start to the end, its centre on the cursor's side of the chord and
+    /// its radius the cursor's distance to the start: it bows away from the cursor, and the way
+    /// round the mouse is on decides which point is its `from`.
     #[test]
-    fn arc_ends_snap_to_the_axes() {
+    fn an_arc_goes_from_the_start_to_the_end_by_the_cursor() {
+        for (cursor, centre, from_start) in [([5.0, 5.0], [5.0, 5.0], true), ([5.0, -5.0], [5.0, -5.0], false)] {
+            let mut e = editor(json!({"points": {}}), false);
+            e.draft.tool = Tool::Arc;
+            assert!(click_at(&mut e, [0.0, 0.0], true).is_none(), "the start");
+            assert!(click_at(&mut e, [10.0, 0.0], true).is_none(), "the end");
+            let p = click_at(&mut e, cursor, true).unwrap();
+            let c = p["points"]["p1"].as_array().unwrap();
+            assert!((c[0].as_f64().unwrap() - centre[0]).abs() < 1e-9 && (c[1].as_f64().unwrap() - centre[1]).abs() < 1e-9, "{p}");
+            assert_eq!(p["points"]["p2"], json!([0.0, 0.0]), "{p}");
+            assert_eq!(p["points"]["p3"], json!([10.0, 0.0]), "{p}");
+            let want = if from_start { json!({"center": "p1", "from": "p2", "to": "p3"}) } else { json!({"center": "p1", "from": "p3", "to": "p2"}) };
+            assert_eq!(p["arcs"]["a1"], want, "{p}");
+        }
+    }
+
+    /// A radius under half the chord has no arc: nothing is drawn, the click does nothing, and the
+    /// start and the end stay for the cursor to give a radius.
+    #[test]
+    fn an_arc_under_half_its_chord_is_refused() {
         let mut e = editor(json!({"points": {}}), false);
         e.draft.tool = Tool::Arc;
-        click_at(&mut e, [0.0, 0.0], false);
-        click_at(&mut e, [5.0, 0.2], false);
-        for q in [[4.0, 3.0], [0.2, 5.0]] {
-            let (x, y) = e.camera.offset(q, H);
-            let mut d = std::mem::take(&mut e.draft);
-            d.track(&e, x, y, H, false);
-            e.draft = d;
-        }
-        let p = click_at(&mut e, [-0.2, 5.0], false).unwrap();
-        assert_eq!(p["points"]["p2"], json!([5.0, 0.0]), "{p}");
-        assert_eq!(p["points"]["p3"], json!([0.0, 5.0]), "{p}");
-        assert_eq!(
-            p["add_constraints"],
-            json!([{"type": "horizontal", "points": ["p1", "p2"]}, {"type": "vertical", "points": ["p1", "p3"]}]),
-            "{p}"
-        );
+        assert!(click_at(&mut e, [0.0, 0.0], true).is_none());
+        assert!(click_at(&mut e, [10.0, 0.0], true).is_none());
+        // 4.12 from the start, under the chord's half of 5.
+        assert!(click_at(&mut e, [4.0, 1.0], true).is_none(), "no arc goes so");
+        assert!(e.json["sketch"].get("arcs").is_none(), "nothing added");
+        let p = click_at(&mut e, [5.0, 5.0], true).unwrap();
+        assert_eq!(p["arcs"]["a1"]["center"], json!("p1"), "{p}");
+    }
+
+    /// A radius typed while the cursor gives it fixes the radius; the centre comes from the chord.
+    #[test]
+    fn a_typed_arc_radius_fixes_it() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Arc;
+        assert!(click_at(&mut e, [0.0, 0.0], true).is_none());
+        assert!(click_at(&mut e, [10.0, 0.0], true).is_none());
+        assert!(e.draft.takes_value(), "a radius typed now sizes the arc");
+        e.draft.typed = Some((json!(8.0), 8.0));
+        let p = click_at(&mut e, [5.0, 5.0], true).unwrap();
+        let c = p["points"]["p1"].as_array().unwrap();
+        assert!((c[0].as_f64().unwrap() - 5.0).abs() < 1e-9 && (c[1].as_f64().unwrap() - 39.0_f64.sqrt()).abs() < 1e-9, "{p}");
+        assert_eq!(p["add_constraints"], json!([{"type": "radius", "arc": "a1", "value": 8.0}]), "{p}");
+        assert!(e.draft.typed.is_none(), "the value went into the constraint");
     }
 
     #[test]
@@ -1839,24 +1863,22 @@ pub(crate) mod tests {
         assert!(p.get("add_constraints").is_none(), "Shift: no snap: {p}");
     }
 
-    /// The arc turns the way the mouse went, past half a turn too.
+    /// The arc is the cursor's place, not the way the mouse went there: a long way round gives the
+    /// same arc as straight on.
     #[test]
-    fn arcs_follow_the_mouse() {
-        for (path, from_start) in [(vec![[4.0, 3.0], [0.0, 5.0], [-5.0, 0.0], [0.0, -5.0]], true), (vec![[4.0, -3.0], [0.0, -5.0]], false)] {
-            let mut e = editor(json!({"points": {}}), false);
-            e.draft.tool = Tool::Arc;
-            assert!(click_at(&mut e, [0.0, 0.0], true).is_none());
-            assert!(click_at(&mut e, [5.0, 0.0], true).is_none());
-            for q in &path[..path.len() - 1] {
-                let (x, y) = e.camera.offset(*q, H);
-                let mut d = std::mem::take(&mut e.draft);
-                d.track(&e, x, y, H, true);
-                e.draft = d;
-            }
-            let p = click_at(&mut e, *path.last().unwrap(), true).unwrap();
-            let want = if from_start { json!({"center": "p1", "from": "p2", "to": "p3"}) } else { json!({"center": "p1", "from": "p3", "to": "p2"}) };
-            assert_eq!(p["arcs"]["a1"], want, "{p}");
+    fn an_arc_ignores_the_path_the_mouse_took() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Arc;
+        assert!(click_at(&mut e, [0.0, 0.0], true).is_none());
+        assert!(click_at(&mut e, [10.0, 0.0], true).is_none());
+        for q in [[5.0, 20.0], [-20.0, 5.0], [5.0, -20.0], [15.0, 20.0]] {
+            let (x, y) = e.camera.offset(q, H);
+            let mut d = std::mem::take(&mut e.draft);
+            d.track(&e, x, y, H, true);
+            e.draft = d;
         }
+        let p = click_at(&mut e, [5.0, 5.0], true).unwrap();
+        assert_eq!(p["arcs"]["a1"], json!({"center": "p1", "from": "p2", "to": "p3"}), "{p}");
     }
 
     #[test]
