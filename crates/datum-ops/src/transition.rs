@@ -84,8 +84,9 @@ pub(crate) struct Bend {
     pub(crate) sweep: f64,
     /// The point of the band's top end plane, square to the axis (D264, option b): the band stops
     /// short of the top rim, whose meeting with the band would be an ellipse. At an extreme bend,
-    /// the meeting of its triangle's two tangent lines; at an inner bend, the middle of the two
-    /// points where its tangent lines run into the top chords.
+    /// the meeting of its triangle's two tangent lines; at an inner bend, the axis point whose end
+    /// face's highest point touches the top profile's plane (D265) — nothing of the blank's edge
+    /// rises off the profile.
     pub(crate) top: Vec3,
 }
 
@@ -135,6 +136,8 @@ pub(crate) struct Layout {
     /// The lengths of the pieces of the first profile (the bottom rim).
     pub(crate) bottom_rim: Vec<f64>,
     pub(crate) seam: Seam,
+    /// The profiles' common normal, from the first plane toward the second.
+    pub(crate) az: Vec3,
     /// The relief at each vertex of `a`, in its order.
     pub(crate) reliefs: Vec<Relief>,
 }
@@ -534,6 +537,29 @@ fn meet(p0: Vec3, d0: Vec3, p1: Vec3, d1: Vec3) -> Result<Vec3, BrepError> {
     Ok(p0 + d0 * s)
 }
 
+/// How far a bend's end face reaches over the top profile's plane, as `(m, rho)`: the greatest
+/// `dir·az` over the band's span and the radius it is taken at (the outer arc when the span faces
+/// up, the inner one when the whole span faces down). `m` is 0 for an axis square to the profiles.
+fn span_top(b: &Bend, radius_in: f64, radius_out: f64, az: Vec3) -> (f64, f64) {
+    let u_of = |t: Vec3| -> Vec3 {
+        let w = t - b.at;
+        unit3(w - b.axis * w.dot(b.axis))
+    };
+    let (u0, u1) = (u_of(b.tangent[0]), u_of(b.tangent[1]));
+    let n01 = u0.cross(u1);
+    let m = if n01.dot(n01) == 0.0 {
+        u0.dot(az)
+    } else {
+        let w = az - b.axis * b.axis.dot(az);
+        let inside = w.dot(w) > 0.0 && {
+            let phi = libm::atan2(u0.cross(unit3(w)).dot(unit3(n01)), u0.dot(unit3(w)));
+            0.0 <= phi && phi <= b.sweep
+        };
+        if inside { unit3(w).dot(az) } else { u0.dot(az).max(u1.dot(az)) }
+    };
+    (m, if m >= 0.0 { radius_out } else { radius_in })
+}
+
 /// The разметка of the transition between profile `a_name` of sketch `a` and `b_name` of `b`.
 pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_name: &str, dims: &TransitionDims) -> Result<Layout, BrepError> {
     let [ao, _ax, _ay, az] = a.frame;
@@ -742,16 +768,15 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
         } else if gi < n {
             apex_meet[gi]
         } else {
-            let mut sum = Vec3::new(0.0, 0.0, 0.0);
-            for (side, f) in [fi, gi].iter().enumerate() {
-                let t = &facets[*f].top;
-                if t.len() != 2 {
-                    return Err(BrepError::Invalid("transition: a fan facet has not two rim points".into()));
-                }
-                let (c0, c1) = (vertices[&t[0]], vertices[&t[1]]);
-                sum = sum + meet(b.tangent[side], b.axis, c0, unit3(c1 - c0))?;
+            // An inner bend: the band stops where its end face's highest point touches the top
+            // profile's plane — a higher cut would lift the blank's edge off the profile (D265).
+            let (m, rho) = span_top(b, radius_in, radius_out, az);
+            let axis_az = b.axis.dot(az);
+            if within_rounding(axis_az, 1.0) {
+                return Err(BrepError::Degenerate("a transition's rib runs parallel to the top profile's plane".into()));
             }
-            sum * 0.5
+            let s = (-(b.at - b3[0]).dot(az) - rho * m) / axis_az;
+            b.at + b.axis * s
         };
         tops.push(top);
     }
@@ -833,7 +858,7 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
             )));
         }
     }
-    Ok(Layout { vertices, a: a3, b: b3, fans, facets, bends, top_rim, bottom_rim, seam, reliefs })
+    Ok(Layout { vertices, a: a3, b: b3, fans, facets, bends, top_rim, bottom_rim, seam, az, reliefs })
 }
 
 /// A planar face through `points`, its loop `ids` turned to face `reference`.
@@ -1036,10 +1061,12 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
         }
     }
     // Every band stops short of the top rim (D264, option b): its end plane square to the axis,
-    // through the meeting of its triangle's two tangent lines at an extreme bend, through the
-    // middle of the two chord runs of its tangent lines at an inner one — and the plane stands
-    // before the rib's top end.
+    // through the meeting of its triangle's two tangent lines at an extreme bend, at the axis
+    // point whose end face's top touches the top profile's plane at an inner one (D265) — and the
+    // plane stands before the rib's top end.
     let n = layout.a.len();
+    let o_t = layout.b[0];
+    let az = layout.az;
     for b in &layout.bends {
         let [fi, gi] = b.facets;
         let want = if fi < n || gi < n {
@@ -1055,22 +1082,22 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             }
             meet(lines[0].0, lines[0].1, lines[1].0, lines[1].1)?
         } else {
-            let mut sum = Vec3::new(0.0, 0.0, 0.0);
-            for (side, f) in [fi, gi].iter().enumerate() {
-                let t = &layout.facets[*f].top;
-                if t.len() != 2 {
-                    return Err(BrepError::Invalid("transition: a fan facet has not two rim points".into()));
-                }
-                let (c0, c1) = (
-                    *layout.vertices.get(&t[0]).ok_or_else(|| BrepError::Invalid("transition: rim vertex is missing".into()))?,
-                    *layout.vertices.get(&t[1]).ok_or_else(|| BrepError::Invalid("transition: rim vertex is missing".into()))?,
-                );
-                sum = sum + meet(b.tangent[side], b.axis, c0, unit3(c1 - c0))?;
+            let (m, rho) = span_top(b, b.radius_in, b.radius_out, az);
+            let axis_az = b.axis.dot(az);
+            if within_rounding(axis_az, 1.0) {
+                return Err(BrepError::Degenerate("a transition's rib runs parallel to the top profile's plane".into()));
             }
-            sum * 0.5
+            let s = (-(b.at - o_t).dot(az) - rho * m) / axis_az;
+            b.at + b.axis * s
         };
         if !within_rounding((b.top - want).dot(b.top - want).sqrt(), size) {
             return Err(BrepError::Invalid("transition: a bend's top end is off its point".into()));
+        }
+        // Nothing of the blank's edge rises off the top profile's plane (D265).
+        let (m, rho) = span_top(b, b.radius_in, b.radius_out, az);
+        let over = (b.top - o_t).dot(az) + rho * m;
+        if over > 0.0 && !within_rounding(over, size) {
+            return Err(BrepError::Invalid("transition: a bend's end face rises over the top profile's plane".into()));
         }
         let top_ids: BTreeSet<TopoId> = layout.facets[fi].top.iter().chain(&layout.facets[gi].top).copied().collect();
         let far = [b.edge[0], b.edge[1]]
@@ -1258,13 +1285,17 @@ mod tests {
             }
         }
         // The bands stop short of the top rim: at the extreme bends, where their triangles' two
-        // tangent lines meet (two millimetres below the rim); at the inner ones, on the middle of
-        // the two chord runs, which lies on the rim plane itself (see the open question on the
-        // torce face's bulge, HANDOFF).
+        // tangent lines meet (two millimetres below the rim); at the inner ones, as high as the
+        // end face allows — nothing of it rises off the top profile's plane (D265).
         for b in &layout.bends {
             let extreme = b.facets.iter().any(|&f| f < 4);
-            let want = if extreme { 117.981 } else { 120.0 };
-            assert!((b.top.z - want).abs() < 1e-2, "bend top z {} against {want}", b.top.z);
+            if extreme {
+                assert!((b.top.z - 117.981).abs() < 1e-2, "bend top z {} against 117.981", b.top.z);
+            } else {
+                let (m, rho) = span_top(b, b.radius_in, b.radius_out, layout.az);
+                let over = (b.top - layout.b[0]).dot(layout.az) + rho * m;
+                assert!(over.abs() < 1e-9, "the end face's top off the profile plane: {over}");
+            }
         }
     }
 
