@@ -3338,12 +3338,18 @@ impl Viewer {
                         Act::Fillet => crate::icons::Icon::Fillet,
                         Act::Mirror => crate::icons::Icon::Mirror,
                         Act::Offset => crate::icons::Icon::Offset,
+                        Act::Polygon => crate::icons::Icon::Polygon,
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
                     let hint = self.keys.hint(ui.ctx(), &self.i18n, act);
-                    // The mirror works on the selection: there must be one (D244).
-                    let enabled = act != Act::Mirror || !sk.selected.is_empty();
+                    // The mirror works on the selection: there must be one (D244); the polygon
+                    // on a circle or an arc of it.
+                    let enabled = match act {
+                        Act::Mirror => !sk.selected.is_empty(),
+                        Act::Polygon => crate::polygon::curve(sk).is_some(),
+                        _ => true,
+                    };
                     let r = crate::icons::tile(ui, self.i18n.label(act), &hint, sk.draft.tool == tool, enabled, |p, c, colour| {
                         crate::icons::paint(p, c, icon, colour)
                     });
@@ -3488,6 +3494,7 @@ impl Viewer {
                     "Click the base point (a rectangle: a corner, then the other; from its centre: the centre, then a corner), then its sockets (Enter skips one), \
                      then the sizes: Tab to the next · F4: a preset from the list · Enter puts it · Esc or a right click cancels",
                 ),
+                Tool::Polygon => self.i18n.t("how-polygon", "Type the sides count, Enter · Esc ends"),
                 _ => self.i18n.t(
                     "how-draw",
                     "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command",
@@ -6727,8 +6734,19 @@ pub(crate) fn definition(v: &Json) -> String {
 }
 
 /// The sketch tools, as the side panel lists them.
-const TOOLS: [Act; 10] =
-    [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Fillet, Act::Mirror, Act::Dimension];
+const TOOLS: [Act; 11] = [
+    Act::Select,
+    Act::Line,
+    Act::Arc,
+    Act::Circle,
+    Act::Point,
+    Act::Project,
+    Act::TrimExtend,
+    Act::Fillet,
+    Act::Mirror,
+    Act::Polygon,
+    Act::Dimension,
+];
 
 /// The sketch's modes, as the menu lists them (D167).
 const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
@@ -6756,6 +6774,7 @@ fn tool(act: Act) -> Tool {
         Act::Fillet => Tool::Fillet,
         Act::Mirror => Tool::Mirror,
         Act::Offset => Tool::Offset,
+        Act::Polygon => Tool::Polygon,
         Act::Dimension => Tool::Dimension,
         _ => Tool::Select,
     }
@@ -6845,6 +6864,7 @@ impl Viewer {
             Act::Rectangle => !self.library.is_empty(),
             Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
             Act::Mirror => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty()),
+            Act::Polygon => self.sketch.as_ref().is_some_and(|sk| crate::polygon::curve(sk).is_some()),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
             _ => true,
         }
@@ -7012,6 +7032,11 @@ impl Viewer {
             Act::Mirror => {
                 if let Some(sk) = &mut self.sketch {
                     sk.start_mirror();
+                }
+            }
+            Act::Polygon => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.draft.press(Tool::Polygon);
                 }
             }
             Act::Group => {
@@ -9093,6 +9118,24 @@ mod tests {
         h.run();
         drop(h);
         assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+    }
+
+    /// N with a circle selected takes up the polygon; with nothing selected it does nothing, as
+    /// the polygon goes on a circle or an arc alone.
+    #[test]
+    fn n_takes_up_the_polygon_on_a_circle() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        fn press(v: &mut Viewer, key: egui::Key) {
+            let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+            h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+        }
+        press(&mut v, egui::Key::N);
+        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select), "nothing selected");
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
+        press(&mut v, egui::Key::N);
+        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Polygon));
     }
 
     /// Placing a library element, the mirror tool's key flips the element; it does not take the

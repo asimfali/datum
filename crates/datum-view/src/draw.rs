@@ -40,6 +40,8 @@ pub enum Tool {
     Mirror,
     /// Copy the chain under the cursor at the size typed, on its side; Shift both (D245).
     Offset,
+    /// A regular polygon on the circle or arc selected: the sides count typed, Enter.
+    Polygon,
     /// Add a geometric constraint of this kind: click what it ties (D118).
     Constrain(crate::constrain::Kind),
 }
@@ -638,7 +640,7 @@ impl Draft {
             Tool::Line => self.chain.is_some() && !self.tangent,
             Tool::Circle => self.clicks.len() == 1,
             Tool::Arc => self.clicks.len() == 2,
-            Tool::Fillet | Tool::Offset => true,
+            Tool::Fillet | Tool::Offset | Tool::Polygon => true,
             _ => false,
         }
     }
@@ -819,9 +821,10 @@ impl Draft {
 
     /// Follows the cursor: where it would click, what it leans to, and the arc's sweep.
     pub fn track(&mut self, edit: &SketchEdit, dx: f64, dy: f64, height: f64, free: bool) {
-        if matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror | Tool::Offset) {
+        if matches!(self.tool, Tool::Trim | Tool::Fillet | Tool::Mirror | Tool::Offset | Tool::Polygon) {
             match (self.tool, self.typed.clone()) {
                 (Tool::Offset, Some(t)) => self.offset = Some(t),
+                (Tool::Polygon, _) => {}
                 (_, Some(t)) => self.fillet = Some(t),
                 _ => {}
             }
@@ -833,6 +836,7 @@ impl Draft {
                 }
                 Tool::Offset => self.offset.as_ref().and_then(|size| crate::offset::plan(edit, dx, dy, height, size, free)),
                 Tool::Mirror => edit.curve_at(dx, dy, height).and_then(|axis| crate::mirror::plan(edit, &self.mirrored, &axis, !self.mirror_moves)),
+                Tool::Polygon => None,
                 _ => self.fillet.as_ref().and_then(|size| crate::fillet::plan(edit, dx, dy, height, size, self.chamfer)),
             };
             self.cursor = Some(Spot { at: edit.camera.at(dx, dy, height), snap: Snap::Free });
@@ -906,6 +910,14 @@ impl Draft {
             // One mirror, then the command ends.
             Tool::Mirror => {
                 let patch = self.plan.take().map(|t| t.patch);
+                if patch.is_some() {
+                    self.escape();
+                }
+                return patch;
+            }
+            // The sides count typed, Enter: the polygon goes in, then the command ends.
+            Tool::Polygon => {
+                let patch = self.typed.as_ref().and_then(|count| crate::polygon::plan(edit, count));
                 if patch.is_some() {
                     self.escape();
                 }
@@ -1185,6 +1197,14 @@ impl Draft {
                 i18n.t("mirror-moves", "Mirror: click the axis; the original goes (Tab: keep it)")
             } else {
                 i18n.t("mirror-copies", "Mirror: click the axis; a copy (Tab: the original goes)")
+            };
+            painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
+        }
+        // The polygon's sides, or what to type.
+        if self.tool == Tool::Polygon && edit.field.is_none() {
+            let text = match &self.typed {
+                Some((_, v)) => i18n.f("polygon-sides", "Polygon: { $v } sides", &[("v", &short(*v).to_string())]),
+                None => i18n.t("polygon-type-sides", "Type the sides count").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }
