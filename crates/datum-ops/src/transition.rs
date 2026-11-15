@@ -6,7 +6,7 @@
 //! bottom and at the top rim (the bands stop short of the rim). The разметка below is what the
 //! body is assembled from; `transition` refuses until the whole body validates.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::PI;
 
 #[cfg(test)]
@@ -54,12 +54,14 @@ enum Kind {
 }
 
 /// A flat facet of the разметка: its loop of vertices, in the order that faces out of the body,
-/// and its plane.
+/// its plane, and its top rim vertices (one apex at a flat triangle, two chord ends at a fan).
 #[derive(Clone, Debug)]
 pub(crate) struct Facet {
     pub(crate) loop_: Vec<TopoId>,
     pub(crate) origin: Vec3,
     pub(crate) normal: Vec3,
+    /// The top rim vertices: the apex at a flat triangle, the two chord ends at a fan facet.
+    pub(crate) top: Vec<TopoId>,
 }
 
 /// A real bend between two facets: a cylinder of the rule's radius tangent to both, its axis along
@@ -80,6 +82,11 @@ pub(crate) struct Bend {
     pub(crate) tangent: [Vec3; 2],
     /// The angle the outer surface turns through: between the two facets' outward normals.
     pub(crate) sweep: f64,
+    /// The point of the band's top end plane, square to the axis (D264, option b): the band stops
+    /// short of the top rim, whose meeting with the band would be an ellipse. At an extreme bend,
+    /// the meeting of its triangle's two tangent lines; at an inner bend, the middle of the two
+    /// points where its tangent lines run into the top chords.
+    pub(crate) top: Vec3,
 }
 
 /// The seam: a cut through the middle of the flat triangle over the first piece of `a`.
@@ -625,7 +632,7 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
     };
     let axis_center = average(&a3);
     let mut facets: Vec<Facet> = Vec::with_capacity(n + fans.iter().sum::<usize>());
-    let orient = |ids: Vec<TopoId>, pts: &[Vec3]| -> Result<Facet, BrepError> {
+    let orient = |ids: Vec<TopoId>, pts: &[Vec3], top: Vec<TopoId>| -> Result<Facet, BrepError> {
         let nrm = (pts[1] - pts[0]).cross(pts[2] - pts[0]);
         if nrm.dot(nrm) == 0.0 {
             return Err(BrepError::Degenerate("a transition's facet has no area".into()));
@@ -638,19 +645,19 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
             ids.reverse();
             nrm = -nrm;
         }
-        Ok(Facet { loop_: ids, origin: pts[0], normal: unit3(nrm) })
+        Ok(Facet { loop_: ids, origin: pts[0], normal: unit3(nrm), top })
     };
     // The flat triangle over each piece of `a`.
     for i in 0..n {
         let pts = [a3[i], a3[(i + 1) % n], b3[i]];
-        facets.push(orient(vec![a_id(i), a_id((i + 1) % n), b_id(i)], &pts)?);
+        facets.push(orient(vec![a_id(i), a_id((i + 1) % n), b_id(i)], &pts, vec![b_id(i)])?);
     }
     // The fan over each vertex of `a`.
     for j in 0..n {
         let m = fans[j];
         for k in 0..m {
             let pts = [a3[j], fan3[j][k + 1], fan3[j][k]];
-            facets.push(orient(vec![a_id(j), fan_vid(j, k + 1, m), fan_vid(j, k, m)], &pts)?);
+            facets.push(orient(vec![a_id(j), fan_vid(j, k + 1, m), fan_vid(j, k, m)], &pts, vec![fan_vid(j, k, m), fan_vid(j, k + 1, m)])?);
         }
     }
     // Every edge of the facets: two of them is a bend, one a rim.
@@ -691,13 +698,65 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
                         trims[facet].push((at + nrm * (radius_out - outer), unit3(away)));
                     }
                 }
-                bends.push(Bend { facets: [*fi, *gi], edge: [*u, *v], at, axis: d, radius_in, radius_out, tangent, sweep });
+                bends.push(Bend {
+                    facets: [*fi, *gi],
+                    edge: [*u, *v],
+                    at,
+                    axis: d,
+                    radius_in,
+                    radius_out,
+                    tangent,
+                    sweep,
+                    top: Vec3::new(0.0, 0.0, 0.0),
+                });
             }
             [.., _, _] => {
                 return Err(BrepError::NonManifold(format!("a transition's edge {u:?} → {v:?} is used by {} facets", faces.len())));
             }
             _ => {}
         }
+    }
+    // The top end of every band (D264, option b): a band's meeting with the top profile's plane is
+    // an ellipse, and the kernel keeps no such curves on a cylinder — the band stops at a plane
+    // square to its axis, short of the rim. At the two extreme bends of a flat triangle, both stop
+    // where the triangle's two tangent lines meet; at an inner bend, the plane goes through the
+    // middle of the two points where its tangent lines run into the top chords.
+    let mut apex_meet: Vec<Vec3> = Vec::with_capacity(n);
+    for i in 0..n {
+        let mut lines: Vec<(Vec3, Vec3)> = Vec::new();
+        for b in &bends {
+            if let Some(side) = b.facets.iter().position(|&f| f == i) {
+                lines.push((b.tangent[side], b.axis));
+            }
+        }
+        if lines.len() != 2 {
+            return Err(BrepError::Invalid("transition: a flat triangle has not two bends".into()));
+        }
+        apex_meet.push(meet(lines[0].0, lines[0].1, lines[1].0, lines[1].1)?);
+    }
+    let mut tops: Vec<Vec3> = Vec::with_capacity(bends.len());
+    for b in &bends {
+        let [fi, gi] = b.facets;
+        let top = if fi < n {
+            apex_meet[fi]
+        } else if gi < n {
+            apex_meet[gi]
+        } else {
+            let mut sum = Vec3::new(0.0, 0.0, 0.0);
+            for (side, f) in [fi, gi].iter().enumerate() {
+                let t = &facets[*f].top;
+                if t.len() != 2 {
+                    return Err(BrepError::Invalid("transition: a fan facet has not two rim points".into()));
+                }
+                let (c0, c1) = (vertices[&t[0]], vertices[&t[1]]);
+                sum = sum + meet(b.tangent[side], b.axis, c0, unit3(c1 - c0))?;
+            }
+            sum * 0.5
+        };
+        tops.push(top);
+    }
+    for (b, top) in bends.iter_mut().zip(tops) {
+        b.top = top;
     }
     // The relief at each vertex of `a`: the sector from it, its far boundary the bends' end
     // sections (D264). On each fan facet, the point where its two bends' tangent lines meet: a
@@ -976,6 +1035,56 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             return Err(BrepError::Invalid("transition: a bend's sweep is not the angle between its facets".into()));
         }
     }
+    // Every band stops short of the top rim (D264, option b): its end plane square to the axis,
+    // through the meeting of its triangle's two tangent lines at an extreme bend, through the
+    // middle of the two chord runs of its tangent lines at an inner one — and the plane stands
+    // before the rib's top end.
+    let n = layout.a.len();
+    for b in &layout.bends {
+        let [fi, gi] = b.facets;
+        let want = if fi < n || gi < n {
+            let ti = fi.min(gi);
+            let mut lines: Vec<(Vec3, Vec3)> = Vec::new();
+            for b2 in &layout.bends {
+                if let Some(side) = b2.facets.iter().position(|&f| f == ti) {
+                    lines.push((b2.tangent[side], b2.axis));
+                }
+            }
+            if lines.len() != 2 {
+                return Err(BrepError::Invalid("transition: a flat triangle has not two bends".into()));
+            }
+            meet(lines[0].0, lines[0].1, lines[1].0, lines[1].1)?
+        } else {
+            let mut sum = Vec3::new(0.0, 0.0, 0.0);
+            for (side, f) in [fi, gi].iter().enumerate() {
+                let t = &layout.facets[*f].top;
+                if t.len() != 2 {
+                    return Err(BrepError::Invalid("transition: a fan facet has not two rim points".into()));
+                }
+                let (c0, c1) = (
+                    *layout.vertices.get(&t[0]).ok_or_else(|| BrepError::Invalid("transition: rim vertex is missing".into()))?,
+                    *layout.vertices.get(&t[1]).ok_or_else(|| BrepError::Invalid("transition: rim vertex is missing".into()))?,
+                );
+                sum = sum + meet(b.tangent[side], b.axis, c0, unit3(c1 - c0))?;
+            }
+            sum * 0.5
+        };
+        if !within_rounding((b.top - want).dot(b.top - want).sqrt(), size) {
+            return Err(BrepError::Invalid("transition: a bend's top end is off its point".into()));
+        }
+        let top_ids: BTreeSet<TopoId> = layout.facets[fi].top.iter().chain(&layout.facets[gi].top).copied().collect();
+        let far = [b.edge[0], b.edge[1]]
+            .iter()
+            .find(|v| top_ids.contains(v))
+            .copied()
+            .ok_or_else(|| BrepError::Invalid("transition: a bend's edge has no top end".into()))?;
+        let far = *layout.vertices.get(&far).ok_or_else(|| BrepError::Invalid("transition: rim vertex is missing".into()))?;
+        let s_top = (b.top - b.at).dot(b.axis);
+        let s_rim = (far - b.at).dot(b.axis);
+        if !(s_top * s_rim > 0.0 && s_top.abs() < s_rim.abs()) {
+            return Err(BrepError::Invalid("transition: a bend's band does not stop short of the top rim".into()));
+        }
+    }
     let seam = &layout.seam;
     if seam.facet >= layout.facets.len() || !(seam.gap > 0.0 && seam.gap.is_finite()) {
         return Err(BrepError::Invalid("transition: the seam names no facet, or has no gap".into()));
@@ -1147,6 +1256,15 @@ mod tests {
             for (got, want) in z.iter().zip([10.1138, 10.1138, 13.0519, 13.0519, 13.2608, 13.2608]) {
                 assert!((got - want).abs() < 1e-3, "relief point heights {z:?}");
             }
+        }
+        // The bands stop short of the top rim: at the extreme bends, where their triangles' two
+        // tangent lines meet (two millimetres below the rim); at the inner ones, on the middle of
+        // the two chord runs, which lies on the rim plane itself (see the open question on the
+        // torce face's bulge, HANDOFF).
+        for b in &layout.bends {
+            let extreme = b.facets.iter().any(|&f| f < 4);
+            let want = if extreme { 117.981 } else { 120.0 };
+            assert!((b.top.z - want).abs() < 1e-2, "bend top z {} against {want}", b.top.z);
         }
     }
 
