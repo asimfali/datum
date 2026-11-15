@@ -201,7 +201,7 @@ pub struct Draft {
     pub mirror: bool,
     /// Line tool: the chain's end.
     pub chain: Option<Chain>,
-    /// Arc tool: the start, then the end; circle tool: the centre.
+    /// Arc tool: the start, then the end, then a point on the arc; circle tool: the centre.
     pub clicks: Vec<Spot>,
     /// A value typed while drawing (the field by the cursor), and what it comes to: the length
     /// of the line, the circle's diameter, the arc's radius.
@@ -948,7 +948,7 @@ impl Draft {
                 self.clicks.clear();
             }
             Tool::Arc => {
-                // The start, then the end; the cursor gives the radius, a typed one fixes it.
+                // The start, then the end, then a point on the arc; a typed radius fixes it.
                 if self.clicks.len() < 2 {
                     if self.clicks.first().is_some_and(|s| s.at == spot.at) {
                         return None;
@@ -1320,9 +1320,12 @@ fn degrees(a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 /// The centre, the radius and the sweep from `start` of the arc from `start` to `end` that the
-/// cursor draws: the centre on the chord's perpendicular bisector, on the cursor's side, the
-/// radius the cursor's distance to the start (or as typed), so the arc bows away from the cursor.
-/// None where no arc goes: the ends alike, the cursor on the chord, a radius under half the chord.
+/// cursor draws. Untyped, the cursor is a point on the arc: the centre is the circumcentre of the
+/// three points, and of the two arcs from the start to the end it is the one the cursor lies on.
+/// A typed radius fixes the radius instead, the centre on the chord's perpendicular bisector on
+/// the cursor's side, so the arc bows away from the cursor.
+/// None where no arc goes: the ends alike, the three points in a line, and with a typed radius
+/// the cursor on the chord or a radius under half the chord.
 fn arc_through(start: [f64; 2], end: [f64; 2], cursor: [f64; 2], radius: Option<f64>) -> Option<([f64; 2], f64, f64)> {
     let v = [end[0] - start[0], end[1] - start[1]];
     let chord = libm::hypot(v[0], v[1]);
@@ -1335,7 +1338,25 @@ fn arc_through(start: [f64; 2], end: [f64; 2], cursor: [f64; 2], radius: Option<
     if side == 0.0 {
         return None;
     }
-    let r = radius.unwrap_or_else(|| libm::hypot(cursor[0] - start[0], cursor[1] - start[1]));
+    let angle = |c: [f64; 2], q: [f64; 2]| libm::atan2(q[1] - c[1], q[0] - c[0]);
+    let Some(r) = radius else {
+        // The circumcentre `start + t` solves `2 t·v = |v|²` and `2 t·w = |w|²` with `w` from the
+        // start to the cursor: a line of three points has none.
+        let w = [cursor[0] - start[0], cursor[1] - start[1]];
+        let d = 2.0 * (v[0] * w[1] - v[1] * w[0]);
+        if d == 0.0 {
+            return None;
+        }
+        let (vv, ww) = (chord * chord, w[0] * w[0] + w[1] * w[1]);
+        let centre = [start[0] + (w[1] * vv - v[1] * ww) / d, start[1] + (v[0] * ww - w[0] * vv) / d];
+        let (a0, a1, ac) = (angle(centre, start), angle(centre, end), angle(centre, cursor));
+        let mut sweep = (a1 - a0).rem_euclid(std::f64::consts::TAU);
+        // The way round from the start that misses the cursor is the other arc: back the other way.
+        if (ac - a0).rem_euclid(std::f64::consts::TAU) > sweep {
+            sweep -= std::f64::consts::TAU;
+        }
+        return Some((centre, libm::hypot(start[0] - centre[0], start[1] - centre[1]), sweep));
+    };
     let half = 0.5 * chord;
     if r < half {
         return None;
@@ -1343,8 +1364,7 @@ fn arc_through(start: [f64; 2], end: [f64; 2], cursor: [f64; 2], radius: Option<
     let k = libm::sqrt((r * r - half * half).max(0.0));
     let sign = if side > 0.0 { 1.0 } else { -1.0 };
     let centre = [mid[0] + n[0] * sign * k, mid[1] + n[1] * sign * k];
-    let angle = |q: [f64; 2]| libm::atan2(q[1] - centre[1], q[0] - centre[0]);
-    let mut sweep = (angle(end) - angle(start)).rem_euclid(std::f64::consts::TAU);
+    let mut sweep = (angle(centre, end) - angle(centre, start)).rem_euclid(std::f64::consts::TAU);
     if sweep > std::f64::consts::PI {
         sweep -= std::f64::consts::TAU;
     }
@@ -1798,12 +1818,12 @@ pub(crate) mod tests {
         assert_eq!(p["add_constraints"], json!([{"type": "perpendicular", "lines": ["l1", "l2"]}]), "{p}");
     }
 
-    /// The arc goes from the start to the end, its centre on the cursor's side of the chord and
-    /// its radius the cursor's distance to the start: it bows away from the cursor, and the way
-    /// round the mouse is on decides which point is its `from`.
+    /// The arc goes from the start to the end through the cursor: its centre is the circumcentre
+    /// of the three points, and the side of the chord the cursor is on decides which of the two
+    /// arcs it is, and so which point is its `from`.
     #[test]
     fn an_arc_goes_from_the_start_to_the_end_by_the_cursor() {
-        for (cursor, centre, from_start) in [([5.0, 5.0], [5.0, 5.0], true), ([5.0, -5.0], [5.0, -5.0], false)] {
+        for (cursor, centre, from_start) in [([2.0, 1.0], [5.0, -7.5], false), ([2.0, -1.0], [5.0, 7.5], true)] {
             let mut e = editor(json!({"points": {}}), false);
             e.draft.tool = Tool::Arc;
             assert!(click_at(&mut e, [0.0, 0.0], true).is_none(), "the start");
@@ -1818,18 +1838,19 @@ pub(crate) mod tests {
         }
     }
 
-    /// A radius under half the chord has no arc: nothing is drawn, the click does nothing, and the
-    /// start and the end stay for the cursor to give a radius.
+    /// A third point in a line with the start and the end has no circle through it: nothing is
+    /// drawn, the click does nothing, and the start and the end stay for the cursor to give a
+    /// point off the chord.
     #[test]
-    fn an_arc_under_half_its_chord_is_refused() {
+    fn a_collinear_arc_point_is_refused() {
         let mut e = editor(json!({"points": {}}), false);
         e.draft.tool = Tool::Arc;
         assert!(click_at(&mut e, [0.0, 0.0], true).is_none());
         assert!(click_at(&mut e, [10.0, 0.0], true).is_none());
-        // 4.12 from the start, under the chord's half of 5.
-        assert!(click_at(&mut e, [4.0, 1.0], true).is_none(), "no arc goes so");
+        // On the chord's line, past the end.
+        assert!(click_at(&mut e, [15.0, 0.0], true).is_none(), "no arc goes so");
         assert!(e.json["sketch"].get("arcs").is_none(), "nothing added");
-        let p = click_at(&mut e, [5.0, 5.0], true).unwrap();
+        let p = click_at(&mut e, [2.0, 1.0], true).unwrap();
         assert_eq!(p["arcs"]["a1"]["center"], json!("p1"), "{p}");
     }
 
@@ -1841,6 +1862,8 @@ pub(crate) mod tests {
         assert!(click_at(&mut e, [0.0, 0.0], true).is_none());
         assert!(click_at(&mut e, [10.0, 0.0], true).is_none());
         assert!(e.draft.takes_value(), "a radius typed now sizes the arc");
+        e.draft.typed = Some((json!(4.0), 4.0));
+        assert!(click_at(&mut e, [5.0, 5.0], true).is_none(), "under the chord's half of 5");
         e.draft.typed = Some((json!(8.0), 8.0));
         let p = click_at(&mut e, [5.0, 5.0], true).unwrap();
         let c = p["points"]["p1"].as_array().unwrap();
@@ -1878,7 +1901,7 @@ pub(crate) mod tests {
             e.draft = d;
         }
         let p = click_at(&mut e, [5.0, 5.0], true).unwrap();
-        assert_eq!(p["arcs"]["a1"], json!({"center": "p1", "from": "p2", "to": "p3"}), "{p}");
+        assert_eq!(p["arcs"]["a1"], json!({"center": "p1", "from": "p3", "to": "p2"}), "{p}");
     }
 
     #[test]
