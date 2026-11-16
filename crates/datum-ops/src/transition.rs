@@ -1316,7 +1316,6 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
     Ok(trims)
 }
 
-
 fn verify_facet_trim_records(layout: &Layout, trims: &[FacetTrim], dims: &TransitionDims) -> Result<(), BrepError> {
     if trims.len() != layout.facets.len() {
         return Err(BrepError::Invalid("transition: not every facet has one trimmed patch".into()));
@@ -1339,7 +1338,10 @@ fn verify_facet_trim_records(layout: &Layout, trims: &[FacetTrim], dims: &Transi
         }
         for slot in 0..2 {
             let bend_index = trim.bends[slot];
-            let bend = layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: trimmed facet {fi} names missing bend {bend_index}")))?;
+            let bend = layout
+                .bends
+                .get(bend_index)
+                .ok_or_else(|| BrepError::Invalid(format!("transition: trimmed facet {fi} names missing bend {bend_index}")))?;
             let side = bend
                 .facets
                 .iter()
@@ -1369,9 +1371,7 @@ fn verify_facet_trim_records(layout: &Layout, trims: &[FacetTrim], dims: &Transi
                 let radial = unit3(bend.tangent[side] - bend.at);
                 let want_outer = center + radial * bend.radius_out;
                 let want_inner = center + radial * bend.radius_in;
-                if !within_rounding(distance3(section.outer, want_outer), size)
-                    || !within_rounding(distance3(section.inner, want_inner), size)
-                {
+                if !within_rounding(distance3(section.outer, want_outer), size) || !within_rounding(distance3(section.inner, want_inner), size) {
                     return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s band endpoints miss bend {bend_index}'s cylinders")));
                 }
             }
