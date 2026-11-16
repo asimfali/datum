@@ -1515,11 +1515,7 @@ fn facet_patches(
             if within_rounding(outer_gap, size) || within_rounding(inner_gap, size) {
                 return Err(BrepError::Degenerate(format!(
                     "transition: trimmed facet {fi} has a collapsed boundary edge {i} (bends {:?}, outer gap {outer_gap:.12e}, inner gap {inner_gap:.12e}, outer {:?} -> {:?}, inner {:?} -> {:?})",
-                    trim.bends,
-                    ordered[i].outer,
-                    ordered[next].outer,
-                    ordered[i].inner,
-                    ordered[next].inner
+                    trim.bends, ordered[i].outer, ordered[next].outer, ordered[i].inner, ordered[next].inner
                 )));
             }
         }
