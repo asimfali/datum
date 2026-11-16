@@ -169,7 +169,7 @@ pub const ACTIONS: [Action; 58] = [
     ),
     action(Act::Select, "sketch.select", "Select", "Select and drag (Esc)", None, Sketch),
     action(Act::Line, "sketch.line", "Line", "Lines in a chain; T or a drag from its end: a tangent arc; Esc ends", plain(Key::L), Sketch),
-    action(Act::Arc, "sketch.arc", "Arc", "Centre, start, end", None, Sketch),
+    action(Act::Arc, "sketch.arc", "Arc", "Start, end, a point on the arc; a typed radius fixes it", None, Sketch),
     action(Act::Circle, "sketch.circle", "Circle", "Centre, then a point on it", plain(Key::C), Sketch),
     action(Act::Point, "sketch.point", "Point", "A point", plain(Key::Period), Sketch),
     action(
