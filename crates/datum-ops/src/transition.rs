@@ -1316,6 +1316,70 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
     Ok(trims)
 }
 
+
+fn verify_facet_trim_records(layout: &Layout, trims: &[FacetTrim], dims: &TransitionDims) -> Result<(), BrepError> {
+    if trims.len() != layout.facets.len() {
+        return Err(BrepError::Invalid("transition: not every facet has one trimmed patch".into()));
+    }
+    let (outer_offset, inner_offset) = shifts(dims.side, dims.thickness);
+    let size = layout
+        .vertices
+        .values()
+        .flat_map(|p| [p.x, p.y, p.z])
+        .chain(layout.a.iter().chain(&layout.b).flat_map(|p| [p.x, p.y, p.z]))
+        .fold(1.0_f64, |m, x| m.max(x.abs()));
+
+    for (fi, trim) in trims.iter().enumerate() {
+        if trim.facet != fi {
+            return Err(BrepError::Invalid(format!("transition: trimmed patch {fi} names facet {}", trim.facet)));
+        }
+        let facet = &layout.facets[fi];
+        if !within_rounding((trim.q - facet.origin).dot(facet.normal), size) {
+            return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s q is off its neutral plane")));
+        }
+        for slot in 0..2 {
+            let bend_index = trim.bends[slot];
+            let bend = layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: trimmed facet {fi} names missing bend {bend_index}")))?;
+            let side = bend
+                .facets
+                .iter()
+                .position(|&f| f == fi)
+                .ok_or_else(|| BrepError::Invalid(format!("transition: bend {bend_index} is not incident to trimmed facet {fi}")))?;
+            for point in [trim.q, trim.x[slot]] {
+                let along = bend.axis * (point - bend.tangent[side]).dot(bend.axis);
+                let miss = point - bend.tangent[side] - along;
+                if !within_rounding(distance3(miss, Vec3::ZERO), size) {
+                    return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s tangent boundary is off bend {bend_index}")));
+                }
+            }
+            if !within_rounding((trim.x[slot] - facet.origin).dot(facet.normal), size) {
+                return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s rim split is off its neutral plane")));
+            }
+            for section in [trim.lower[slot], trim.upper[slot]] {
+                if !within_rounding((section.outer - facet.origin).dot(facet.normal) - outer_offset, size)
+                    || !within_rounding((section.inner - facet.origin).dot(facet.normal) - inner_offset, size)
+                {
+                    return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s band endpoints miss its offset planes")));
+                }
+                if !within_rounding(distance3(section.outer, section.inner) - dims.thickness, size) {
+                    return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s band endpoints miss the sheet thickness")));
+                }
+                let station = (section.outer - bend.at).dot(bend.axis);
+                let center = bend.at + bend.axis * station;
+                let radial = unit3(bend.tangent[side] - bend.at);
+                let want_outer = center + radial * bend.radius_out;
+                let want_inner = center + radial * bend.radius_in;
+                if !within_rounding(distance3(section.outer, want_outer), size)
+                    || !within_rounding(distance3(section.inner, want_inner), size)
+                {
+                    return Err(BrepError::Invalid(format!("transition: trimmed facet {fi}'s band endpoints miss bend {bend_index}'s cylinders")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Checks the разметка against itself (D264: a wrong layout is turned away here, before it is
 /// developed): every facet's vertices lie on its plane, every bend's axis along its edge and at the
 /// outer radius from both facets, its tangents the axis's feet on the facets' own planes, each
@@ -1522,9 +1586,7 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
         return Err(BrepError::Invalid("transition: not every bend has one lower section".into()));
     }
     let trims = facet_trims(layout, &sections, dims)?;
-    if trims.len() != layout.facets.len() {
-        return Err(BrepError::Invalid("transition: not every facet has one trimmed patch".into()));
-    }
+    verify_facet_trim_records(layout, &trims, dims)?;
     Ok(())
 }
 
@@ -1663,7 +1725,7 @@ mod tests {
             assert_eq!(trims.iter().filter(|trim| trim.q.z < 30.0).count(), 24);
             assert_eq!(trims.iter().filter(|trim| trim.q.z > 90.0).count(), 4);
             for trim in trims {
-                assert_eq!(trim.facet < layout.facets.len(), true);
+                assert!(trim.facet < layout.facets.len());
                 assert_eq!(trim.bends.len(), 2);
                 for k in 0..2 {
                     assert!(distance3(trim.q, trim.x[k]) > 0.0);
