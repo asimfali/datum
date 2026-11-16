@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // The reviewer runs on DeepSeek (another model family than the architect, which
+  // stays on GLM) with a 200k window instead of the 1M the model declares by
+  // default: a window nobody reaches means the session never compacts and every
+  // request carries the whole diff and its exploration history.
+  // `modelID` keeps the ID sent to the proxy the same.
+  "providers": {
+    "cliproxy": {
+      "models": {
+        "deepseek-v4.1-flash-200k": {
+          "modelID": "deepseek-v4.1-flash",
+          "name": "DeepSeek V4.1 Flash (200k, reviewer)",
+          "reasoning": true,
+          "limit": {
+            "context": 200000,
+            "output": 32000
+          }
+        }
+      }
+    }
+  }
+}
