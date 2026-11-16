@@ -595,7 +595,6 @@ fn span_top(b: &Bend, radius_in: f64, radius_out: f64, az: Vec3) -> (f64, f64) {
     (m, if m >= 0.0 { radius_out } else { radius_in })
 }
 
-
 /// A bend's lower end section: one plane perpendicular to its axis, with the two
 /// concentric arcs where it meets the outer and inner cylindrical surfaces.
 #[derive(Clone, Copy, Debug)]
@@ -701,9 +700,7 @@ fn lower_sections(layout: &Layout, dims: &TransitionDims) -> Result<Vec<BendSect
                 return Err(BrepError::Invalid(format!("transition: relief {j}'s lower section is not square to bend {bend_index}")));
             }
             let section = bend_section(bend, point, seed_side, outer_offset, inner_offset, size)?;
-            if !section.station.is_finite()
-                || !within_rounding(distance3(section.center, bend.at + bend.axis * section.station), size)
-            {
+            if !section.station.is_finite() || !within_rounding(distance3(section.center, bend.at + bend.axis * section.station), size) {
                 return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s lower section is not on its axis")));
             }
             for side in 0..2 {
@@ -713,7 +710,9 @@ fn lower_sections(layout: &Layout, dims: &TransitionDims) -> Result<Vec<BendSect
                     || !within_rounding((section.outer[side] - section.center).dot(bend.axis), size)
                     || !within_rounding((section.inner[side] - section.center).dot(bend.axis), size)
                 {
-                    return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s lower section misses a cylinder or its perpendicular plane")));
+                    return Err(BrepError::Invalid(format!(
+                        "transition: bend {bend_index}'s lower section misses a cylinder or its perpendicular plane"
+                    )));
                 }
             }
 
