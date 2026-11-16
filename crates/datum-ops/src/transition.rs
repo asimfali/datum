@@ -1847,8 +1847,7 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             let lower = patch.boundary[if slot == 0 || collapsed_lower { 0 } else { 5 }];
             let upper = patch.boundary[if slot == 0 { 1 } else { 4 }];
             let lower_ids_match = if collapsed_lower {
-                lower.outer_id == patch_relief_id(patch_feature, fi, false)
-                    && lower.inner_id == patch_relief_id(patch_feature, fi, true)
+                lower.outer_id == patch_relief_id(patch_feature, fi, false) && lower.inner_id == patch_relief_id(patch_feature, fi, true)
             } else {
                 lower.outer_id == patch_band_id(patch_feature, *bend_index, side, false, false)
                     && lower.inner_id == patch_band_id(patch_feature, *bend_index, side, false, true)
