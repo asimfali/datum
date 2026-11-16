@@ -1154,12 +1154,17 @@ fn planar_polygon(
 }
 
 #[cfg(test)]
-fn facet_patch_prism(feature: TopoId, patch: &FacetPatch, points: &BTreeMap<TopoId, Vec3>, normal: Vec3) -> Result<Body, BrepError> {
+fn facet_patch_prism(feature: TopoId, patch: &FacetPatch, normal: Vec3) -> Result<Body, BrepError> {
     let outer_ids: Vec<TopoId> = patch.boundary.iter().map(|v| v.outer_id).collect();
     let outer_points: Vec<Vec3> = patch.boundary.iter().map(|v| v.outer).collect();
     let inner_ids: Vec<TopoId> = patch.boundary.iter().rev().map(|v| v.inner_id).collect();
     let inner_points: Vec<Vec3> = patch.boundary.iter().rev().map(|v| v.inner).collect();
-    let vertices: Vec<Vertex> = points.iter().map(|(&id, &point)| Vertex { id, point }).collect();
+    let mut vertex_points = BTreeMap::new();
+    for vertex in &patch.boundary {
+        vertex_points.insert(vertex.outer_id, vertex.outer);
+        vertex_points.insert(vertex.inner_id, vertex.inner);
+    }
+    let vertices: Vec<Vertex> = vertex_points.into_iter().map(|(id, point)| Vertex { id, point }).collect();
     let mut faces = vec![
         planar_polygon(TopoId::derive("transition.patch.test.outer").id(feature).index(patch.facet as u64).finish(), outer_ids, &outer_points, normal)?,
         planar_polygon(TopoId::derive("transition.patch.test.inner").id(feature).index(patch.facet as u64).finish(), inner_ids, &inner_points, normal * -1.0)?,
@@ -1415,8 +1420,8 @@ fn patch_band_id(feature: TopoId, bend: usize, side: usize, upper: bool, inner: 
         .id(feature)
         .index(bend as u64)
         .index(side as u64)
-        .index(u64::from(upper))
-        .index(u64::from(inner))
+        .index(upper as u64)
+        .index(inner as u64)
         .finish()
 }
 
@@ -1425,7 +1430,7 @@ fn patch_rim_id(feature: TopoId, facet: usize, slot: usize, inner: bool) -> Topo
         .id(feature)
         .index(facet as u64)
         .index(slot as u64)
-        .index(u64::from(inner))
+        .index(inner as u64)
         .finish()
 }
 
@@ -1817,8 +1822,11 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             })?;
             let lower = patch.boundary[if slot == 0 { 0 } else { 5 }];
             let upper = patch.boundary[if slot == 0 { 1 } else { 4 }];
-            if lower.outer_id != patch_band_id(TopoId::derive("transition.verify").finish(), *bend_index, side, false, false)
-                || upper.outer_id != patch_band_id(TopoId::derive("transition.verify").finish(), *bend_index, side, true, false)
+            let patch_feature = TopoId::derive("transition.verify").finish();
+            if lower.outer_id != patch_band_id(patch_feature, *bend_index, side, false, false)
+                || lower.inner_id != patch_band_id(patch_feature, *bend_index, side, false, true)
+                || upper.outer_id != patch_band_id(patch_feature, *bend_index, side, true, false)
+                || upper.inner_id != patch_band_id(patch_feature, *bend_index, side, true, true)
             {
                 return Err(BrepError::Invalid(format!("transition: patch {fi}'s bend-side vertex IDs are inconsistent")));
             }
@@ -2002,7 +2010,7 @@ mod tests {
             assert_eq!(patches.len(), 28, "side {side:?}");
             assert!(registry.len() >= patches.len() * 6, "side {side:?}");
             for patch in &patches {
-                let body = facet_patch_prism(feature, patch, &registry, layout.facets[patch.facet].normal).unwrap();
+                let body = facet_patch_prism(feature, patch, layout.facets[patch.facet].normal).unwrap();
                 body.validate().unwrap();
                 assert!(body.volume() > 0.0, "facet {}, side {side:?}", patch.facet);
             }
