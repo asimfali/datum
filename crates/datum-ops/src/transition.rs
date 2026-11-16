@@ -1334,7 +1334,11 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
             .find(|v| layout.bends[adjacent[1]].edge.contains(v))
             .copied()
             .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s bends do not share a vertex")))?;
-        let shared_at = facet.loop_.iter().position(|&v| v == shared).unwrap();
+        let shared_at = facet
+            .loop_
+            .iter()
+            .position(|&v| v == shared)
+            .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi} does not contain its shared bend vertex")))?;
         let next = facet.loop_[(shared_at + 1) % 3];
         let prev = facet.loop_[(shared_at + 2) % 3];
         let bend_for_edge = |a: TopoId, b: TopoId| {
