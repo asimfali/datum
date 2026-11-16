@@ -35,6 +35,7 @@
 ## Окружение
 
 - Скилл `wsl-image-paste` (`.claude/skills/wsl-image-paste/`) — вставка картинок из буфера Windows в WSL без GUI.
+- Скилл `win-build` (`scripts/win-build.sh`) — сборка для автора: синхронизирует коммиты ветки из WSL-репозитория в `C:\develop\datum` (доступен по `/mnt/c`, Windows-копия detached на собранном коммите) и собирает `datum.exe` Windows-cargo через cmd.exe-интероп; `--test` — ещё и проверка закреплённых хешей (C4) на Windows; печатает SHA собранного коммита; Windows-дерево чистое или стоп (ничего не отбрасывать); грязное WSL-дерево — предупреждение «собрано не всё».
 - Скиллы ядра (`.claude/skills/`): `add-op`, `add-surface`, `geometry-debug`, `bless-hashes`; скилл `pr` — открытие PR; мерж — только с разрешения автора.
 - `rg` 15.2.0 в `~/.local/bin` (для shell-однострочников; агентский поиск — встроенными `grep`/`glob`).
 - Провайдер моделей — `cliproxy` (127.0.0.1:8317); `model:` в `.opencode/agent/` должен совпадать с ID провайдера машины. У `glm-5.3-flash` окно 300k, у `deepseek-v4.1-flash` — 1M (глобальный конфиг); алиасы моделей с другим окном — в проектном `.opencode/opencode.json` (`modelID` = настоящий ID в прокси).
