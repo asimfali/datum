@@ -1289,12 +1289,13 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
             let top_section = bend_section_at_station(bend, top_station, outer_offset, inner_offset, size)?;
             let q_station = (q - bend.at).dot(bend.axis);
             let x_station = (hit - bend.at).dot(bend.axis);
-            let lower_ok = station_between(lower_section.station, q_station, x_station, size);
-            let upper_ok = station_between(top_station, q_station, x_station, size);
-            if !lower_ok || !upper_ok {
+            // D264 relief end planes are assigned per rib from the q point on the following
+            // fan facet. On the preceding facet, the same lower section can therefore extend
+            // slightly past this facet's q; lower_sections already checks it against the finite
+            // rib. Only the D265 upper section must remain between this facet's q and rim split.
+            if !station_between(top_station, q_station, x_station, size) {
                 return Err(BrepError::Invalid(format!(
-                    "transition: bend {bend_index}, facet {fi}, tangent side {bend_side}: q={q_station:.9}, x={x_station:.9}, lower={:.9} (ok={lower_ok}), upper={top_station:.9} (ok={upper_ok})",
-                    lower_section.station
+                    "transition: bend {bend_index}, facet {fi}, tangent side {bend_side}: upper station {top_station:.9} falls outside q={q_station:.9} .. x={x_station:.9}"
                 )));
             }
             if (top_station - lower_section.station).abs() <= envelope {
@@ -1725,6 +1726,21 @@ mod tests {
             let lower = lower_sections(&layout, &d).unwrap();
             let trims = facet_trims(&layout, &lower, &d).unwrap();
             assert_eq!(trims.len(), 28, "side {side:?}");
+            // At least one rib's relief plane is defined by the q on its following fan facet,
+            // so on this facet its lower section legitimately extends past the local q.
+            let lower_relief_extensions = trims
+                .iter()
+                .flat_map(|trim| {
+                    (0..2).filter_map(|slot| {
+                        let bend = &layout.bends[trim.bends[slot]];
+                        let lower_station = lower[trim.bends[slot]].station;
+                        let q_station = (trim.q - bend.at).dot(bend.axis);
+                        let x_station = (trim.x[slot] - bend.at).dot(bend.axis);
+                        (!station_between(lower_station, q_station, x_station, 1.0)).then_some(())
+                    })
+                })
+                .count();
+            assert!(lower_relief_extensions > 0, "side {side:?}");
             assert_eq!(trims.iter().filter(|trim| trim.q.z < 30.0).count(), 24);
             assert_eq!(trims.iter().filter(|trim| trim.q.z > 90.0).count(), 4);
             for trim in trims {
