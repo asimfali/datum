@@ -1128,8 +1128,6 @@ fn planar(id: TopoId, mut ids: Vec<TopoId>, points: &[Vec3], reference: Vec3) ->
     };
     Ok(FaceSpec { id, surface: Surface::Plane(Plane { origin: points[0], normal: unit3(n) }), loops: vec![ids] })
 }
-
-
 #[cfg(test)]
 fn planar_polygon(id: TopoId, mut ids: Vec<TopoId>, points: &[Vec3], reference: Vec3) -> Result<FaceSpec, BrepError> {
     if ids.len() != points.len() || ids.len() < 3 {
@@ -1413,8 +1411,6 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
     }
     Ok(trims)
 }
-
-
 fn patch_band_id(feature: TopoId, bend: usize, side: usize, upper: bool, inner: bool) -> TopoId {
     TopoId::derive("transition.patch.band").id(feature).index(bend as u64).index(side as u64).index(upper as u64).index(inner as u64).finish()
 }
@@ -1982,8 +1978,6 @@ mod tests {
             }
         }
     }
-
-
     #[test]
     fn each_trimmed_facet_closes_as_a_thin_planar_patch() {
         let feature = id("facet-patch-prisms");
