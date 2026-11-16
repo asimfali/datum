@@ -11,7 +11,12 @@
         "deepseek-v4.1-flash-200k": {
           "modelID": "deepseek-v4.1-flash",
           "name": "DeepSeek V4.1 Flash (200k, reviewer)",
-          "reasoning": true,
+          // The same ladder as the base model and the proxy's thinking.levels:
+          // OpenCode builds #low/#high/#max from it, and a level the proxy does
+          // not declare comes back as a 400.
+          "capabilities": {
+            "reasoning": { "supported": true, "effort": ["low", "high", "max"] }
+          },
           "limit": {
             "context": 200000,
             "output": 32000

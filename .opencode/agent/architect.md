@@ -1,7 +1,7 @@
 ---
 description: Планирует, принимает решения и ревьюит; реализацию делегирует worker.
 mode: primary
-model: cliproxy/glm-5.3-flash
+model: cliproxy/glm-5.3-flash#high
 permission:
   edit: allow
   bash: allow

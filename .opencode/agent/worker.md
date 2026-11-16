@@ -1,7 +1,7 @@
 ---
 description: Реализует бриф архитектора; код, тесты, проверки.
 mode: subagent
-model: cliproxy/deepseek-v4.1-flash
+model: cliproxy/deepseek-v4.1-flash#high
 permission:
   edit: allow
   bash:
