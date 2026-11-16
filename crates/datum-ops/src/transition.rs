@@ -619,14 +619,7 @@ fn distance3(a: Vec3, b: Vec3) -> f64 {
 /// the other generator is intersected with the same perpendicular plane, not tested against
 /// point itself. The thickness offsets carry the two radial endpoints from each facet plane
 /// onto the two cylindrical surfaces.
-fn bend_section(
-    bend: &Bend,
-    point: Vec3,
-    seed_side: usize,
-    outer_offset: f64,
-    inner_offset: f64,
-    size: f64,
-) -> Result<BendSection, BrepError> {
+fn bend_section(bend: &Bend, point: Vec3, seed_side: usize, outer_offset: f64, inner_offset: f64, size: f64) -> Result<BendSection, BrepError> {
     if seed_side >= 2 {
         return Err(BrepError::Invalid("transition: a lower bend section names no tangent side".into()));
     }
@@ -647,9 +640,7 @@ fn bend_section(
             return Err(BrepError::Degenerate("transition: a bend has a zero tangent radius".into()));
         }
         let direction = radial * (1.0 / radius);
-        if !within_rounding(radius + outer_offset - bend.radius_out, size)
-            || !within_rounding(radius + inner_offset - bend.radius_in, size)
-        {
+        if !within_rounding(radius + outer_offset - bend.radius_out, size) || !within_rounding(radius + inner_offset - bend.radius_in, size) {
             return Err(BrepError::Invalid("transition: a bend section's thickness offsets miss its cylinder radii".into()));
         }
 
@@ -666,9 +657,7 @@ fn bend_section(
         {
             return Err(BrepError::Invalid("transition: a bend section does not meet its offset tangent generators".into()));
         }
-        if !within_rounding((outer[side] - center).dot(bend.axis), size)
-            || !within_rounding((inner[side] - center).dot(bend.axis), size)
-        {
+        if !within_rounding((outer[side] - center).dot(bend.axis), size) || !within_rounding((inner[side] - center).dot(bend.axis), size) {
             return Err(BrepError::Invalid("transition: a bend section endpoint is off its perpendicular plane".into()));
         }
     }
@@ -699,7 +688,8 @@ fn lower_sections(layout: &Layout, dims: &TransitionDims) -> Result<Vec<BendSect
         }
         for k in 0..=m {
             let bend_index = relief.ribs[k];
-            let bend = layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: relief {j} names missing bend {bend_index}")))?;
+            let bend =
+                layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: relief {j} names missing bend {bend_index}")))?;
             let fan_facet = fan_base + k.min(m - 1);
             let seed_side = bend
                 .facets
@@ -711,10 +701,27 @@ fn lower_sections(layout: &Layout, dims: &TransitionDims) -> Result<Vec<BendSect
                 return Err(BrepError::Invalid(format!("transition: relief {j}'s lower section is not square to bend {bend_index}")));
             }
             let section = bend_section(bend, point, seed_side, outer_offset, inner_offset, size)?;
+            if !section.station.is_finite()
+                || !within_rounding(distance3(section.center, bend.at + bend.axis * section.station), size)
+            {
+                return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s lower section is not on its axis")));
+            }
+            for side in 0..2 {
+                if !within_rounding(distance3(section.outer[side], section.center) - bend.radius_out, size)
+                    || !within_rounding(distance3(section.inner[side], section.center) - bend.radius_in, size)
+                    || !within_rounding(distance3(section.outer[side], section.inner[side]) - dims.thickness, size)
+                    || !within_rounding((section.outer[side] - section.center).dot(bend.axis), size)
+                    || !within_rounding((section.inner[side] - section.center).dot(bend.axis), size)
+                {
+                    return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s lower section misses a cylinder or its perpendicular plane")));
+                }
+            }
 
             // The lower section must lie on the finite rib, before its D264/D265 upper section.
-            let p0 = *layout.vertices.get(&bend.edge[0]).ok_or_else(|| BrepError::Invalid("transition: lower section's bend vertex is missing".into()))?;
-            let p1 = *layout.vertices.get(&bend.edge[1]).ok_or_else(|| BrepError::Invalid("transition: lower section's bend vertex is missing".into()))?;
+            let p0 =
+                *layout.vertices.get(&bend.edge[0]).ok_or_else(|| BrepError::Invalid("transition: lower section's bend vertex is missing".into()))?;
+            let p1 =
+                *layout.vertices.get(&bend.edge[1]).ok_or_else(|| BrepError::Invalid("transition: lower section's bend vertex is missing".into()))?;
             let far = if distance3(p0, relief.at) <= distance3(p1, relief.at) { p1 } else { p0 };
             let length = (far - relief.at).dot(relief_axis);
             let lower = (section.center - relief.at).dot(relief_axis);
@@ -1462,7 +1469,6 @@ mod tests {
             }
         }
     }
-
 
     #[test]
     fn every_bend_has_one_valid_lower_section_on_both_cylinders() {
