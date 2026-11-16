@@ -1289,9 +1289,12 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
             let top_section = bend_section_at_station(bend, top_station, outer_offset, inner_offset, size)?;
             let q_station = (q - bend.at).dot(bend.axis);
             let x_station = (hit - bend.at).dot(bend.axis);
-            if !station_between(lower_section.station, q_station, x_station, size) || !station_between(top_station, q_station, x_station, size) {
+            let lower_ok = station_between(lower_section.station, q_station, x_station, size);
+            let upper_ok = station_between(top_station, q_station, x_station, size);
+            if !lower_ok || !upper_ok {
                 return Err(BrepError::Invalid(format!(
-                    "transition: bend {bend_index}'s lower or upper section falls outside facet {fi}'s tangent boundary"
+                    "transition: bend {bend_index}, facet {fi}, tangent side {bend_side}: q={q_station:.9}, x={x_station:.9}, lower={:.9} (ok={lower_ok}), upper={top_station:.9} (ok={upper_ok})",
+                    lower_section.station
                 )));
             }
             if (top_station - lower_section.station).abs() <= envelope {
