@@ -142,6 +142,40 @@ pub(crate) struct Layout {
     pub(crate) reliefs: Vec<Relief>,
 }
 
+/// Stable topological IDs shared by layout and body assembly.
+#[derive(Clone, Copy)]
+struct TransitionIds {
+    feature: TopoId,
+}
+
+impl TransitionIds {
+    fn a(self, i: usize) -> TopoId {
+        TopoId::derive("transition.a").id(self.feature).index(i as u64).finish()
+    }
+
+    fn b(self, i: usize) -> TopoId {
+        TopoId::derive("transition.b").id(self.feature).index(i as u64).finish()
+    }
+
+    fn fan(self, j: usize, k: usize) -> TopoId {
+        TopoId::derive("transition.fan").id(self.feature).index(j as u64).index(k as u64).finish()
+    }
+
+    fn fan_vertex(self, j: usize, k: usize, m: usize, n: usize) -> TopoId {
+        if k == 0 {
+            self.b((j + n - 1) % n)
+        } else if k == m {
+            self.b(j)
+        } else {
+            self.fan(j, k)
+        }
+    }
+
+    fn inner(self, v: TopoId) -> TopoId {
+        TopoId::derive("transition.inner").id(self.feature).id(v).finish()
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Small vector arithmetic in the plane and in space.
 
@@ -394,7 +428,7 @@ fn nearest(boundary: &[Smooth], m: Vec2, size: f64) -> Result<(Vec2, usize, f64)
     let near: Vec<&(f64, Vec2, usize, f64)> = found.iter().filter(|f| f.0 <= least + tol).collect();
     let mut points: Vec<Vec2> = Vec::new();
     for f in &near {
-        if !points.iter().any(|p| p.x == f.1.x && p.y == f.1.y) {
+        if !points.iter().any(|p| within_rounding(len2(sub(*p, f.1)), size)) {
             points.push(f.1);
         }
     }
@@ -405,7 +439,7 @@ fn nearest(boundary: &[Smooth], m: Vec2, size: f64) -> Result<(Vec2, usize, f64)
             least.sqrt()
         )));
     }
-    let Some(pick) = near.iter().filter(|f| f.1 == points[0]).min_by_key(|f| f.2).copied() else {
+    let Some(pick) = near.iter().filter(|f| within_rounding(len2(sub(f.1, points[0])), size)).min_by_key(|f| f.2).copied() else {
         return Err(BrepError::Degenerate("a transition's apex over a piece's middle is not unique".into()));
     };
     Ok((pick.1, pick.2, pick.3))
@@ -547,7 +581,7 @@ fn span_top(b: &Bend, radius_in: f64, radius_out: f64, az: Vec3) -> (f64, f64) {
     };
     let (u0, u1) = (u_of(b.tangent[0]), u_of(b.tangent[1]));
     let n01 = u0.cross(u1);
-    let m = if n01.dot(n01) == 0.0 {
+    let m = if nearly_parallel(u0, u1) {
         u0.dot(az)
     } else {
         let w = az - b.axis * b.axis.dot(az);
@@ -634,28 +668,18 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
     let b3: Vec<Vec3> = b2.iter().map(|&p| to_b(p)).collect();
     let fan3: Vec<Vec<Vec3>> = fan_pts.iter().map(|pts| pts.iter().map(|&p| to_b(p)).collect()).collect();
     // The vertices and the facets, each facing out of the body.
-    let a_id = |i: usize| TopoId::derive("transition.a").id(feature).index(i as u64).finish();
-    let b_id = |i: usize| TopoId::derive("transition.b").id(feature).index(i as u64).finish();
-    let f_id = |j: usize, k: usize| TopoId::derive("transition.fan").id(feature).index(j as u64).index(k as u64).finish();
+    let ids = TransitionIds { feature };
     let mut vertices: BTreeMap<TopoId, Vec3> = BTreeMap::new();
     for i in 0..n {
-        vertices.insert(a_id(i), a3[i]);
-        vertices.insert(b_id(i), b3[i]);
+        vertices.insert(ids.a(i), a3[i]);
+        vertices.insert(ids.b(i), b3[i]);
     }
     for (j, pts) in fan3.iter().enumerate() {
         for (k, &point) in pts.iter().enumerate().skip(1).take(pts.len().saturating_sub(2)) {
-            vertices.insert(f_id(j, k), point);
+            vertices.insert(ids.fan(j, k), point);
         }
     }
-    let fan_vid = |j: usize, k: usize, m: usize| -> TopoId {
-        if k == 0 {
-            b_id((j + n - 1) % n)
-        } else if k == m {
-            b_id(j)
-        } else {
-            f_id(j, k)
-        }
-    };
+    let fan_vid = |j: usize, k: usize, m: usize| ids.fan_vertex(j, k, m, n);
     let axis_center = average(&a3);
     let mut facets: Vec<Facet> = Vec::with_capacity(n + fans.iter().sum::<usize>());
     let orient = |ids: Vec<TopoId>, pts: &[Vec3], top: Vec<TopoId>| -> Result<Facet, BrepError> {
@@ -676,14 +700,14 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
     // The flat triangle over each piece of `a`.
     for i in 0..n {
         let pts = [a3[i], a3[(i + 1) % n], b3[i]];
-        facets.push(orient(vec![a_id(i), a_id((i + 1) % n), b_id(i)], &pts, vec![b_id(i)])?);
+        facets.push(orient(vec![ids.a(i), ids.a((i + 1) % n), ids.b(i)], &pts, vec![ids.b(i)])?);
     }
     // The fan over each vertex of `a`.
     for j in 0..n {
         let m = fans[j];
         for k in 0..m {
             let pts = [a3[j], fan3[j][k + 1], fan3[j][k]];
-            facets.push(orient(vec![a_id(j), fan_vid(j, k + 1, m), fan_vid(j, k, m)], &pts, vec![fan_vid(j, k, m), fan_vid(j, k + 1, m)])?);
+            facets.push(orient(vec![ids.a(j), fan_vid(j, k + 1, m), fan_vid(j, k, m)], &pts, vec![fan_vid(j, k, m), fan_vid(j, k + 1, m)])?);
         }
     }
     // Every edge of the facets: two of them is a bend, one a rim.
@@ -796,7 +820,7 @@ pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_na
         let m = fans[j];
         // The bend at the rib out to `fan3[j][k]`: its index, axis point and the rib's direction.
         let bend_at_rib = |k: usize| -> Result<usize, BrepError> {
-            let edge = (a_id(j).min(fan_vid(j, k, m)), a_id(j).max(fan_vid(j, k, m)));
+            let edge = (ids.a(j).min(fan_vid(j, k, m)), ids.a(j).max(fan_vid(j, k, m)));
             by_edge.get(&edge).copied().ok_or_else(|| BrepError::Invalid("transition: a fan edge has no bend".into()))
         };
         let ribs: Vec<usize> = (0..=m).map(bend_at_rib).collect::<Result<_, _>>()?;
@@ -882,19 +906,9 @@ fn planar(id: TopoId, mut ids: Vec<TopoId>, points: &[Vec3], reference: Vec3) ->
 #[cfg(test)]
 fn shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body, BrepError> {
     let n = layout.a.len();
-    let a_id = |i: usize| TopoId::derive("transition.a").id(feature).index(i as u64).finish();
-    let b_id = |i: usize| TopoId::derive("transition.b").id(feature).index(i as u64).finish();
-    let f_id = |j: usize, k: usize| TopoId::derive("transition.fan").id(feature).index(j as u64).index(k as u64).finish();
-    let inner_id = |v: TopoId| TopoId::derive("transition.inner").id(feature).id(v).finish();
-    let fan_vid = |j: usize, k: usize, m: usize| -> TopoId {
-        if k == 0 {
-            b_id((j + n - 1) % n)
-        } else if k == m {
-            b_id(j)
-        } else {
-            f_id(j, k)
-        }
-    };
+    let ids = TransitionIds { feature };
+    let inner_id = |v: TopoId| ids.inner(v);
+    let fan_vid = |j: usize, k: usize, m: usize| ids.fan_vertex(j, k, m, n);
     // The inner vertex is the outer one a thickness along the facets' normals there.
     let mut incident: BTreeMap<TopoId, Vec<usize>> = BTreeMap::new();
     for (fi, f) in layout.facets.iter().enumerate() {
@@ -940,7 +954,7 @@ fn shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body
     }
     // The bottom rims, one per piece of `a`; the top rims, one per chord.
     for (i, f) in layout.facets.iter().enumerate().take(n) {
-        let (u, w) = (a_id(i), a_id((i + 1) % n));
+        let (u, w) = (ids.a(i), ids.a((i + 1) % n));
         let ids = vec![u, w, inner_id(w), inner_id(u)];
         let pts = ids.iter().map(|&v| get(v)).collect::<Result<Vec<Vec3>, _>>()?;
         let reference = average(&pts) - centroid(&f.loop_)?;
