@@ -1159,7 +1159,7 @@ fn facet_patch_prism(feature: TopoId, patch: &FacetPatch, points: &BTreeMap<Topo
     let outer_points: Vec<Vec3> = patch.boundary.iter().map(|v| v.outer).collect();
     let inner_ids: Vec<TopoId> = patch.boundary.iter().rev().map(|v| v.inner_id).collect();
     let inner_points: Vec<Vec3> = patch.boundary.iter().rev().map(|v| v.inner).collect();
-    let mut vertices: Vec<Vertex> = points.iter().map(|(&id, &point)| Vertex { id, point }).collect();
+    let vertices: Vec<Vertex> = points.iter().map(|(&id, &point)| Vertex { id, point }).collect();
     let mut faces = vec![
         planar_polygon(TopoId::derive("transition.patch.test.outer").id(feature).index(patch.facet as u64).finish(), outer_ids, &outer_points, normal)?,
         planar_polygon(TopoId::derive("transition.patch.test.inner").id(feature).index(patch.facet as u64).finish(), inner_ids, &inner_points, normal * -1.0)?,
@@ -1180,7 +1180,6 @@ fn facet_patch_prism(feature: TopoId, patch: &FacetPatch, points: &BTreeMap<Topo
             wall_center - center,
         )?);
     }
-    vertices.shrink_to_fit();
     build_with_curves(vertices, faces, Vec::new())
 }
 
@@ -1317,16 +1316,27 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
         if facet.loop_.len() != 3 {
             return Err(BrepError::Invalid(format!("transition: facet {fi} is not triangular")));
         }
-        let shared = layout.bends.iter().find_map(|bend| {
-            layout.bends.iter().find(|other| other.edge != bend.edge).and_then(|other| {
-                bend.edge.iter().find(|v| other.edge.contains(v)).copied().filter(|v| facet.loop_.contains(v))
-            })
-        }).ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi} has no shared bend vertex")))?;
+        let adjacent: Vec<usize> = layout
+            .bends
+            .iter()
+            .enumerate()
+            .filter_map(|(bi, bend)| bend.facets.contains(&fi).then_some(bi))
+            .collect();
+        if adjacent.len() != 2 {
+            return Err(BrepError::Invalid(format!("transition: facet {fi} has {} adjacent bends, expected two", adjacent.len())));
+        }
+        let shared = layout.bends[adjacent[0]]
+            .edge
+            .iter()
+            .find(|v| layout.bends[adjacent[1]].edge.contains(v))
+            .copied()
+            .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s bends do not share a vertex")))?;
         let shared_at = facet.loop_.iter().position(|&v| v == shared).unwrap();
         let next = facet.loop_[(shared_at + 1) % 3];
         let prev = facet.loop_[(shared_at + 2) % 3];
         let bend_for_edge = |a: TopoId, b: TopoId| {
-            layout.bends.iter().enumerate().find_map(|(bi, bend)| {
+            adjacent.iter().find_map(|&bi| {
+                let bend = &layout.bends[bi];
                 (bend.edge.contains(&a) && bend.edge.contains(&b))
                     .then(|| (bi, bend.facets.iter().position(|&f| f == fi)))
                     .and_then(|(bi, side)| side.map(|side| (bi, side)))
@@ -1795,6 +1805,24 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     let (patches, registry) = facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
     if patches.len() != layout.facets.len() || registry.is_empty() {
         return Err(BrepError::Invalid("transition: trimmed facet patches are incomplete".into()));
+    }
+    for (fi, patch) in patches.iter().enumerate() {
+        if patch.facet != fi || patch.bends[0] == patch.bends[1] || patch.boundary.len() != 6 {
+            return Err(BrepError::Invalid(format!("transition: trimmed facet patch {fi} has invalid topology")));
+        }
+        for (slot, bend_index) in patch.bends.iter().enumerate() {
+            let bend = &layout.bends[*bend_index];
+            let side = bend.facets.iter().position(|&f| f == fi).ok_or_else(|| {
+                BrepError::Invalid(format!("transition: patch {fi} names a non-adjacent bend {bend_index}"))
+            })?;
+            let lower = patch.boundary[if slot == 0 { 0 } else { 5 }];
+            let upper = patch.boundary[if slot == 0 { 1 } else { 4 }];
+            if lower.outer_id != patch_band_id(TopoId::derive("transition.verify").finish(), *bend_index, side, false, false)
+                || upper.outer_id != patch_band_id(TopoId::derive("transition.verify").finish(), *bend_index, side, true, false)
+            {
+                return Err(BrepError::Invalid(format!("transition: patch {fi}'s bend-side vertex IDs are inconsistent")));
+            }
+        }
     }
     Ok(())
 }
