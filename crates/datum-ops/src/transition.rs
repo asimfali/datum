@@ -1153,10 +1153,10 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
             }
 
             let mut station_layer = |which: usize,
-                                 axis_point: Vec3,
-                                 candidate: LayerPoint,
-                                 candidate_neutral: Vec3,
-                                 candidate_x: LayerPoint|
+                                     axis_point: Vec3,
+                                     candidate: LayerPoint,
+                                     candidate_neutral: Vec3,
+                                     candidate_x: LayerPoint|
              -> Result<LayerPoint, BrepError> {
                 let po = axis_point + facet.normal * b.radius_out;
                 let pi = axis_point + facet.normal * b.radius_in;
