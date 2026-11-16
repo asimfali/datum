@@ -171,6 +171,7 @@ impl TransitionIds {
         }
     }
 
+    #[cfg(test)]
     fn inner(self, v: TopoId) -> TopoId {
         TopoId::derive("transition.inner").id(self.feature).id(v).finish()
     }
