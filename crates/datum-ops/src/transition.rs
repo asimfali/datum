@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::f64::consts::PI;
 
 #[cfg(test)]
-use datum_brep::{Body, FaceSpec, Plane, Surface, Vertex, build_with_curves};
+use datum_brep::{Arc as BrepArc, Body, Curve, CurveSpec, Cylinder, FaceSpec, Plane, Surface, Vertex, build_with_curves};
 use datum_brep::{BrepError, ProfileArc, ProfileLoop, TopoId};
 use datum_math::{Vec2, Vec3};
 
@@ -976,6 +976,373 @@ fn shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body
     build_with_curves(vertices, faces, Vec::new())
 }
 
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct LayerPoint {
+    outer: TopoId,
+    inner: TopoId,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct BandSide {
+    bottom: LayerPoint,
+    top: LayerPoint,
+}
+
+/// Registers an ID once. A repeated ID is legal only when it denotes the same geometric point
+/// within the kernel's rounding envelope.
+#[cfg(test)]
+fn put_point(points: &mut BTreeMap<TopoId, Vec3>, id: TopoId, point: Vec3, size: f64) -> Result<(), BrepError> {
+    if let Some(old) = points.get(&id) {
+        let d = point - *old;
+        if !within_rounding(d.dot(d).sqrt(), size) {
+            return Err(BrepError::Invalid(format!("transition: topological vertex {id:?} has two positions")));
+        }
+    } else {
+        points.insert(id, point);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn put_layer(
+    ids: TransitionIds,
+    points: &mut BTreeMap<TopoId, Vec3>,
+    inner_of: &mut BTreeMap<TopoId, TopoId>,
+    id: TopoId,
+    point: Vec3,
+    normal: Vec3,
+    outer: f64,
+    inner: f64,
+    size: f64,
+) -> Result<LayerPoint, BrepError> {
+    let layer = LayerPoint { outer: id, inner: ids.inner(id) };
+    put_point(points, layer.outer, point + normal * outer, size)?;
+    put_point(points, layer.inner, point + normal * inner, size)?;
+    inner_of.insert(layer.outer, layer.inner);
+    Ok(layer)
+}
+
+#[cfg(test)]
+fn close_points(a: Vec3, b: Vec3, size: f64) -> bool {
+    let d = a - b;
+    within_rounding(d.dot(d).sqrt(), size)
+}
+
+#[cfg(test)]
+fn loop_normal(ids: &[TopoId], points: &BTreeMap<TopoId, Vec3>) -> Result<Vec3, BrepError> {
+    let mut n = Vec3::ZERO;
+    for k in 0..ids.len() {
+        let a = points.get(&ids[k]).copied().ok_or_else(|| BrepError::Invalid("transition: a face vertex is missing".into()))?;
+        let b = points.get(&ids[(k + 1) % ids.len()]).copied().ok_or_else(|| BrepError::Invalid("transition: a face vertex is missing".into()))?;
+        n = n + a.cross(b);
+    }
+    if !(n.dot(n) > 0.0 && n.dot(n).is_finite()) {
+        return Err(BrepError::Degenerate("transition: a face has no area".into()));
+    }
+    Ok(n)
+}
+
+#[cfg(test)]
+fn orient_loop(ids: &mut Vec<TopoId>, points: &BTreeMap<TopoId, Vec3>, reference: Vec3) -> Result<(), BrepError> {
+    let n = loop_normal(ids, points)?;
+    if n.dot(reference) == 0.0 || !n.dot(reference).is_finite() {
+        return Err(BrepError::Degenerate("transition: a face's orientation is ambiguous".into()));
+    }
+    if n.dot(reference) < 0.0 {
+        ids.reverse();
+    }
+    Ok(())
+}
+
+/// Builds the rounded sheet around its facets and bend bands. Each plane-facet edge is split at
+/// the band's two end planes; the middle segment is sewn to a cylinder and the two remainder
+/// segments become trim walls. The sheet's seam is intentionally a later assembly group.
+#[cfg(test)]
+fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body, BrepError> {
+    let (outer, inner) = shifts(dims.side, dims.thickness);
+    let size = layout
+        .vertices
+        .values()
+        .flat_map(|p| [p.x, p.y, p.z])
+        .fold(1.0_f64, |m, x| m.max(x.abs()));
+    let ids = TransitionIds { feature };
+    let mut points: BTreeMap<TopoId, Vec3> = BTreeMap::new();
+    let mut inner_of: BTreeMap<TopoId, TopoId> = BTreeMap::new();
+    let mut faces: Vec<FaceSpec> = Vec::new();
+    let mut curves: Vec<CurveSpec> = Vec::new();
+    let mut sides: Vec<[Option<BandSide>; 2]> = vec![[None, None]; layout.bends.len()];
+
+    // Every bend has exactly one lower end plane, supplied by the relief at its A-vertex.
+    let mut lower: Vec<Option<Vec3>> = vec![None; layout.bends.len()];
+    for relief in &layout.reliefs {
+        if relief.ribs.len() != relief.ends.len() {
+            return Err(BrepError::Invalid("transition: a relief has different numbers of ribs and end planes".into()));
+        }
+        for (k, &bi) in relief.ribs.iter().enumerate() {
+            let slot = lower.get_mut(bi).ok_or_else(|| BrepError::Invalid("transition: a relief names a missing bend".into()))?;
+            if slot.replace(relief.ends[k].1).is_some() {
+                return Err(BrepError::Invalid(format!("transition: bend {bi} has more than one lower end plane")));
+            }
+        }
+    }
+    if lower.iter().any(Option::is_none) {
+        return Err(BrepError::Invalid("transition: a bend has no lower end plane".into()));
+    }
+
+    // First build each planar facet patch and all its boundary walls. The two bends of a triangle
+    // share one vertex; their tangent lines meet there at q. Each line meets the opposite rim at X.
+    for (fi, facet) in layout.facets.iter().enumerate() {
+        let mut adjacent: Vec<(usize, usize)> = layout
+            .bends
+            .iter()
+            .enumerate()
+            .filter_map(|(bi, b)| b.facets.iter().position(|&f| f == fi).map(|side| (bi, side)))
+            .collect();
+        adjacent.sort_unstable();
+        let [(b0i, b0s), (b1i, b1s)] = adjacent.as_slice() else {
+            return Err(BrepError::Invalid(format!("transition: facet {fi} has {} bends, expected two", adjacent.len())));
+        };
+        let (b0, b1) = (&layout.bends[*b0i], &layout.bends[*b1i]);
+        let shared = b0.edge.iter().find(|v| b1.edge.contains(v)).copied()
+            .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s bends do not meet at a vertex")))?;
+        let opposite: Vec<TopoId> = facet.loop_.iter().copied().filter(|&v| v != shared).collect();
+        if opposite.len() != 2 {
+            return Err(BrepError::Invalid(format!("transition: facet {fi} has no opposite rim edge")));
+        }
+        let edge_a = layout.vertices[&opposite[0]];
+        let edge_b = layout.vertices[&opposite[1]];
+        let q = meet(b0.tangent[*b0s], b0.axis, b1.tangent[*b1s], b1.axis)?;
+        let x0 = meet(b0.tangent[*b0s], b0.axis, edge_a, edge_b - edge_a)?;
+        let x1 = meet(b1.tangent[*b1s], b1.axis, edge_a, edge_b - edge_a)?;
+
+        // Each X must be on the finite rim edge, not merely on its supporting line.
+        for (x, bi) in [(x0, *b0i), (x1, *b1i)] {
+            let d = edge_b - edge_a;
+            let u = (x - edge_a).dot(d) / d.dot(d);
+            let projected = edge_a + d * u;
+            if u < 0.0 || u > 1.0 || !close_points(x, projected, size) {
+                return Err(BrepError::Invalid(format!("transition: bend {bi}'s tangent line misses facet {fi}'s rim")));
+            }
+        }
+
+        let q_id = TopoId::derive("transition.facet.q").id(feature).index(fi as u64).finish();
+        let x0_id = TopoId::derive("transition.facet.x").id(feature).index(fi as u64).index(0).finish();
+        let x1_id = TopoId::derive("transition.facet.x").id(feature).index(fi as u64).index(1).finish();
+        let q_layer = put_layer(ids, &mut points, &mut inner_of, q_id, q, facet.normal, outer, inner, size)?;
+        let x0_layer = put_layer(ids, &mut points, &mut inner_of, x0_id, x0, facet.normal, outer, inner, size)?;
+        let x1_layer = put_layer(ids, &mut points, &mut inner_of, x1_id, x1, facet.normal, outer, inner, size)?;
+
+        let mut make_path = |bi: usize, side: usize, x: Vec3, x_layer: LayerPoint| -> Result<(Vec<LayerPoint>, BandSide), BrepError> {
+            let b = &layout.bends[bi];
+            let lower_point = lower[bi].ok_or_else(|| BrepError::Invalid("transition: a bend's lower station is missing".into()))?;
+            let s_bottom = (lower_point - b.at).dot(b.axis);
+            let bottom_axis = b.at + b.axis * s_bottom;
+            if !close_points(lower_point, b.tangent[side] + b.axis * (lower_point - b.tangent[side]).dot(b.axis), size) {
+                return Err(BrepError::Invalid(format!("transition: bend {bi}'s lower end is off its tangent line")));
+            }
+            let s_top = (b.top - b.at).dot(b.axis);
+            let s_q = (q - b.at).dot(b.axis);
+            let s_x = (x - b.at).dot(b.axis);
+            let lo = s_q.min(s_x);
+            let hi = s_q.max(s_x);
+            let envelope = 64.0 * f64::EPSILON * size;
+            if s_bottom < lo - envelope || s_bottom > hi + envelope || s_top < lo - envelope || s_top > hi + envelope {
+                return Err(BrepError::Invalid(format!("transition: bend {bi}'s end plane falls outside facet {fi}'s tangent edge")));
+            }
+            if (s_top - s_bottom).abs() <= envelope {
+                return Err(BrepError::Degenerate(format!("transition: bend {bi} has no length between its end planes")));
+            }
+
+            let station_layer = |which: usize,
+                                 s: f64,
+                                 axis_point: Vec3,
+                                 candidate: LayerPoint,
+                                 candidate_neutral: Vec3,
+                                 candidate_x: LayerPoint|
+             -> Result<LayerPoint, BrepError> {
+                let po = axis_point + facet.normal * b.radius_out;
+                let pi = axis_point + facet.normal * b.radius_in;
+                let candidate_outer = candidate_neutral + facet.normal * outer;
+                let candidate_inner = candidate_neutral + facet.normal * inner;
+                let x_neutral = if which == 0 { q } else { x };
+                let x_outer = x_neutral + facet.normal * outer;
+                let x_inner = x_neutral + facet.normal * inner;
+                if close_points(po, candidate_outer, size) && close_points(pi, candidate_inner, size) {
+                    return Ok(candidate);
+                }
+                if close_points(po, x_outer, size) && close_points(pi, x_inner, size) {
+                    return Ok(candidate_x);
+                }
+                let id = TopoId::derive("transition.band.station")
+                    .id(feature).index(bi as u64).index(side as u64).index(which as u64).finish();
+                let layer = LayerPoint { outer: id, inner: ids.inner(id) };
+                put_point(&mut points, layer.outer, po, size)?;
+                put_point(&mut points, layer.inner, pi, size)?;
+                inner_of.insert(layer.outer, layer.inner);
+                let _ = s;
+                Ok(layer)
+            };
+
+            let bottom_layer = station_layer(0, s_bottom, bottom_axis, q_layer, q, x_layer)?;
+            let top_layer = station_layer(1, s_top, b.top, q_layer, q, x_layer)?;
+            let band = BandSide { bottom: bottom_layer, top: top_layer };
+            if sides[bi][side].replace(band).is_some() {
+                return Err(BrepError::Invalid(format!("transition: bend {bi}'s side {side} is used twice")));
+            }
+
+            let mut middle = vec![(s_bottom, bottom_layer), (s_top, top_layer)];
+            middle.sort_by(|a, b| a.0.total_cmp(&b.0));
+            if s_q > s_x {
+                middle.reverse();
+            }
+            let mut path = vec![q_layer];
+            for (_, layer) in middle {
+                if path.last().is_none_or(|last| last.outer != layer.outer) {
+                    path.push(layer);
+                }
+            }
+            if path.last().is_none_or(|last| last.outer != x_layer.outer) {
+                path.push(x_layer);
+            }
+            if path.len() < 3 {
+                return Err(BrepError::Degenerate(format!("transition: bend {bi}'s split tangent edge collapsed")));
+            }
+            Ok((path, band))
+        };
+
+        let (path0, band0) = make_path(*b0i, *b0s, x0, x0_layer)?;
+        let (path1, band1) = make_path(*b1i, *b1s, x1, x1_layer)?;
+
+        // The two tangent paths and the opposite rim make the triangular outer patch. Its
+        // orientation is the facet's outward normal; the inner patch is the reverse loop.
+        let mut x0_layer = x0_layer;
+        let mut x1_layer = x1_layer;
+        let mut path0 = path0;
+        let mut path1 = path1;
+        let cross = (x0 - q).cross(x1 - q);
+        if cross.dot(facet.normal) < 0.0 {
+            std::mem::swap(&mut x0_layer, &mut x1_layer);
+            std::mem::swap(&mut path0, &mut path1);
+        }
+        let mut outer_loop = vec![q_layer.outer];
+        outer_loop.extend(path0.iter().skip(1).map(|p| p.outer));
+        outer_loop.push(x1_layer.outer);
+        if path1.len() > 2 {
+            outer_loop.extend(path1.iter().rev().skip(1).take(path1.len() - 2).map(|p| p.outer));
+        }
+        if outer_loop.len() < 3 {
+            return Err(BrepError::Degenerate(format!("transition: facet {fi}'s trimmed patch collapsed")));
+        }
+        let inner_loop: Vec<TopoId> = outer_loop.iter().rev().map(|v| {
+            inner_of.get(v).copied().ok_or_else(|| BrepError::Invalid(format!("transition: no inner vertex for {v:?}")))
+        }).collect::<Result<_, _>>()?;
+
+        let outer_origin = points[&outer_loop[0]];
+        let inner_origin = points[&inner_loop[0]];
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.round.facet.outer").id(feature).index(fi as u64).finish(),
+            surface: Surface::Plane(Plane { origin: outer_origin, normal: facet.normal }),
+            loops: vec![outer_loop.clone()],
+        });
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.round.facet.inner").id(feature).index(fi as u64).finish(),
+            surface: Surface::Plane(Plane { origin: inner_origin, normal: -facet.normal }),
+            loops: vec![inner_loop],
+        });
+
+        // All outer boundary edges except the two band generators close through the thickness.
+        // This includes the remaining portions of tangent lines and the sheet's profiled rim.
+        let mut band_edges = BTreeSet::new();
+        for band in [band0, band1] {
+            band_edges.insert((band.bottom.outer.min(band.top.outer), band.bottom.outer.max(band.top.outer)));
+        }
+        for edge in 0..outer_loop.len() {
+            let a = outer_loop[edge];
+            let b = outer_loop[(edge + 1) % outer_loop.len()];
+            if band_edges.contains(&(a.min(b), a.max(b))) {
+                continue;
+            }
+            let ai = inner_of.get(&a).copied().ok_or_else(|| BrepError::Invalid("transition: a wall's inner start is missing".into()))?;
+            let bi = inner_of.get(&b).copied().ok_or_else(|| BrepError::Invalid("transition: a wall's inner end is missing".into()))?;
+            let wall_loop = vec![b, a, ai, bi];
+            let p0 = points[&wall_loop[0]];
+            let p1 = points[&wall_loop[1]];
+            let p2 = points[&wall_loop[2]];
+            let normal = unit3((p1 - p0).cross(p2 - p0));
+            faces.push(FaceSpec {
+                id: TopoId::derive("transition.round.wall").id(feature).index(fi as u64).index(edge as u64).finish(),
+                surface: Surface::Plane(Plane { origin: p0, normal }),
+                loops: vec![wall_loop],
+            });
+        }
+    }
+
+    // Each bend contributes two cylindrical surfaces and two annular-sector end faces. The end
+    // arcs are exact circles, shared by the cylinders and their planar end caps.
+    for (bi, bend) in layout.bends.iter().enumerate() {
+        let [Some(s0), Some(s1)] = sides[bi] else {
+            return Err(BrepError::Invalid(format!("transition: bend {bi} is missing one of its two facets")));
+        };
+        let f0 = &layout.facets[bend.facets[0]];
+        let f1 = &layout.facets[bend.facets[1]];
+        let radial = unit3(f0.normal + f1.normal);
+        let mut outer_loop = vec![s0.bottom.outer, s0.top.outer, s1.top.outer, s1.bottom.outer];
+        orient_loop(&mut outer_loop, &points, radial)?;
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.round.bend.outer").id(feature).index(bi as u64).finish(),
+            surface: Surface::Cylinder(Cylinder { origin: bend.at, axis: bend.axis, radius: bend.radius_out, convex: true }),
+            loops: vec![outer_loop],
+        });
+        let mut inner_loop = vec![s0.bottom.inner, s0.top.inner, s1.top.inner, s1.bottom.inner];
+        orient_loop(&mut inner_loop, &points, -radial)?;
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.round.bend.inner").id(feature).index(bi as u64).finish(),
+            surface: Surface::Cylinder(Cylinder { origin: bend.at, axis: bend.axis, radius: bend.radius_in, convex: false }),
+            loops: vec![inner_loop],
+        });
+
+        let axis_dot = bend.axis.dot(layout.az);
+        if within_rounding(axis_dot, 1.0) {
+            return Err(BrepError::Degenerate(format!("transition: bend {bi}'s axis is parallel to its end planes")));
+        }
+        let bottom_axis = {
+            let p = lower[bi].ok_or_else(|| BrepError::Invalid("transition: lower station disappeared".into()))?;
+            let s = (p - bend.at).dot(bend.axis);
+            bend.at + bend.axis * s
+        };
+        let top_axis = bend.top;
+        let direction_to_top = if (top_axis - bottom_axis).dot(layout.az) > 0.0 { bend.axis } else { -bend.axis };
+        let mut bottom_cap = vec![s0.bottom.outer, s1.bottom.outer, s1.bottom.inner, s0.bottom.inner];
+        orient_loop(&mut bottom_cap, &points, -direction_to_top)?;
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.round.cap.bottom").id(feature).index(bi as u64).finish(),
+            surface: Surface::Plane(Plane { origin: bottom_axis, normal: -direction_to_top }),
+            loops: vec![bottom_cap],
+        });
+        let mut top_cap = vec![s0.top.outer, s1.top.outer, s1.top.inner, s0.top.inner];
+        orient_loop(&mut top_cap, &points, direction_to_top)?;
+        faces.push(FaceSpec {
+            id: TopoId::derive("transition.round.cap.top").id(feature).index(bi as u64).finish(),
+            surface: Surface::Plane(Plane { origin: top_axis, normal: direction_to_top }),
+            loops: vec![top_cap],
+        });
+
+        let arc_axis = if bend.axis.dot(f0.normal.cross(f1.normal)) >= 0.0 { bend.axis } else { -bend.axis };
+        curves.extend([
+            CurveSpec { from: s0.bottom.outer, to: s1.bottom.outer, curve: Curve::Arc(BrepArc { center: bottom_axis, axis: arc_axis, radius: bend.radius_out }) },
+            CurveSpec { from: s0.top.outer, to: s1.top.outer, curve: Curve::Arc(BrepArc { center: top_axis, axis: arc_axis, radius: bend.radius_out }) },
+            CurveSpec { from: s0.bottom.inner, to: s1.bottom.inner, curve: Curve::Arc(BrepArc { center: bottom_axis, axis: arc_axis, radius: bend.radius_in }) },
+            CurveSpec { from: s0.top.inner, to: s1.top.inner, curve: Curve::Arc(BrepArc { center: top_axis, axis: arc_axis, radius: bend.radius_in }) },
+        ]);
+    }
+
+    let vertices = points.into_iter().map(|(id, point)| Vertex { id, point }).collect();
+    build_with_curves(vertices, faces, curves)
+}
+
 /// The transition between the profiles: refused at the fan's corners until their relief is settled.
 pub(crate) fn transition(
     feature: TopoId,
@@ -1352,6 +1719,17 @@ mod tests {
         big.radius = 200.0;
         let e = layout(id("t"), &square(), "ab", &circle(), "c", &big).unwrap_err();
         assert!(e.to_string().contains("eats facet"), "{e}");
+    }
+
+
+    #[test]
+    fn the_rounded_bands_and_trim_walls_form_a_closed_shell() {
+        let d = dims();
+        let feature = id("rounded-transition");
+        let layout = layout(feature, &square(), "ab", &circle(), "c", &d).unwrap();
+        let body = rounded_shell(feature, &layout, &d).unwrap();
+        body.validate().unwrap();
+        assert!(body.volume() > 0.0);
     }
 
     #[test]
