@@ -1056,7 +1056,8 @@ fn orient_loop(ids: &mut Vec<TopoId>, points: &BTreeMap<TopoId, Vec3>, reference
     Ok(())
 }
 
-/// Builds the rounded sheet around its facets and bend bands. Each plane-facet edge is split at
+/// Builds the rounded sheet around its facets and bend bands. The final flat pattern is checked
+/// against the fan-and-relief silhouette in `HANDOFF.md` (visual reference, 2026-11-16). Each plane-facet edge is split at
 /// the band's two end planes; the middle segment is sewn to a cylinder and the two remainder
 /// segments become trim walls. The sheet's seam is intentionally a later assembly group.
 #[cfg(test)]
@@ -1152,7 +1153,6 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
             }
 
             let station_layer = |which: usize,
-                                 s: f64,
                                  axis_point: Vec3,
                                  candidate: LayerPoint,
                                  candidate_neutral: Vec3,
@@ -1176,12 +1176,11 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
                 put_point(&mut points, layer.outer, po, size)?;
                 put_point(&mut points, layer.inner, pi, size)?;
                 inner_of.insert(layer.outer, layer.inner);
-                let _ = s;
                 Ok(layer)
             };
 
-            let bottom_layer = station_layer(0, s_bottom, bottom_axis, q_layer, q, x_layer)?;
-            let top_layer = station_layer(1, s_top, b.top, q_layer, q, x_layer)?;
+            let bottom_layer = station_layer(0, bottom_axis, q_layer, q, x_layer)?;
+            let top_layer = station_layer(1, b.top, q_layer, q, x_layer)?;
             let band = BandSide { bottom: bottom_layer, top: top_layer };
             if sides[bi][side].replace(band).is_some() {
                 return Err(BrepError::Invalid(format!("transition: bend {bi}'s side {side} is used twice")));
