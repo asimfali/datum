@@ -1152,7 +1152,7 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
                 return Err(BrepError::Degenerate(format!("transition: bend {bi} has no length between its end planes")));
             }
 
-            let station_layer = |which: usize,
+            let mut station_layer = |which: usize,
                                  axis_point: Vec3,
                                  candidate: LayerPoint,
                                  candidate_neutral: Vec3,
