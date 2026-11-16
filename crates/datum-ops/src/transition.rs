@@ -985,6 +985,15 @@ struct LayerPoint {
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
+struct LayerOffset {
+    normal: Vec3,
+    outer: f64,
+    inner: f64,
+    size: f64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
 struct BandSide {
     bottom: LayerPoint,
     top: LayerPoint,
@@ -1012,14 +1021,11 @@ fn put_layer(
     inner_of: &mut BTreeMap<TopoId, TopoId>,
     id: TopoId,
     point: Vec3,
-    normal: Vec3,
-    outer: f64,
-    inner: f64,
-    size: f64,
+    offset: LayerOffset,
 ) -> Result<LayerPoint, BrepError> {
     let layer = LayerPoint { outer: id, inner: ids.inner(id) };
-    put_point(points, layer.outer, point + normal * outer, size)?;
-    put_point(points, layer.inner, point + normal * inner, size)?;
+    put_point(points, layer.outer, point + offset.normal * offset.outer, offset.size)?;
+    put_point(points, layer.inner, point + offset.normal * offset.inner, offset.size)?;
     inner_of.insert(layer.outer, layer.inner);
     Ok(layer)
 }
@@ -1045,7 +1051,7 @@ fn loop_normal(ids: &[TopoId], points: &BTreeMap<TopoId, Vec3>) -> Result<Vec3, 
 }
 
 #[cfg(test)]
-fn orient_loop(ids: &mut Vec<TopoId>, points: &BTreeMap<TopoId, Vec3>, reference: Vec3) -> Result<(), BrepError> {
+fn orient_loop(ids: &mut [TopoId], points: &BTreeMap<TopoId, Vec3>, reference: Vec3) -> Result<(), BrepError> {
     let n = loop_normal(ids, points)?;
     if n.dot(reference) == 0.0 || !n.dot(reference).is_finite() {
         return Err(BrepError::Degenerate("transition: a face's orientation is ambiguous".into()));
@@ -1127,9 +1133,10 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
         let q_id = TopoId::derive("transition.facet.q").id(feature).index(fi as u64).finish();
         let x0_id = TopoId::derive("transition.facet.x").id(feature).index(fi as u64).index(0).finish();
         let x1_id = TopoId::derive("transition.facet.x").id(feature).index(fi as u64).index(1).finish();
-        let q_layer = put_layer(ids, &mut points, &mut inner_of, q_id, q, facet.normal, outer, inner, size)?;
-        let x0_layer = put_layer(ids, &mut points, &mut inner_of, x0_id, x0, facet.normal, outer, inner, size)?;
-        let x1_layer = put_layer(ids, &mut points, &mut inner_of, x1_id, x1, facet.normal, outer, inner, size)?;
+        let offset = LayerOffset { normal: facet.normal, outer, inner, size };
+        let q_layer = put_layer(ids, &mut points, &mut inner_of, q_id, q, offset)?;
+        let x0_layer = put_layer(ids, &mut points, &mut inner_of, x0_id, x0, offset)?;
+        let x1_layer = put_layer(ids, &mut points, &mut inner_of, x1_id, x1, offset)?;
 
         let mut make_path = |bi: usize, side: usize, x: Vec3, x_layer: LayerPoint| -> Result<(Vec<LayerPoint>, BandSide), BrepError> {
             let b = &layout.bends[bi];
