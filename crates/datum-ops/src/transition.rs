@@ -730,8 +730,7 @@ fn bend_section_at_station(
 fn station_between(value: f64, a: f64, b: f64, size: f64) -> bool {
     let lo = a.min(b);
     let hi = a.max(b);
-    value >= lo || within_rounding(value - lo, size)
-        && (value <= hi || within_rounding(value - hi, size))
+    (value >= lo || within_rounding(value - lo, size)) && (value <= hi || within_rounding(value - hi, size))
 }
 
 /// Resolves the lower end plane of every bend from its relief q point. A fan facet selects the
