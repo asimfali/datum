@@ -1733,7 +1733,6 @@ mod tests {
         assert!(e.to_string().contains("eats facet"), "{e}");
     }
 
-
     #[test]
     fn the_rounded_bands_and_trim_walls_form_a_closed_shell() {
         let d = dims();
