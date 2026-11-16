@@ -976,7 +976,6 @@ fn shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body
     build_with_curves(vertices, faces, Vec::new())
 }
 
-
 #[cfg(test)]
 #[derive(Clone, Copy)]
 struct LayerPoint {
@@ -1063,11 +1062,7 @@ fn orient_loop(ids: &mut Vec<TopoId>, points: &BTreeMap<TopoId, Vec3>, reference
 #[cfg(test)]
 fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body, BrepError> {
     let (outer, inner) = shifts(dims.side, dims.thickness);
-    let size = layout
-        .vertices
-        .values()
-        .flat_map(|p| [p.x, p.y, p.z])
-        .fold(1.0_f64, |m, x| m.max(x.abs()));
+    let size = layout.vertices.values().flat_map(|p| [p.x, p.y, p.z]).fold(1.0_f64, |m, x| m.max(x.abs()));
     let ids = TransitionIds { feature };
     let mut points: BTreeMap<TopoId, Vec3> = BTreeMap::new();
     let mut inner_of: BTreeMap<TopoId, TopoId> = BTreeMap::new();
@@ -1095,18 +1090,18 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
     // First build each planar facet patch and all its boundary walls. The two bends of a triangle
     // share one vertex; their tangent lines meet there at q. Each line meets the opposite rim at X.
     for (fi, facet) in layout.facets.iter().enumerate() {
-        let mut adjacent: Vec<(usize, usize)> = layout
-            .bends
-            .iter()
-            .enumerate()
-            .filter_map(|(bi, b)| b.facets.iter().position(|&f| f == fi).map(|side| (bi, side)))
-            .collect();
+        let mut adjacent: Vec<(usize, usize)> =
+            layout.bends.iter().enumerate().filter_map(|(bi, b)| b.facets.iter().position(|&f| f == fi).map(|side| (bi, side))).collect();
         adjacent.sort_unstable();
         let [(b0i, b0s), (b1i, b1s)] = adjacent.as_slice() else {
             return Err(BrepError::Invalid(format!("transition: facet {fi} has {} bends, expected two", adjacent.len())));
         };
         let (b0, b1) = (&layout.bends[*b0i], &layout.bends[*b1i]);
-        let shared = b0.edge.iter().find(|v| b1.edge.contains(v)).copied()
+        let shared = b0
+            .edge
+            .iter()
+            .find(|v| b1.edge.contains(v))
+            .copied()
             .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s bends do not meet at a vertex")))?;
         let opposite: Vec<TopoId> = facet.loop_.iter().copied().filter(|&v| v != shared).collect();
         if opposite.len() != 2 {
@@ -1176,8 +1171,7 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
                 if close_points(po, x_outer, size) && close_points(pi, x_inner, size) {
                     return Ok(candidate_x);
                 }
-                let id = TopoId::derive("transition.band.station")
-                    .id(feature).index(bi as u64).index(side as u64).index(which as u64).finish();
+                let id = TopoId::derive("transition.band.station").id(feature).index(bi as u64).index(side as u64).index(which as u64).finish();
                 let layer = LayerPoint { outer: id, inner: ids.inner(id) };
                 put_point(&mut points, layer.outer, po, size)?;
                 put_point(&mut points, layer.inner, pi, size)?;
@@ -1236,9 +1230,11 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
         if outer_loop.len() < 3 {
             return Err(BrepError::Degenerate(format!("transition: facet {fi}'s trimmed patch collapsed")));
         }
-        let inner_loop: Vec<TopoId> = outer_loop.iter().rev().map(|v| {
-            inner_of.get(v).copied().ok_or_else(|| BrepError::Invalid(format!("transition: no inner vertex for {v:?}")))
-        }).collect::<Result<_, _>>()?;
+        let inner_loop: Vec<TopoId> = outer_loop
+            .iter()
+            .rev()
+            .map(|v| inner_of.get(v).copied().ok_or_else(|| BrepError::Invalid(format!("transition: no inner vertex for {v:?}"))))
+            .collect::<Result<_, _>>()?;
 
         let outer_origin = points[&outer_loop[0]];
         let inner_origin = points[&inner_loop[0]];
@@ -1332,10 +1328,26 @@ fn rounded_shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Res
 
         let arc_axis = if bend.axis.dot(f0.normal.cross(f1.normal)) >= 0.0 { bend.axis } else { -bend.axis };
         curves.extend([
-            CurveSpec { from: s0.bottom.outer, to: s1.bottom.outer, curve: Curve::Arc(BrepArc { center: bottom_axis, axis: arc_axis, radius: bend.radius_out }) },
-            CurveSpec { from: s0.top.outer, to: s1.top.outer, curve: Curve::Arc(BrepArc { center: top_axis, axis: arc_axis, radius: bend.radius_out }) },
-            CurveSpec { from: s0.bottom.inner, to: s1.bottom.inner, curve: Curve::Arc(BrepArc { center: bottom_axis, axis: arc_axis, radius: bend.radius_in }) },
-            CurveSpec { from: s0.top.inner, to: s1.top.inner, curve: Curve::Arc(BrepArc { center: top_axis, axis: arc_axis, radius: bend.radius_in }) },
+            CurveSpec {
+                from: s0.bottom.outer,
+                to: s1.bottom.outer,
+                curve: Curve::Arc(BrepArc { center: bottom_axis, axis: arc_axis, radius: bend.radius_out }),
+            },
+            CurveSpec {
+                from: s0.top.outer,
+                to: s1.top.outer,
+                curve: Curve::Arc(BrepArc { center: top_axis, axis: arc_axis, radius: bend.radius_out }),
+            },
+            CurveSpec {
+                from: s0.bottom.inner,
+                to: s1.bottom.inner,
+                curve: Curve::Arc(BrepArc { center: bottom_axis, axis: arc_axis, radius: bend.radius_in }),
+            },
+            CurveSpec {
+                from: s0.top.inner,
+                to: s1.top.inner,
+                curve: Curve::Arc(BrepArc { center: top_axis, axis: arc_axis, radius: bend.radius_in }),
+            },
         ]);
     }
 
