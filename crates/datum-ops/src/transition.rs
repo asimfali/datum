@@ -595,6 +595,149 @@ fn span_top(b: &Bend, radius_in: f64, radius_out: f64, az: Vec3) -> (f64, f64) {
     (m, if m >= 0.0 { radius_out } else { radius_in })
 }
 
+
+/// A bend's lower end section: one plane perpendicular to its axis, with the two
+/// concentric arcs where it meets the outer and inner cylindrical surfaces.
+#[derive(Clone, Copy, Debug)]
+struct BendSection {
+    /// Signed distance along the unit bend axis from Bend::at.
+    station: f64,
+    /// The section circle's centre on the bend axis.
+    center: Vec3,
+    /// Endpoints on the outer cylinder, one on each adjacent facet.
+    outer: [Vec3; 2],
+    /// Endpoints on the inner cylinder, one on each adjacent facet.
+    inner: [Vec3; 2],
+}
+
+fn distance3(a: Vec3, b: Vec3) -> f64 {
+    let d = a - b;
+    d.dot(d).sqrt()
+}
+
+/// Places a section through point. point belongs to the tangent generator on seed_side;
+/// the other generator is intersected with the same perpendicular plane, not tested against
+/// point itself. The thickness offsets carry the two radial endpoints from each facet plane
+/// onto the two cylindrical surfaces.
+fn bend_section(
+    bend: &Bend,
+    point: Vec3,
+    seed_side: usize,
+    outer_offset: f64,
+    inner_offset: f64,
+    size: f64,
+) -> Result<BendSection, BrepError> {
+    if seed_side >= 2 {
+        return Err(BrepError::Invalid("transition: a lower bend section names no tangent side".into()));
+    }
+    if !within_rounding(bend.axis.dot(bend.axis) - 1.0, 1.0) {
+        return Err(BrepError::Invalid("transition: a lower bend section has a non-unit axis".into()));
+    }
+    let station = (point - bend.at).dot(bend.axis);
+    let center = bend.at + bend.axis * station;
+    let mut outer = [Vec3::ZERO; 2];
+    let mut inner = [Vec3::ZERO; 2];
+    for side in 0..2 {
+        let radial = bend.tangent[side] - bend.at;
+        if !within_rounding(radial.dot(bend.axis), size) {
+            return Err(BrepError::Invalid("transition: a tangent generator is not perpendicular to its bend axis".into()));
+        }
+        let radius = radial.dot(radial).sqrt();
+        if !(radius > 0.0 && radius.is_finite()) {
+            return Err(BrepError::Degenerate("transition: a bend has a zero tangent radius".into()));
+        }
+        let direction = radial * (1.0 / radius);
+        if !within_rounding(radius + outer_offset - bend.radius_out, size)
+            || !within_rounding(radius + inner_offset - bend.radius_in, size)
+        {
+            return Err(BrepError::Invalid("transition: a bend section's thickness offsets miss its cylinder radii".into()));
+        }
+
+        // Each tangent generator is parallel to the bend axis. The section plane fixes the same
+        // axial parameter on both generators; only the seed side contains point by definition.
+        let generator = bend.tangent[side] + bend.axis * station;
+        if side == seed_side && !within_rounding(distance3(generator, point), size) {
+            return Err(BrepError::Invalid("transition: the relief point is off its selected tangent generator".into()));
+        }
+        outer[side] = center + direction * bend.radius_out;
+        inner[side] = center + direction * bend.radius_in;
+        if !within_rounding(distance3(outer[side], generator + direction * outer_offset), size)
+            || !within_rounding(distance3(inner[side], generator + direction * inner_offset), size)
+        {
+            return Err(BrepError::Invalid("transition: a bend section does not meet its offset tangent generators".into()));
+        }
+        if !within_rounding((outer[side] - center).dot(bend.axis), size)
+            || !within_rounding((inner[side] - center).dot(bend.axis), size)
+        {
+            return Err(BrepError::Invalid("transition: a bend section endpoint is off its perpendicular plane".into()));
+        }
+    }
+    Ok(BendSection { station, center, outer, inner })
+}
+
+/// Resolves the lower end plane of every bend from its relief q point. A fan facet selects the
+/// tangent generator that contains q; the opposite generator is intersected at the same axial
+/// station. The resulting sections are indexed by bend, independently of relief order.
+fn lower_sections(layout: &Layout, dims: &TransitionDims) -> Result<Vec<BendSection>, BrepError> {
+    let n = layout.a.len();
+    if layout.reliefs.len() != n || layout.fans.len() != n {
+        return Err(BrepError::Invalid("transition: lower bend sections have incomplete relief data".into()));
+    }
+    let (outer_offset, inner_offset) = shifts(dims.side, dims.thickness);
+    let size = layout
+        .vertices
+        .values()
+        .flat_map(|p| [p.x, p.y, p.z])
+        .chain(layout.a.iter().chain(&layout.b).flat_map(|p| [p.x, p.y, p.z]))
+        .fold(1.0_f64, |m, x| m.max(x.abs()));
+    let mut sections: Vec<Option<BendSection>> = vec![None; layout.bends.len()];
+    let mut fan_base = n;
+    for (j, relief) in layout.reliefs.iter().enumerate() {
+        let m = layout.fans[j];
+        if m == 0 || relief.ribs.len() != m + 1 || relief.ends.len() != m + 1 {
+            return Err(BrepError::Invalid(format!("transition: relief {j} cannot define its lower bend sections")));
+        }
+        for k in 0..=m {
+            let bend_index = relief.ribs[k];
+            let bend = layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: relief {j} names missing bend {bend_index}")))?;
+            let fan_facet = fan_base + k.min(m - 1);
+            let seed_side = bend
+                .facets
+                .iter()
+                .position(|&facet| facet == fan_facet)
+                .ok_or_else(|| BrepError::Invalid(format!("transition: bend {bend_index} does not border its relief's fan facet")))?;
+            let (relief_axis, point) = relief.ends[k];
+            if !nearly_parallel(relief_axis, bend.axis) {
+                return Err(BrepError::Invalid(format!("transition: relief {j}'s lower section is not square to bend {bend_index}")));
+            }
+            let section = bend_section(bend, point, seed_side, outer_offset, inner_offset, size)?;
+
+            // The lower section must lie on the finite rib, before its D264/D265 upper section.
+            let p0 = *layout.vertices.get(&bend.edge[0]).ok_or_else(|| BrepError::Invalid("transition: lower section's bend vertex is missing".into()))?;
+            let p1 = *layout.vertices.get(&bend.edge[1]).ok_or_else(|| BrepError::Invalid("transition: lower section's bend vertex is missing".into()))?;
+            let far = if distance3(p0, relief.at) <= distance3(p1, relief.at) { p1 } else { p0 };
+            let length = (far - relief.at).dot(relief_axis);
+            let lower = (section.center - relief.at).dot(relief_axis);
+            let upper = (bend.top - relief.at).dot(relief_axis);
+            if !(length > 0.0 && lower > 0.0 && lower < upper && upper < length) {
+                return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s lower section is not between its corner and upper section")));
+            }
+            if sections[bend_index].replace(section).is_some() {
+                return Err(BrepError::Invalid(format!("transition: bend {bend_index} has more than one lower section")));
+            }
+        }
+        fan_base += m;
+    }
+    if fan_base != layout.facets.len() {
+        return Err(BrepError::Invalid("transition: reliefs do not cover all fan facets".into()));
+    }
+    sections
+        .into_iter()
+        .enumerate()
+        .map(|(i, section)| section.ok_or_else(|| BrepError::Invalid(format!("transition: bend {i} has no lower section"))))
+        .collect()
+}
+
 /// The разметка of the transition between profile `a_name` of sketch `a` and `b_name` of `b`.
 pub(crate) fn layout(feature: TopoId, a: &Placed, a_name: &str, b: &Placed, b_name: &str, dims: &TransitionDims) -> Result<Layout, BrepError> {
     let [ao, _ax, _ay, az] = a.frame;
@@ -1216,6 +1359,12 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             }
         }
     }
+    // Resolve one perpendicular lower station for every bend. The relief q point seeds one
+    // tangent side only; the opposite side is intersected with the same plane.
+    let sections = lower_sections(layout, dims)?;
+    if sections.len() != layout.bends.len() {
+        return Err(BrepError::Invalid("transition: not every bend has one lower section".into()));
+    }
     Ok(())
 }
 
@@ -1310,6 +1459,34 @@ mod tests {
                 let (m, rho) = span_top(b, b.radius_in, b.radius_out, layout.az);
                 let over = (b.top - layout.b[0]).dot(layout.az) + rho * m;
                 assert!(over.abs() < 1e-9, "the end face's top off the profile plane: {over}");
+            }
+        }
+    }
+
+
+    #[test]
+    fn every_bend_has_one_valid_lower_section_on_both_cylinders() {
+        let feature = id("lower-sections");
+        for side in [Side::Left, Side::Right, Side::Middle] {
+            let mut d = dims();
+            d.side = side;
+            let layout = layout(feature, &square(), "ab", &circle(), "c", &d).unwrap();
+            verify(&layout, &d).unwrap();
+            let sections = lower_sections(&layout, &d).unwrap();
+            assert_eq!(sections.len(), 28, "side {side:?}");
+
+            for (i, (bend, section)) in layout.bends.iter().zip(&sections).enumerate() {
+                assert!(section.station.is_finite(), "bend {i}, side {side:?}");
+                assert!(distance3(section.center, bend.at + bend.axis * section.station) < 1e-10);
+                for k in 0..2 {
+                    let outer_radius = distance3(section.outer[k], section.center);
+                    let inner_radius = distance3(section.inner[k], section.center);
+                    assert!((outer_radius - bend.radius_out).abs() < 1e-9, "bend {i}, outer radius {outer_radius}");
+                    assert!((inner_radius - bend.radius_in).abs() < 1e-9, "bend {i}, inner radius {inner_radius}");
+                    assert!((distance3(section.outer[k], section.inner[k]) - d.thickness).abs() < 1e-9);
+                    assert!((section.outer[k] - section.center).dot(bend.axis).abs() < 1e-9);
+                    assert!((section.inner[k] - section.center).dot(bend.axis).abs() < 1e-9);
+                }
             }
         }
     }
