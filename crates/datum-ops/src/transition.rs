@@ -609,6 +609,24 @@ struct BendSection {
     inner: [Vec3; 2],
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FacetSection {
+    outer: Vec3,
+    inner: Vec3,
+}
+
+/// The two tangent boundaries of one trimmed planar facet, including its lower and upper
+/// cylinder intersections. q is the tangent-line intersection; x lies on the opposite rim edge.
+#[derive(Clone, Copy, Debug)]
+struct FacetTrim {
+    facet: usize,
+    bends: [usize; 2],
+    q: Vec3,
+    x: [Vec3; 2],
+    lower: [FacetSection; 2],
+    upper: [FacetSection; 2],
+}
+
 fn distance3(a: Vec3, b: Vec3) -> f64 {
     let d = a - b;
     d.dot(d).sqrt()
@@ -661,6 +679,59 @@ fn bend_section(bend: &Bend, point: Vec3, seed_side: usize, outer_offset: f64, i
         }
     }
     Ok(BendSection { station, center, outer, inner })
+}
+
+
+fn bend_section_at_station(
+    bend: &Bend,
+    station: f64,
+    outer_offset: f64,
+    inner_offset: f64,
+    size: f64,
+) -> Result<BendSection, BrepError> {
+    if !station.is_finite() || !within_rounding(bend.axis.dot(bend.axis) - 1.0, 1.0) {
+        return Err(BrepError::Invalid("transition: a bend section has an invalid station or axis".into()));
+    }
+    let center = bend.at + bend.axis * station;
+    let mut outer = [Vec3::ZERO; 2];
+    let mut inner = [Vec3::ZERO; 2];
+    for side in 0..2 {
+        let radial = bend.tangent[side] - bend.at;
+        if !within_rounding(radial.dot(bend.axis), size) {
+            return Err(BrepError::Invalid("transition: a tangent generator is not perpendicular to its bend axis".into()));
+        }
+        let radius = radial.dot(radial).sqrt();
+        if !(radius > 0.0 && radius.is_finite()) {
+            return Err(BrepError::Degenerate("transition: a bend has a zero tangent radius".into()));
+        }
+        let direction = radial * (1.0 / radius);
+        if !within_rounding(radius + outer_offset - bend.radius_out, size)
+            || !within_rounding(radius + inner_offset - bend.radius_in, size)
+        {
+            return Err(BrepError::Invalid("transition: a bend section's thickness offsets miss its cylinder radii".into()));
+        }
+        outer[side] = center + direction * bend.radius_out;
+        inner[side] = center + direction * bend.radius_in;
+        let generator = bend.tangent[side] + bend.axis * station;
+        if !within_rounding(distance3(outer[side], generator + direction * outer_offset), size)
+            || !within_rounding(distance3(inner[side], generator + direction * inner_offset), size)
+        {
+            return Err(BrepError::Invalid("transition: a bend section does not meet its offset tangent generators".into()));
+        }
+        if !within_rounding((outer[side] - center).dot(bend.axis), size)
+            || !within_rounding((inner[side] - center).dot(bend.axis), size)
+        {
+            return Err(BrepError::Invalid("transition: a bend section endpoint is off its perpendicular plane".into()));
+        }
+    }
+    Ok(BendSection { station, center, outer, inner })
+}
+
+fn station_between(value: f64, a: f64, b: f64, size: f64) -> bool {
+    let lo = a.min(b);
+    let hi = a.max(b);
+    value >= lo || within_rounding(value - lo, size)
+        && (value <= hi || within_rounding(value - hi, size))
 }
 
 /// Resolves the lower end plane of every bend from its relief q point. A fan facet selects the
@@ -1166,6 +1237,102 @@ pub(crate) fn transition(
     )))
 }
 
+
+fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) -> Result<Vec<FacetTrim>, BrepError> {
+    if lower.len() != layout.bends.len() {
+        return Err(BrepError::Invalid("transition: facet trims have incomplete lower bend sections".into()));
+    }
+    let (outer_offset, inner_offset) = shifts(dims.side, dims.thickness);
+    let size = layout
+        .vertices
+        .values()
+        .flat_map(|p| [p.x, p.y, p.z])
+        .chain(layout.a.iter().chain(&layout.b).flat_map(|p| [p.x, p.y, p.z]))
+        .fold(1.0_f64, |m, x| m.max(x.abs()));
+    let envelope = 64.0 * f64::EPSILON * size;
+    let mut trims = Vec::with_capacity(layout.facets.len());
+
+    for (fi, facet) in layout.facets.iter().enumerate() {
+        let mut adjacent: Vec<(usize, usize)> = layout
+            .bends
+            .iter()
+            .enumerate()
+            .filter_map(|(bi, bend)| bend.facets.iter().position(|&f| f == fi).map(|side| (bi, side)))
+            .collect();
+        adjacent.sort_unstable();
+        let [(b0i, b0s), (b1i, b1s)] = adjacent.as_slice() else {
+            return Err(BrepError::Invalid(format!("transition: facet {fi} has {} bends, expected two", adjacent.len())));
+        };
+        let (b0, b1) = (&layout.bends[*b0i], &layout.bends[*b1i]);
+        let shared = b0
+            .edge
+            .iter()
+            .find(|v| b1.edge.contains(v))
+            .copied()
+            .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s bends do not share a vertex")))?;
+        let opposite: Vec<TopoId> = facet.loop_.iter().copied().filter(|&v| v != shared).collect();
+        if opposite.len() != 2 {
+            return Err(BrepError::Invalid(format!("transition: facet {fi} has no opposite rim edge")));
+        }
+
+        let edge_a = *layout.vertices.get(&opposite[0]).ok_or_else(|| BrepError::Invalid("transition: facet rim vertex is missing".into()))?;
+        let edge_b = *layout.vertices.get(&opposite[1]).ok_or_else(|| BrepError::Invalid("transition: facet rim vertex is missing".into()))?;
+        let edge = edge_b - edge_a;
+        let q = meet(b0.tangent[*b0s], b0.axis, b1.tangent[*b1s], b1.axis)?;
+        if !within_rounding((q - facet.origin).dot(facet.normal), size) {
+            return Err(BrepError::Invalid(format!("transition: facet {fi}'s tangent lines do not meet on its plane")));
+        }
+
+        let mut x = [Vec3::ZERO; 2];
+        let mut lower_side = [FacetSection { outer: Vec3::ZERO, inner: Vec3::ZERO }; 2];
+        let mut upper_side = [FacetSection { outer: Vec3::ZERO, inner: Vec3::ZERO }; 2];
+        for (slot, (bend_index, bend_side)) in [(*b0i, *b0s), (*b1i, *b1s)].into_iter().enumerate() {
+            let bend = &layout.bends[bend_index];
+            let hit = meet(bend.tangent[bend_side], bend.axis, edge_a, edge)?;
+            let u = (hit - edge_a).dot(edge) / edge.dot(edge);
+            if u < -envelope || u > 1.0 + envelope {
+                return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s tangent misses facet {fi}'s finite rim edge")));
+            }
+            let projected = edge_a + edge * u;
+            if !within_rounding(distance3(hit, projected), size)
+                || !within_rounding((hit - facet.origin).dot(facet.normal), size)
+            {
+                return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s rim split is off facet {fi}")));
+            }
+            x[slot] = hit;
+
+            let lower_section = lower[bend_index];
+            let top_station = (bend.top - bend.at).dot(bend.axis);
+            let top_section = bend_section_at_station(bend, top_station, outer_offset, inner_offset, size)?;
+            let q_station = (q - bend.at).dot(bend.axis);
+            let x_station = (hit - bend.at).dot(bend.axis);
+            if !station_between(lower_section.station, q_station, x_station, size)
+                || !station_between(top_station, q_station, x_station, size)
+            {
+                return Err(BrepError::Invalid(format!("transition: bend {bend_index}'s lower or upper section falls outside facet {fi}'s tangent boundary")));
+            }
+            if (top_station - lower_section.station).abs() <= envelope {
+                return Err(BrepError::Degenerate(format!("transition: bend {bend_index} has no band length on facet {fi}")));
+            }
+            lower_side[slot] = FacetSection { outer: lower_section.outer[bend_side], inner: lower_section.inner[bend_side] };
+            upper_side[slot] = FacetSection { outer: top_section.outer[bend_side], inner: top_section.inner[bend_side] };
+        }
+
+        // Fan facets must trim against exactly their two stored top chord endpoints.
+        if facet.top.len() == 2 {
+            let mut rim_ids = opposite.clone();
+            let mut top_ids = facet.top.clone();
+            rim_ids.sort_unstable();
+            top_ids.sort_unstable();
+            if rim_ids != top_ids {
+                return Err(BrepError::Invalid(format!("transition: facet {fi}'s opposite edge is not its stored top chord")));
+            }
+        }
+        trims.push(FacetTrim { facet: fi, bends: [*b0i, *b1i], q, x, lower: lower_side, upper: upper_side });
+    }
+    Ok(trims)
+}
+
 /// Checks the разметка against itself (D264: a wrong layout is turned away here, before it is
 /// developed): every facet's vertices lie on its plane, every bend's axis along its edge and at the
 /// outer radius from both facets, its tangents the axis's feet on the facets' own planes, each
@@ -1371,6 +1538,10 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     if sections.len() != layout.bends.len() {
         return Err(BrepError::Invalid("transition: not every bend has one lower section".into()));
     }
+    let trims = facet_trims(layout, &sections, dims)?;
+    if trims.len() != layout.facets.len() {
+        return Err(BrepError::Invalid("transition: not every facet has one trimmed patch".into()));
+    }
     Ok(())
 }
 
@@ -1491,6 +1662,31 @@ mod tests {
                     assert!((distance3(section.outer[k], section.inner[k]) - d.thickness).abs() < 1e-9);
                     assert!((section.outer[k] - section.center).dot(bend.axis).abs() < 1e-9);
                     assert!((section.inner[k] - section.center).dot(bend.axis).abs() < 1e-9);
+                }
+            }
+        }
+    }
+
+
+    #[test]
+    fn every_facet_has_two_tangent_splits_and_bounded_sections() {
+        let feature = id("facet-trims");
+        for side in [Side::Left, Side::Right, Side::Middle] {
+            let mut d = dims();
+            d.side = side;
+            let layout = layout(feature, &square(), "ab", &circle(), "c", &d).unwrap();
+            let lower = lower_sections(&layout, &d).unwrap();
+            let trims = facet_trims(&layout, &lower, &d).unwrap();
+            assert_eq!(trims.len(), 28, "side {side:?}");
+            assert_eq!(trims.iter().filter(|trim| trim.q.z < 30.0).count(), 24);
+            assert_eq!(trims.iter().filter(|trim| trim.q.z > 90.0).count(), 4);
+            for trim in trims {
+                assert_eq!(trim.facet < layout.facets.len(), true);
+                assert_eq!(trim.bends.len(), 2);
+                for k in 0..2 {
+                    assert!(distance3(trim.q, trim.x[k]) > 0.0);
+                    assert!(distance3(trim.lower[k].outer, trim.lower[k].inner) > 0.0);
+                    assert!(distance3(trim.upper[k].outer, trim.upper[k].inner) > 0.0);
                 }
             }
         }
