@@ -1131,12 +1131,7 @@ fn planar(id: TopoId, mut ids: Vec<TopoId>, points: &[Vec3], reference: Vec3) ->
 
 
 #[cfg(test)]
-fn planar_polygon(
-    id: TopoId,
-    mut ids: Vec<TopoId>,
-    points: &[Vec3],
-    reference: Vec3,
-) -> Result<FaceSpec, BrepError> {
+fn planar_polygon(id: TopoId, mut ids: Vec<TopoId>, points: &[Vec3], reference: Vec3) -> Result<FaceSpec, BrepError> {
     if ids.len() != points.len() || ids.len() < 3 {
         return Err(BrepError::Degenerate(format!("transition: face {id:?} has an invalid polygon loop")));
     }
@@ -1166,11 +1161,21 @@ fn facet_patch_prism(feature: TopoId, patch: &FacetPatch, normal: Vec3) -> Resul
     }
     let vertices: Vec<Vertex> = vertex_points.into_iter().map(|(id, point)| Vertex { id, point }).collect();
     let mut faces = vec![
-        planar_polygon(TopoId::derive("transition.patch.test.outer").id(feature).index(patch.facet as u64).finish(), outer_ids, &outer_points, normal)?,
-        planar_polygon(TopoId::derive("transition.patch.test.inner").id(feature).index(patch.facet as u64).finish(), inner_ids, &inner_points, normal * -1.0)?,
+        planar_polygon(
+            TopoId::derive("transition.patch.test.outer").id(feature).index(patch.facet as u64).finish(),
+            outer_ids,
+            &outer_points,
+            normal,
+        )?,
+        planar_polygon(
+            TopoId::derive("transition.patch.test.inner").id(feature).index(patch.facet as u64).finish(),
+            inner_ids,
+            &inner_points,
+            normal * -1.0,
+        )?,
     ];
-    let center = (outer_points.iter().chain(&inner_points).fold(Vec3::ZERO, |sum, p| sum + *p))
-        * (1.0 / (outer_points.len() + inner_points.len()) as f64);
+    let center =
+        (outer_points.iter().chain(&inner_points).fold(Vec3::ZERO, |sum, p| sum + *p)) * (1.0 / (outer_points.len() + inner_points.len()) as f64);
     for i in 0..patch.boundary.len() {
         let j = (i + 1) % patch.boundary.len();
         let a = patch.boundary[i];
@@ -1321,12 +1326,7 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
         if facet.loop_.len() != 3 {
             return Err(BrepError::Invalid(format!("transition: facet {fi} is not triangular")));
         }
-        let adjacent: Vec<usize> = layout
-            .bends
-            .iter()
-            .enumerate()
-            .filter_map(|(bi, bend)| bend.facets.contains(&fi).then_some(bi))
-            .collect();
+        let adjacent: Vec<usize> = layout.bends.iter().enumerate().filter_map(|(bi, bend)| bend.facets.contains(&fi).then_some(bi)).collect();
         if adjacent.len() != 2 {
             return Err(BrepError::Invalid(format!("transition: facet {fi} has {} adjacent bends, expected two", adjacent.len())));
         }
@@ -1347,10 +1347,10 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
                     .and_then(|(bi, side)| side.map(|side| (bi, side)))
             })
         };
-        let (b0i, b0s) = bend_for_edge(shared, next)
-            .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s outgoing edge has no bend")))?;
-        let (b1i, b1s) = bend_for_edge(prev, shared)
-            .ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s incoming edge has no bend")))?;
+        let (b0i, b0s) =
+            bend_for_edge(shared, next).ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s outgoing edge has no bend")))?;
+        let (b1i, b1s) =
+            bend_for_edge(prev, shared).ok_or_else(|| BrepError::Invalid(format!("transition: facet {fi}'s incoming edge has no bend")))?;
         let (b0, b1) = (&layout.bends[b0i], &layout.bends[b1i]);
         let opposite = vec![next, prev];
 
@@ -1416,30 +1416,14 @@ fn facet_trims(layout: &Layout, lower: &[BendSection], dims: &TransitionDims) ->
 
 
 fn patch_band_id(feature: TopoId, bend: usize, side: usize, upper: bool, inner: bool) -> TopoId {
-    TopoId::derive("transition.patch.band")
-        .id(feature)
-        .index(bend as u64)
-        .index(side as u64)
-        .index(upper as u64)
-        .index(inner as u64)
-        .finish()
+    TopoId::derive("transition.patch.band").id(feature).index(bend as u64).index(side as u64).index(upper as u64).index(inner as u64).finish()
 }
 
 fn patch_rim_id(feature: TopoId, facet: usize, slot: usize, inner: bool) -> TopoId {
-    TopoId::derive("transition.patch.rim")
-        .id(feature)
-        .index(facet as u64)
-        .index(slot as u64)
-        .index(inner as u64)
-        .finish()
+    TopoId::derive("transition.patch.rim").id(feature).index(facet as u64).index(slot as u64).index(inner as u64).finish()
 }
 
-fn register_patch_point(
-    registry: &mut BTreeMap<TopoId, Vec3>,
-    id: TopoId,
-    point: Vec3,
-    size: f64,
-) -> Result<(), BrepError> {
+fn register_patch_point(registry: &mut BTreeMap<TopoId, Vec3>, id: TopoId, point: Vec3, size: f64) -> Result<(), BrepError> {
     if let Some(old) = registry.get(&id) {
         if !within_rounding(distance3(*old, point), size) {
             return Err(BrepError::Invalid(format!("transition: patch vertex {id:?} has inconsistent positions")));
@@ -1480,10 +1464,13 @@ fn facet_patches(
         let mut boundary = Vec::with_capacity(6);
         for slot in 0..2 {
             let bend_index = trim.bends[slot];
-            let bend = layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: patch {fi} names missing bend {bend_index}")))?;
-            let side = bend.facets.iter().position(|&f| f == fi).ok_or_else(|| {
-                BrepError::Invalid(format!("transition: bend {bend_index} is not incident to patch {fi}"))
-            })?;
+            let bend =
+                layout.bends.get(bend_index).ok_or_else(|| BrepError::Invalid(format!("transition: patch {fi} names missing bend {bend_index}")))?;
+            let side = bend
+                .facets
+                .iter()
+                .position(|&f| f == fi)
+                .ok_or_else(|| BrepError::Invalid(format!("transition: bend {bend_index} is not incident to patch {fi}")))?;
             for (upper, section) in [(false, trim.lower[slot]), (true, trim.upper[slot])] {
                 let vertex = PatchVertex {
                     outer_id: patch_band_id(feature, bend_index, side, upper, false),
@@ -1516,9 +1503,7 @@ fn facet_patches(
                 return Err(BrepError::Invalid(format!("transition: patch {fi}'s vertex {i} misses its offset plane")));
             }
         }
-        let normal = (0..ordered.len()).fold(Vec3::ZERO, |sum, i| {
-            sum + ordered[i].outer.cross(ordered[(i + 1) % ordered.len()].outer)
-        });
+        let normal = (0..ordered.len()).fold(Vec3::ZERO, |sum, i| sum + ordered[i].outer.cross(ordered[(i + 1) % ordered.len()].outer));
         if !(normal.dot(facet.normal) > 0.0 && normal.dot(normal).is_finite()) {
             return Err(BrepError::Degenerate(format!("transition: trimmed facet {fi} has no outward planar area")));
         }
@@ -1817,9 +1802,11 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
         }
         for (slot, bend_index) in patch.bends.iter().enumerate() {
             let bend = &layout.bends[*bend_index];
-            let side = bend.facets.iter().position(|&f| f == fi).ok_or_else(|| {
-                BrepError::Invalid(format!("transition: patch {fi} names a non-adjacent bend {bend_index}"))
-            })?;
+            let side = bend
+                .facets
+                .iter()
+                .position(|&f| f == fi)
+                .ok_or_else(|| BrepError::Invalid(format!("transition: patch {fi} names a non-adjacent bend {bend_index}")))?;
             let lower = patch.boundary[if slot == 0 { 0 } else { 5 }];
             let upper = patch.boundary[if slot == 0 { 1 } else { 4 }];
             let patch_feature = TopoId::derive("transition.verify").finish();
