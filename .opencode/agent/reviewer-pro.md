@@ -1,7 +1,7 @@
 ---
 description: Тяжёлое ревью на DeepSeek V4 Pro — только по прямой просьбе автора.
 mode: subagent
-model: cliproxy/deepseek-v4-pro
+model: cliproxy/deepseek-v4-pro#high
 permission:
   edit: deny
   bash:

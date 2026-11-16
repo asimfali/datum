@@ -39,6 +39,7 @@
 - Скиллы ядра (`.claude/skills/`): `add-op`, `add-surface`, `geometry-debug`, `bless-hashes`; скилл `pr` — открытие PR; мерж — только с разрешения автора.
 - `rg` 15.2.0 в `~/.local/bin` (для shell-однострочников; агентский поиск — встроенными `grep`/`glob`).
 - Провайдер моделей — `cliproxy` (127.0.0.1:8317); `model:` в `.opencode/agent/` должен совпадать с ID провайдера машины. У `glm-5.3-flash` окно 300k, у `deepseek-v4.1-flash` — 1M (глобальный конфиг); алиасы моделей с другим окном — в проектном `.opencode/opencode.json` (`modelID` = настоящий ID в прокси).
+- Меню агентов по сложности и ключевые слова — `.opencode/README.md`: `architect-light/-max`, `worker-light/-max` и команды `/обсуждаем`, `/план`, `/план-макс`, `/делаем`, `/делаем-лайт`, `/делаем-макс`. Варианты `#low/#high/#max` требуют `capabilities.reasoning.effort` в глобальном конфиге (V2-блок `providers`) и совпадающей лестницы `thinking.levels` в конфиге прокси.
 - Связь с домашней машиной — через комментарии в GitHub issue (#248).
 - Несколько проектов/агентов: `~/develop/agent-kit`, глобальные правила `~/.config/opencode/AGENTS.md`, граница владения — плагин `project-guard`, шина — `ab` (зарегистрированы `datum` и `mc`).
 

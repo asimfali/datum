@@ -1,7 +1,7 @@
 ---
 description: Ревьюит diff только чтением; находки с file:line.
 mode: subagent
-model: cliproxy/deepseek-v4.1-flash-200k
+model: cliproxy/deepseek-v4.1-flash-200k#high
 permission:
   edit: deny
   bash:
