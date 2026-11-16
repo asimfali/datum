@@ -939,11 +939,11 @@ fn shell(feature: TopoId, layout: &Layout, dims: &TransitionDims) -> Result<Body
         });
     }
     // The bottom rims, one per piece of `a`; the top rims, one per chord.
-    for i in 0..n {
+    for (i, f) in layout.facets.iter().enumerate().take(n) {
         let (u, w) = (a_id(i), a_id((i + 1) % n));
         let ids = vec![u, w, inner_id(w), inner_id(u)];
         let pts = ids.iter().map(|&v| get(v)).collect::<Result<Vec<Vec3>, _>>()?;
-        let reference = average(&pts) - centroid(&layout.facets[i].loop_)?;
+        let reference = average(&pts) - centroid(&f.loop_)?;
         faces.push(planar(TopoId::derive("transition.rim").id(feature).index(i as u64).finish(), ids, &pts, reference)?);
     }
     let mut fan_at = n;

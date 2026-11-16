@@ -83,5 +83,6 @@
 - На `325cc95` + задачи дня (дуга, многоугольник, win-build): `scripts/check.sh` — exit 0 (fmt, clippy `-D warnings`, тесты, 65 эталонных моделей, детерминизм). `cargo test -p datum-ops --test transition` — 7 passed; `--test component` — 9 passed, 1 ignored. Дерево чистое.
 - Эталон `tests/models/transition.json` не добавлен и bless не делался: тело перехода ещё не собрано (п.2), `transition()` в отказе.
 - PR #251 — draft `feat/transition` → `main` (весь переход + дуга + многоугольник + win-build), handoff продублирован в issue #252 — для домашней машины.
+- Локальный `stable` — 1.99.1, у CI — 1.100.0: clippy 1.100 поймал `needless_range_loop` в тестовом `shell` (`transition.rs:942`), локально `check.sh` был зелёным. Исправлено, `check.sh` exit 0; перед следующей задачей обновить `rustup update stable`, иначе такие линты видит только CI.
 - Ревью PR #251 (ревьюер, только чтение): красных нет, 6 жёлтых — записаны комментарием в issue #252. Кандидаты на правку до монтажа: дублирование `TopoId`-замыканий (`layout` ↔ `shell`, `transition.rs:637` ↔ `885`) и точное `== 0.0` в `span_top` (`transition.rs:543`); вопросы автору — поведение центра дуги (`draw.rs:1342`) и дуги > π.
 - Smoke Windows на `e6f64bc` (12039.636933 / `e090d561`) устарел: эталон снят вместе с концепцией D261; при новом контракте пересадить сборку на новую модель.
