@@ -180,10 +180,14 @@ fn two_bend_layout(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, 
         }
     }
 
-    // The profile is the outer face for Left, inner face for Right, and the middle for Middle.
+    // The facets are the profile's own surfaces: the reference skin. `thickness_sides` spans the
+    // material from `low` to `high` along the facets' normals (as `planar_loft` does), so the skin
+    // at offset o carries radius `reference_radius + o` of the same bend centre. Left keeps the
+    // material above the reference (offsets 0..t): the reference is the inner skin; Right keeps it
+    // below (offsets -t..0): the reference is the outer skin; Middle is the neutral layer.
     let reference_radius = match side {
-        Side::Left => radius + thickness,
-        Side::Right => radius,
+        Side::Left => radius,
+        Side::Right => radius + thickness,
         Side::Middle => radius + 0.5 * thickness,
     };
     let bend_1 = bend_layout([a0, vertex], facets[0], facets[1], radius, thickness, reference_radius, radius + k_factor * thickness)?;
