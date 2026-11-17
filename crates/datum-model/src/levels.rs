@@ -343,7 +343,7 @@ impl Doc {
             .iter()
             .enumerate()
             .filter_map(|(ix, n)| match n.op {
-                Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
+                Op::Sheet { .. } | Op::Loft { .. } | Op::Plate { .. } | Op::Rolled { .. } => Some((ix, self.rule(&n.name, level)?)),
                 Op::Flange { .. }
                 | Op::Trim { .. }
                 | Op::Saddle { .. }
@@ -375,7 +375,7 @@ impl Doc {
         // The sheet parts' first features whose rule the library has.
         let ruled: std::collections::BTreeSet<NodeIx> = sheets
             .iter()
-            .filter(|(ix, r)| matches!(g.nodes()[*ix].op, Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. }) && rules.get(r).is_some())
+            .filter(|(ix, r)| matches!(g.nodes()[*ix].op, Op::Sheet { .. } | Op::Loft { .. } | Op::Plate { .. } | Op::Rolled { .. }) && rules.get(r).is_some())
             .map(|(ix, _)| *ix as NodeIx)
             .collect();
         for (ix, rule) in sheets {
@@ -388,7 +388,7 @@ impl Doc {
             let mut op = g.nodes()[ix].op.clone();
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
-                Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
+                Op::Plate { thickness, .. } | Op::Loft { thickness, .. } => *thickness = Some(Num::Value(t)),
                 // A placed part forms the sheet by the rule's thickness and bend radius (D261).
                 Op::Component { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
@@ -433,7 +433,7 @@ impl Doc {
     pub fn kind(&self, part: &str) -> &'static str {
         let begun = self.root.find(part).and_then(|i| body_history(&self.root, i).last().copied());
         match begun.map(|i| &self.root.nodes()[i as usize].op) {
-            Some(Op::Sheet { .. } | Op::Plate { .. } | Op::Rolled { .. }) => "sheet",
+            Some(Op::Sheet { .. } | Op::Loft { .. } | Op::Plate { .. } | Op::Rolled { .. }) => "sheet",
             _ => "part",
         }
     }
