@@ -375,7 +375,9 @@ impl Doc {
         // The sheet parts' first features whose rule the library has.
         let ruled: std::collections::BTreeSet<NodeIx> = sheets
             .iter()
-            .filter(|(ix, r)| matches!(g.nodes()[*ix].op, Op::Sheet { .. } | Op::Loft { .. } | Op::Plate { .. } | Op::Rolled { .. }) && rules.get(r).is_some())
+            .filter(|(ix, r)| {
+                matches!(g.nodes()[*ix].op, Op::Sheet { .. } | Op::Loft { .. } | Op::Plate { .. } | Op::Rolled { .. }) && rules.get(r).is_some()
+            })
             .map(|(ix, _)| *ix as NodeIx)
             .collect();
         for (ix, rule) in sheets {
