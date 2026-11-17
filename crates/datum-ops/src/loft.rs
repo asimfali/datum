@@ -8,7 +8,7 @@ use crate::{Placed, Side, parallel};
 
 /// Parameters shared by the planar and first bent D264 loft cases.
 #[derive(Clone, Copy)]
-pub(super) struct LoftDims {
+pub struct LoftDims {
     pub thickness: f64,
     pub radius: Option<f64>,
     pub k_factor: Option<f64>,
