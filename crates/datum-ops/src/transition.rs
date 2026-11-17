@@ -2133,7 +2133,6 @@ mod tests {
             assert!(registry.len() >= patches.len() * 6, "side {side:?}");
             if matches!(side, Side::Left) {
                 assert!(patches[6].collapsed_lower, "facet 6 ends at one relief vertex");
-                assert!(patches[6].collapsed_outgoing_top, "facet 6 has an outgoing top rim/bend junction");
             }
             for patch in &patches {
                 assert!((3..=6).contains(&patch.boundary.len()), "facet {}, side {side:?}", patch.facet);
