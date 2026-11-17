@@ -33,6 +33,8 @@ pub enum Icon {
     Mirror,
     /// A corner and the same corner a step inside it: offset.
     Offset,
+    /// A hexagon: a regular polygon on a circle or arc.
+    Polygon,
     Dimension,
     /// The top bar's commands: a plane with a pencil, a plane offset (an arrow off it), an eye,
     /// a ruler.
@@ -208,6 +210,15 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
         Icon::Offset => {
             painter.add(egui::Shape::line(vec![at(-7.0, 7.0), at(-7.0, -7.0), at(7.0, -7.0)], stroke));
             painter.add(egui::Shape::line(vec![at(-2.5, 7.0), at(-2.5, -2.5), at(7.0, -2.5)], stroke));
+        }
+        Icon::Polygon => {
+            let pts: Vec<Pos2> = (0..6)
+                .map(|k| {
+                    let a = (60.0 * k as f32 - 90.0).to_radians();
+                    at(6.5 * a.cos(), 6.5 * a.sin())
+                })
+                .collect();
+            painter.add(egui::Shape::closed_line(pts, stroke));
         }
         Icon::Dimension => {
             painter.line_segment([at(-6.0, -6.0), at(-6.0, 6.0)], stroke);

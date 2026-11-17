@@ -32,6 +32,7 @@ pub enum Act {
     Fillet,
     Mirror,
     Offset,
+    Polygon,
     ProjectSection,
     Dimension,
     Measure,
@@ -109,7 +110,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 58] = [
+pub const ACTIONS: [Action; 59] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -213,6 +214,7 @@ pub const ACTIONS: [Action; 58] = [
         plain(Key::O),
         Sketch,
     ),
+    action(Act::Polygon, "sketch.polygon", "Polygon", "A regular polygon along a circle or arc; type the sides count", plain(Key::N), Sketch),
     action(
         Act::ProjectSection,
         "sketch.project_section",

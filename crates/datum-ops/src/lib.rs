@@ -38,7 +38,7 @@ pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
 };
-pub use loft::{LoftDims, loft};
+pub use loft::loft;
 pub use mirror::TurnAxis;
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
@@ -260,17 +260,14 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<String>,
     },
-    /// A loft flange from two sketch profiles (D264). The first stage accepts one straight line
-    /// in each sketch and makes a planar trapezoid. The next case takes one line against two
-    /// connected lines; its three facets and two cylindrical bends use the part's sheet rule.
-    /// `tolerance` is positive and reserved for curved profile faceting in later stages.
+    /// The planar first step of a loft flange (D264): two sketch inputs, each with one straight
+    /// line. Their solved world-space directions must be parallel and all four ends coplanar.
+    /// The trapezoid is thickened by the part's sheet rule (or `thickness` in an early model);
+    /// `side` chooses where the material lies about its plane. `tolerance` is positive; it has
+    /// no geometric effect until curved profiles are supported. Two inputs: the first and second sketches.
     Loft {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         thickness: Option<Num>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        radius: Option<Num>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        k_factor: Option<Num>,
         side: Side,
         tolerance: Num,
     },
@@ -776,10 +773,8 @@ impl Op {
                 path: path.clone(),
                 start: start.clone(),
             },
-            Self::Loft { thickness, radius, k_factor, side, tolerance } => Self::Loft {
+            Self::Loft { thickness, side, tolerance } => Self::Loft {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
-                radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
-                k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
                 side: *side,
                 tolerance: r(tolerance, "tolerance")?,
             },
@@ -1104,20 +1099,9 @@ impl Op {
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
             }
-            Self::Loft { thickness, radius, k_factor, side, tolerance } => {
+            Self::Loft { thickness, side, tolerance } => {
                 let Some(thickness) = thickness else { return Err(BrepError::Invalid(NO_SHEET_THICKNESS.into())) };
-                loft::loft(
-                    feature,
-                    sketch(0)?,
-                    sketch(1)?,
-                    loft::LoftDims {
-                        thickness: num(thickness)?,
-                        radius: radius.as_ref().map(num).transpose()?,
-                        k_factor: k_factor.as_ref().map(num).transpose()?,
-                        side: *side,
-                        tolerance: num(tolerance)?,
-                    },
-                )?
+                loft::loft(feature, sketch(0)?, sketch(1)?, num(thickness)?, *side, num(tolerance)?)?
             }
             Self::Flange {
                 edges,

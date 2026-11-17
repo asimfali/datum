@@ -21,6 +21,7 @@ mod mirror;
 mod offset;
 mod origin;
 mod pattern;
+mod polygon;
 pub mod render;
 pub mod scene;
 mod select;
