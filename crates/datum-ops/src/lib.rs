@@ -38,7 +38,7 @@ pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
 };
-pub use loft::loft;
+pub use loft::{LoftDims, loft};
 pub use mirror::TurnAxis;
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
