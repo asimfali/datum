@@ -71,14 +71,8 @@ impl Session {
                 return Err(format!("`{sketch}` is not a sketch"));
             }
         }
-        let rule = p
-            .get("rule")
-            .and_then(Value::as_str)
-            .ok_or("loft needs `rule`: a sheet rule of the library, its thickness")?;
-        let tolerance = p
-            .get("tolerance")
-            .cloned()
-            .ok_or("loft needs `tolerance`: the chordal deviation for its profiles")?;
+        let rule = p.get("rule").and_then(Value::as_str).ok_or("loft needs `rule`: a sheet rule of the library, its thickness")?;
+        let tolerance = p.get("tolerance").cloned().ok_or("loft needs `tolerance`: the chordal deviation for its profiles")?;
         let fields = json!({
             "name": name,
             "op": "loft",
@@ -86,10 +80,7 @@ impl Session {
             "side": p.get("side").cloned().unwrap_or(json!("left")),
             "tolerance": tolerance,
         });
-        let ix = add_feature(
-            &mut self.graph,
-            fields.as_object().cloned().ok_or("loft feature parameters are not an object")?,
-        )?;
+        let ix = add_feature(&mut self.graph, fields.as_object().cloned().ok_or("loft feature parameters are not an object")?)?;
         self.doc.store(self.active.as_deref(), &self.graph)?;
         self.set_rule(name, Some(rule.to_string()))?;
         let mut reply = self.rebuild_recording(ix);
