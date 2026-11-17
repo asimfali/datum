@@ -6,20 +6,22 @@ use datum_math::{Sign, Vec3, orient3d_coords};
 use crate::sketch::within_rounding;
 use crate::{Placed, Side, parallel};
 
+/// Parameters shared by the planar and first bent D264 loft cases.
+#[derive(Clone, Copy)]
+pub(super) struct LoftDims {
+    pub thickness: f64,
+    pub radius: Option<f64>,
+    pub k_factor: Option<f64>,
+    pub side: Side,
+    pub tolerance: f64,
+}
+
 /// Builds the planar first D264 case, or validates the next three-facet/two-bend layout.
 ///
 /// The sketch support planes need not be parallel: the solved world-space line profiles
 /// themselves must be parallel and all four endpoints coplanar in the first case.
-pub fn loft(
-    feature: TopoId,
-    first: &Placed,
-    second: &Placed,
-    thickness: f64,
-    radius: Option<f64>,
-    k_factor: Option<f64>,
-    side: Side,
-    tolerance: f64,
-) -> Result<Body, BrepError> {
+pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) -> Result<Body, BrepError> {
+    let LoftDims { thickness, radius, k_factor, side, tolerance } = dims;
     if !(thickness > 0.0 && thickness.is_finite()) {
         return Err(BrepError::Degenerate(format!("loft: thickness must be positive and finite, got {thickness}")));
     }
@@ -37,7 +39,7 @@ pub fn loft(
                     "loft with two lines in its second profile takes thickness, bend radius and K-factor from the part's sheet rule".into(),
                 ));
             };
-            let layout = two_bend_layout(a0, a1, second, &second_lines, thickness, radius, k, side)?;
+            let layout = two_bend_layout([a0, a1], second, &second_lines, BendRule { thickness, radius, k_factor: k, side })?;
             let [first_bend, second_bend] = layout.bends;
             Err(BrepError::Unsupported(format!(
                 "loft: the three-facet / two-bend layout is valid (folds {:.3}° and {:.3}°, radii {:.3}/{:.3} mm, neutral radii {:.3}/{:.3} mm, tangent offsets {:.3}/{:.3} mm, centers {:.3}/{:.3}/{:.3} and {:.3}/{:.3}/{:.3}, common corner stations {:.3}/{:.3} mm); corner-trimmed cylindrical B-rep assembly and development are not built yet",
@@ -140,18 +142,24 @@ struct TwoBendLayout {
     corner_station: [f64; 2],
 }
 
-/// Geometric part of D264's one-line / two-line case. The corner is where the two tangent
-/// lines in the middle facet meet; both bends must terminate there, rather than overlap caps.
-fn two_bend_layout(
-    a0: Vec3,
-    a1: Vec3,
-    second: &Placed,
-    lines: &[(String, Vec3, Vec3)],
+#[derive(Clone, Copy)]
+struct BendRule {
     thickness: f64,
     radius: f64,
     k_factor: f64,
     side: Side,
+}
+
+/// Geometric part of D264's one-line / two-line case. The corner is where the two tangent
+/// lines in the middle facet meet; both bends must terminate there, rather than overlap caps.
+fn two_bend_layout(
+    profile: [Vec3; 2],
+    second: &Placed,
+    lines: &[(String, Vec3, Vec3)],
+    rule: BendRule,
 ) -> Result<TwoBendLayout, BrepError> {
+    let [a0, a1] = profile;
+    let BendRule { thickness, radius, k_factor, side } = rule;
     if !(radius > 0.0 && radius.is_finite()) {
         return Err(BrepError::Degenerate(format!("loft: bend radius must be positive and finite, got {radius}")));
     }
@@ -237,7 +245,7 @@ fn bend_layout(
     }
     let bisector = unit(u0 + u1).ok_or_else(|| BrepError::Degenerate("loft: the two facets have no unique bend bisector".into()))?;
     let cos = libm::cos(0.5 * angle);
-    if !(cos > 0.0) {
+    if !cos.is_finite() || cos <= 0.0 {
         return Err(BrepError::Degenerate("loft: a bend angle has no finite tangent offset".into()));
     }
     let tangent_offset = reference_radius * libm::tan(0.5 * angle);
@@ -256,7 +264,7 @@ fn bend_layout(
             .ok_or_else(|| BrepError::Invalid("loft: a bend's adjacent facet has no opposite vertex".into()))?;
         let offset = third - hinge[0];
         let height = (offset - axis * offset.dot(axis)).dot(if index == 0 { u0 } else { u1 });
-        if !(height > tangent_offset) {
+        if !height.is_finite() || height <= tangent_offset {
             return Err(BrepError::Degenerate(format!(
                 "loft: bend radius {radius} mm consumes an adjacent facet (available width {height:.6}, tangent offset {tangent_offset:.6})"
             )));
