@@ -2832,7 +2832,9 @@ impl Viewer {
         let enabled = self.model.is_some();
         let features = self.model.iter().flat_map(|m| m.inspect["features"].as_array().into_iter().flatten());
         // The kind a part's rules must be of: its first feature's; any, for a new part.
-        let kind = part.as_ref().map(|p| if features.clone().any(|f| f["name"] == *p && matches!(f["op"].as_str(), Some("sheet" | "plate" | "loft"))) { "sheet" } else { "part" });
+        let kind = part.as_ref().map(|p| {
+            if features.clone().any(|f| f["name"] == *p && matches!(f["op"].as_str(), Some("sheet" | "plate" | "loft"))) { "sheet" } else { "part" }
+        });
         // The variant's own rule (or the nearest up its chain) while one is active, else the part's.
         let rule = match (&part, self.model.as_ref()) {
             (Some(p), Some(m)) => {
