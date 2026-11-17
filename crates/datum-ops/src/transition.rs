@@ -647,6 +647,12 @@ struct FacetPatch {
     boundary: Vec<PatchVertex>,
 }
 
+struct FacetPatchSet {
+    patches: Vec<FacetPatch>,
+    registry: BTreeMap<TopoId, Vec3>,
+    aliases: BTreeMap<TopoId, TopoId>,
+}
+
 fn distance3(a: Vec3, b: Vec3) -> f64 {
     let d = a - b;
     d.dot(d).sqrt()
@@ -1468,7 +1474,7 @@ fn facet_patches(
     layout: &Layout,
     trims: &[FacetTrim],
     dims: &TransitionDims,
-) -> Result<(Vec<FacetPatch>, BTreeMap<TopoId, Vec3>, BTreeMap<TopoId, TopoId>), BrepError> {
+) -> Result<FacetPatchSet, BrepError> {
     if trims.len() != layout.facets.len() {
         return Err(BrepError::Invalid("transition: facet patches have incomplete trim records".into()));
     }
@@ -1616,7 +1622,7 @@ fn facet_patches(
             vertex.inner = registry[&vertex.inner_id];
         }
     }
-    Ok((patches, registry, aliases))
+    Ok(FacetPatchSet { patches, registry, aliases })
 }
 
 fn verify_facet_trim_records(layout: &Layout, trims: &[FacetTrim], dims: &TransitionDims) -> Result<(), BrepError> {
@@ -1890,7 +1896,8 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     }
     let trims = facet_trims(layout, &sections, dims)?;
     verify_facet_trim_records(layout, &trims, dims)?;
-    let (patches, registry, aliases) = facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
+    let FacetPatchSet { patches, registry, aliases } =
+        facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
     if patches.len() != layout.facets.len() || registry.is_empty() {
         return Err(BrepError::Invalid("transition: trimmed facet patches are incomplete".into()));
     }
@@ -2114,7 +2121,7 @@ mod tests {
             let layout = layout(feature, &square(), "ab", &circle(), "c", &d).unwrap();
             let sections = lower_sections(&layout, &d).unwrap();
             let trims = facet_trims(&layout, &sections, &d).unwrap();
-            let (patches, registry, _) = facet_patches(feature, &layout, &trims, &d).unwrap();
+            let FacetPatchSet { patches, registry, .. } = facet_patches(feature, &layout, &trims, &d).unwrap();
             assert_eq!(patches.len(), 28, "side {side:?}");
             assert!(registry.len() >= patches.len() * 6, "side {side:?}");
             if matches!(side, Side::Left) {
