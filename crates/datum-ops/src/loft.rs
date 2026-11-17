@@ -40,13 +40,21 @@ pub fn loft(
             let layout = two_bend_layout(a0, a1, second, &second_lines, thickness, radius, k, side)?;
             let [first_bend, second_bend] = layout.bends;
             Err(BrepError::Unsupported(format!(
-                "loft: the three-facet / two-bend layout is valid (folds {:.3}° and {:.3}°, radii {:.3}/{:.3} mm, neutral radii {:.3}/{:.3} mm, common corner stations {:.3}/{:.3} mm); corner-trimmed cylindrical B-rep assembly and development are not built yet",
+                "loft: the three-facet / two-bend layout is valid (folds {:.3}° and {:.3}°, radii {:.3}/{:.3} mm, neutral radii {:.3}/{:.3} mm, tangent offsets {:.3}/{:.3} mm, centers {:.3}/{:.3}/{:.3} and {:.3}/{:.3}/{:.3}, common corner stations {:.3}/{:.3} mm); corner-trimmed cylindrical B-rep assembly and development are not built yet",
                 first_bend.angle.to_degrees(),
                 second_bend.angle.to_degrees(),
                 first_bend.radius_in,
                 first_bend.radius_out,
                 first_bend.neutral_radius,
                 second_bend.neutral_radius,
+                first_bend.tangent_offset,
+                second_bend.tangent_offset,
+                first_bend.center.x,
+                first_bend.center.y,
+                first_bend.center.z,
+                second_bend.center.x,
+                second_bend.center.y,
+                second_bend.center.z,
                 layout.corner_station[0],
                 layout.corner_station[1],
             )))
@@ -279,6 +287,12 @@ fn bend_layout(
     let tangent_1 = hinge[0] + u1 * tangent_offset;
     let radial_0 = unit(tangent_0 - center).ok_or_else(|| BrepError::Degenerate("loft: a bend tangent has no radius".into()))?;
     let radial_1 = unit(tangent_1 - center).ok_or_else(|| BrepError::Degenerate("loft: a bend tangent has no radius".into()))?;
+    let size = [hinge[0], hinge[1], tangent_0, tangent_1].iter().flat_map(|p| p.to_array()).fold(1.0_f64, |m, x| m.max(x.abs()));
+    if !within_rounding((tangent_0 - hinge[0]).dot(first.normal), size)
+        || !within_rounding((tangent_1 - hinge[0]).dot(second.normal), size)
+    {
+        return Err(BrepError::Invalid("loft: bend tangent lines leave their planar facets".into()));
+    }
     let measured_0 = length(tangent_0 - center);
     let measured_1 = length(tangent_1 - center);
     if !within_rounding(measured_0 - reference_radius, reference_radius)
