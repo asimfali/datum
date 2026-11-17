@@ -93,7 +93,6 @@ fn non_parallel_line_profiles_are_refused_as_degenerate() {
     assert!(matches!(loft.eval(id("nonparallel.body"), &[&first, &second]), Err(BrepError::Degenerate(_))));
 }
 
-
 fn bent_sketches(apex_x: f64, apex_height: f64) -> (Value, Value) {
     let first = op(serde_json::json!({"op": "sketch", "sketch": profile(10.0)})).eval(id("bent-loft.first"), &[]).unwrap();
     let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": 15})).eval(id("bent-loft.plane"), &[]).unwrap();
