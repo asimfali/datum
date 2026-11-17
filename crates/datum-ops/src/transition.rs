@@ -1901,7 +1901,7 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
         return Err(BrepError::Invalid("transition: trimmed facet patches are incomplete".into()));
     }
     for (fi, patch) in patches.iter().enumerate() {
-        let expected_len = 6 - if patch.collapsed_lower { 1 } else { 0 } - if patch.collapsed_top { 1 } else { 0 };
+        let expected_len = 6 - (if patch.collapsed_lower { 1 } else { 0 }) - (if patch.collapsed_top { 1 } else { 0 });
         if patch.facet != fi || patch.bends[0] == patch.bends[1] || patch.boundary.len() != expected_len || patch.boundary.len() < 4 {
             return Err(BrepError::Invalid(format!("transition: trimmed facet patch {fi} has invalid topology")));
         }
