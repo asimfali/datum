@@ -48,7 +48,10 @@ if [ "$mode" = mirror ]; then
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
   git -C "$WSL" archive "$branch" | tar -x -C "$tmp"
-  rsync -rL --delete --exclude target/ "$tmp"/ "$WIN"/
+  # git archive stamps files with the commit date; without this cargo may see every
+  # source as older than its last build and silently skip the rebuild.
+  find "$tmp" -exec touch {} +
+  rsync -rtL --delete --exclude target/ "$tmp"/ "$WIN"/
   sha=$(git -C "$WSL" rev-parse --short "$branch")
   profile="cargo build -q -p datum-cli --release"
 else
