@@ -158,7 +158,6 @@ fn two_line_loft_refuses_a_bend_that_consumes_a_facet() {
     assert!(matches!(error, BrepError::Degenerate(_)), "{error}");
 }
 
-
 /// An implementation probe for D264 step 2: the middle triangle can take two neighbouring
 /// flanges at once. This verifies the shared-corner path in the existing flange B-rep builder.
 #[test]
@@ -176,22 +175,15 @@ fn a_triangular_plate_can_take_two_adjacent_cylindrical_flanges() {
     }))
     .eval(id("two-flange.profiles"), &[])
     .unwrap();
-    let plate = op(serde_json::json!({"op": "extrude", "z0": -1.0, "z1": 1.0}))
-        .eval(id("two-flange.plate"), &[&triangle])
-        .unwrap()
-        .body()
-        .unwrap()
-        .clone();
+    let plate =
+        op(serde_json::json!({"op": "extrude", "z0": -1.0, "z1": 1.0})).eval(id("two-flange.plate"), &[&triangle]).unwrap().body().unwrap().clone();
     plate.validate().unwrap();
 
     let close_xy = |p: datum_math::Vec3, q: [f64; 2]| (p.x - q[0]).abs() < 1e-9 && (p.y - q[1]).abs() < 1e-9;
     let edge_names = |a: [f64; 2], b: [f64; 2]| -> Vec<String> {
         datum_ops::flange_edges(&plate)
             .into_iter()
-            .filter(|(_, ends)| {
-                (close_xy(ends[0], a) && close_xy(ends[1], b))
-                    || (close_xy(ends[0], b) && close_xy(ends[1], a))
-            })
+            .filter(|(_, ends)| (close_xy(ends[0], a) && close_xy(ends[1], b)) || (close_xy(ends[0], b) && close_xy(ends[1], a)))
             .map(|(edge, _)| format!("{edge:?}"))
             .collect()
     };
