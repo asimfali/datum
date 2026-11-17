@@ -157,3 +157,65 @@ fn two_line_loft_refuses_a_bend_that_consumes_a_facet() {
     let error = bent_op(Side::Left, 100.0).eval(id("bent-loft.large-radius"), &[&first, &second]).unwrap_err();
     assert!(matches!(error, BrepError::Degenerate(_)), "{error}");
 }
+
+
+/// An implementation probe for D264 step 2: the middle triangle can take two neighbouring
+/// flanges at once. This verifies the shared-corner path in the existing flange B-rep builder.
+#[test]
+fn a_triangular_plate_can_take_two_adjacent_cylindrical_flanges() {
+    let triangle = op(serde_json::json!({
+        "op": "sketch",
+        "sketch": {
+            "points": {"a": [-10.0, 0.0], "b": [10.0, 0.0], "v": [0.0, 15.0]},
+            "lines": {
+                "ab": {"from": "a", "to": "b"},
+                "bv": {"from": "b", "to": "v"},
+                "va": {"from": "v", "to": "a"}
+            }
+        }
+    }))
+    .eval(id("two-flange.profiles"), &[])
+    .unwrap();
+    let plate = op(serde_json::json!({"op": "extrude", "z0": -1.0, "z1": 1.0}))
+        .eval(id("two-flange.plate"), &[&triangle])
+        .unwrap()
+        .body()
+        .unwrap()
+        .clone();
+    plate.validate().unwrap();
+
+    let close_xy = |p: datum_math::Vec3, q: [f64; 2]| (p.x - q[0]).abs() < 1e-9 && (p.y - q[1]).abs() < 1e-9;
+    let edge_names = |a: [f64; 2], b: [f64; 2]| -> Vec<String> {
+        datum_ops::flange_edges(&plate)
+            .into_iter()
+            .filter(|(_, ends)| {
+                (close_xy(ends[0], a) && close_xy(ends[1], b))
+                    || (close_xy(ends[0], b) && close_xy(ends[1], a))
+            })
+            .map(|(edge, _)| format!("{edge:?}"))
+            .collect()
+    };
+    let mut edges = edge_names([-10.0, 0.0], [0.0, 15.0]);
+    edges.extend(edge_names([10.0, 0.0], [0.0, 15.0]));
+    assert_eq!(edges.len(), 4, "two hinge edges, inner and outer: {edges:?}");
+
+    let target = Value::Body(plate);
+    let bent = op(serde_json::json!({
+        "op": "flange",
+        "edges": edges,
+        "height": 10.0,
+        "height_along": true,
+        "angle": 60.0,
+        "radius": 2.0
+    }))
+    .eval(id("two-flange.bent"), &[&target])
+    .unwrap()
+    .body()
+    .unwrap()
+    .clone();
+
+    bent.validate().unwrap();
+    assert_eq!(bent.faces().iter().filter(|face| matches!(face.surface, datum_brep::Surface::Cylinder(_))).count(), 4);
+    let flat = unfold_side(&bent, false, 0.44).unwrap();
+    assert_eq!(flat.bends.len(), 2);
+}
