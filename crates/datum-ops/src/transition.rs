@@ -1469,12 +1469,7 @@ fn register_patch_point(registry: &mut BTreeMap<TopoId, Vec3>, id: TopoId, point
 /// Gives each trimmed patch a shared topological identity for its two bend sides and its two
 /// rim splits. Adjacent facets therefore name the same bend-side vertices; no coordinate welding
 /// is left to the B-rep builder.
-fn facet_patches(
-    feature: TopoId,
-    layout: &Layout,
-    trims: &[FacetTrim],
-    dims: &TransitionDims,
-) -> Result<FacetPatchSet, BrepError> {
+fn facet_patches(feature: TopoId, layout: &Layout, trims: &[FacetTrim], dims: &TransitionDims) -> Result<FacetPatchSet, BrepError> {
     if trims.len() != layout.facets.len() {
         return Err(BrepError::Invalid("transition: facet patches have incomplete trim records".into()));
     }
@@ -1896,8 +1891,7 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     }
     let trims = facet_trims(layout, &sections, dims)?;
     verify_facet_trim_records(layout, &trims, dims)?;
-    let FacetPatchSet { patches, registry, aliases } =
-        facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
+    let FacetPatchSet { patches, registry, aliases } = facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
     if patches.len() != layout.facets.len() || registry.is_empty() {
         return Err(BrepError::Invalid("transition: trimmed facet patches are incomplete".into()));
     }
