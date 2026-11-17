@@ -62,6 +62,12 @@
     "flange": "2022c6e4883baabd7d2f109c8de5a0fb50e7e32a3c84794a151f5abaed5034f6",
     "outline": "1d78bc1b6571e71f659511bb7f99d3346ee88893e31b58093f5a39d9c9d3db10"
   },
+  "loft-01-line.json": {
+    "loft": "5240c92f4682d577ece230154cc0f967b10aa42c3a2cb16b8eead4568f4039ea",
+    "plane_b": "9e1ac466c141c13eb126064cae1f24f210f581976f6f5ec49416ed3d4dcffecb",
+    "profile_a": "00e9022cd8da5fe37369cb667479415c58f2323c040db984276b47e0fc01fa7e",
+    "profile_b": "9cfbeff41cc8b139014c0ec5b40b426c3f9950ebf2c336d5fe386d4225411939"
+  },
   "mirror_part.json": {
     "other": "56f5d64946fb4ca3642e94b694ba02a2cc1cc659f7b73ad7aa41404ea22634ef",
     "outline": "51ee6be2257cb5f4373177b804c2752817560ad681a8ed6333a2007d7aa396a8",
