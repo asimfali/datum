@@ -371,7 +371,8 @@ fn profile_lines(sketch: &Placed, which: &str) -> Result<Vec<(String, Vec3, Vec3
     if sketch.developed.is_some() {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must lie on a plane")));
     }
-    if sketch.arcs.values().any(|arc| !arc.construction) || sketch.circles.values().any(|circle| !circle.construction) || !sketch.ellipses.is_empty() {
+    if sketch.arcs.values().any(|arc| !arc.construction) || sketch.circles.values().any(|circle| !circle.construction) || !sketch.ellipses.is_empty()
+    {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must contain only straight lines")));
     }
     let world = |name: &str| -> Result<Vec3, BrepError> {
