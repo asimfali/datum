@@ -209,5 +209,9 @@ fn a_triangular_plate_can_take_two_adjacent_cylindrical_flanges() {
     bent.validate().unwrap();
     assert_eq!(bent.faces().iter().filter(|face| matches!(face.surface, datum_brep::Surface::Cylinder(_))).count(), 4);
     let flat = unfold_side(&bent, false, 0.44).unwrap();
-    assert_eq!(flat.bends.len(), 2);
+    // `Flat::bends` holds a line per seam of the unfold tree, both tangent lines of each bend
+    // (as the flange tests count them: a new flange adds two). Two adjacent flanges: four.
+    assert_eq!(flat.bends.len(), 4);
+    let ids: std::collections::BTreeSet<TopoId> = flat.bend_ids.iter().copied().collect();
+    assert_eq!(ids.len(), flat.bend_ids.len());
 }
