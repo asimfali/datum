@@ -1441,7 +1441,7 @@ fn on_sheet(features: &[Json], sketch: &str) -> bool {
         if (f["op"] == "extrude" && f["mode"].as_str().is_some_and(|m| m != "new")) || f["op"] == "flange" || f["op"] == "rib" {
             at = first_input(f);
         } else {
-            return matches!(f["op"].as_str(), Some("sheet" | "plate"));
+            return matches!(f["op"].as_str(), Some("sheet" | "plate" | "loft"));
         }
     }
     false
@@ -2832,7 +2832,7 @@ impl Viewer {
         let enabled = self.model.is_some();
         let features = self.model.iter().flat_map(|m| m.inspect["features"].as_array().into_iter().flatten());
         // The kind a part's rules must be of: its first feature's; any, for a new part.
-        let kind = part.as_ref().map(|p| if features.clone().any(|f| f["name"] == *p && f["op"] == "sheet") { "sheet" } else { "part" });
+        let kind = part.as_ref().map(|p| if features.clone().any(|f| f["name"] == *p && matches!(f["op"].as_str(), Some("sheet" | "plate" | "loft"))) { "sheet" } else { "part" });
         // The variant's own rule (or the nearest up its chain) while one is active, else the part's.
         let rule = match (&part, self.model.as_ref()) {
             (Some(p), Some(m)) => {
