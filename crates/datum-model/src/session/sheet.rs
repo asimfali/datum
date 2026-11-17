@@ -65,6 +65,37 @@ impl Session {
         self.sheet_part(p, fields)
     }
 
+    /// Adds the first planar loft-flange case (D264): two one-line sketches form one trapezoid.
+    pub(super) fn loft(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
+        let name = text(p, "name")?;
+        let first = text(p, "first")?;
+        let second = text(p, "second")?;
+        if first == second {
+            return Err("loft needs two different sketch features".into());
+        }
+        for sketch in [first, second] {
+            if !matches!(self.graph.nodes()[self.find(sketch)? as usize].op, Op::Sketch { .. }) {
+                return Err(format!("`{sketch}` is not a sketch"));
+            }
+        }
+        let rule = p.get("rule").and_then(Value::as_str).ok_or("loft needs `rule`: a sheet rule of the library, its thickness")?;
+        let tolerance = p.get("tolerance").cloned().ok_or("loft needs `tolerance`: the chordal deviation for its profiles")?;
+        let fields = json!({
+            "name": name,
+            "op": "loft",
+            "inputs": [first, second],
+            "side": p.get("side").cloned().unwrap_or(json!("left")),
+            "tolerance": tolerance,
+        });
+        let ix = add_feature(&mut self.graph, fields.as_object().cloned().ok_or("loft feature parameters are not an object")?)?;
+        self.doc.store(self.active.as_deref(), &self.graph)?;
+        self.set_rule(name, Some(rule.to_string()))?;
+        let mut reply = self.rebuild_recording(ix);
+        reply["rule"] = self.doc.rule(name, self.active.as_deref()).into();
+        reply["body"] = name.into();
+        Ok(reply)
+    }
+
     /// Adds the rolled sheet metal the `rolled` command's parameters `p` describe, as `sheet`.
     pub(super) fn rolled(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
         let mut fields: Map<String, Value> = ["axis", "path", "angle", "gap"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();

@@ -261,6 +261,21 @@ const COMMANDS: &[Command] = &[
         run: |s, p| s.plate(p),
     },
     Command {
+        name: "loft",
+        description: "The first planar loft-flange case (D264): join the one straight line of sketch first to the one straight line of sketch second. Their solved world-space directions must be parallel and the four endpoints coplanar; the sketch planes themselves may differ. The result is one planar trapezoid, thickened as a sheet part. rule is required, a sheet rule of the library. tolerance (mm) is required; side is left (default), right or middle. This first step refuses arcs, multiple lines and non-parallel profiles. The reply names the part and its rule.",
+        params: || {
+            json!({"type": "object", "properties": {
+                "name": {"type": "string"},
+                "first": {"type": "string"},
+                "second": {"type": "string"},
+                "rule": {"type": "string"},
+                "side": {"type": "string", "enum": ["left", "right", "middle"]},
+                "tolerance": {"type": ["number", "string"]}
+            }, "required": ["name", "first", "second", "rule", "tolerance"], "additionalProperties": false})
+        },
+        run: |s, p| s.loft(p),
+    },
+    Command {
         name: "rolled",
         description: "Rolled sheet metal (D207) as feature `name`, a part of its own: line `path` of sketch `sketch` (none: its only \
                       line besides the axis and construction lines) turned about the sketch's line `axis`. Parallel to the axis it \

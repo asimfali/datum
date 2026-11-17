@@ -10,6 +10,7 @@ mod component;
 mod copies;
 mod cut;
 mod flange;
+mod loft;
 mod mirror;
 mod pattern;
 mod revolve;
@@ -37,6 +38,7 @@ pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
 };
+pub use loft::loft;
 pub use mirror::TurnAxis;
 pub use pattern::pattern_grid;
 use revolve::{RollDims, Span};
@@ -258,6 +260,17 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         start: Option<String>,
     },
+    /// The planar first step of a loft flange (D264): two sketch inputs, each with one straight
+    /// line. Their solved world-space directions must be parallel and all four ends coplanar.
+    /// The trapezoid is thickened by the part's sheet rule (or `thickness` in an early model);
+    /// `side` chooses where the material lies about its plane. `tolerance` is positive; it has
+    /// no geometric effect until curved profiles are supported. Two inputs: the first and second sketches.
+    Loft {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thickness: Option<Num>,
+        side: Side,
+        tolerance: Num,
+    },
     /// A face of sheet metal (D195): the closed profiles of the input sketch (curves `profiles`
     /// choose them, D191; none: every one) as a plate of `thickness`, on the sketch's front
     /// (`flip`: its back; `symmetric`: half each way). The thickness is the part's sheet rule's,
@@ -396,6 +409,7 @@ pub enum Op {
 
 /// Said when sheet metal is built with no rule giving its thickness.
 const NO_SHEET_RULE: &str = "sheet metal takes its thickness and bend radius from the part's sheet rule: give the part one";
+const NO_SHEET_THICKNESS: &str = "loft takes its thickness from the part's sheet rule: give the part one";
 
 /// Said when rolled sheet metal is built with no rule giving its thickness and K-factor.
 const NO_ROLL_RULE: &str =
@@ -629,6 +643,7 @@ impl Op {
             Self::Rib { .. } => "rib",
             Self::Component { .. } => "component",
             Self::Sheet { .. } => "sheet",
+            Self::Loft { .. } => "loft",
             Self::Plate { .. } => "plate",
             Self::Flange { .. } => "flange",
             Self::Plane { .. } => "plane",
@@ -660,6 +675,7 @@ impl Op {
             | Self::Plate { .. }
             | Self::Revolve { .. }
             | Self::Rolled { .. } => 1..=1,
+            Self::Loft { .. } => 2..=2,
             Self::Flange { .. } => 1..=4,
             Self::Boolean { .. } => 2..=usize::MAX,
             Self::Trim { .. } | Self::Saddle { .. } | Self::BranchHole { .. } | Self::Rib { .. } | Self::Component { .. } => 2..=2,
@@ -756,6 +772,11 @@ impl Op {
                 z1: r(z1, "z1")?,
                 path: path.clone(),
                 start: start.clone(),
+            },
+            Self::Loft { thickness, side, tolerance } => Self::Loft {
+                thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
+                side: *side,
+                tolerance: r(tolerance, "tolerance")?,
             },
             Self::Flange {
                 edges,
@@ -857,6 +878,7 @@ impl Op {
             // `Debug` spells every field exactly, as for a sketch.
             Self::Mirror { .. }
             | Self::Sheet { .. }
+            | Self::Loft { .. }
             | Self::Plate { .. }
             | Self::Flange { .. }
             | Self::Revolve { .. }
@@ -934,6 +956,7 @@ impl Op {
             Self::Extrude { .. }
             | Self::Sketch { .. }
             | Self::Sheet { .. }
+            | Self::Loft { .. }
             | Self::Plate { .. }
             | Self::Plane { .. }
             | Self::Revolve { .. }
@@ -1075,6 +1098,10 @@ impl Op {
                 let (Some(thickness), Some(radius)) = (thickness, radius) else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let dims = Sheet { thickness: num(thickness)?, radius: num(radius)?, side: *side };
                 sheet(feature, sketch(0)?, path.as_deref(), start.as_deref(), dims, num(z0)?, num(z1)?)?
+            }
+            Self::Loft { thickness, side, tolerance } => {
+                let Some(thickness) = thickness else { return Err(BrepError::Invalid(NO_SHEET_THICKNESS.into())) };
+                loft::loft(feature, sketch(0)?, sketch(1)?, num(thickness)?, *side, num(tolerance)?)?
             }
             Self::Flange {
                 edges,

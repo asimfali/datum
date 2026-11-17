@@ -1,0 +1,61 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "profile_a",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "mid": [0, 0],
+          "a": [-10, 0],
+          "b": [10, 0]
+        },
+        "lines": {
+          "profile": { "from": "a", "to": "b" }
+        },
+        "constraints": [
+          { "type": "fix", "point": "mid", "at": [0, 0] },
+          { "type": "midpoint", "point": "mid", "line": "profile" },
+          { "type": "horizontal", "line": "profile" },
+          { "type": "length", "line": "profile", "value": 20 }
+        ]
+      }
+    },
+    {
+      "name": "plane_b",
+      "op": "plane",
+      "base": "xz",
+      "offset": 15
+    },
+    {
+      "name": "profile_b",
+      "op": "sketch",
+      "inputs": ["plane_b"],
+      "sketch": {
+        "points": {
+          "mid": [0, 0],
+          "a": [-15, 0],
+          "b": [15, 0]
+        },
+        "lines": {
+          "profile": { "from": "a", "to": "b" }
+        },
+        "constraints": [
+          { "type": "fix", "point": "mid", "at": [0, 0] },
+          { "type": "midpoint", "point": "mid", "line": "profile" },
+          { "type": "horizontal", "line": "profile" },
+          { "type": "length", "line": "profile", "value": 30 }
+        ]
+      }
+    },
+    {
+      "name": "loft",
+      "op": "loft",
+      "inputs": ["profile_a", "profile_b"],
+      "thickness": 2,
+      "side": "left",
+      "tolerance": 1
+    }
+  ]
+}
