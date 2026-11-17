@@ -33,27 +33,17 @@ fn profile(half_length: f64) -> serde_json::Value {
 }
 
 fn sketches(second_plane_offset: f64) -> (Value, Value) {
-    let first = op(serde_json::json!({"op": "sketch", "sketch": profile(10.0)}))
-        .eval(id("loft.first"), &[])
-        .unwrap();
+    let first = op(serde_json::json!({"op": "sketch", "sketch": profile(10.0)})).eval(id("loft.first"), &[]).unwrap();
 
-    let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": second_plane_offset}))
-        .eval(id("loft.second-plane"), &[])
-        .unwrap();
-    let second = op(serde_json::json!({"op": "sketch", "sketch": profile(15.0)}))
-        .eval(id("loft.second"), &[&plane])
-        .unwrap();
+    let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": second_plane_offset})).eval(id("loft.second-plane"), &[]).unwrap();
+    let second = op(serde_json::json!({"op": "sketch", "sketch": profile(15.0)})).eval(id("loft.second"), &[&plane]).unwrap();
 
     (first, second)
 }
 
 fn body(side: Side, offset: f64) -> Result<datum_brep::Body, BrepError> {
     let (first, second) = sketches(offset);
-    let loft = Op::Loft {
-        thickness: Some(Num::Value(2.0)),
-        side,
-        tolerance: Num::Value(1.0),
-    };
+    let loft = Op::Loft { thickness: Some(Num::Value(2.0)), side, tolerance: Num::Value(1.0) };
     let value = loft.eval(id("loft.body"), &[&first, &second])?;
     Ok(value.body().ok_or_else(|| BrepError::Invalid("loft returned no body".into()))?.clone())
 }
@@ -86,12 +76,8 @@ fn coincident_line_profiles_are_refused_as_degenerate() {
 /// or approximate the unsupported profile pair.
 #[test]
 fn non_parallel_line_profiles_are_refused_as_degenerate() {
-    let first = op(serde_json::json!({"op": "sketch", "sketch": profile(10.0)}))
-        .eval(id("nonparallel.first"), &[])
-        .unwrap();
-    let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": 15}))
-        .eval(id("nonparallel.plane"), &[])
-        .unwrap();
+    let first = op(serde_json::json!({"op": "sketch", "sketch": profile(10.0)})).eval(id("nonparallel.first"), &[]).unwrap();
+    let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": 15})).eval(id("nonparallel.plane"), &[]).unwrap();
     let second_sketch = serde_json::json!({
         "points": {"origin": [0, 0], "a": [0, -15], "b": [0, 15]},
         "lines": {"profile": {"from": "a", "to": "b"}},
@@ -102,13 +88,7 @@ fn non_parallel_line_profiles_are_refused_as_degenerate() {
             {"type": "length", "line": "profile", "value": 30}
         ]
     });
-    let second = op(serde_json::json!({"op": "sketch", "sketch": second_sketch}))
-        .eval(id("nonparallel.second"), &[&plane])
-        .unwrap();
-    let loft = Op::Loft {
-        thickness: Some(Num::Value(2.0)),
-        side: Side::Left,
-        tolerance: Num::Value(1.0),
-    };
+    let second = op(serde_json::json!({"op": "sketch", "sketch": second_sketch})).eval(id("nonparallel.second"), &[&plane]).unwrap();
+    let loft = Op::Loft { thickness: Some(Num::Value(2.0)), side: Side::Left, tolerance: Num::Value(1.0) };
     assert!(matches!(loft.eval(id("nonparallel.body"), &[&first, &second]), Err(BrepError::Degenerate(_))));
 }
