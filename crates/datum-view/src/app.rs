@@ -3338,12 +3338,18 @@ impl Viewer {
                         Act::Fillet => crate::icons::Icon::Fillet,
                         Act::Mirror => crate::icons::Icon::Mirror,
                         Act::Offset => crate::icons::Icon::Offset,
+                        Act::Polygon => crate::icons::Icon::Polygon,
                         Act::Dimension => crate::icons::Icon::Dimension,
                         _ => crate::icons::Icon::Select,
                     };
                     let hint = self.keys.hint(ui.ctx(), &self.i18n, act);
-                    // The mirror works on the selection: there must be one (D244).
-                    let enabled = act != Act::Mirror || !sk.selected.is_empty();
+                    // The mirror works on the selection: there must be one (D244); the polygon
+                    // on a circle or an arc of it.
+                    let enabled = match act {
+                        Act::Mirror => !sk.selected.is_empty(),
+                        Act::Polygon => crate::polygon::curve(sk).is_some(),
+                        _ => true,
+                    };
                     let r = crate::icons::tile(ui, self.i18n.label(act), &hint, sk.draft.tool == tool, enabled, |p, c, colour| {
                         crate::icons::paint(p, c, icon, colour)
                     });
@@ -3488,6 +3494,7 @@ impl Viewer {
                     "Click the base point (a rectangle: a corner, then the other; from its centre: the centre, then a corner), then its sockets (Enter skips one), \
                      then the sizes: Tab to the next · F4: a preset from the list · Enter puts it · Esc or a right click cancels",
                 ),
+                Tool::Polygon => self.i18n.t("how-polygon", "Type the sides count, Enter · Esc ends"),
                 _ => self.i18n.t(
                     "how-draw",
                     "Click to place · type a number for the length (diameter, radius), Enter · snaps to points, middles, curves and the face's edges · Shift: no snaps · Esc, a right click or the tool's button again ends the command",
@@ -5745,7 +5752,7 @@ impl Viewer {
     fn sketch_menu(&mut self, ctx: &egui::Context) {
         let (Some(sk), Some(menu)) = (&mut self.sketch, &mut self.menu) else { return };
         let at = match menu {
-            Menu::Pattern { at, .. } | Menu::Copies { at, .. } | Menu::Note { at, .. } => *at,
+            Menu::Pattern { at, .. } | Menu::Copies { at, .. } | Menu::Polygon { at, .. } | Menu::Note { at, .. } => *at,
         };
         // What the menu ends in: sent, and what follows it.
         enum End {
@@ -5911,6 +5918,29 @@ impl Viewer {
                                 let mut m = serde_json::Map::new();
                                 m.insert("patterns".into(), json!({ p: null }));
                                 end = End::Send(m);
+                            }
+                        }
+                        if ui.button(self.i18n.t("cancel", "Cancel")).clicked() || esc {
+                            end = End::Cancel;
+                        }
+                    });
+                }
+                Menu::Polygon { group, sides, error, .. } => {
+                    ui.strong(self.i18n.t("polygon-form", "Polygon"));
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("polygon-form-sides", "Sides"));
+                        ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(sides).hint_text("—"));
+                    });
+                    let count = crate::polygon::typed(sides);
+                    if let Some(e) = error.as_ref().filter(|_| !ui.ctx().text_edit_focused()) {
+                        ui.colored_label(ui.visuals().error_fg_color, e.as_str());
+                    }
+                    ui.horizontal(|ui| {
+                        let ready = count.is_some();
+                        if ui.add_enabled(ready, egui::Button::new(self.i18n.t("done", "Done"))).clicked() || (enter && ready) {
+                            match count.and_then(|n| crate::polygon::reedit(sk, group, n)) {
+                                Some(p) => end = End::Send(p),
+                                None => *error = Some(self.i18n.t("polygon-form-failed", "The polygon cannot be rebuilt").into()),
                             }
                         }
                         if ui.button(self.i18n.t("cancel", "Cancel")).clicked() || esc {
@@ -6490,15 +6520,28 @@ impl Viewer {
                 }
             }
         } else if r.clicked() {
-            // A group's badge stands for what the group holds; inside a contour, off its curves,
-            // the click takes the contour (D191: then E extrudes it).
-            let picks = match sk.hover.clone() {
-                Some(Pick::Group(g)) => sk.group_picks(&g),
-                Some(Pick::Pattern(n)) => sk.pattern_copies(&n),
-                None => offset.map_or_else(Vec::new, |(x, y)| sk.contour_picks(x, y, h)),
-                p => p.into_iter().collect(),
+            // A polygon's group badge: a form of its sides count, the polygon rebuilt on Done.
+            let polygon = match &sk.hover {
+                Some(Pick::Group(g)) => crate::polygon::sides_of(sk, g).map(|n| (g.clone(), n)),
+                _ => None,
             };
-            crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
+            if let Some((group, sides)) = polygon {
+                if let Some(m) = self.menu.take() {
+                    m.cancel(sk);
+                }
+                let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                self.menu = Some(Menu::Polygon { at, group, sides: sides.to_string(), error: None });
+            } else {
+                // A group's badge stands for what the group holds; inside a contour, off its
+                // curves, the click takes the contour (D191: then E extrudes it).
+                let picks = match sk.hover.clone() {
+                    Some(Pick::Group(g)) => sk.group_picks(&g),
+                    Some(Pick::Pattern(n)) => sk.pattern_copies(&n),
+                    None => offset.map_or_else(Vec::new, |(x, y)| sk.contour_picks(x, y, h)),
+                    p => p.into_iter().collect(),
+                };
+                crate::select::click(&mut sk.selected, picks, ui.input(|i| crate::select::adding(&i.modifiers)));
+            }
         }
         // A right click held still for half a second: the menu of what is selected (D155); a
         // short one (a right drag pans): the last command again, as Enter, by the mouse alone.
@@ -6611,6 +6654,13 @@ enum Menu {
         at: egui::Pos2,
         form: crate::pattern::CopiesForm,
     },
+    /// A polygon's group badge clicked: its sides count, rebuilt on Done in the same group.
+    Polygon {
+        at: egui::Pos2,
+        group: String,
+        sides: String,
+        error: Option<String>,
+    },
     /// Nothing to do with this selection, and why.
     Note {
         at: egui::Pos2,
@@ -6641,7 +6691,7 @@ impl Menu {
         match self {
             Menu::Pattern { form, .. } => form.cancel(sk),
             Menu::Copies { form, .. } => form.preview(sk, &serde_json::Map::new()),
-            Menu::Note { .. } => {}
+            Menu::Polygon { .. } | Menu::Note { .. } => {}
         }
     }
 }
@@ -6727,8 +6777,19 @@ pub(crate) fn definition(v: &Json) -> String {
 }
 
 /// The sketch tools, as the side panel lists them.
-const TOOLS: [Act; 10] =
-    [Act::Select, Act::Line, Act::Arc, Act::Circle, Act::Point, Act::Project, Act::TrimExtend, Act::Fillet, Act::Mirror, Act::Dimension];
+const TOOLS: [Act; 11] = [
+    Act::Select,
+    Act::Line,
+    Act::Arc,
+    Act::Circle,
+    Act::Point,
+    Act::Project,
+    Act::TrimExtend,
+    Act::Fillet,
+    Act::Mirror,
+    Act::Polygon,
+    Act::Dimension,
+];
 
 /// The sketch's modes, as the menu lists them (D167).
 const MODES: [Act; 5] = [Act::Infer, Act::Presets, Act::Badges, Act::Names, Act::Dimensions];
@@ -6756,6 +6817,7 @@ fn tool(act: Act) -> Tool {
         Act::Fillet => Tool::Fillet,
         Act::Mirror => Tool::Mirror,
         Act::Offset => Tool::Offset,
+        Act::Polygon => Tool::Polygon,
         Act::Dimension => Tool::Dimension,
         _ => Tool::Select,
     }
@@ -6845,6 +6907,7 @@ impl Viewer {
             Act::Rectangle => !self.library.is_empty(),
             Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
             Act::Mirror => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty()),
+            Act::Polygon => self.sketch.as_ref().is_some_and(|sk| crate::polygon::curve(sk).is_some()),
             Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
             _ => true,
         }
@@ -7012,6 +7075,11 @@ impl Viewer {
             Act::Mirror => {
                 if let Some(sk) = &mut self.sketch {
                     sk.start_mirror();
+                }
+            }
+            Act::Polygon => {
+                if let Some(sk) = &mut self.sketch {
+                    sk.draft.press(Tool::Polygon);
                 }
             }
             Act::Group => {
@@ -9093,6 +9161,76 @@ mod tests {
         h.run();
         drop(h);
         assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+    }
+
+    /// N with a circle selected takes up the polygon; with nothing selected it does nothing, as
+    /// the polygon goes on a circle or an arc alone.
+    #[test]
+    fn n_takes_up_the_polygon_on_a_circle() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        fn press(v: &mut Viewer, key: egui::Key) {
+            let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+            h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+        }
+        press(&mut v, egui::Key::N);
+        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select), "nothing selected");
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
+        press(&mut v, egui::Key::N);
+        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Polygon));
+    }
+
+    /// A polygon's group badge clicked opens the sides form; Done with a new count rebuilds the
+    /// polygon in the same group and sends it.
+    #[test]
+    fn a_polygons_badge_changes_its_sides() {
+        let (mut v, inbox) = sketching();
+        let _ = inbox.try_iter().count();
+        let sk = v.sketch.as_mut().unwrap();
+        sk.selected = vec![Pick::Curve("left_hole".into())];
+        let p = crate::polygon::plan(sk, &(json!(6), 6.0)).expect("a polygon");
+        sk.apply(p);
+        let group = sk.json["sketch"]["groups"].as_object().unwrap().keys().next().unwrap().clone();
+        assert_eq!(crate::polygon::sides_of(sk, &group), Some(6));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+                v.sketch_menu(ui.ctx());
+            },
+            v,
+        );
+        h.run();
+        let badge =
+            h.state().sketch.as_ref().unwrap().badges(400.0).into_iter().find(|b| b.pick == Pick::Group(group.clone())).expect("the polygon's badge");
+        let at = egui::pos2(300.0 + badge.at.0 as f32, 200.0 + badge.at.1 as f32);
+        h.hover_at(at);
+        h.step();
+        let button = |h: &mut egui_kittest::Harness<Viewer>, pressed| {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
+            h.step();
+        };
+        button(&mut h, true);
+        button(&mut h, false);
+        let Some(Menu::Polygon { sides, .. }) = &mut h.state_mut().menu else { panic!("the polygon's form") };
+        assert_eq!(sides, "6");
+        *sides = "4".into();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        assert!(h.state().menu.is_none(), "Done closes the form");
+        let p = inbox
+            .try_iter()
+            .find_map(|r| match r {
+                Request::Command("edit_sketch", p) => Some(p),
+                _ => None,
+            })
+            .expect("the edit_sketch sent");
+        assert_eq!(p["groups"][&group].as_array().unwrap().len(), 9, "four vertices, four sides, the circle");
+        assert_eq!(p["points"].as_object().unwrap().values().filter(|v| v.is_null()).count(), 6, "the six old vertices go");
+        let sk = h.state().sketch.as_ref().unwrap();
+        assert_eq!(crate::polygon::sides_of(sk, &group), Some(4), "the same group, four sides now");
     }
 
     /// Placing a library element, the mirror tool's key flips the element; it does not take the
