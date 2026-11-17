@@ -1110,11 +1110,13 @@ impl Op {
                     feature,
                     sketch(0)?,
                     sketch(1)?,
-                    num(thickness)?,
-                    radius.as_ref().map(num).transpose()?,
-                    k_factor.as_ref().map(num).transpose()?,
-                    *side,
-                    num(tolerance)?,
+                    loft::LoftDims {
+                        thickness: num(thickness)?,
+                        radius: radius.as_ref().map(num).transpose()?,
+                        k_factor: k_factor.as_ref().map(num).transpose()?,
+                        side: *side,
+                        tolerance: num(tolerance)?,
+                    },
                 )?
             }
             Self::Flange {
