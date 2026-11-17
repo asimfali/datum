@@ -1591,13 +1591,7 @@ fn facet_patches(
         if !(normal.dot(facet.normal) > 0.0 && normal.dot(normal).is_finite()) {
             return Err(BrepError::Degenerate(format!("transition: trimmed facet {fi} has no outward planar area")));
         }
-        patches.push(FacetPatch {
-            facet: fi,
-            bends: trim.bends,
-            collapsed_lower,
-            collapsed_top,
-            boundary: ordered,
-        });
+        patches.push(FacetPatch { facet: fi, bends: trim.bends, collapsed_lower, collapsed_top, boundary: ordered });
     }
 
     // Resolve aliases globally, not only inside the patch where two geometric endpoints meet.
@@ -1913,8 +1907,20 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
                 .iter()
                 .position(|&f| f == fi)
                 .ok_or_else(|| BrepError::Invalid(format!("transition: patch {fi} names a non-adjacent bend {bend_index}")))?;
-            let lower_index = if slot == 0 || patch.collapsed_lower { 0 } else if patch.collapsed_top { 4 } else { 5 };
-            let upper_index = if slot == 0 { 1 } else if patch.collapsed_top { 3 } else { 4 };
+            let lower_index = if slot == 0 || patch.collapsed_lower {
+                0
+            } else if patch.collapsed_top {
+                4
+            } else {
+                5
+            };
+            let upper_index = if slot == 0 {
+                1
+            } else if patch.collapsed_top {
+                3
+            } else {
+                4
+            };
             let lower = patch.boundary[lower_index];
             let upper = patch.boundary[upper_index];
             let expected_lower_outer = if patch.collapsed_lower {
