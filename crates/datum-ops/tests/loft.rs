@@ -16,7 +16,7 @@ fn op(value: serde_json::Value) -> Op {
 fn profile(half_length: f64) -> serde_json::Value {
     serde_json::json!({
         "points": {
-            "origin": [0.0, 0.0],
+            "mid": [0.0, 0.0],
             "a": [-half_length, 0.0],
             "b": [half_length, 0.0]
         },
@@ -24,8 +24,8 @@ fn profile(half_length: f64) -> serde_json::Value {
             "profile": {"from": "a", "to": "b"}
         },
         "constraints": [
-            {"type": "fix", "point": "origin", "at": [0.0, 0.0]},
-            {"type": "midpoint", "point": "origin", "line": "profile"},
+            {"type": "fix", "point": "mid", "at": [0.0, 0.0]},
+            {"type": "midpoint", "point": "mid", "line": "profile"},
             {"type": "horizontal", "line": "profile"},
             {"type": "length", "line": "profile", "value": 2.0 * half_length}
         ]
@@ -79,11 +79,11 @@ fn non_parallel_line_profiles_are_refused_as_degenerate() {
     let first = op(serde_json::json!({"op": "sketch", "sketch": profile(10.0)})).eval(id("nonparallel.first"), &[]).unwrap();
     let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": 15})).eval(id("nonparallel.plane"), &[]).unwrap();
     let second_sketch = serde_json::json!({
-        "points": {"origin": [0, 0], "a": [0, -15], "b": [0, 15]},
+        "points": {"mid": [0, 0], "a": [0, -15], "b": [0, 15]},
         "lines": {"profile": {"from": "a", "to": "b"}},
         "constraints": [
-            {"type": "fix", "point": "origin", "at": [0, 0]},
-            {"type": "midpoint", "point": "origin", "line": "profile"},
+            {"type": "fix", "point": "mid", "at": [0, 0]},
+            {"type": "midpoint", "point": "mid", "line": "profile"},
             {"type": "vertical", "line": "profile"},
             {"type": "length", "line": "profile", "value": 30}
         ]
