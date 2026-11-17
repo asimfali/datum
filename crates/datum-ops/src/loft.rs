@@ -152,12 +152,7 @@ struct BendRule {
 
 /// Geometric part of D264's one-line / two-line case. The corner is where the two tangent
 /// lines in the middle facet meet; both bends must terminate there, rather than overlap caps.
-fn two_bend_layout(
-    profile: [Vec3; 2],
-    second: &Placed,
-    lines: &[(String, Vec3, Vec3)],
-    rule: BendRule,
-) -> Result<TwoBendLayout, BrepError> {
+fn two_bend_layout(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, Vec3)], rule: BendRule) -> Result<TwoBendLayout, BrepError> {
     let [a0, a1] = profile;
     let BendRule { thickness, radius, k_factor, side } = rule;
     if !(radius > 0.0 && radius.is_finite()) {
