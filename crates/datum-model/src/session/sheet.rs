@@ -58,6 +58,13 @@ impl Session {
         self.sheet_part(p, fields)
     }
 
+    /// Adds the face of sheet metal the `plate` command's parameters `p` describe, as `sheet`.
+    pub(super) fn plate(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
+        let mut fields: Map<String, Value> = ["profiles", "flip", "symmetric"].iter().filter_map(|&k| Some((k.into(), p.get(k)?.clone()))).collect();
+        fields.insert("op".into(), "plate".into());
+        self.sheet_part(p, fields)
+    }
+
     /// Adds the first planar loft-flange case (D264): two one-line sketches form one trapezoid.
     pub(super) fn loft(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
         let name = text(p, "name")?;
