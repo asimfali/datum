@@ -7,7 +7,7 @@
       "op": "sketch",
       "sketch": {
         "points": {
-          "origin": [0, 0],
+          "mid": [0, 0],
           "a": [-10, 0],
           "b": [10, 0]
         },
@@ -15,8 +15,8 @@
           "profile": { "from": "a", "to": "b" }
         },
         "constraints": [
-          { "type": "fix", "point": "origin", "at": [0, 0] },
-          { "type": "midpoint", "point": "origin", "line": "profile" },
+          { "type": "fix", "point": "mid", "at": [0, 0] },
+          { "type": "midpoint", "point": "mid", "line": "profile" },
           { "type": "horizontal", "line": "profile" },
           { "type": "length", "line": "profile", "value": 20 }
         ]
@@ -34,7 +34,7 @@
       "inputs": ["plane_b"],
       "sketch": {
         "points": {
-          "origin": [0, 0],
+          "mid": [0, 0],
           "a": [-15, 0],
           "b": [15, 0]
         },
@@ -42,8 +42,8 @@
           "profile": { "from": "a", "to": "b" }
         },
         "constraints": [
-          { "type": "fix", "point": "origin", "at": [0, 0] },
-          { "type": "midpoint", "point": "origin", "line": "profile" },
+          { "type": "fix", "point": "mid", "at": [0, 0] },
+          { "type": "midpoint", "point": "mid", "line": "profile" },
           { "type": "horizontal", "line": "profile" },
           { "type": "length", "line": "profile", "value": 30 }
         ]
