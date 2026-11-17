@@ -5,6 +5,7 @@ model: cliproxy/glm-5.3-flash#max
 permission:
   edit: allow
   bash: allow
+  shell: allow
   task: allow
   webfetch: allow
 ---

@@ -3,6 +3,10 @@
   "default_agent": "architect",
   "instructions": ["HANDOFF.md"],
   "permissions": [
+    { "action": "shell", "resource": "git add*", "effect": "allow" },
+    { "action": "shell", "resource": "git commit*", "effect": "allow" },
+    { "action": "shell", "resource": "git checkout*", "effect": "allow" },
+    { "action": "shell", "resource": "git branch*", "effect": "allow" },
     { "action": "shell", "resource": "git push*", "effect": "allow" }
   ],
   "mcp": {
