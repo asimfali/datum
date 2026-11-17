@@ -1612,14 +1612,7 @@ fn facet_patches(feature: TopoId, layout: &Layout, trims: &[FacetTrim], dims: &T
         if !(normal.dot(facet.normal) > 0.0 && normal.dot(normal).is_finite()) {
             return Err(BrepError::Degenerate(format!("transition: trimmed facet {fi} has no outward planar area")));
         }
-        patches.push(FacetPatch {
-            facet: fi,
-            bends: trim.bends,
-            collapsed_lower,
-            collapsed_outgoing_top,
-            collapsed_incoming_top,
-            boundary: ordered,
-        });
+        patches.push(FacetPatch { facet: fi, bends: trim.bends, collapsed_lower, collapsed_outgoing_top, collapsed_incoming_top, boundary: ordered });
     }
 
     // Resolve aliases globally, not only inside the patch where two geometric endpoints meet.
@@ -1923,10 +1916,8 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
         return Err(BrepError::Invalid("transition: trimmed facet patches are incomplete".into()));
     }
     for (fi, patch) in patches.iter().enumerate() {
-        let expected_len = 6
-            - usize::from(patch.collapsed_lower)
-            - usize::from(patch.collapsed_outgoing_top)
-            - usize::from(patch.collapsed_incoming_top);
+        let expected_len =
+            6 - usize::from(patch.collapsed_lower) - usize::from(patch.collapsed_outgoing_top) - usize::from(patch.collapsed_incoming_top);
         if patch.facet != fi || patch.bends[0] == patch.bends[1] || patch.boundary.len() != expected_len || patch.boundary.len() < 3 {
             return Err(BrepError::Invalid(format!("transition: trimmed facet patch {fi} has invalid topology")));
         }
@@ -1943,11 +1934,7 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             } else {
                 5 - usize::from(patch.collapsed_outgoing_top) - usize::from(patch.collapsed_incoming_top)
             };
-            let upper_index = if slot == 0 {
-                1
-            } else {
-                4 - usize::from(patch.collapsed_outgoing_top) - usize::from(patch.collapsed_incoming_top)
-            };
+            let upper_index = if slot == 0 { 1 } else { 4 - usize::from(patch.collapsed_outgoing_top) - usize::from(patch.collapsed_incoming_top) };
             let lower = patch.boundary[lower_index];
             let upper = patch.boundary[upper_index];
             let expected_lower_outer = if patch.collapsed_lower {
