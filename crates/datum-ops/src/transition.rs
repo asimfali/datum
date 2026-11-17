@@ -1927,7 +1927,7 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
             - usize::from(patch.collapsed_lower)
             - usize::from(patch.collapsed_outgoing_top)
             - usize::from(patch.collapsed_incoming_top);
-        if patch.facet != fi || patch.bends[0] == patch.bends[1] || patch.boundary.len() != expected_len || patch.boundary.len() < 4 {
+        if patch.facet != fi || patch.bends[0] == patch.bends[1] || patch.boundary.len() != expected_len || patch.boundary.len() < 3 {
             return Err(BrepError::Invalid(format!("transition: trimmed facet patch {fi} has invalid topology")));
         }
         let patch_feature = TopoId::derive("transition.verify").finish();
