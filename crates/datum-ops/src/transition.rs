@@ -636,12 +636,14 @@ struct PatchVertex {
 }
 
 /// One trimmed planar facet. Its boundary runs: lower/upper on the outgoing bend, outgoing rim
-/// split, incoming rim split, upper/lower on the incoming bend. At a relief junction the two lower
-/// bend endpoints are one topological vertex, so that boundary has five rather than six vertices.
+/// split, incoming rim split, upper/lower on the incoming bend. Lower relief and upper rim
+/// intersections can each collapse one boundary edge into a single topological vertex.
 #[derive(Clone, Debug)]
 struct FacetPatch {
     facet: usize,
     bends: [usize; 2],
+    collapsed_lower: bool,
+    collapsed_top: bool,
     boundary: Vec<PatchVertex>,
 }
 
@@ -1173,20 +1175,20 @@ fn facet_patch_prism(feature: TopoId, patch: &FacetPatch, normal: Vec3) -> Resul
             normal * -1.0,
         )?,
     ];
-    let center =
-        (outer_points.iter().chain(&inner_points).fold(Vec3::ZERO, |sum, p| sum + *p)) * (1.0 / (outer_points.len() + inner_points.len()) as f64);
     for i in 0..patch.boundary.len() {
         let j = (i + 1) % patch.boundary.len();
         let a = patch.boundary[i];
         let b = patch.boundary[j];
         let ids = vec![a.outer_id, b.outer_id, b.inner_id, a.inner_id];
         let wall_points = vec![a.outer, b.outer, b.inner, a.inner];
-        let wall_center = wall_points.iter().fold(Vec3::ZERO, |sum, p| sum + *p) * 0.25;
+        let edge = b.outer - a.outer;
+        let thickness = ((a.inner - a.outer) + (b.inner - b.outer)) * 0.5;
+        let outward = unit3(thickness.cross(edge));
         faces.push(planar(
             TopoId::derive("transition.patch.test.wall").id(feature).index(patch.facet as u64).index(i as u64).finish(),
             ids,
             &wall_points,
-            wall_center - center,
+            outward,
         )?);
     }
     build_with_curves(vertices, faces, Vec::new())
@@ -1428,6 +1430,25 @@ fn patch_relief_id(feature: TopoId, facet: usize, inner: bool) -> TopoId {
     TopoId::derive("transition.patch.relief").id(feature).index(facet as u64).index(inner as u64).finish()
 }
 
+fn patch_alias_root(aliases: &BTreeMap<TopoId, TopoId>, mut id: TopoId) -> TopoId {
+    while let Some(&next) = aliases.get(&id) {
+        if next == id {
+            break;
+        }
+        id = next;
+    }
+    id
+}
+
+fn patch_alias(aliases: &mut BTreeMap<TopoId, TopoId>, from: TopoId, to: TopoId) -> TopoId {
+    let from = patch_alias_root(aliases, from);
+    let to = patch_alias_root(aliases, to);
+    if from != to {
+        aliases.insert(from, to);
+    }
+    to
+}
+
 fn register_patch_point(registry: &mut BTreeMap<TopoId, Vec3>, id: TopoId, point: Vec3, size: f64) -> Result<(), BrepError> {
     if let Some(old) = registry.get(&id) {
         if !within_rounding(distance3(*old, point), size) {
@@ -1447,7 +1468,7 @@ fn facet_patches(
     layout: &Layout,
     trims: &[FacetTrim],
     dims: &TransitionDims,
-) -> Result<(Vec<FacetPatch>, BTreeMap<TopoId, Vec3>), BrepError> {
+) -> Result<(Vec<FacetPatch>, BTreeMap<TopoId, Vec3>, BTreeMap<TopoId, TopoId>), BrepError> {
     if trims.len() != layout.facets.len() {
         return Err(BrepError::Invalid("transition: facet patches have incomplete trim records".into()));
     }
@@ -1458,7 +1479,7 @@ fn facet_patches(
         .flat_map(|p| [p.x, p.y, p.z])
         .chain(layout.a.iter().chain(&layout.b).flat_map(|p| [p.x, p.y, p.z]))
         .fold(1.0_f64, |m, x| m.max(x.abs()));
-    let mut registry = BTreeMap::new();
+    let mut aliases = BTreeMap::new();
     let mut patches = Vec::with_capacity(trims.len());
 
     for (fi, trim) in trims.iter().enumerate() {
@@ -1497,35 +1518,67 @@ fn facet_patches(
         // along its bend edge. The first three entries are outgoing; rotate into boundary order.
         let mut ordered = vec![boundary[0], boundary[1], boundary[2], boundary[5], boundary[4], boundary[3]];
 
-        // At a relief junction, the two lower bend endpoints are the same physical point. Keep one
-        // vertex and give both bend sides its stable facet-level identity; do not make a zero edge.
-        let outer_gap = distance3(ordered[0].outer, ordered[5].outer);
-        let inner_gap = distance3(ordered[0].inner, ordered[5].inner);
-        let outer_meets = within_rounding(outer_gap, size);
-        let inner_meets = within_rounding(inner_gap, size);
-        if outer_meets != inner_meets {
+        // D265 can make the incoming bend's upper endpoint coincide with its rim split. The
+        // bend endpoint owns the identity because the same vertex closes the cylindrical band.
+        let top_outer_gap = distance3(ordered[3].outer, ordered[4].outer);
+        let top_inner_gap = distance3(ordered[3].inner, ordered[4].inner);
+        let top_outer_meets = within_rounding(top_outer_gap, size);
+        let top_inner_meets = within_rounding(top_inner_gap, size);
+        if top_outer_meets != top_inner_meets {
             return Err(BrepError::Invalid(format!(
-                "transition: patch {fi}'s lower bend endpoints disagree about the relief junction (outer gap {outer_gap:.12e}, inner gap {inner_gap:.12e})"
+                "transition: patch {fi}'s upper rim split and bend endpoint disagree (outer gap {top_outer_gap:.12e}, inner gap {top_inner_gap:.12e})"
             )));
         }
-        if outer_meets {
-            let shared_outer = patch_relief_id(feature, fi, false);
-            let shared_inner = patch_relief_id(feature, fi, true);
-            let outer = (ordered[0].outer + ordered[5].outer) * 0.5;
-            let inner = (ordered[0].inner + ordered[5].inner) * 0.5;
-            ordered[0].outer_id = shared_outer;
-            ordered[0].inner_id = shared_inner;
+        let collapsed_top = top_outer_meets;
+        if collapsed_top {
+            let outer_id = patch_alias(&mut aliases, ordered[3].outer_id, ordered[4].outer_id);
+            let inner_id = patch_alias(&mut aliases, ordered[3].inner_id, ordered[4].inner_id);
+            ordered[3].outer_id = outer_id;
+            ordered[3].inner_id = inner_id;
+            ordered[3].outer = ordered[4].outer;
+            ordered[3].inner = ordered[4].inner;
+            ordered.remove(4);
+        }
+
+        // At a relief junction, both lower bend endpoints denote one physical vertex. Alias both
+        // bend-side identities so every neighbouring patch uses the same B-rep vertex as well.
+        let last = ordered.len() - 1;
+        let lower_outer_gap = distance3(ordered[0].outer, ordered[last].outer);
+        let lower_inner_gap = distance3(ordered[0].inner, ordered[last].inner);
+        let lower_outer_meets = within_rounding(lower_outer_gap, size);
+        let lower_inner_meets = within_rounding(lower_inner_gap, size);
+        if lower_outer_meets != lower_inner_meets {
+            return Err(BrepError::Invalid(format!(
+                "transition: patch {fi}'s lower bend endpoints disagree about the relief junction (outer gap {lower_outer_gap:.12e}, inner gap {lower_inner_gap:.12e})"
+            )));
+        }
+        let collapsed_lower = lower_outer_meets;
+        if collapsed_lower {
+            let preferred_outer = patch_relief_id(feature, fi, false);
+            let preferred_inner = patch_relief_id(feature, fi, true);
+            let outer_id = patch_alias(&mut aliases, ordered[0].outer_id, preferred_outer);
+            let outer_id = patch_alias(&mut aliases, ordered[last].outer_id, outer_id);
+            let inner_id = patch_alias(&mut aliases, ordered[0].inner_id, preferred_inner);
+            let inner_id = patch_alias(&mut aliases, ordered[last].inner_id, inner_id);
+            let outer = (ordered[0].outer + ordered[last].outer) * 0.5;
+            let inner = (ordered[0].inner + ordered[last].inner) * 0.5;
+            ordered[0].outer_id = outer_id;
+            ordered[0].inner_id = inner_id;
             ordered[0].outer = outer;
             ordered[0].inner = inner;
-            ordered[5].outer_id = shared_outer;
-            ordered[5].inner_id = shared_inner;
-            ordered[5].outer = outer;
-            ordered[5].inner = inner;
             ordered.pop();
         }
-        for vertex in &ordered {
-            register_patch_point(&mut registry, vertex.outer_id, vertex.outer, size)?;
-            register_patch_point(&mut registry, vertex.inner_id, vertex.inner, size)?;
+
+        // Any other collapsed edge is not one of the two D264/D265 junctions described above.
+        for i in 0..ordered.len() {
+            let next = (i + 1) % ordered.len();
+            let outer_gap = distance3(ordered[i].outer, ordered[next].outer);
+            let inner_gap = distance3(ordered[i].inner, ordered[next].inner);
+            if within_rounding(outer_gap, size) || within_rounding(inner_gap, size) {
+                return Err(BrepError::Degenerate(format!(
+                    "transition: trimmed facet {fi} has an unclassified collapsed boundary edge {i} (outer gap {outer_gap:.12e}, inner gap {inner_gap:.12e})"
+                )));
+            }
         }
         for (i, vertex) in ordered.iter().enumerate() {
             let outer_plane = (vertex.outer - facet.origin).dot(facet.normal);
@@ -1538,22 +1591,38 @@ fn facet_patches(
         if !(normal.dot(facet.normal) > 0.0 && normal.dot(normal).is_finite()) {
             return Err(BrepError::Degenerate(format!("transition: trimmed facet {fi} has no outward planar area")));
         }
-        // A coincident lower pair was represented above as one relief vertex. Every remaining
-        // boundary edge must have distinct endpoints on both sheet surfaces.
-        for i in 0..ordered.len() {
-            let next = (i + 1) % ordered.len();
-            let outer_gap = distance3(ordered[i].outer, ordered[next].outer);
-            let inner_gap = distance3(ordered[i].inner, ordered[next].inner);
-            if within_rounding(outer_gap, size) || within_rounding(inner_gap, size) {
-                return Err(BrepError::Degenerate(format!(
-                    "transition: trimmed facet {fi} has a collapsed boundary edge {i} (bends {:?}, outer gap {outer_gap:.12e}, inner gap {inner_gap:.12e})",
-                    trim.bends
-                )));
-            }
-        }
-        patches.push(FacetPatch { facet: fi, bends: trim.bends, boundary: ordered });
+        patches.push(FacetPatch {
+            facet: fi,
+            bends: trim.bends,
+            collapsed_lower,
+            collapsed_top,
+            boundary: ordered,
+        });
     }
-    Ok((patches, registry))
+
+    // Resolve aliases globally, not only inside the patch where two geometric endpoints meet.
+    // This keeps the bend-side vertex shared with every neighbouring face in the eventual body.
+    for patch in &mut patches {
+        for vertex in &mut patch.boundary {
+            vertex.outer_id = patch_alias_root(&aliases, vertex.outer_id);
+            vertex.inner_id = patch_alias_root(&aliases, vertex.inner_id);
+        }
+    }
+    let mut registry = BTreeMap::new();
+    for patch in &patches {
+        for vertex in &patch.boundary {
+            register_patch_point(&mut registry, vertex.outer_id, vertex.outer, size)?;
+            register_patch_point(&mut registry, vertex.inner_id, vertex.inner, size)?;
+        }
+    }
+    // All occurrences of an aliased vertex use exactly the same stored coordinate.
+    for patch in &mut patches {
+        for vertex in &mut patch.boundary {
+            vertex.outer = registry[&vertex.outer_id];
+            vertex.inner = registry[&vertex.inner_id];
+        }
+    }
+    Ok((patches, registry, aliases))
 }
 
 fn verify_facet_trim_records(layout: &Layout, trims: &[FacetTrim], dims: &TransitionDims) -> Result<(), BrepError> {
@@ -1827,13 +1896,13 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
     }
     let trims = facet_trims(layout, &sections, dims)?;
     verify_facet_trim_records(layout, &trims, dims)?;
-    let (patches, registry) = facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
+    let (patches, registry, aliases) = facet_patches(TopoId::derive("transition.verify").finish(), layout, &trims, dims)?;
     if patches.len() != layout.facets.len() || registry.is_empty() {
         return Err(BrepError::Invalid("transition: trimmed facet patches are incomplete".into()));
     }
     for (fi, patch) in patches.iter().enumerate() {
-        let collapsed_lower = patch.boundary.len() == 5;
-        if patch.facet != fi || patch.bends[0] == patch.bends[1] || !(collapsed_lower || patch.boundary.len() == 6) {
+        let expected_len = 6 - usize::from(patch.collapsed_lower) - usize::from(patch.collapsed_top);
+        if patch.facet != fi || patch.bends[0] == patch.bends[1] || patch.boundary.len() != expected_len || patch.boundary.len() < 4 {
             return Err(BrepError::Invalid(format!("transition: trimmed facet patch {fi} has invalid topology")));
         }
         let patch_feature = TopoId::derive("transition.verify").finish();
@@ -1844,17 +1913,24 @@ fn verify(layout: &Layout, dims: &TransitionDims) -> Result<(), BrepError> {
                 .iter()
                 .position(|&f| f == fi)
                 .ok_or_else(|| BrepError::Invalid(format!("transition: patch {fi} names a non-adjacent bend {bend_index}")))?;
-            let lower = patch.boundary[if slot == 0 || collapsed_lower { 0 } else { 5 }];
-            let upper = patch.boundary[if slot == 0 { 1 } else { 4 }];
-            let lower_ids_match = if collapsed_lower {
-                lower.outer_id == patch_relief_id(patch_feature, fi, false) && lower.inner_id == patch_relief_id(patch_feature, fi, true)
+            let lower_index = if slot == 0 || patch.collapsed_lower { 0 } else if patch.collapsed_top { 4 } else { 5 };
+            let upper_index = if slot == 0 { 1 } else if patch.collapsed_top { 3 } else { 4 };
+            let lower = patch.boundary[lower_index];
+            let upper = patch.boundary[upper_index];
+            let expected_lower_outer = if patch.collapsed_lower {
+                patch_alias_root(&aliases, patch_relief_id(patch_feature, fi, false))
             } else {
-                lower.outer_id == patch_band_id(patch_feature, *bend_index, side, false, false)
-                    && lower.inner_id == patch_band_id(patch_feature, *bend_index, side, false, true)
+                patch_alias_root(&aliases, patch_band_id(patch_feature, *bend_index, side, false, false))
             };
-            if !lower_ids_match
-                || upper.outer_id != patch_band_id(patch_feature, *bend_index, side, true, false)
-                || upper.inner_id != patch_band_id(patch_feature, *bend_index, side, true, true)
+            let expected_lower_inner = if patch.collapsed_lower {
+                patch_alias_root(&aliases, patch_relief_id(patch_feature, fi, true))
+            } else {
+                patch_alias_root(&aliases, patch_band_id(patch_feature, *bend_index, side, false, true))
+            };
+            if lower.outer_id != expected_lower_outer
+                || lower.inner_id != expected_lower_inner
+                || upper.outer_id != patch_alias_root(&aliases, patch_band_id(patch_feature, *bend_index, side, true, false))
+                || upper.inner_id != patch_alias_root(&aliases, patch_band_id(patch_feature, *bend_index, side, true, true))
             {
                 return Err(BrepError::Invalid(format!("transition: patch {fi}'s bend-side vertex IDs are inconsistent")));
             }
@@ -2032,13 +2108,15 @@ mod tests {
             let layout = layout(feature, &square(), "ab", &circle(), "c", &d).unwrap();
             let sections = lower_sections(&layout, &d).unwrap();
             let trims = facet_trims(&layout, &sections, &d).unwrap();
-            let (patches, registry) = facet_patches(feature, &layout, &trims, &d).unwrap();
+            let (patches, registry, _) = facet_patches(feature, &layout, &trims, &d).unwrap();
             assert_eq!(patches.len(), 28, "side {side:?}");
             assert!(registry.len() >= patches.len() * 6, "side {side:?}");
-            assert_eq!(patches[6].boundary.len(), 5, "facet 6 ends at one relief vertex, side {side:?}");
+            assert!(patches[6].collapsed_lower, "facet 6 ends at one relief vertex, side {side:?}");
+            assert!(patches[5].collapsed_top, "facet 5 has a top rim/bend junction, side {side:?}");
             for patch in &patches {
-                assert!(matches!(patch.boundary.len(), 5 | 6), "facet {}, side {side:?}", patch.facet);
-                let body = facet_patch_prism(feature, patch, layout.facets[patch.facet].normal).unwrap();
+                assert!((4..=6).contains(&patch.boundary.len()), "facet {}, side {side:?}", patch.facet);
+                let body = facet_patch_prism(feature, patch, layout.facets[patch.facet].normal)
+                    .unwrap_or_else(|error| panic!("facet {}, side {side:?}: {error}", patch.facet));
                 body.validate().unwrap();
                 assert!(body.volume() > 0.0, "facet {}, side {side:?}", patch.facet);
             }
