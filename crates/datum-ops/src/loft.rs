@@ -183,33 +183,12 @@ fn two_bend_layout(
         Side::Right => radius,
         Side::Middle => radius + 0.5 * thickness,
     };
-    let bend_1 = bend_layout(
-        [a0, vertex],
-        facets[0],
-        facets[1],
-        radius,
-        thickness,
-        reference_radius,
-        radius + k_factor * thickness,
-    )?;
-    let bend_2 = bend_layout(
-        [a1, vertex],
-        facets[2],
-        facets[1],
-        radius,
-        thickness,
-        reference_radius,
-        radius + k_factor * thickness,
-    )?;
+    let bend_1 = bend_layout([a0, vertex], facets[0], facets[1], radius, thickness, reference_radius, radius + k_factor * thickness)?;
+    let bend_2 = bend_layout([a1, vertex], facets[2], facets[1], radius, thickness, reference_radius, radius + k_factor * thickness)?;
 
     // The two tangent lines on the middle triangle must meet once, inside both hinge segments.
-    let (corner, first_station, second_station) =
-        line_meeting(bend_1.middle_tangent, bend_1.axis, bend_2.middle_tangent, bend_2.axis)?;
-    if !(first_station > 0.0
-        && first_station < bend_1.hinge_length
-        && second_station > 0.0
-        && second_station < bend_2.hinge_length)
-    {
+    let (corner, first_station, second_station) = line_meeting(bend_1.middle_tangent, bend_1.axis, bend_2.middle_tangent, bend_2.axis)?;
+    if !(first_station > 0.0 && first_station < bend_1.hinge_length && second_station > 0.0 && second_station < bend_2.hinge_length) {
         return Err(BrepError::Degenerate(format!(
             "loft: the two bend tangent lines meet outside their shared middle facet (stations {first_station:.6}, {second_station:.6})"
         )));
@@ -238,7 +217,8 @@ fn bend_layout(
     let hinge_length = length(axis_vector);
     let axis = unit(axis_vector).ok_or_else(|| BrepError::Degenerate("loft: a bend has zero length".into()))?;
     let inward = |facet: Facet| -> Result<Vec3, BrepError> {
-        let third = facet.points
+        let third = facet
+            .points
             .iter()
             .copied()
             .find(|p| *p != hinge[0] && *p != hinge[1])
@@ -268,7 +248,8 @@ fn bend_layout(
 
     // The radius must fit on both facets before the tangent lines reach their opposite edges.
     for (index, facet) in [first, second].into_iter().enumerate() {
-        let third = facet.points
+        let third = facet
+            .points
             .iter()
             .copied()
             .find(|p| *p != hinge[0] && *p != hinge[1])
@@ -288,16 +269,12 @@ fn bend_layout(
     let radial_0 = unit(tangent_0 - center).ok_or_else(|| BrepError::Degenerate("loft: a bend tangent has no radius".into()))?;
     let radial_1 = unit(tangent_1 - center).ok_or_else(|| BrepError::Degenerate("loft: a bend tangent has no radius".into()))?;
     let size = [hinge[0], hinge[1], tangent_0, tangent_1].iter().flat_map(|p| p.to_array()).fold(1.0_f64, |m, x| m.max(x.abs()));
-    if !within_rounding((tangent_0 - hinge[0]).dot(first.normal), size)
-        || !within_rounding((tangent_1 - hinge[0]).dot(second.normal), size)
-    {
+    if !within_rounding((tangent_0 - hinge[0]).dot(first.normal), size) || !within_rounding((tangent_1 - hinge[0]).dot(second.normal), size) {
         return Err(BrepError::Invalid("loft: bend tangent lines leave their planar facets".into()));
     }
     let measured_0 = length(tangent_0 - center);
     let measured_1 = length(tangent_1 - center);
-    if !within_rounding(measured_0 - reference_radius, reference_radius)
-        || !within_rounding(measured_1 - reference_radius, reference_radius)
-    {
+    if !within_rounding(measured_0 - reference_radius, reference_radius) || !within_rounding(measured_1 - reference_radius, reference_radius) {
         return Err(BrepError::Invalid("loft: tangent points do not lie on the reference bend cylinder".into()));
     }
     let sweep = libm::atan2(axis.dot(radial_0.cross(radial_1)), radial_0.dot(radial_1)).abs();
@@ -336,12 +313,7 @@ fn line_meeting(p: Vec3, d: Vec3, q: Vec3, e: Vec3) -> Result<(Vec3, f64, f64), 
     Ok((a, s, t))
 }
 
-fn second_profile_corner(
-    sketch: &Placed,
-    lines: &[(String, Vec3, Vec3)],
-    midpoint: Vec3,
-    direction: Vec3,
-) -> Result<(Vec3, Vec3, Vec3), BrepError> {
+fn second_profile_corner(sketch: &Placed, lines: &[(String, Vec3, Vec3)], midpoint: Vec3, direction: Vec3) -> Result<(Vec3, Vec3, Vec3), BrepError> {
     if lines.len() != 2 {
         return Err(BrepError::Unsupported("loft: the second profile must contain exactly two straight lines for this step".into()));
     }
@@ -354,10 +326,17 @@ fn second_profile_corner(
         return Err(BrepError::Sketch("loft: the two lines of the second profile must share exactly one endpoint".into()));
     }
     let vertex_name = shared[0];
-    let outer_a = *ends_a.iter().find(|&&p| p != vertex_name).ok_or_else(|| BrepError::Sketch("loft: the first line has no outer endpoint".into()))?;
-    let outer_b = *ends_b.iter().find(|&&p| p != vertex_name).ok_or_else(|| BrepError::Sketch("loft: the second line has no outer endpoint".into()))?;
+    let outer_a =
+        *ends_a.iter().find(|&&p| p != vertex_name).ok_or_else(|| BrepError::Sketch("loft: the first line has no outer endpoint".into()))?;
+    let outer_b =
+        *ends_b.iter().find(|&&p| p != vertex_name).ok_or_else(|| BrepError::Sketch("loft: the second line has no outer endpoint".into()))?;
     let world = |name: &str| -> Result<Vec3, BrepError> {
-        let p = sketch.solved.points.get(name).copied().ok_or_else(|| BrepError::LostReference(format!("loft: the second profile lost point {}", name)))?;
+        let p = sketch
+            .solved
+            .points
+            .get(name)
+            .copied()
+            .ok_or_else(|| BrepError::LostReference(format!("loft: the second profile lost point {}", name)))?;
         Ok(sketch.frame[0] + sketch.frame[1] * p.x + sketch.frame[2] * p.y)
     };
     let (mut a, mut b, vertex) = (world(outer_a)?, world(outer_b)?, world(vertex_name)?);
@@ -369,7 +348,9 @@ fn second_profile_corner(
     let along_a = (a - midpoint).dot(direction);
     let along_b = (b - midpoint).dot(direction);
     if along_a == 0.0 || along_b == 0.0 || along_a.signum() == along_b.signum() {
-        return Err(BrepError::Degenerate("loft: the two outer endpoints of the second profile must lie on opposite sides of the first line's midpoint".into()));
+        return Err(BrepError::Degenerate(
+            "loft: the two outer endpoints of the second profile must lie on opposite sides of the first line's midpoint".into(),
+        ));
     }
     if along_a > along_b {
         std::mem::swap(&mut a, &mut b);
@@ -390,19 +371,19 @@ fn profile_lines(sketch: &Placed, which: &str) -> Result<Vec<(String, Vec3, Vec3
     if sketch.developed.is_some() {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must lie on a plane")));
     }
-    if sketch.arcs.values().any(|arc| !arc.construction)
-        || sketch.circles.values().any(|circle| !circle.construction)
-        || !sketch.ellipses.is_empty()
-    {
+    if sketch.arcs.values().any(|arc| !arc.construction) || sketch.circles.values().any(|circle| !circle.construction) || !sketch.ellipses.is_empty() {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must contain only straight lines")));
     }
     let world = |name: &str| -> Result<Vec3, BrepError> {
-        let p = sketch.solved.points.get(name).copied().ok_or_else(|| BrepError::LostReference(format!("loft: the {which} profile lost point {}", name)))?;
+        let p = sketch
+            .solved
+            .points
+            .get(name)
+            .copied()
+            .ok_or_else(|| BrepError::LostReference(format!("loft: the {which} profile lost point {}", name)))?;
         Ok(sketch.frame[0] + sketch.frame[1] * p.x + sketch.frame[2] * p.y)
     };
-    sketch.lines.iter().filter(|(_, line)| !line.construction)
-        .map(|(name, line)| Ok((name.clone(), world(&line.from)?, world(&line.to)?)))
-        .collect()
+    sketch.lines.iter().filter(|(_, line)| !line.construction).map(|(name, line)| Ok((name.clone(), world(&line.from)?, world(&line.to)?))).collect()
 }
 
 fn thickness_sides(side: Side, thickness: f64) -> (f64, f64) {
