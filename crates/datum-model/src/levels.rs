@@ -395,7 +395,7 @@ impl Doc {
                     *thickness = Some(Num::Value(t));
                     *radius = Some(Num::Value(r));
                     *k_factor = Some(k_of(&ks, ix as NodeIx));
-                },
+                }
                 // A placed part forms the sheet by the rule's thickness and bend radius (D261).
                 Op::Component { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
