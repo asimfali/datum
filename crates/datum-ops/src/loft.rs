@@ -1,23 +1,16 @@
 //! A planar loft from two parallel line profiles (D264, first step).
 
-use datum_brep::{build_with_curves, Body, BrepError, FaceSpec, Plane, Surface, TopoId, Vertex};
-use datum_math::{orient3d_coords, Sign, Vec3};
+use datum_brep::{Body, BrepError, FaceSpec, Plane, Surface, TopoId, Vertex, build_with_curves};
+use datum_math::{Sign, Vec3, orient3d_coords};
 
-use crate::{parallel, Placed, Side};
+use crate::{Placed, Side, parallel};
 
 /// Builds the first D264 case: two single-line sketches make one planar trapezoid.
 ///
 /// The sketch support planes need not be parallel: the solved world-space line profiles
 /// themselves must be parallel and their four endpoints coplanar. This covers the author's
 /// XY/XZ test case, whose sketch planes are perpendicular but whose lines lie in one plane.
-pub fn loft(
-    feature: TopoId,
-    first: &Placed,
-    second: &Placed,
-    thickness: f64,
-    side: Side,
-    tolerance: f64,
-) -> Result<Body, BrepError> {
+pub fn loft(feature: TopoId, first: &Placed, second: &Placed, thickness: f64, side: Side, tolerance: f64) -> Result<Body, BrepError> {
     if !(thickness > 0.0 && thickness.is_finite()) {
         return Err(BrepError::Degenerate(format!("loft: thickness must be positive and finite, got {thickness}")));
     }
@@ -65,16 +58,8 @@ pub fn loft(
     // One planar face on each side of the sheet. The second loop is reversed so every
     // perimeter edge has the opposite use in its thickness face.
     let mut faces = Vec::with_capacity(6);
-    faces.push(planar_face(
-        face_id(feature, 0),
-        outer_ids.to_vec(),
-        outer.to_vec(),
-    )?);
-    faces.push(planar_face(
-        face_id(feature, 1),
-        (0..4).rev().map(|i| inner_ids[i]).collect(),
-        (0..4).rev().map(|i| inner[i]).collect(),
-    )?);
+    faces.push(planar_face(face_id(feature, 0), outer_ids.to_vec(), outer.to_vec())?);
+    faces.push(planar_face(face_id(feature, 1), (0..4).rev().map(|i| inner_ids[i]).collect(), (0..4).rev().map(|i| inner[i]).collect())?);
 
     // The four thickness faces close the sheet around the trapezoid's real boundary.
     for i in 0..4 {
@@ -93,10 +78,7 @@ fn profile_line(sketch: &Placed, which: &str) -> Result<(Vec3, Vec3), BrepError>
     if sketch.developed.is_some() {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must lie on a plane")));
     }
-    if sketch.arcs.values().any(|arc| !arc.construction)
-        || sketch.circles.values().any(|circle| !circle.construction)
-        || !sketch.ellipses.is_empty()
-    {
+    if sketch.arcs.values().any(|arc| !arc.construction) || sketch.circles.values().any(|circle| !circle.construction) || !sketch.ellipses.is_empty() {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must be one straight line")));
     }
     let mut lines = sketch.lines.iter().filter(|(_, line)| !line.construction);
@@ -107,12 +89,8 @@ fn profile_line(sketch: &Placed, which: &str) -> Result<(Vec3, Vec3), BrepError>
         return Err(BrepError::Unsupported(format!("loft: the {which} sketch must contain exactly one profile line")));
     }
     let world = |name: &str| {
-        let point = sketch
-            .solved
-            .points
-            .get(name)
-            .copied()
-            .ok_or_else(|| BrepError::LostReference(format!("loft: the {which} line lost point {name}")))?;
+        let point =
+            sketch.solved.points.get(name).copied().ok_or_else(|| BrepError::LostReference(format!("loft: the {which} line lost point {name}")))?;
         Ok(sketch.frame[0] + sketch.frame[1] * point.x + sketch.frame[2] * point.y)
     };
     Ok((world(&line.from)?, world(&line.to)?))
@@ -136,11 +114,7 @@ fn planar_face(id: TopoId, loop_ids: Vec<TopoId>, points: Vec<Vec3>) -> Result<F
         return Err(BrepError::Degenerate(format!("loft: face {id:?} has no planar area")));
     }
     let normal = normal * (1.0 / length_squared.sqrt());
-    Ok(FaceSpec {
-        id,
-        surface: Surface::Plane(Plane { origin: points[0], normal }),
-        loops: vec![loop_ids],
-    })
+    Ok(FaceSpec { id, surface: Surface::Plane(Plane { origin: points[0], normal }), loops: vec![loop_ids] })
 }
 
 fn unit(vector: Vec3) -> Option<Vec3> {
