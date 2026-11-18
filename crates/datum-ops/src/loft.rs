@@ -479,8 +479,8 @@ struct SkinGeom {
     apex: Vec3,
     /// The middle facet's working triangle: its edge A corners, then the apex.
     middle: [Vec3; 3],
-    /// Each wing's working triangle: its fold start, the profile corner, its fold end.
-    wings: [[Vec3; 3]; 2],
+    /// Each wing's working quad: fold start, the apex, the wing's ridge crossing, the profile corner.
+    wings: [[Vec3; 4]; 2],
 }
 
 /// One bend's points on one skin. The fold line runs `fold + t * axis`; the tangent lines run
@@ -491,6 +491,9 @@ struct BendSkin {
     fold: Vec3,
     mid_tan: Vec3,
     wing_tan: Vec3,
+    axis: Vec3,
+    middle_in: Vec3,
+    wing_in: Vec3,
     /// The tangent lines' crossings with the outline: the middle side (edge A), the wing side.
     edge_cross: Vec3,
     wing_cross: Vec3,
@@ -518,6 +521,8 @@ struct BendSkin {
     /// The cut stations along the axis: the edge-side cut, then the corner cut.
     edge_station: f64,
     corner_station: f64,
+    /// The wing facet's fold end on the wing's far edge: the sharp part's far corner.
+    wing_end: Vec3,
 }
 
 /// Per bend, the directions shared by both skins: the axis and the inward directions.
@@ -582,6 +587,14 @@ fn two_bend_geom(
             let corner_station = layout.corner_station[i];
             let fold_at_edge_cut = fold + dirs.axis * edge_station;
             let fold_at_corner = fold + dirs.axis * corner_station;
+            // The wing's fold end on the wing's far edge.
+            let (far_origin, far_direction) = if i == 0 {
+                (b0 + normals[0] * offset, vertex - b0)
+            } else {
+                (b1 + normals[2] * offset, vertex - b1)
+            };
+            let wing_end = line_meeting(fold, dirs.axis, far_origin, far_direction)
+                .map_err(|e| BrepError::Degenerate(format!("wing_end bend {i} skin offset {offset}: {e}")))?.0;
             // The cut lines' crossings with each facet's own outline edges.
             let middle_cut_cross = line_meeting(fold_at_edge_cut, dirs.middle_in, edge_start + edge_normal, edge_end - edge_start)?.0;
             let wing_cut_cross = line_meeting(fold_at_edge_cut, dirs.wing_in, wing_edge_start + wing_edge_offset, wing_edge_end - wing_edge_start)?.0;
@@ -628,6 +641,9 @@ fn two_bend_geom(
                 fold,
                 mid_tan,
                 wing_tan,
+                axis: dirs.axis,
+                middle_in: dirs.middle_in,
+                wing_in: dirs.wing_in,
                 edge_cross,
                 wing_cross,
                 far_cross,
@@ -644,6 +660,7 @@ fn two_bend_geom(
                 profile_cut_cross,
                 edge_station,
                 corner_station,
+                wing_end,
             });
         }
         // The skin's facet planes: the middle's through the shifted A ends, the wings' through
@@ -653,16 +670,25 @@ fn two_bend_geom(
         let middle_start = line_meeting(a0 + middle_normal * offset, a1 - a0, bends[0].fold, dirs[0].axis)?.0;
         let middle_end = line_meeting(a1 + middle_normal * offset, a0 - a1, bends[1].fold, dirs[1].axis)?.0;
         let wing0_start = line_meeting(a0 + wing0_normal * offset, b0 - a0, bends[0].fold, dirs[0].axis)?.0;
-        let wing0_end = line_meeting(b0 + wing0_normal * offset, vertex - b0, bends[0].fold, dirs[0].axis)?.0;
         let wing1_start = line_meeting(a1 + wing1_normal * offset, b1 - a1, bends[1].fold, dirs[1].axis)?.0;
-        let wing1_end = line_meeting(b1 + wing1_normal * offset, vertex - b1, bends[1].fold, dirs[1].axis)?.0;
+        // The wings meet each other in a sharp ridge (the loft's second profile has no bend at
+        // its apex): the ridge line and where it crosses each wing's far edge, which trims the
+        // wings past the shifted profile corner.
+        let ridge_direction = unit(wing0_normal.cross(wing1_normal)).ok_or_else(|| {
+            BrepError::Degenerate("loft: the two wing facets have no unique ridge".into())
+        })?;
+        let ridge0 = line_meeting(apex, ridge_direction, b0 + wing0_normal * offset, vertex - b0)?.0;
+        let ridge1 = line_meeting(apex, ridge_direction, b1 + wing1_normal * offset, vertex - b1)?.0;
         skins.push(SkinGeom {
             offset,
             radius,
             bends: [bends[0].clone(), bends[1].clone()],
             apex,
             middle: [middle_start, middle_end, apex],
-            wings: [[wing0_start, b0 + wing0_normal * offset, wing0_end], [wing1_start, b1 + wing1_normal * offset, wing1_end]],
+            wings: [
+                [wing0_start, apex, ridge0, b0 + wing0_normal * offset],
+                [wing1_start, apex, ridge1, b1 + wing1_normal * offset],
+            ],
         });
     }
     Ok([skins[0].clone(), skins[1].clone()])
@@ -712,7 +738,12 @@ mod two_bend_tests {
             [profile[0], profile[1], vertex],
             [profile[1], vertex, b1],
         ];
-        let normals = facet_normals(&facets);
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        let normals = facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        });
         let [reference, offset_skin] = two_bend_geom(&[profile[0], profile[1], vertex, b0, b1], &normals, &layout, author_rule()).unwrap();
 
         // The reference skin keeps the facets at offset 0, the Left skin sits across them.
@@ -760,7 +791,12 @@ mod two_bend_tests {
             [profile[0], profile[1], vertex],
             [profile[1], vertex, b1],
         ];
-        let normals = facet_normals(&facets);
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        let normals = facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        });
         let [reference, _] =
             two_bend_geom(&[profile[0], profile[1], vertex, b0, b1], &normals, &layout, author_rule()).unwrap();
 
@@ -788,7 +824,12 @@ mod two_bend_tests {
             [profile[0], profile[1], vertex],
             [profile[1], vertex, b1],
         ];
-        let normals = facet_normals(&facets);
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        let normals = facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        });
         let [_, offset_skin] =
             two_bend_geom(&[profile[0], profile[1], vertex, b0, b1], &normals, &layout, author_rule()).unwrap();
 
@@ -810,5 +851,200 @@ mod two_bend_tests {
         let half_cos = libm::cos(0.5 * layout.bends[0].angle);
         let expected_fold = profile[0] + layout.bends[0].bisector * (offset_skin.offset / -half_cos);
         assert!(close(offset_skin.bends[0].fold, expected_fold), "fold line");
+    }
+}
+
+
+/// Collects the body's points, assigning each a unique stable vertex ID.
+#[allow(dead_code)]
+struct Bag {
+    feature: TopoId,
+    points: Vec<(TopoId, Vec3)>,
+}
+
+impl Bag {
+    fn new(feature: TopoId) -> Bag {
+        Bag { feature, points: Vec::with_capacity(64) }
+    }
+    fn get(&mut self, point: Vec3) -> TopoId {
+        if let Some(&(id, _)) = self.points.iter().find(|(_, p)| length(*p - point) < 1e-7) {
+            return id;
+        }
+        let id = vertex_id(self.feature, self.points.len() as u64);
+        self.points.push((id, point));
+        id
+    }
+    fn point(&self, id: TopoId) -> Vec3 {
+        self.points.iter().find(|(vid, _)| *vid == id).map_or(Vec3::ZERO, |(_, p)| *p)
+    }
+}
+
+fn two_bend_body(feature: TopoId, points: &[Vec3; 5], normals: &[Vec3; 3], layout: &TwoBendLayout, rule: BendRule) -> Result<Body, BrepError> {
+    let _ = (feature, points, normals, layout, rule);
+    Err(BrepError::Unsupported("loft: two-bend body assembly is not finished".into()))
+}
+
+/// Clips a convex polygon, keeping the points on the positive side of the plane through `anchor`
+/// with the unit `normal`, up to the plane's own bit of tolerance (D229).
+fn clip_half(polygon: &mut Vec<Vec3>, anchor: Vec3, normal: Vec3, size: f64) {
+    let tolerance = 64.0 * f64::EPSILON * size;
+    let inside = |d: f64| d >= -tolerance;
+    let mut kept = Vec::with_capacity(polygon.len() + 1);
+    for index in 0..polygon.len() {
+        let (a, b) = (polygon[index], polygon[(index + 1) % polygon.len()]);
+        let (da, db) = ((a - anchor).dot(normal), (b - anchor).dot(normal));
+        if inside(da) {
+            kept.push(a);
+        }
+        if inside(da) != inside(db) {
+            kept.push(a + (b - a) * (da / (da - db)));
+        }
+    }
+    *polygon = kept;
+    let mut index = 1;
+    while index < polygon.len() {
+        if length(polygon[index] - polygon[index - 1]) < 1e-9 {
+            polygon.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    if polygon.len() > 1 && length(polygon[0] - polygon[polygon.len() - 1]) < 1e-9 {
+        polygon.pop();
+    }
+}
+
+/// The middle facet's rounded part on one skin: beyond both tangent lines, past both edge cuts.
+#[allow(dead_code)]
+fn middle_rounded(skin: &SkinGeom) -> Vec<Vec3> {
+    let mut polygon = skin.middle.to_vec();
+    for bend in &skin.bends {
+        clip_half(&mut polygon, bend.mid_tan, bend.middle_in, 1.0);
+        clip_half(&mut polygon, bend.middle_at_edge_cut, bend.axis, 1.0);
+        clip_half(&mut polygon, bend.corner, bend.axis * -1.0, 1.0);
+    }
+    polygon
+}
+
+/// The middle facet's sharp part past bend `i`'s corner cut: to the fold, while bend `1-i` is
+/// still rounded.
+#[allow(dead_code)]
+fn middle_sharp(skin: &SkinGeom, i: usize) -> Vec<Vec3> {
+    let (own, other) = (&skin.bends[i], &skin.bends[1 - i]);
+    let mut polygon = skin.middle.to_vec();
+    clip_half(&mut polygon, own.corner, own.axis, 1.0);
+    clip_half(&mut polygon, own.fold_at_corner, own.middle_in, 1.0);
+    clip_half(&mut polygon, other.mid_tan, other.middle_in, 1.0);
+    clip_half(&mut polygon, other.corner, other.axis * -1.0, 1.0);
+    polygon
+}
+
+/// The middle facet's apex part: past both corner cuts, to both sharp folds.
+#[allow(dead_code)]
+fn middle_apex(skin: &SkinGeom) -> Vec<Vec3> {
+    let mut polygon = skin.middle.to_vec();
+    for bend in &skin.bends {
+        clip_half(&mut polygon, bend.corner, bend.axis, 1.0);
+        clip_half(&mut polygon, bend.fold_at_corner, bend.middle_in, 1.0);
+    }
+    polygon
+}
+
+/// One wing facet's rounded part: between its cuts, beyond its tangent line.
+#[allow(dead_code)]
+fn wing_rounded(skin: &SkinGeom, wing: usize) -> Vec<Vec3> {
+    let bend = &skin.bends[wing];
+    let mut polygon = skin.wings[wing].to_vec();
+    clip_half(&mut polygon, bend.wing_at_edge_cut, bend.axis, 1.0);
+    clip_half(&mut polygon, bend.wing_tan, bend.wing_in, 1.0);
+    clip_half(&mut polygon, bend.wing_corner, bend.axis * -1.0, 1.0);
+    polygon
+}
+
+/// One wing facet's sharp part past the corner cut: to the fold and the outline.
+#[allow(dead_code)]
+fn wing_sharp(skin: &SkinGeom, wing: usize, vertex_s: Vec3, wing_far_origin: Vec3) -> Vec<Vec3> {
+    let bend = &skin.bends[wing];
+    let mut polygon = skin.wings[wing].to_vec();
+    clip_half(&mut polygon, bend.wing_corner, bend.axis, 1.0);
+    // The corner trace's tangent point is interior to the trace edge: split it so the rounded
+    // part and the step face share exact sub-edges.
+    for k in 0..polygon.len() {
+        let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
+        let to = bend.wing_corner - a;
+        let t = to.dot(b - a) / (b - a).dot(b - a);
+        if t > 1e-9 && t < 1.0 - 1e-9 && length(a + (b - a) * t - bend.wing_corner) < 1e-9 {
+            polygon.insert(k + 1, bend.wing_corner);
+            break;
+        }
+    }
+    // The fold's end on the far edge splits that edge (the wall pieces share its halves); the
+    // fold edge itself is shared whole with the middle facet's apex part.
+    let far = unit(vertex_s - wing_far_origin).map_or(Vec3::ZERO, |d| d);
+    let mut best: Option<(usize, f64)> = None;
+    for k in 0..polygon.len() {
+        let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
+        let to = bend.wing_end - a;
+        let t = to.dot(b - a) / (b - a).dot(b - a);
+        if t > 1e-9 && t < 1.0 - 1e-9 && length(a + (b - a) * t - bend.wing_end) < 1e-9 {
+            let score = (b - a).dot(far).abs();
+            if best.map_or(true, |(_, s)| score > s) {
+                best = Some((k, score));
+            }
+        }
+    }
+    if let Some((k, _)) = best {
+        polygon.insert(k + 1, bend.wing_end);
+    }
+    polygon
+}
+
+
+#[cfg(test)]
+mod two_bend_region_tests {
+    use super::*;
+
+    /// Prints every region polygon of both skins for the author's geometry: vertex counts and
+    /// coordinates, to check the tiling by eye and by invariants before the builder consumes it.
+    #[test]
+    fn regions_of_author_geometry() {
+        let (profile, second) = ([Vec3::new(-5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 0.0)], [
+            Vec3::new(-15.0, 15.0, 0.0),
+            Vec3::new(0.0, 15.0, 15.0),
+            Vec3::new(15.0, 15.0, 0.0),
+        ]);
+        let rule = BendRule { thickness: 2.0, radius: 2.0, k_factor: 0.44, side: Side::Left };
+        let layout = two_bend_from_points(profile, second, rule).unwrap();
+        let facets = [
+            [profile[0], second[0], second[1]],
+            [profile[0], profile[1], second[1]],
+            [profile[1], second[1], second[2]],
+        ];
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        let normals = facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        });
+        let [a0, a1, vertex, b0, b1] = [profile[0], profile[1], second[1], second[0], second[2]];
+        let [reference, offset] = two_bend_geom(&[a0, a1, vertex, b0, b1], &normals, &layout, rule).unwrap();
+        for (name, skin) in [("reference", &reference), ("offset", &offset)] {
+            println!("== {name} skin, offset {}", skin.offset);
+            println!("middle rounded: {} vertices", middle_rounded(skin).len());
+            for i in 0..2 {
+                println!("middle sharp {i}: {:?}", middle_sharp(skin, i).iter().map(|p| (p.x, p.y, p.z)).collect::<Vec<_>>());
+            }
+            println!("middle apex: {:?}", middle_apex(skin).iter().map(|p| (p.x, p.y, p.z)).collect::<Vec<_>>());
+            println!("middle rounded pts: {:?}", middle_rounded(skin).iter().map(|p| (p.x, p.y, p.z)).collect::<Vec<_>>());
+            for i in 0..2 {
+                println!("wing {i} rounded: {:?}", wing_rounded(skin, i).iter().map(|p| (p.x, p.y, p.z)).collect::<Vec<_>>());
+                let (v_s, f_o) = if i == 0 {
+                    (vertex + normals[0] * skin.offset, b0 + normals[0] * skin.offset)
+                } else {
+                    (vertex + normals[2] * skin.offset, b1 + normals[2] * skin.offset)
+                };
+                println!("wing {i} sharp: {:?}", wing_sharp(skin, i, v_s, f_o).iter().map(|p| (p.x, p.y, p.z)).collect::<Vec<_>>());
+            }
+        }
     }
 }
