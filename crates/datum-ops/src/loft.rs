@@ -125,6 +125,7 @@ struct Facet {
 }
 
 #[derive(Clone, Copy)]
+#[allow(dead_code)]
 struct BendLayout {
     axis: Vec3,
     hinge_length: f64,
@@ -135,11 +136,23 @@ struct BendLayout {
     neutral_radius: f64,
     tangent_offset: f64,
     middle_tangent: Vec3,
+    /// The tangent point on the first (wing) facet, at the same station as `middle_tangent`.
+    wing_tangent: Vec3,
+    /// Inward unit directions across the bend, in each facet from the hinge: wing first.
+    wing_in: Vec3,
+    middle_in: Vec3,
+    /// Unit bisector of the two inward directions, from the hinge towards the bend centre.
+    bisector: Vec3,
 }
 
+#[allow(dead_code)]
 struct TwoBendLayout {
     bends: [BendLayout; 2],
     corner_station: [f64; 2],
+    /// The radius the facets' own surfaces (offset 0) carry about the bend centres.
+    reference_radius: f64,
+    /// Where the two tangent lines on the middle facet meet.
+    corner: Vec3,
 }
 
 #[derive(Clone, Copy)]
@@ -154,6 +167,17 @@ struct BendRule {
 /// lines in the middle facet meet; both bends must terminate there, rather than overlap caps.
 fn two_bend_layout(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, Vec3)], rule: BendRule) -> Result<TwoBendLayout, BrepError> {
     let [a0, a1] = profile;
+    let direction = unit(a1 - a0).ok_or_else(|| BrepError::Degenerate("loft: the first profile line has zero length".into()))?;
+    let midpoint = (a0 + a1) * 0.5;
+    let (b0, vertex, b1) = second_profile_corner(second, lines, midpoint, direction)?;
+    two_bend_from_points([a0, a1], [b0, vertex, b1], rule)
+
+}
+
+/// The same layout straight from the solved world-space profile points.
+fn two_bend_from_points(profile: [Vec3; 2], second: [Vec3; 3], rule: BendRule) -> Result<TwoBendLayout, BrepError> {
+    let [a0, a1] = profile;
+    let [b0, vertex, b1] = second;
     let BendRule { thickness, radius, k_factor, side } = rule;
     if !(radius > 0.0 && radius.is_finite()) {
         return Err(BrepError::Degenerate(format!("loft: bend radius must be positive and finite, got {radius}")));
@@ -161,9 +185,10 @@ fn two_bend_layout(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, 
     if !(0.0..=1.0).contains(&k_factor) {
         return Err(BrepError::Degenerate(format!("loft: K-factor must lie between 0 and 1, got {k_factor}")));
     }
-    let direction = unit(a1 - a0).ok_or_else(|| BrepError::Degenerate("loft: the first profile line has zero length".into()))?;
+    if !(length(a1 - a0) > 0.0 && length(a1 - a0).is_finite()) {
+        return Err(BrepError::Degenerate("loft: the first profile line has zero length".into()));
+    }
     let midpoint = (a0 + a1) * 0.5;
-    let (b0, vertex, b1) = second_profile_corner(second, lines, midpoint, direction)?;
     let base_normal = unit((a1 - a0).cross(vertex - midpoint))
         .ok_or_else(|| BrepError::Degenerate("loft: the second profile's vertex lies on the first profile line".into()))?;
 
@@ -207,7 +232,7 @@ fn two_bend_layout(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, 
         return Err(BrepError::Invalid("loft: the two bend tangents do not share one corner".into()));
     }
 
-    Ok(TwoBendLayout { bends: [bend_1, bend_2], corner_station: [first_station, second_station] })
+    Ok(TwoBendLayout { bends: [bend_1, bend_2], corner_station: [first_station, second_station], reference_radius, corner })
 }
 
 /// The sharp shared edge is the bend's axis; first and second are the facets on either side.
@@ -298,6 +323,10 @@ fn bend_layout(
         neutral_radius,
         tangent_offset,
         middle_tangent: tangent_1,
+        wing_tangent: tangent_0,
+        wing_in: u0,
+        middle_in: u1,
+        bisector,
     })
 }
 
@@ -430,4 +459,324 @@ fn unit(vector: Vec3) -> Option<Vec3> {
 
 fn length(vector: Vec3) -> f64 {
     vector.dot(vector).sqrt()
+}
+
+// WIP D265 step 2: the body builder consuming these arrives next in this task; until then
+// clippy's dead-code check is silenced for the geometry block only.
+#[allow(dead_code)]
+/// The solved points of one skin of the three-facet / two-bend sheet (D265).
+///
+/// A skin is the sheet's surface at one thickness offset: the three facet planes shifted by
+/// `offset` along their own normals, and the two bend cylinders of radius `radius` about the
+/// unchanged bend centres. Its facet regions are bounded by the outline edges and the skin's own
+/// fold lines (the reference hinges at offset 0, the shifted planes' intersections elsewhere).
+#[derive(Clone)]
+struct SkinGeom {
+    offset: f64,
+    radius: f64,
+    bends: [BendSkin; 2],
+    /// Where the skin's three facet planes meet: the sheet's apex on this skin.
+    apex: Vec3,
+    /// The middle facet's working triangle: its edge A corners, then the apex.
+    middle: [Vec3; 3],
+    /// Each wing's working triangle: its fold start, the profile corner, its fold end.
+    wings: [[Vec3; 3]; 2],
+}
+
+/// One bend's points on one skin. The fold line runs `fold + t * axis`; the tangent lines run
+/// `mid_tan + t * axis` and `wing_tan + t * axis`, all stations measured from those anchors.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct BendSkin {
+    fold: Vec3,
+    mid_tan: Vec3,
+    wing_tan: Vec3,
+    /// The tangent lines' crossings with the outline: the middle side (edge A), the wing side.
+    edge_cross: Vec3,
+    wing_cross: Vec3,
+    /// The wing tangent's crossing with the wing's far edge.
+    far_cross: Vec3,
+    /// The middle tangent's crossing with the other bend's fold line.
+    fold_cross: Vec3,
+    /// The skin's fold line where the cut planes cross it: at the edge cut and the corner cut.
+    fold_at_edge_cut: Vec3,
+    fold_at_corner: Vec3,
+    /// The two tangent lines' meeting corner, on this skin's middle plane.
+    corner: Vec3,
+    /// The cut stations along the axis: the edge-side cut, then the corner cut.
+    edge_station: f64,
+    corner_station: f64,
+}
+
+/// Per bend, the directions shared by both skins: the axis and the inward directions.
+#[allow(dead_code)]
+struct BendDirs {
+    axis: Vec3,
+    middle_in: Vec3,
+    wing_in: Vec3,
+}
+
+/// Solves every point of both skins of the sheet.
+///
+/// `points` are the world-space profile vertices (A's ends, the apex, B's ends); `normals` are
+/// the wing facets' and the middle facet's unit normals, all facing the same way of the sheet.
+#[allow(dead_code)]
+fn two_bend_geom(
+    points: &[Vec3; 5],
+    normals: &[Vec3; 3],
+    layout: &TwoBendLayout,
+    rule: BendRule,
+) -> Result<[SkinGeom; 2], BrepError> {
+    let [a0, a1, vertex, b0, b1] = *points;
+    let [wing0_normal, middle_normal, wing1_normal] = *normals;
+    let (low, high) = thickness_sides(rule.side, rule.thickness);
+    let dirs = [
+        BendDirs { axis: layout.bends[0].axis, middle_in: layout.bends[0].middle_in, wing_in: layout.bends[0].wing_in },
+        BendDirs { axis: layout.bends[1].axis, middle_in: layout.bends[1].middle_in, wing_in: layout.bends[1].wing_in },
+    ];
+    let mut skins = Vec::with_capacity(2);
+    for &offset in &[low, high] {
+        let radius = layout.reference_radius + offset;
+        let mut bends = Vec::with_capacity(2);
+        for i in 0..2 {
+            let bend = &layout.bends[i];
+            let dirs = &dirs[i];
+            // The fold line: the reference hinge displaced across the sheet's other side.
+            let half_cos = libm::cos(0.5 * bend.angle);
+            let hinge_start = if i == 0 { a0 } else { a1 };
+            let fold = hinge_start + bend.bisector * (offset / -half_cos);
+            let mid_tan = bend.middle_tangent + middle_normal * offset;
+            let wing_tan = bend.wing_tangent + normals[if i == 0 { 0 } else { 2 }] * offset;
+            let corner = layout.corner + middle_normal * offset;
+            // The tangent lines' crossings with the outline edges of their own facets.
+            let (edge_start, edge_end, wing_edge_start, wing_edge_end, far_start, far_end) = if i == 0 {
+                (a0, a1, a0, b0, b0, vertex)
+            } else {
+                (a1, a0, a1, b1, b1, vertex)
+            };
+            let edge_normal = middle_normal * offset;
+            let wing_edge_offset = normals[if i == 0 { 0 } else { 2 }] * offset;
+            let edge_cross = line_meeting(mid_tan, dirs.axis, edge_start + edge_normal, edge_end - edge_start)?.0;
+            let wing_cross = line_meeting(wing_tan, dirs.axis, wing_edge_start + wing_edge_offset, wing_edge_end - wing_edge_start)?.0;
+            let far_cross = line_meeting(wing_tan, dirs.axis, far_start + wing_edge_offset, far_end - far_start)?.0;
+            // The middle tangent's crossing with the other bend's fold line.
+            let other = &layout.bends[1 - i];
+            let other_hinge = if 1 - i == 0 { a0 } else { a1 };
+            let other_fold = other_hinge + other.bisector * (offset / -libm::cos(0.5 * other.angle));
+            let fold_cross = line_meeting(mid_tan, dirs.axis, other_fold, other.axis)?.0;
+            // The cut stations: the edge-side cut clears both facets' outline crossings; the
+            // corner cut is at the tangent lines' meeting.
+            let edge_station = (edge_cross - mid_tan).dot(dirs.axis).max((wing_cross - wing_tan).dot(dirs.axis));
+            let corner_station = layout.corner_station[i];
+            let fold_at_edge_cut = fold + dirs.axis * edge_station;
+            let fold_at_corner = fold + dirs.axis * corner_station;
+            for (name, station, limit) in [
+                ("edge", edge_station, 0.0),
+                ("corner", corner_station, edge_station),
+            ] {
+                if !(station > limit && station.is_finite()) {
+                    return Err(BrepError::Degenerate(format!(
+                        "loft: bend {i}'s {name} cut station {station:.6} is not past its limit {limit:.6}"
+                    )));
+                }
+            }
+            if edge_station >= corner_station {
+                return Err(BrepError::Degenerate(format!(
+                    "loft: bend {i}'s edge cut at {:.6} is not before the corner cut at {:.6}",
+                    edge_station, corner_station
+                )));
+            }
+            for (name, cross, span, start) in [
+                ("edge A", edge_cross, edge_end - edge_start, edge_start),
+                ("the wing edge", wing_cross, wing_edge_end - wing_edge_start, wing_edge_start),
+                ("the far edge", far_cross, far_end - far_start, far_start),
+            ] {
+                let along = (cross - start).dot(span) / length(span).powi(2);
+                if !(0.0..=1.0).contains(&along) {
+                    return Err(BrepError::Degenerate(format!(
+                        "loft: bend {i}'s tangent leaves {name} (at {:.6} of it)",
+                        along
+                    )));
+                }
+            }
+            bends.push(BendSkin {
+                fold,
+                mid_tan,
+                wing_tan,
+                edge_cross,
+                wing_cross,
+                far_cross,
+                fold_cross,
+                fold_at_edge_cut,
+                fold_at_corner,
+                corner,
+                edge_station,
+                corner_station,
+            });
+        }
+        // The skin's facet planes: the middle's through the shifted A ends, the wings' through
+        // the shifted B ends. Their pairwise intersections are the skin's fold lines; where all
+        // three meet is the skin's apex.
+        let apex = line_meeting(bends[0].fold, dirs[0].axis, bends[1].fold, dirs[1].axis)?.0;
+        let middle_start = line_meeting(a0 + middle_normal * offset, a1 - a0, bends[0].fold, dirs[0].axis)?.0;
+        let middle_end = line_meeting(a1 + middle_normal * offset, a0 - a1, bends[1].fold, dirs[1].axis)?.0;
+        let wing0_start = line_meeting(a0 + wing0_normal * offset, b0 - a0, bends[0].fold, dirs[0].axis)?.0;
+        let wing0_end = line_meeting(b0 + wing0_normal * offset, vertex - b0, bends[0].fold, dirs[0].axis)?.0;
+        let wing1_start = line_meeting(a1 + wing1_normal * offset, b1 - a1, bends[1].fold, dirs[1].axis)?.0;
+        let wing1_end = line_meeting(b1 + wing1_normal * offset, vertex - b1, bends[1].fold, dirs[1].axis)?.0;
+        skins.push(SkinGeom {
+            offset,
+            radius,
+            bends: [bends[0].clone(), bends[1].clone()],
+            apex,
+            middle: [middle_start, middle_end, apex],
+            wings: [[wing0_start, b0 + wing0_normal * offset, wing0_end], [wing1_start, b1 + wing1_normal * offset, wing1_end]],
+        });
+    }
+    Ok([skins[0].clone(), skins[1].clone()])
+}
+
+#[cfg(test)]
+mod two_bend_tests {
+    use super::*;
+
+    fn facet_normals(facets: &[[Vec3; 3]; 3]) -> [Vec3; 3] {
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        })
+    }
+
+    /// The author's sizes: edge A = 10, legs 10 at 20 degrees, the apex above A's middle,
+    /// the second sketch plane 15 above. Reference bend radius 2, sheet 2 thick, K 0.44, Left.
+    fn author_points() -> ([Vec3; 2], [Vec3; 3]) {
+        (
+            [Vec3::new(-5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 0.0)],
+            [
+                Vec3::new(-15.0, 15.0, 0.0),
+                Vec3::new(0.0, 15.0, 15.0),
+                Vec3::new(15.0, 15.0, 0.0),
+            ],
+        )
+    }
+
+    fn author_rule() -> BendRule {
+        BendRule { thickness: 2.0, radius: 2.0, k_factor: 0.44, side: Side::Left }
+    }
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        length(a - b) < 1e-3
+    }
+
+    #[test]
+    fn skins_order_stations_and_crossings() {
+        let (profile, second) = author_points();
+        let layout = two_bend_from_points(profile, second, author_rule()).unwrap();
+        let [b0, vertex, b1] = second;
+        let facets = [
+            [profile[0], b0, vertex],
+            [profile[0], profile[1], vertex],
+            [profile[1], vertex, b1],
+        ];
+        let normals = facet_normals(&facets);
+        let [reference, offset_skin] = two_bend_geom(&[profile[0], profile[1], vertex, b0, b1], &normals, &layout, author_rule()).unwrap();
+
+        // The reference skin keeps the facets at offset 0, the Left skin sits across them.
+        assert_eq!(reference.offset, 0.0);
+        assert!(offset_skin.offset > 1.0);
+
+        for skin in [&reference, &offset_skin] {
+            for i in 0..2 {
+                let bend = &skin.bends[i];
+                // Both cuts sit between the outline crossings and the corner: the flat regions
+                // and the cylinder patch get a real extent on every bend, on every skin.
+                assert!(bend.edge_station > 0.0, "skin bend {i}: edge station");
+                assert!(bend.edge_station < bend.corner_station, "skin bend {i}: corner past the edge cut");
+                // The tangent crossings sit on their outline edges, inside the segments.
+                let on_segment = |cross: Vec3, start: Vec3, end: Vec3| {
+                    let span = end - start;
+                    let along = (cross - start).dot(span) / length(span).powi(2);
+                    (0.0..=1.0).contains(&along)
+                };
+                let (wing_start, wing_end, far_start) = if i == 0 {
+                    (profile[0], b0, b0)
+                } else {
+                    (profile[1], b1, b1)
+                };
+                let wing_offset = normals[if i == 0 { 0 } else { 2 }] * skin.offset;
+                let middle_offset = normals[1] * skin.offset;
+                assert!(on_segment(
+                    bend.edge_cross - middle_offset,
+                    if i == 0 { profile[0] } else { profile[1] },
+                    if i == 0 { profile[1] } else { profile[0] },
+                ));
+                assert!(on_segment(bend.wing_cross - wing_offset, wing_start, wing_end));
+                assert!(on_segment(bend.far_cross - wing_offset, far_start, vertex));
+            }
+        }
+    }
+
+    #[test]
+    fn reference_skin_matches_the_flat_geometory() {
+        let (profile, second) = author_points();
+        let layout = two_bend_from_points(profile, second, author_rule()).unwrap();
+        let [b0, vertex, b1] = second;
+        let facets = [
+            [profile[0], b0, vertex],
+            [profile[0], profile[1], vertex],
+            [profile[1], vertex, b1],
+        ];
+        let normals = facet_normals(&facets);
+        let [reference, _] =
+            two_bend_geom(&[profile[0], profile[1], vertex, b0, b1], &normals, &layout, author_rule()).unwrap();
+
+        // At offset 0 the skin's planes are the facets themselves: the middle's working triangle
+        // keeps A's ends, and the skin's apex is the profile's apex.
+        assert!(close(reference.middle[0], profile[0]), "middle start");
+        assert!(close(reference.middle[1], profile[1]), "middle end");
+        assert!(close(reference.apex, vertex), "apex");
+        assert!(close(reference.wings[0][1], b0), "wing 0 corner");
+        assert!(close(reference.wings[1][1], b1), "wing 1 corner");
+        // The reference bend radii are the reference radius itself.
+        assert!((reference.radius - 2.0).abs() < 1e-9);
+        // The corner sits between the two bends' tangent lines, on the middle facet.
+        let corner_to_middle = (layout.corner - profile[0]).dot(normals[1]);
+        assert!(corner_to_middle.abs() < 1e-6, "corner off the middle facet by {corner_to_middle}");
+    }
+
+    #[test]
+    fn offset_skin_rides_the_shifted_planes() {
+        let (profile, second) = author_points();
+        let layout = two_bend_from_points(profile, second, author_rule()).unwrap();
+        let [b0, vertex, b1] = second;
+        let facets = [
+            [profile[0], b0, vertex],
+            [profile[0], profile[1], vertex],
+            [profile[1], vertex, b1],
+        ];
+        let normals = facet_normals(&facets);
+        let [_, offset_skin] =
+            two_bend_geom(&[profile[0], profile[1], vertex, b0, b1], &normals, &layout, author_rule()).unwrap();
+
+        // Every skin point sits on its own shifted plane or on the bend cylinders of the same
+        // centre: the middle skin plane at offset 2 carries radius 4 about the bend centres.
+        let middle_offset = normals[1] * offset_skin.offset;
+        let on_middle_plane = |p: Vec3| (p - profile[0] - middle_offset).dot(normals[1]).abs() < 1e-6;
+        assert!(on_middle_plane(offset_skin.middle[0]), "middle start");
+        assert!(on_middle_plane(offset_skin.middle[1]), "middle end");
+        assert!(on_middle_plane(layout.corner + middle_offset), "corner");
+        // The offset skin's apex sits on all three shifted planes; the wings' corners ride the
+        // wings' own shifts.
+        let wing0_offset = normals[0] * offset_skin.offset;
+        assert!(
+            (offset_skin.wings[0][1] - b0 - wing0_offset).dot(normals[0]).abs() < 1e-6,
+            "wing 0 corner"
+        );
+        // The offset skin's fold lines pass through the hinge starts displaced across the sheet.
+        let half_cos = libm::cos(0.5 * layout.bends[0].angle);
+        let expected_fold = profile[0] + layout.bends[0].bisector * (offset_skin.offset / -half_cos);
+        assert!(close(offset_skin.bends[0].fold, expected_fold), "fold line");
+    }
 }
