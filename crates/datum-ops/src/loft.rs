@@ -805,8 +805,14 @@ mod two_bend_tests {
         assert!(close(reference.middle[0], profile[0]), "middle start");
         assert!(close(reference.middle[1], profile[1]), "middle end");
         assert!(close(reference.apex, vertex), "apex");
-        assert!(close(reference.wings[0][1], b0), "wing 0 corner");
-        assert!(close(reference.wings[1][1], b1), "wing 1 corner");
+        // The wing's quad: fold start, the apex, the ridge crossing (at the apex for the flat
+        // reference skin), then the profile corner.
+        assert!(close(reference.wings[0][1], vertex), "wing 0 apex");
+        assert!(close(reference.wings[0][2], vertex), "wing 0 ridge");
+        assert!(close(reference.wings[0][3], b0), "wing 0 corner");
+        assert!(close(reference.wings[1][1], vertex), "wing 1 apex");
+        assert!(close(reference.wings[1][2], vertex), "wing 1 ridge");
+        assert!(close(reference.wings[1][3], b1), "wing 1 corner");
         // The reference bend radii are the reference radius itself.
         assert!((reference.radius - 2.0).abs() < 1e-9);
         // The corner sits between the two bends' tangent lines, on the middle facet.
@@ -862,6 +868,7 @@ struct Bag {
     points: Vec<(TopoId, Vec3)>,
 }
 
+#[allow(dead_code)]
 impl Bag {
     fn new(feature: TopoId) -> Bag {
         Bag { feature, points: Vec::with_capacity(64) }
@@ -879,6 +886,7 @@ impl Bag {
     }
 }
 
+#[allow(dead_code)]
 fn two_bend_body(feature: TopoId, points: &[Vec3; 5], normals: &[Vec3; 3], layout: &TwoBendLayout, rule: BendRule) -> Result<Body, BrepError> {
     let _ = (feature, points, normals, layout, rule);
     Err(BrepError::Unsupported("loft: two-bend body assembly is not finished".into()))
