@@ -390,7 +390,12 @@ impl Doc {
             let mut op = g.nodes()[ix].op.clone();
             match &mut op {
                 Op::Sheet { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
-                Op::Plate { thickness, .. } | Op::Loft { thickness, .. } => *thickness = Some(Num::Value(t)),
+                Op::Plate { thickness, .. } => *thickness = Some(Num::Value(t)),
+                Op::Loft { thickness, radius, k_factor, .. } => {
+                    *thickness = Some(Num::Value(t));
+                    *radius = Some(Num::Value(r));
+                    *k_factor = Some(k_of(&ks, ix as NodeIx));
+                }
                 // A placed part forms the sheet by the rule's thickness and bend radius (D261).
                 Op::Component { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
                 Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
