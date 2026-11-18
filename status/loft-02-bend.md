@@ -1,75 +1,52 @@
-# Loft, step 2 — one line → two angled lines (three facets, two bends)
+# Loft, step 2 — one line → two angled lines (the fan from the apex)
 
 ## Goal
 
-Extend the first D264 loft case to the next concrete open-profile pair. One
-straight segment of profile A transitions to a two-segment polyline of profile
-B. The result is a connected sheet of **three planar triangular facets and
-two cylindrical bends**. This topology was clarified by the author on
-2026-11-17; the earlier two-facet / one-bend wording was wrong.
+The second case of the loft op (D264): the transition from one straight
+profile to a two-segment angled profile (a V), the first real bends.
 
 ## Inputs
 
-- profile A: exactly one straight line;
-- profile B: exactly two straight lines sharing one endpoint;
-- the shared vertex of B lies above the midpoint of A;
-- the two outer endpoints of B correspond to the two endpoints of A;
-- the profiles are placed so the three resulting triangular panels are
-  non-degenerate and the two bend axes have positive length.
+- profile A: one line (the reference model: length 10, world (-5,0,0)→(5,0,0));
+- profile B: an open chain of two lines meeting at a vertex (the apex; the
+  reference model: legs 10 long, 20° off the horizontal, apex at (0,15,0));
+- the apex sits over the middle of A (step-2 restriction; general matching of
+  open chains comes later, after a third real case).
 
-The first fixture should retain the dimensions of step 1 where possible:
-profile A is 20 mm, profile B spans 30 mm, and the sketches are 15 mm apart.
-Choose a non-zero apex height for the angled profile and record it in the
-reference model.
+## Result (the contract, confirmed by the author's Inventor example 2026-11-17)
 
-## Result
+- **three planar triangular facets**: the middle one (A's start, A's end, the
+  apex) lies in A's plane; two wings (A's end, the apex, B's end);
+- **two cylindrical bends** along the apex→A's-ends lines, the rule's radius
+  (not sharp: production, D181), K-factor of the rule for the development;
+- the bend's end at A's edge is a square cut of the thickness (the bend runs
+  out onto the side edge; the author confirmed the step on the corner);
+- thickness on `side` of the sheet, as in step 1 (left / right / middle);
+- the development through `unfold_side`: the flat fan with two bends, the seam
+  by the rule of developments of bodies of revolution.
 
-- three planar triangular facets:
-  - left end triangle: A-start, B-start, B-vertex;
-  - middle triangle: A-start, A-end, B-vertex;
-  - right end triangle: A-end, B-vertex, B-end;
-- two real cylindrical bends along the internal edges:
-  - A-start ↔ B-vertex;
-  - A-end ↔ B-vertex;
-- each bend uses the inner radius from the sheet rule and the outer radius
-  offset by sheet thickness;
-- the bends meet at the B vertex; their shared corner must be trimmed and
-  sewn as one manifold junction, not as two overlapping independent caps;
-- the finished sheet has consistent thickness and its flat development uses
-  the rule's K-factor.
+## Refusals
 
-## Geometry constraints
-
-- No cone or sharp crease may substitute for either cylindrical bend.
-- The three planar facets must remain planar and must not be replaced by a
-  single ruled surface.
-- The bend tangent boundaries and the common corner relief must be derived
-  from the same exact geometric construction as the two cylinders.
-- Reject zero-area triangles, zero-length bends, an invalid fold angle, or a
-  bend radius that consumes a facet with `Err(Degenerate)`.
-- Do not weaken `Body::validate()` or introduce an arbitrary epsilon to make
-  the shared corner pass.
+- the apex on the line A (the middle facet has no area) → `Degenerate`;
+- a leg of B lying on a bend line (a wing has no area) → `Degenerate`;
+- profiles outside the case (arcs, more segments, the apex off the middle) →
+  `Unsupported` with names.
 
 ## Done when
 
-- [x] The author supplied the topology reference: three triangular facets and
-  two cylindrical bends.
-- [x] A pre-code three-view topology preview exists.
-- [ ] A reference JSON model is added under `tests/models/`.
-- [ ] Unit tests cover the three facets, two cylinders, their common corner,
-  thickness, and rule-driven radius/K-factor.
-- [ ] The body passes `Body::validate()` on all three `Side` choices.
-- [ ] `unfold_side` develops both bends and preserves bend lengths at the
-  rule's K-factor.
-- [ ] Reference hashes are blessed only after `scripts/check.sh` passes before
-  blessing, and checked again afterward.
-- [ ] Linux and Windows CI pass.
+- [ ] unit tests, reference model in `tests/models/`, blessed hashes;
+- [ ] `scripts/check.sh` exit 0.
 
 ## Notes
 
-- General matching of arbitrary open chains (different segment counts,
-  endpoints not over endpoints) is deliberately out of scope. This step only
-  handles one line against exactly two connected lines.
-- The common B vertex is a genuine two-bend junction. Its end trimming is the
-  main topological risk; do not build the two bends independently and simply
-  fuse their end caps.
+- The author said renders are not needed (the Inventor screenshots were the
+  reference); the old done-when "renders before code" is dropped.
+- The old assumption "two facets, one bend" is wrong: with the apex over the
+  middle and B's ends lifted, the wing quad is not planar (checked by numbers,
+  2026-11-17). The fan from the apex to A's ends is the Inventor construction.
+- The author's test file `C:\Users\Simanov\datum-demo\part\loft(1 to 2
+  line)(2 stage).json` duplicates a leg (`l1`/`l2`, one segment twice); the
+  reference model takes the clean chain `p1 → apex → p2`, the length on one
+  leg, `equal` on the pair.
+- Built on the branch of the closed draft PR #261: the layout validation, the
+  two-line recognition and the Left/Right/Middle tests there are reused.
