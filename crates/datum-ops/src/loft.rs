@@ -988,7 +988,7 @@ fn wing_sharp(skin: &SkinGeom, wing: usize, vertex_s: Vec3, wing_far_origin: Vec
     }
     // The fold's end on the far edge splits that edge (the wall pieces share its halves); the
     // fold edge itself is shared whole with the middle facet's apex part.
-    let far = unit(vertex_s - wing_far_origin).map_or(Vec3::ZERO, |d| d);
+    let far = unit(vertex_s - wing_far_origin).unwrap_or(Vec3::ZERO);
     let mut best: Option<(usize, f64)> = None;
     for k in 0..polygon.len() {
         let (a, b) = (polygon[k], polygon[(k + 1) % polygon.len()]);
