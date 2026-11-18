@@ -1,6 +1,6 @@
 //! A planar loft, then the first two-bend D264 case.
 
-use datum_brep::{Body, BrepError, FaceSpec, Plane, Surface, TopoId, Vertex, build_with_curves};
+use datum_brep::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Plane, Surface, TopoId, Vertex, build_with_curves};
 use datum_math::{Sign, Vec3, orient3d_coords};
 
 use crate::sketch::within_rounding;
@@ -40,26 +40,19 @@ pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) ->
                 ));
             };
             let layout = two_bend_layout([a0, a1], second, &second_lines, BendRule { thickness, radius, k_factor: k, side })?;
-            let [first_bend, second_bend] = layout.bends;
-            Err(BrepError::Unsupported(format!(
-                "loft: the three-facet / two-bend layout is valid (folds {:.3}° and {:.3}°, radii {:.3}/{:.3} mm, neutral radii {:.3}/{:.3} mm, tangent offsets {:.3}/{:.3} mm, centers {:.3}/{:.3}/{:.3} and {:.3}/{:.3}/{:.3}, common corner stations {:.3}/{:.3} mm); corner-trimmed cylindrical B-rep assembly and development are not built yet",
-                first_bend.angle.to_degrees(),
-                second_bend.angle.to_degrees(),
-                first_bend.radius_in,
-                first_bend.radius_out,
-                first_bend.neutral_radius,
-                second_bend.neutral_radius,
-                first_bend.tangent_offset,
-                second_bend.tangent_offset,
-                first_bend.center.x,
-                first_bend.center.y,
-                first_bend.center.z,
-                second_bend.center.x,
-                second_bend.center.y,
-                second_bend.center.z,
-                layout.corner_station[0],
-                layout.corner_station[1],
-            )))
+            let facets = [
+                [a0, second_lines[0].1, second_lines[0].2],
+                [a0, a1, second_lines[0].2],
+                [a1, second_lines[0].2, second_lines[1].2],
+            ];
+            let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+            let normals = facets.map(|f| {
+                let n = (f[1] - f[0]).cross(f[2] - f[0]);
+                let n = n * (1.0 / length(n));
+                if n.dot(base) < 0.0 { -n } else { n }
+            });
+            let points = [a0, a1, second_lines[0].2, second_lines[0].1, second_lines[1].2];
+            two_bend_body(feature, &points, &normals, &layout, BendRule { thickness, radius, k_factor: k, side })
         }
         [] => Err(BrepError::Sketch("loft: the second sketch has no profile line".into())),
         _ => Err(BrepError::Unsupported("loft: the second profile must be one line or two connected lines".into())),
@@ -481,6 +474,8 @@ struct SkinGeom {
     middle: [Vec3; 3],
     /// Each wing's working quad: fold start, the apex, the wing's ridge crossing, the profile corner.
     wings: [[Vec3; 4]; 2],
+    /// The skin's ridge crossings with the wings' far edges.
+    ridge: [Vec3; 2],
 }
 
 /// One bend's points on one skin. The fold line runs `fold + t * axis`; the tangent lines run
@@ -689,6 +684,7 @@ fn two_bend_geom(
                 [wing0_start, apex, ridge0, b0 + wing0_normal * offset],
                 [wing1_start, apex, ridge1, b1 + wing1_normal * offset],
             ],
+            ridge: [ridge0, ridge1],
         });
     }
     Ok([skins[0].clone(), skins[1].clone()])
@@ -886,10 +882,262 @@ impl Bag {
     }
 }
 
+/// Accumulates the body's faces: unique vertices by point, planar faces with outward winding.
 #[allow(dead_code)]
+struct Builder {
+    feature: TopoId,
+    bag: Bag,
+    faces: Vec<FaceSpec>,
+    counter: u64,
+}
+
+impl Builder {
+    fn new(feature: TopoId) -> Builder {
+        Builder { feature, bag: Bag::new(feature), faces: Vec::with_capacity(48), counter: 0 }
+    }
+
+    /// Pushes a planar face through `points`, wound so its normal faces `outward`.
+    fn plane(&mut self, points: Vec<Vec3>, outward: Vec3) -> Result<(), BrepError> {
+        let mut points = points;
+        let normal = (0..points.len()).fold(Vec3::ZERO, |sum, k| sum + points[k].cross(points[(k + 1) % points.len()]));
+        if normal.dot(outward) < 0.0 {
+            points.reverse();
+        }
+        let ids: Vec<TopoId> = points.iter().map(|&p| self.bag.get(p)).collect();
+        let id = face_id(self.feature, {
+            self.counter += 1;
+            self.counter - 1
+        });
+        self.faces.push(planar_face(id, ids, points)?);
+        Ok(())
+    }
+}
+
+/// Builds the three-facet / two-bend sheet body: the skins' facet faces, the bend cylinders, the
+/// stepped cut faces and the outline walls (D265).
 fn two_bend_body(feature: TopoId, points: &[Vec3; 5], normals: &[Vec3; 3], layout: &TwoBendLayout, rule: BendRule) -> Result<Body, BrepError> {
-    let _ = (feature, points, normals, layout, rule);
-    Err(BrepError::Unsupported("loft: two-bend body assembly is not finished".into()))
+    let [reference, offset] = two_bend_geom(points, normals, layout, rule)?;
+    let [a0, a1, vertex, b0, b1] = *points;
+    let [wing0_normal, middle_normal, wing1_normal] = *normals;
+    let thickness = rule.thickness;
+    let mut b = Builder::new(feature);
+    let area = |polygon: &[Vec3]| {
+        0.5 * length(
+            (0..polygon.len()).fold(Vec3::ZERO, |sum, k| sum + polygon[k].cross(polygon[(k + 1) % polygon.len()])),
+        )
+    };
+    for skin in [&reference, &offset] {
+        let inner = skin.offset < 0.5 * thickness; // the reference side faces against the normals
+        let mid_out = if inner { middle_normal * -1.0 } else { middle_normal };
+        // The middle facet: the rounded pentagon and the sharp apex quad; the sharp side
+        // triangles vanish when the corner cuts leave no sliver between tangent and fold.
+        let rounded = middle_rounded(skin);
+        if area(&rounded) > 1e-12 {
+            b.plane(rounded, mid_out)?;
+        }
+        let apex = middle_apex(skin);
+        if area(&apex) > 1e-12 {
+            b.plane(apex, mid_out)?;
+        }
+        for i in 0..2 {
+            let sharp = middle_sharp(skin, i);
+            if area(&sharp) > 1e-12 {
+                b.plane(sharp, mid_out)?;
+            }
+        }
+        // The wings: rounded between the cuts, sharp past the corner cut.
+        for i in 0..2 {
+            let wing_out = if inner { normals[if i == 0 { 0 } else { 2 }] * -1.0 } else { normals[if i == 0 { 0 } else { 2 }] };
+            let rounded = wing_rounded(skin, i);
+            if area(&rounded) > 1e-12 {
+                b.plane(rounded, wing_out)?;
+            }
+            let (vertex_s, far_origin) = if i == 0 {
+                (vertex + normals[0] * skin.offset, b0 + normals[0] * skin.offset)
+            } else {
+                (vertex + normals[2] * skin.offset, b1 + normals[2] * skin.offset)
+            };
+            let sharp = wing_sharp(skin, i, vertex_s, far_origin);
+            if area(&sharp) > 1e-12 {
+                b.plane(sharp, wing_out)?;
+            }
+        }
+    }
+    // The outline walls: square to their facets, spanning the thickness.
+    let (r, o) = (&reference, &offset);
+    // Edge A's wall, between the two bends' cut traces on the middle plane.
+    let along_a = unit(a1 - a0).unwrap_or(Vec3::ZERO);
+    b.plane(
+        vec![
+            r.bends[0].middle_cut_cross,
+            r.bends[1].middle_cut_cross,
+            o.bends[1].middle_cut_cross,
+            o.bends[0].middle_cut_cross,
+        ],
+        along_a.cross(middle_normal),
+    )?;
+    // The legs and the second profile's edges: square to their wings.
+    for i in 0..2 {
+        let (n, start, apex_end) = if i == 0 { (wing0_normal, a0, b0) } else { (wing1_normal, a1, b1) };
+        let (cross_r, cross_o) = (r.bends[i].wing_at_edge_cut, o.bends[i].wing_at_edge_cut);
+        let along = unit(apex_end - start).unwrap_or(Vec3::ZERO);
+        let outward = along.cross(n);
+        // The leg's wall from the edge cut to the profile corner.
+        b.plane(vec![cross_r, apex_end, apex_end + n * o.offset, cross_o], outward)?;
+        // The far edge's wall: rounded part, sharp part, then the apex strip's closing face.
+        let (pcc_r, pcc_o) = (r.bends[i].profile_cut_cross, o.bends[i].profile_cut_cross);
+        let (_end_r, end_o) = (r.bends[i].wing_end, o.bends[i].wing_end);
+        b.plane(vec![apex_end, pcc_r, pcc_o, apex_end + n * o.offset], outward)?;
+        b.plane(vec![pcc_r, vertex, end_o, pcc_o], outward)?;
+        if area(&[vertex, end_o, o.ridge[i]]) > 1e-12 {
+            b.plane(vec![vertex, end_o, o.ridge[i]], outward)?;
+        }
+    }
+    // The bend cylinders: one strip per skin per bend, bounded by the two tangent lines and the
+    // arcs in the two cut planes. The step faces share those arcs.
+    let mut curves: Vec<CurveSpec> = Vec::new();
+    for i in 0..2 {
+        let bend = &layout.bends[i];
+        let arc_spec = |from: TopoId, to: TopoId, radius: f64, station: f64| CurveSpec {
+            from,
+            to,
+            curve: Curve::Arc(Arc { center: bend.center + bend.axis * station, axis: bend.axis, radius }),
+        };
+        for skin in [&reference, &offset] {
+            let skin_bend = &skin.bends[i];
+            let points = vec![skin_bend.middle_at_edge_cut, skin_bend.corner, skin_bend.wing_corner, skin_bend.wing_at_edge_cut];
+            let ids: Vec<TopoId> = points.iter().map(|&p| b.bag.get(p)).collect();
+            let id = face_id(feature, {
+                b.counter += 1;
+                b.counter - 1
+            });
+            // Radial outward: away from the axis for the inner skin, toward it for the outer.
+            let axis_point = bend.center + bend.axis * (points[0] - bend.center).dot(bend.axis);
+            let outward = points[0] - axis_point;
+            let outward = if skin.offset < 0.5 * thickness { outward } else { outward * -1.0 };
+            let normal = (0..points.len()).fold(Vec3::ZERO, |sum, k| sum + points[k].cross(points[(k + 1) % points.len()]));
+            let mut ids = ids;
+            if normal.dot(outward) < 0.0 {
+                ids.reverse();
+            }
+            b.faces.push(FaceSpec {
+                id,
+                surface: Surface::Cylinder(Cylinder { origin: bend.center, axis: bend.axis, radius: skin.radius, convex: skin.offset > 0.5 * thickness }),
+                loops: vec![ids.clone()],
+            });
+            let _ = points;
+            curves.push(arc_spec(ids[1], ids[2], skin.radius, skin_bend.corner_station));
+            curves.push(arc_spec(ids[3], ids[0], skin.radius, skin_bend.edge_station));
+        }
+        // The step faces: at the edge cut, the sector with its traces to the outline; at the
+        // corner cut, the sector closed by the radial segment the two bends share.
+        let (r_bend, o_bend) = (&reference.bends[i], &offset.bends[i]);
+        // Edge cut: [X_in, Tmid_in, arc, Twing_in, Twing_out, arc_rev, Tmid_out, X_out].
+        let edge_face = vec![
+            r_bend.middle_cut_cross,
+            r_bend.middle_at_edge_cut,
+            r_bend.wing_at_edge_cut,
+            o_bend.wing_at_edge_cut,
+            o_bend.middle_at_edge_cut,
+            o_bend.middle_cut_cross,
+        ];
+        b.plane(edge_face, bend.axis * -1.0)?;
+        // Corner cut: [C_in, arc, wing_corner_in, pcc_in, pcc_out, wing_corner_out, arc_rev, C_out].
+        let corner_face = vec![
+            r_bend.corner,
+            r_bend.wing_corner,
+            r_bend.profile_cut_cross,
+            o_bend.profile_cut_cross,
+            o_bend.wing_corner,
+            o_bend.corner,
+        ];
+        b.plane(corner_face, bend.axis)?;
+    }
+    // Orient the face set consistently: a neighbour sharing an edge must traverse it in the
+    // opposite direction. The first face's winding seeds the propagation.
+    {
+        let count = b.faces.len();
+        let mut reached = vec![false; count];
+        let mut queue = vec![0usize];
+        reached[0] = true;
+        while let Some(seed) = queue.pop() {
+            let seed_loop = b.faces[seed].loops[0].clone();
+            for k in 0..seed_loop.len() {
+                let edge = (seed_loop[k], seed_loop[(k + 1) % seed_loop.len()]);
+                let pending: Vec<usize> = (0..b.faces.len()).filter(|&g| !reached[g]).collect();
+                for other in pending {
+                    if reached[other] {
+                        continue;
+                    }
+                    let loop_ = b.faces[other].loops[0].clone();
+                    let shares = (0..loop_.len()).any(|p| (loop_[p], loop_[(p + 1) % loop_.len()]) == edge);
+                    let shares_reversed = (0..loop_.len()).any(|p| (loop_[(p + 1) % loop_.len()], loop_[p]) == edge);
+                    if shares || shares_reversed {
+                        if shares {
+                            b.faces[other].loops[0].reverse();
+                        }
+                        reached[other] = true;
+                        queue.push(other);
+                    }
+                }
+            }
+        }
+    }
+    // Assemble.
+    if std::env::var("DATUM_DEBUG_EDGES").is_ok() {
+        for (ordinal, face) in b.faces.iter().enumerate() {
+            let pts: String = face.loops[0].iter().map(|&v| { let p = b.bag.point(v); format!("({:.3},{:.3},{:.3})", p.x, p.y, p.z) }).collect::<Vec<_>>().join(" ");
+            eprintln!("FACE {ordinal}: {:?}", match &face.surface { Surface::Plane(_) => "plane", Surface::Cylinder(_) => "cyl", _ => "?" });
+            eprintln!("   {pts}");
+        }
+        let mut uses: Vec<((TopoId, TopoId), usize, usize, String)> = Vec::new();
+        for (ordinal, face) in b.faces.iter().enumerate() {
+            let loop_ = &face.loops[0];
+            for k in 0..loop_.len() {
+                let edge = (loop_[k], loop_[(k + 1) % loop_.len()]);
+                let pts: Vec<(f64, f64, f64)> = [edge.0, edge.1].iter().map(|&v| {
+                    let p = b.bag.point(v);
+                    ((p.x * 1e3).round(), (p.y * 1e3).round(), (p.z * 1e3).round())
+                }).collect();
+                uses.push((edge, ordinal, k, format!("{pts:?}")));
+            }
+        }
+        uses.sort_by_key(|u| (u.0, u.1, u.2));
+        for w in uses.windows(2) {
+            if w[0].0 == w[1].0 {
+                let face_pts = |ordinal: usize| -> String {
+                    let face = &b.faces[ordinal];
+                    let pts: Vec<Vec3> = face.loops[0].iter().map(|&v| b.bag.point(v)).collect();
+                    let n = (0..pts.len()).fold(Vec3::ZERO, |sum, k| sum + pts[k].cross(pts[(k + 1) % pts.len()]));
+                    let n = n * (1.0 / length(n));
+                    format!("n=({:.2},{:.2},{:.2}) {}", n.x, n.y, n.z, pts.iter().map(|p| format!("({:.2},{:.2},{:.2})", p.x, p.y, p.z)).collect::<Vec<_>>().join(" "))
+                };
+                eprintln!("DUP EDGE f{} [{}] vs f{} [{}]: edge {}", w[0].1, face_pts(w[0].1), w[1].1, face_pts(w[1].1), w[0].3);
+            }
+        }
+    }
+    let vertices = b.bag.points.iter().map(|&(id, point)| Vertex { id, point }).collect();
+    let body = build_with_curves(vertices, b.faces, curves)?;
+    body.validate()?;
+    Ok(body)
+}
+
+
+
+/// Removes consecutive duplicate points and a duplicate closing point.
+fn dedup_polygon(mut polygon: Vec<Vec3>) -> Vec<Vec3> {
+    let mut index = 1;
+    while index < polygon.len() {
+        if length(polygon[index] - polygon[index - 1]) < 1e-7 {
+            polygon.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+    if polygon.len() > 1 && length(polygon[0] - polygon[polygon.len() - 1]) < 1e-7 {
+        polygon.pop();
+    }
+    polygon
 }
 
 /// Clips a convex polygon, keeping the points on the positive side of the plane through `anchor`
@@ -925,7 +1173,7 @@ fn clip_half(polygon: &mut Vec<Vec3>, anchor: Vec3, normal: Vec3, size: f64) {
 /// The middle facet's rounded part on one skin: beyond both tangent lines, past both edge cuts.
 #[allow(dead_code)]
 fn middle_rounded(skin: &SkinGeom) -> Vec<Vec3> {
-    let mut polygon = skin.middle.to_vec();
+    let mut polygon = dedup_polygon(skin.middle.to_vec());
     for bend in &skin.bends {
         clip_half(&mut polygon, bend.mid_tan, bend.middle_in, 1.0);
         clip_half(&mut polygon, bend.middle_at_edge_cut, bend.axis, 1.0);
@@ -939,7 +1187,7 @@ fn middle_rounded(skin: &SkinGeom) -> Vec<Vec3> {
 #[allow(dead_code)]
 fn middle_sharp(skin: &SkinGeom, i: usize) -> Vec<Vec3> {
     let (own, other) = (&skin.bends[i], &skin.bends[1 - i]);
-    let mut polygon = skin.middle.to_vec();
+    let mut polygon = dedup_polygon(skin.middle.to_vec());
     clip_half(&mut polygon, own.corner, own.axis, 1.0);
     clip_half(&mut polygon, own.fold_at_corner, own.middle_in, 1.0);
     clip_half(&mut polygon, other.mid_tan, other.middle_in, 1.0);
@@ -950,7 +1198,7 @@ fn middle_sharp(skin: &SkinGeom, i: usize) -> Vec<Vec3> {
 /// The middle facet's apex part: past both corner cuts, to both sharp folds.
 #[allow(dead_code)]
 fn middle_apex(skin: &SkinGeom) -> Vec<Vec3> {
-    let mut polygon = skin.middle.to_vec();
+    let mut polygon = dedup_polygon(skin.middle.to_vec());
     for bend in &skin.bends {
         clip_half(&mut polygon, bend.corner, bend.axis, 1.0);
         clip_half(&mut polygon, bend.fold_at_corner, bend.middle_in, 1.0);
@@ -962,7 +1210,7 @@ fn middle_apex(skin: &SkinGeom) -> Vec<Vec3> {
 #[allow(dead_code)]
 fn wing_rounded(skin: &SkinGeom, wing: usize) -> Vec<Vec3> {
     let bend = &skin.bends[wing];
-    let mut polygon = skin.wings[wing].to_vec();
+    let mut polygon = dedup_polygon(skin.wings[wing].to_vec());
     clip_half(&mut polygon, bend.wing_at_edge_cut, bend.axis, 1.0);
     clip_half(&mut polygon, bend.wing_tan, bend.wing_in, 1.0);
     clip_half(&mut polygon, bend.wing_corner, bend.axis * -1.0, 1.0);
@@ -973,7 +1221,7 @@ fn wing_rounded(skin: &SkinGeom, wing: usize) -> Vec<Vec3> {
 #[allow(dead_code)]
 fn wing_sharp(skin: &SkinGeom, wing: usize, vertex_s: Vec3, wing_far_origin: Vec3) -> Vec<Vec3> {
     let bend = &skin.bends[wing];
-    let mut polygon = skin.wings[wing].to_vec();
+    let mut polygon = dedup_polygon(skin.wings[wing].to_vec());
     clip_half(&mut polygon, bend.wing_corner, bend.axis, 1.0);
     // The corner trace's tangent point is interior to the trace edge: split it so the rounded
     // part and the step face share exact sub-edges.
@@ -1015,6 +1263,42 @@ mod two_bend_region_tests {
     /// Prints every region polygon of both skins for the author's geometry: vertex counts and
     /// coordinates, to check the tiling by eye and by invariants before the builder consumes it.
     #[test]
+    fn regions_of_bent_geometry() {
+        let a0 = Vec3::new(-10.0, 0.0, 0.0);
+        let a1 = Vec3::new(10.0, 0.0, 0.0);
+        let vertex = Vec3::new(0.0, 15.0, 10.0);
+        let b0 = Vec3::new(-15.0, 15.0, 0.0);
+        let b1 = Vec3::new(15.0, 15.0, 0.0);
+        let rule = BendRule { thickness: 2.0, radius: 8.0, k_factor: 0.44, side: Side::Left };
+        let layout = two_bend_from_points([a0, a1], [b0, vertex, b1], rule).unwrap();
+        let facets = [[a0, b0, vertex], [a0, a1, vertex], [a1, vertex, b1]];
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        let normals = facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        });
+        let [reference, offset] = two_bend_geom(&[a0, a1, vertex, b0, b1], &normals, &layout, rule).unwrap();
+        let show = |name: &str, polygon: &[Vec3]| {
+            let n = (0..polygon.len()).fold(Vec3::ZERO, |sum, k| sum + polygon[k].cross(polygon[(k + 1) % polygon.len()]));
+            let n = n * (1.0 / length(n));
+            println!("{name} n=({:.3},{:.3},{:.3}):", n.x, n.y, n.z);
+            println!("   {}", polygon.iter().map(|p| format!("({:.3},{:.3},{:.3})", p.x, p.y, p.z)).collect::<Vec<_>>().join(" "));
+        };
+        for (name, skin) in [("reference", &reference), ("offset", &offset)] {
+            println!("== {name}");
+            show("middle rounded", &middle_rounded(skin));
+            show("middle apex", &middle_apex(skin));
+            for i in 0..2 {
+                show(&format!("middle sharp {i}"), &middle_sharp(skin, i));
+                let (v_s, f_o) = if i == 0 { (vertex + normals[0] * skin.offset, b0 + normals[0] * skin.offset) } else { (vertex + normals[2] * skin.offset, b1 + normals[2] * skin.offset) };
+                show(&format!("wing {i} rounded"), &wing_rounded(skin, i));
+                show(&format!("wing {i} sharp"), &wing_sharp(skin, i, v_s, f_o));
+            }
+        }
+    }
+
+    #[test]
     fn regions_of_author_geometry() {
         let (profile, second) = ([Vec3::new(-5.0, 0.0, 0.0), Vec3::new(5.0, 0.0, 0.0)], [
             Vec3::new(-15.0, 15.0, 0.0),
@@ -1053,6 +1337,36 @@ mod two_bend_region_tests {
                 };
                 println!("wing {i} sharp: {:?}", wing_sharp(skin, i, v_s, f_o).iter().map(|p| (p.x, p.y, p.z)).collect::<Vec<_>>());
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod two_bend_body_tests {
+    use super::*;
+
+    #[test]
+    fn body_builds_for_the_probe_case() {
+        let a0 = Vec3::new(-10.0, 0.0, 0.0);
+        let a1 = Vec3::new(10.0, 0.0, 0.0);
+        let vertex = Vec3::new(0.0, 15.0, 10.0);
+        let b0 = Vec3::new(-15.0, 15.0, 0.0);
+        let b1 = Vec3::new(15.0, 15.0, 0.0);
+        let rule = BendRule { thickness: 2.0, radius: 8.0, k_factor: 0.44, side: Side::Left };
+        let layout = two_bend_from_points([a0, a1], [b0, vertex, b1], rule).unwrap();
+        let facets = [[a0, b0, vertex], [a0, a1, vertex], [a1, vertex, b1]];
+        let base = (facets[1][1] - facets[1][0]).cross(facets[1][2] - facets[1][0]);
+        let normals = facets.map(|f| {
+            let n = (f[1] - f[0]).cross(f[2] - f[0]);
+            let n = n * (1.0 / length(n));
+            if n.dot(base) < 0.0 { -n } else { n }
+        });
+        match two_bend_body(TopoId::derive("bent.body").finish(), &[a0, a1, vertex, b0, b1], &normals, &layout, rule) {
+            Ok(body) => {
+                body.validate().unwrap();
+                println!("body ok: {} faces, volume {}", body.faces().len(), body.volume());
+            }
+            Err(e) => panic!("body: {e}"),
         }
     }
 }
