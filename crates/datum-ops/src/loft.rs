@@ -996,7 +996,7 @@ fn wing_sharp(skin: &SkinGeom, wing: usize, vertex_s: Vec3, wing_far_origin: Vec
         let t = to.dot(b - a) / (b - a).dot(b - a);
         if t > 1e-9 && t < 1.0 - 1e-9 && length(a + (b - a) * t - bend.wing_end) < 1e-9 {
             let score = (b - a).dot(far).abs();
-            if best.map_or(true, |(_, s)| score > s) {
+            if best.is_none_or(|(_, s)| score > s) {
                 best = Some((k, score));
             }
         }
