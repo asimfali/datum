@@ -10,13 +10,14 @@
 | `architect-light` | `cliproxy/glm-5.3-flash#low` | только разговор: без правок, без делегирования |
 | `architect` | `cliproxy/glm-5.3-flash#high` | обычный план, решения, брифы |
 | `architect-max` | `cliproxy/glm-5.3-flash#max` | сложная задача: варианты, критерии, спорные места |
+| `architect-sol` | `cliproxy/gpt-6.2-sol#high` | самая сложная задача: новый контракт, неясная геометрия (у модели нет `max`, верхняя ступень — `high`) |
 | `worker-light` | `cliproxy/deepseek-v4.1-flash#low` | механические правки: тексты, переименования, документация |
 | `worker` | `cliproxy/deepseek-v4.1-flash#high` | реализация по брифу |
 | `worker-max` | `cliproxy/deepseek-v4-pro#max` | тяжёлые участки: сложная геометрия, отладка |
 | `reviewer` | `cliproxy/deepseek-v4.1-flash-200k#high` | ревью diff (окно 200k) |
 | `reviewer-pro` | `cliproxy/deepseek-v4-pro#high` | тяжёлое ревью, только по прямой просьбе |
 
-`architect-max`, `architect-light`, `worker-max`, `worker-light` — тонкие варианты: их тело отсылает к
+`architect-sol`, `architect-max`, `architect-light`, `worker-max`, `worker-light` — тонкие варианты: их тело отсылает к
 `architect.md`/`worker.md`, чтобы правила проекта жили в одном месте.
 
 `worker*` и `reviewer*` — `mode: subagent`: в меню агентов TUI их нет, попасть в них можно командой
@@ -29,6 +30,7 @@
 | `/обсуждаем` | `architect-light` | обсуждение, правок нет |
 | `/план` | `architect` | план и обсуждение, код не пишется |
 | `/план-макс` | `architect-max` | то же для сложной задачи |
+| `/план-сол` | `architect-sol` | то же для самой сложной задачи (gpt sol 6.2) |
 | `/делаем` | `worker` | реализация в текущей сессии |
 | `/делаем-лайт` | `worker-light` | механические правки |
 | `/делаем-макс` | `worker-max` | тяжёлая реализация |
