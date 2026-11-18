@@ -503,6 +503,18 @@ struct BendSkin {
     fold_at_corner: Vec3,
     /// The two tangent lines' meeting corner, on this skin's middle plane.
     corner: Vec3,
+    /// The tangent point of the wing facet's skin on the cylinder, at the corner station.
+    wing_corner: Vec3,
+    /// The tangent points of this skin's cylinders at the cut planes: the middle facet's point
+    /// at the edge cut, the wing facet's point there, then both at the corner cut.
+    middle_at_edge_cut: Vec3,
+    wing_at_edge_cut: Vec3,
+    middle_at_corner_cut: Vec3,
+    /// The cut lines' crossings with the outline: the middle facet's edge A and the wing's two
+    /// edges, on this skin's planes.
+    middle_cut_cross: Vec3,
+    wing_cut_cross: Vec3,
+    profile_cut_cross: Vec3,
     /// The cut stations along the axis: the edge-side cut, then the corner cut.
     edge_station: f64,
     corner_station: f64,
@@ -570,6 +582,10 @@ fn two_bend_geom(
             let corner_station = layout.corner_station[i];
             let fold_at_edge_cut = fold + dirs.axis * edge_station;
             let fold_at_corner = fold + dirs.axis * corner_station;
+            // The cut lines' crossings with each facet's own outline edges.
+            let middle_cut_cross = line_meeting(fold_at_edge_cut, dirs.middle_in, edge_start + edge_normal, edge_end - edge_start)?.0;
+            let wing_cut_cross = line_meeting(fold_at_edge_cut, dirs.wing_in, wing_edge_start + wing_edge_offset, wing_edge_end - wing_edge_start)?.0;
+            let profile_cut_cross = line_meeting(fold_at_corner, dirs.wing_in, far_start + wing_edge_offset, far_end - far_start)?.0;
             for (name, station, limit) in [
                 ("edge", edge_station, 0.0),
                 ("corner", corner_station, edge_station),
@@ -586,10 +602,19 @@ fn two_bend_geom(
                     edge_station, corner_station
                 )));
             }
+            // The tangent points on this skin's cylinder at the two cut planes. The touch
+            // stations are zero: every tangent point sits in the plane through its hinge start.
+            let middle_at_edge_cut = mid_tan + dirs.axis * edge_station;
+            let wing_at_edge_cut = wing_tan + dirs.axis * edge_station;
+            let middle_at_corner_cut = mid_tan + dirs.axis * corner_station;
+            let wing_corner = wing_tan + dirs.axis * corner_station;
             for (name, cross, span, start) in [
                 ("edge A", edge_cross, edge_end - edge_start, edge_start),
                 ("the wing edge", wing_cross, wing_edge_end - wing_edge_start, wing_edge_start),
                 ("the far edge", far_cross, far_end - far_start, far_start),
+                ("edge A's cut line", middle_cut_cross, edge_end - edge_start, edge_start),
+                ("the wing edge's cut line", wing_cut_cross, wing_edge_end - wing_edge_start, wing_edge_start),
+                ("the far edge's cut line", profile_cut_cross, far_end - far_start, far_start),
             ] {
                 let along = (cross - start).dot(span) / length(span).powi(2);
                 if !(0.0..=1.0).contains(&along) {
@@ -610,6 +635,13 @@ fn two_bend_geom(
                 fold_at_edge_cut,
                 fold_at_corner,
                 corner,
+                wing_corner,
+                middle_at_edge_cut,
+                wing_at_edge_cut,
+                middle_at_corner_cut,
+                middle_cut_cross,
+                wing_cut_cross,
+                profile_cut_cross,
                 edge_station,
                 corner_station,
             });
