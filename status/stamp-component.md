@@ -76,7 +76,7 @@ ROADMAP 0.5.5, issue #248. Этап 1–2 влит в main (PR #250, squash `6ca
   (`component_of`), `levels.rs` (правило листа).
 - `crates/datum-brep/src/curve.rs` — база φ сферы по меридианам (D263).
 - `crates/datum-ops/tests/component.rs` — старые формовочные тесты удалены, новый тест
-  `#[ignore]` (NonManifold на крышке); 9 passed, 1 ignored.
+  `#[ignore]` (NonManifold на крышке); 9 passed, 1 ignored (`cargo test -p datum-ops --test component`).
 - `tests/models/louver.json` — СНЯТ (старая геометрия D261; вернётся с bless под новым
   контрактом).
 - `ARCHITECTURE.md` D260–D263; `ROADMAP.md` 0.5.5; `TESTERS.md` 0.5.5 (строка про жалюзи
