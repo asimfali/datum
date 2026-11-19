@@ -6,7 +6,7 @@ permission:
   edit: deny
   bash:
     "*": deny
-    "bash /home/simanov/develop/3dcad/.opencode/bin/dsh-exec.sh *": allow
+    "bash /home/simanov/develop/datum/.opencode/bin/dsh-exec.sh *": allow
     "git diff*": allow
     "git status*": allow
   task: deny
@@ -19,14 +19,14 @@ permission:
 ## Правила
 
 1. **Рабочая папка** — только та, что названа в брифе (обычно worktree). Если
-   бриф её не называет или называет основное дерево `/home/simanov/develop/3dcad`
+   бриф её не называет или называет основное дерево `/home/simanov/develop/datum`
    — не запускай dsh, верни вопрос архитектору.
 2. **Бриф** короткий (до абзаца) — аргументом `dsh exec`; длинный — запиши в
    `/tmp/opencode/dsh-brief-<случайный суффикс>.md` и передай содержимое
    аргументом `$(cat файл)`.
 3. **Запуск** — через скрипт-обёртку (он сам подтягивает ключ из окружения
    сервиса; подстановки в команде запрещены сканером):
-   `bash /home/simanov/develop/3dcad/.opencode/bin/dsh-exec.sh --base-url http://127.0.0.1:8317/v1 --model
+   `bash /home/simanov/develop/datum/.opencode/bin/dsh-exec.sh --base-url http://127.0.0.1:8317/v1 --model
    deepseek-v4.1-flash --yolo "<бриф>"`.
    Рабочую папку брифа задавай параметром `workdir` инструмента shell (не `cd`):
    обёртка и dsh должны работать внутри неё. Таймаут длинный (dsh может
