@@ -9,6 +9,12 @@ if [[ ! -f Cargo.toml ]]; then
     exit 0
 fi
 
+# The always-loaded files pay on every model step (AGENTS.md, "Цена контекста"): the caps are
+# checked where agent-kit's ctx-cost is installed, skipped elsewhere (CI has no ctx-cost).
+if command -v ctx-cost >/dev/null; then
+    ctx-cost --cap 2000 AGENTS.md HANDOFF.md
+fi
+
 cargo fmt --all ${CI:+-- --check}
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace

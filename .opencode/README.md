@@ -79,3 +79,13 @@
 Внимание: варианты работают только в V2-блоке `providers` (множественное число). В V1-блоке
 `provider` у модели другая форма `variants` (объект, не массив), и массив там молча выбрасывает весь
 провайдер — все модели отвечают `Model unavailable`.
+
+## Среда автора (вне репозитория)
+
+- Репозиторий — `/home/simanov/develop/datum`; Windows-сборки: дома `C:\develop\datum`, на работе
+  `C:\Users\Simanov\datum-src` — скилл `win-build` (`scripts/win-build.sh [branch] [--test]`).
+- Рендеры для автора — PNG в `/tmp/opencode` (из Windows `\\wsl.localhost\Ubuntu\tmp\opencode\`);
+  MCP-рендер держит старую сборку, поэтому рендерить OBJ питон-скриптом
+  (`/tmp/opencode/render.py`, `render2.py`).
+- Две машины (работа и дом) чат друг друга не видят: связь — комментарии в GitHub issue (#248).
+- `ctx-cost` (из `agent-kit`) считает токены файла; потолки — в `AGENTS.md`, «Цена контекста».
