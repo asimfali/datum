@@ -13,6 +13,11 @@ profile to a two-segment angled profile (a V), the first real bends.
 - the apex sits over the middle of A (step-2 restriction; general matching of
   open chains comes later, after a third real case).
 
+The pre-code topological sketch (three views, a scheme of the axes and panels,
+not a CAD result and not a proof of the radius geometry):
+`/mnt/data/loft-02-bend-preview.png`. The author's own picture is the shape
+reference.
+
 ## Result (the contract, confirmed by the author's Inventor example 2026-11-17)
 
 - **three planar triangular facets**: the middle one (A's start, A's end, the
