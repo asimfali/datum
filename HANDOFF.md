@@ -37,5 +37,6 @@
 ## Проверки
 
 - `f0ec94f`: `cargo test -p datum-ops --lib` — 5 passed, 1 ignored; `--test loft` — 7 passed. Операция лофта — прежняя заглушка.
-- `scripts/check.sh` сверяет ещё и потолки `AGENTS.md`/`HANDOFF.md` (`ctx-cost --cap 2000`), если `ctx-cost` установлен.
+- `scripts/check.sh` сверяет потолки `AGENTS.md`/`HANDOFF.md` (`ctx-cost --cap 2000`, ставится `install.sh` из agent-kit), если `ctx-cost` в PATH.
+- Потолки на этой правке: `AGENTS.md` 1983, `HANDOFF.md` 1267 — ok.
 - Справочные точки: `scripts/check.sh` exit 0 на `63cd5f5` и `96d8c49`.

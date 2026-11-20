@@ -24,14 +24,16 @@ allowed) is in `AGENTS.md`; this is only the order of steps.
    parentheses — `(D258)`; a release is `Release 0.5.5`.
 7. `gh pr create --base main --title … --body-file …`. `--draft` only if the author wants an early look.
 8. Review: the `reviewer` subagent on the diff (read-only, findings with `file:line`); `reviewer-pro` only
-   on the author's direct request. Fix the findings on the branch and re-run `scripts/check.sh`.
+   on the author's direct request. Code only: a change that touches only `**.md` gets no review — there is
+   nothing for the reviewer to verify that a human cannot read in the diff, and each of its commands costs
+   the author a confirmation. Fix the findings on the branch and re-run `scripts/check.sh`.
 9. Merge only with the author's explicit permission — skill `merge-pr` (squash, delete the branch).
 
 Traps:
 - Untracked prototypes (`crates/datum-ops/tests/stamp_spike.rs`, `examples/stamp-leaf.json`) never ride
   along in a commit. `git status` before `git add`, and name them in "Не входит".
 - Changes to `**.md` only skip CI (`paths-ignore`). Say "CI не запускался — только документация", not
-  "CI зелёный".
+  "CI зелёный". The same rule skips the review: prose is the author's to read.
 - No merge commits and no force-push to `main`; a stale branch is rebased on `main`, not merged.
 
 Report in Russian, one or two lines: branch, PR number, what the checks say, what is still open.
