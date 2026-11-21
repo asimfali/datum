@@ -88,13 +88,16 @@ impl Session {
         self.loft_inputs(first, second, self.graph.nodes().len() as NodeIx)?;
         let rule = p.get("rule").and_then(Value::as_str).ok_or("loft needs `rule`: a sheet rule of the library, its thickness")?;
         let tolerance = p.get("tolerance").cloned().ok_or("loft needs `tolerance`: the chordal deviation for its profiles")?;
-        let fields = json!({
+        let mut fields = json!({
             "name": name,
             "op": "loft",
             "inputs": [first, second],
             "side": p.get("side").cloned().unwrap_or(json!("left")),
             "tolerance": tolerance,
         });
+        if let Some(gap) = p.get("gap") {
+            fields["gap"] = gap.clone();
+        }
         let ix = add_feature(&mut self.graph, fields.as_object().cloned().ok_or("loft feature parameters are not an object")?)?;
         self.doc.store(self.active.as_deref(), &self.graph)?;
         self.set_rule(name, Some(rule.to_string()))?;

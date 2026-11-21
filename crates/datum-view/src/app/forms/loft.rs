@@ -17,6 +17,7 @@ pub(in crate::app) struct LoftForm {
     first: String,
     second: String,
     tolerance: String,
+    gap: Option<String>,
     side: &'static str,
     rule: Option<String>,
     editing: bool,
@@ -36,6 +37,7 @@ impl LoftForm {
             first: feature["inputs"][0].as_str().unwrap_or_default().into(),
             second: feature["inputs"][1].as_str().unwrap_or_default().into(),
             tolerance: if feature["tolerance"].is_null() { "1".into() } else { definition(&feature["tolerance"]) },
+            gap: feature.get("gap").filter(|v| !v.is_null()).map(definition),
             side,
             rule: feature["rule"].as_str().map(String::from),
             editing: true,
@@ -48,19 +50,26 @@ impl LoftForm {
         self.editing.then_some(&self.name)
     }
 
-    fn params(&self) -> Option<(&'static str, Json)> {
+    fn params(&self, uses_gap: bool) -> Option<(&'static str, Json)> {
         if self.first.is_empty() || self.second.is_empty() || self.first == self.second || self.tolerance.trim().is_empty() {
             return None;
         }
         let tolerance = value_of(&self.tolerance);
-        if self.editing {
-            Some(("edit", json!({"name": self.name, "inputs": [self.first, self.second], "tolerance": tolerance, "side": self.side})))
+        let (command, mut params) = if self.editing {
+            ("edit", json!({"name": self.name, "inputs": [self.first, self.second], "tolerance": tolerance, "side": self.side}))
         } else {
-            Some((
+            (
                 "loft",
                 json!({"name": self.name, "first": self.first, "second": self.second, "rule": self.rule.as_ref()?, "tolerance": tolerance, "side": self.side}),
-            ))
+            )
+        };
+        if uses_gap {
+            let gap = self.gap.as_ref().filter(|gap| !gap.trim().is_empty())?;
+            params["gap"] = value_of(gap);
+        } else if self.editing && self.gap.is_some() {
+            params["gap"] = Json::Null;
         }
+        Some((command, params))
     }
 }
 
@@ -77,6 +86,7 @@ impl Viewer {
             first: String::new(),
             second: String::new(),
             tolerance: "1".into(),
+            gap: None,
             side: "left",
             rule: Some(rule),
             editing: false,
@@ -169,6 +179,22 @@ impl Viewer {
         }
     }
 
+    /// Offer a seam for a circle and a four-line sketch. Geometry validation is in the preview.
+    fn loft_uses_gap(&self, f: &LoftForm) -> bool {
+        let Some(model) = &self.model else { return false };
+        let shape = |name: &str| {
+            if let Some(sketch) = model.loft_profiles.iter().find(|p| p.name == name).and_then(|p| p.value.sketch()) {
+                return (sketch.circles.values().filter(|c| !c.construction).count(), sketch.lines.values().filter(|l| !l.construction).count());
+            }
+            let feature = model.inspect["features"].as_array().into_iter().flatten().find(|f| f["name"] == name);
+            let count = |kind: &str| {
+                feature.and_then(|f| f["sketch"][kind].as_object()).map_or(0, |curves| curves.values().filter(|c| c["construction"] != true).count())
+            };
+            (count("circles"), count("lines"))
+        };
+        matches!((shape(&f.first), shape(&f.second)), ((1, 0), (0, 4)) | ((0, 4), (1, 0)))
+    }
+
     pub(in crate::app) fn loft_window(&mut self, ctx: &egui::Context) {
         if self.loft.is_none() {
             return;
@@ -179,6 +205,7 @@ impl Viewer {
             self.contour_hint = Some((ctx.pointer_hover_pos().unwrap_or(egui::Pos2::ZERO), std::time::Instant::now(), Act::Loft));
             return;
         }
+        let uses_gap = self.loft.as_ref().is_some_and(|f| self.loft_uses_gap(f));
         let Some(f) = &mut self.loft else { return };
         if !f.editing {
             f.rule = rule;
@@ -186,7 +213,10 @@ impl Viewer {
         if f.picking.is_some() {
             return;
         }
-        let before = f.params();
+        if uses_gap {
+            f.gap.get_or_insert_with(|| datum_ops::DEFAULT_LOFT_GAP.to_string());
+        }
+        let before = f.params(uses_gap);
         let preview =
             self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| Some(p) == before.as_ref().map(|(_, p)| p)).map(|(_, r)| r);
         let (mut add, mut cancel) = (false, false);
@@ -214,6 +244,12 @@ impl Viewer {
                             .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
                     );
                 });
+                if let Some(gap) = f.gap.as_mut().filter(|_| uses_gap) {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("loft-seam-gap", "Seam gap (mm)"));
+                        ui.add(egui::TextEdit::singleline(gap).desired_width(120.0).hint_text(self.i18n.t("plane-offset-hint", "number or formula")));
+                    });
+                }
                 ui.horizontal(|ui| {
                     ui.label(self.i18n.t("loft-side", "Side"));
                     ui.radio_value(&mut f.side, "middle", self.i18n.t("loft-middle", "Middle"));
@@ -224,18 +260,18 @@ impl Viewer {
                 .on_hover_text(
                     self.i18n.t("loft-side-hint", "For arcs, inside is toward the centre. Use the preview to check the side of line profiles."),
                 );
-                if before == f.params()
+                if before == f.params(uses_gap)
                     && let Some(Err(why)) = preview
                 {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
-                let ok = f.picking.is_none() && before == f.params() && preview.is_some_and(Result::is_ok);
+                let ok = f.picking.is_none() && before == f.params(uses_gap) && preview.is_some_and(Result::is_ok);
                 ui.horizontal(|ui| {
                     add = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK"))).clicked();
                     cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
                 });
             });
-        let params = f.params();
+        let params = f.params(uses_gap);
         let ok = f.picking.is_none() && before == params && preview.is_some_and(Result::is_ok);
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if cancel || esc {
@@ -322,28 +358,51 @@ mod tests {
     }
 
     #[test]
+    fn closed_loft_preview_sets_and_edits_the_seam_gap() {
+        let (mut v, inbox) = viewer("loft-01-line.json");
+        v.model.as_mut().unwrap().inspect["features"] = json!([
+            {"name": "circle", "op": "sketch", "sketch": {"circles": {"c": {"diameter": 80}}}},
+            {"name": "rectangle", "op": "sketch", "sketch": {"lines": {"a": {}, "b": {}, "c": {}, "d": {}, "diagonal": {"construction": true}}}},
+        ]);
+        v.rules = vec![json!({"name": "Sheet", "kind": "sheet"})];
+        v.next_rule = Some("Sheet".into());
+        v.open_loft(egui::Pos2::ZERO);
+        v.pick_loft_profile("rectangle");
+        v.pick_loft_profile("circle");
+        frame(&mut v, None);
+        let Request::Preview(Some(("loft", params))) = inbox.try_recv().unwrap() else { panic!("expected loft preview") };
+        assert_eq!(params["gap"], datum_ops::DEFAULT_LOFT_GAP);
+
+        v.loft = Some(LoftForm::editing("loft".into(), &json!({"inputs": ["circle", "rectangle"], "gap": "pitch / 2"})));
+        frame(&mut v, None);
+        let Request::Preview(Some(("edit", params))) = inbox.try_recv().unwrap() else { panic!("expected edit preview") };
+        assert_eq!(params["gap"], "pitch / 2");
+    }
+
+    #[test]
     fn loft_needs_two_distinct_profiles_and_a_rule() {
         let mut f = LoftForm {
             name: "loft1".into(),
             first: "a".into(),
             second: "a".into(),
             tolerance: "1".into(),
+            gap: None,
             side: "left",
             rule: Some("Sheet".into()),
             editing: false,
             sent: None,
             picking: None,
         };
-        assert!(f.params().is_none());
+        assert!(f.params(false).is_none());
         f.second = "b".into();
         assert_eq!(
-            f.params(),
+            f.params(false),
             Some(("loft", json!({"name": "loft1", "first": "a", "second": "b", "rule": "Sheet", "tolerance": 1.0, "side": "left"})))
         );
         f.tolerance.clear();
-        assert!(f.params().is_none());
+        assert!(f.params(false).is_none());
         f.tolerance = "pitch / 2".into();
         f.editing = true;
-        assert_eq!(f.params(), Some(("edit", json!({"name": "loft1", "inputs": ["a", "b"], "tolerance": "pitch / 2", "side": "left"}))));
+        assert_eq!(f.params(false), Some(("edit", json!({"name": "loft1", "inputs": ["a", "b"], "tolerance": "pitch / 2", "side": "left"}))));
     }
 }

@@ -1,4 +1,6 @@
-//! Sheet lofts between line profiles or coaxial circular arcs.
+//! Sheet lofts between line profiles, coaxial circular arcs, or a circle and a rectangle.
+
+mod rect;
 
 use std::collections::BTreeMap;
 
@@ -9,6 +11,9 @@ use crate::sheet::{Sheet, loft_chords};
 use crate::sketch::within_rounding;
 use crate::{Placed, Side, parallel};
 
+/// Seam gap in millimetres for a new closed loft.
+pub const DEFAULT_LOFT_GAP: f64 = 1.0;
+
 /// Sheet and approximation parameters for the D264 loft cases.
 #[derive(Clone, Copy)]
 pub struct LoftDims {
@@ -17,6 +22,7 @@ pub struct LoftDims {
     pub k_factor: Option<f64>,
     pub side: Side,
     pub tolerance: f64,
+    pub gap: Option<f64>,
 }
 
 /// Builds a sheet loft from a line or circular arc.
@@ -24,7 +30,7 @@ pub struct LoftDims {
 /// In the planar case the line profiles must be parallel and coplanar in world space. For
 /// the bent cases the first line must lie in a plane parallel to the second profile.
 pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) -> Result<Body, BrepError> {
-    let LoftDims { thickness, radius, k_factor, side, tolerance } = dims;
+    let LoftDims { thickness, radius, k_factor, side, tolerance, gap } = dims;
     if !(thickness > 0.0 && thickness.is_finite()) {
         return Err(BrepError::Degenerate(format!("loft: thickness must be positive and finite, got {thickness}")));
     }
@@ -32,6 +38,13 @@ pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) ->
         return Err(BrepError::Degenerate(format!("loft: tolerance must be positive and finite, got {tolerance}")));
     }
 
+    if first.circles.values().any(|circle| !circle.construction) || second.circles.values().any(|circle| !circle.construction) {
+        let (radius, k) = loft_bend_rule(radius, k_factor)?;
+        let (circle, rectangle) = if first.circles.values().any(|c| !c.construction) { (first, second) } else { (second, first) };
+        let body = rect::circle_rectangle(feature, circle, rectangle, Sheet { thickness, radius, side }, tolerance, gap.unwrap_or(DEFAULT_LOFT_GAP))?;
+        check_blank(&body, k, "the circle and rectangle")?;
+        return Ok(body);
+    }
     if first.arcs.values().any(|arc| !arc.construction) {
         let (radius, k) = loft_bend_rule(radius, k_factor)?;
         let body = arc_loft(feature, first, second, Sheet { thickness, radius, side }, tolerance)?;
@@ -327,6 +340,10 @@ fn bend(start: Vec3, apex: Vec3, opposite: [Vec3; 2], radial_sign: f64, rule: Be
 
 /// Where two lines in a facet meet, with their parameters along d and e.
 fn line_meeting(p: Vec3, d: Vec3, q: Vec3, e: Vec3) -> Result<(Vec3, f64, f64), BrepError> {
+    line_meeting_at_scale(p, d, q, e, 0.0)
+}
+
+fn line_meeting_at_scale(p: Vec3, d: Vec3, q: Vec3, e: Vec3, scale: f64) -> Result<(Vec3, f64, f64), BrepError> {
     let n = d.cross(e);
     let n2 = n.dot(n);
     if !(n2 > 0.0 && n2.is_finite()) {
@@ -337,7 +354,7 @@ fn line_meeting(p: Vec3, d: Vec3, q: Vec3, e: Vec3) -> Result<(Vec3, f64, f64), 
     let t = delta.cross(d).dot(n) / n2;
     let first = d * s;
     let second = delta + e * t;
-    let size = length(first).max(length(delta)).max(length(e * t));
+    let size = length(first).max(length(delta)).max(length(e * t)).max(scale);
     if !within_rounding(length(first - second), size) {
         return Err(BrepError::Degenerate("loft: lines used to trim a bend are skew".into()));
     }
@@ -484,7 +501,11 @@ fn shared_bend_outline(bend: Bend, end: f64, a: Vec3, a_other: Vec3, b: Vec3, ap
 }
 
 fn tangent_crossing(tangent: Vec3, axis: Vec3, start: Vec3, edge: Vec3) -> Result<(Vec3, f64), BrepError> {
-    let (point, station, fraction) = line_meeting(tangent, axis, start, edge)?;
+    tangent_crossing_at_scale(tangent, axis, start, edge, 0.0)
+}
+
+fn tangent_crossing_at_scale(tangent: Vec3, axis: Vec3, start: Vec3, edge: Vec3, scale: f64) -> Result<(Vec3, f64), BrepError> {
+    let (point, station, fraction) = line_meeting_at_scale(tangent, axis, start, edge, scale)?;
     if !(0.0 < fraction && fraction < 1.0) {
         return Err(BrepError::Degenerate("loft: a tangent does not cross its profile edge".into()));
     }

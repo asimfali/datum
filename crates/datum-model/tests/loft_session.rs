@@ -28,6 +28,42 @@ fn concentric_arc_bridge_follows_the_projected_profile() {
     check_arc_bridge("loft-04-concentric-arcs.json", true);
 }
 
+#[test]
+fn closed_loft_seam_gap_is_parametric_and_can_reset_to_its_default() {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("loft_session_seam_gap");
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let mut s = Session::default();
+    run(&mut s, "save", json!({"path": root.join("part/loft.json")}));
+    run(&mut s, "put_library", json!({"level": "material", "element": {"name": "Steel", "density": 7850}}));
+    run(
+        &mut s,
+        "put_library",
+        json!({"level": "rule", "element": {"name": "Sheet", "kind": "sheet", "material": "Steel", "thickness": 2, "radius": 2, "k_factor": 0.44}}),
+    );
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/loft-circle-rectangle.json")).unwrap();
+    for feature in model["features"].as_array().unwrap().iter().take(3) {
+        run(&mut s, "add", feature.clone());
+    }
+    let changed = run(&mut s, "set_parameter", json!({"name": "pitch", "value": 2.0}));
+    assert!(changed["failed"].as_array().unwrap().is_empty(), "{changed}");
+    let added =
+        run(&mut s, "loft", json!({"name": "loft", "first": "sketch1", "second": "sketch2", "rule": "Sheet", "tolerance": 1, "gap": "pitch / 2"}));
+    assert!(added["failed"].as_array().unwrap().is_empty(), "{added}");
+    let volume = |s: &Session| s.value("loft").unwrap().body().unwrap().volume();
+    let before = volume(&s);
+    assert!(s.flat_of("loft").unwrap().overlaps.is_empty());
+
+    let changed = run(&mut s, "set_parameter", json!({"name": "pitch", "value": 4.0}));
+    assert!(changed["failed"].as_array().unwrap().is_empty(), "{changed}");
+    assert!(volume(&s) < before);
+    assert!(s.flat_of("loft").unwrap().overlaps.is_empty());
+
+    let reset = run(&mut s, "edit", json!({"name": "loft", "gap": null}));
+    assert!(reset["failed"].as_array().unwrap().is_empty(), "{reset}");
+    assert_eq!(volume(&s), before);
+}
+
 fn check_arc_bridge(model: &str, fixed_second_radius: bool) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
     let mut s = Session::default();
