@@ -262,7 +262,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "loft",
-        description: "A loft-flange between two open sketches: one straight line to a parallel, coplanar straight line forms a planar trapezoid (D264); one straight line to a two-line V with its apex above the first line's midpoint forms three facets and two bends (D265–D266); one straight line to a three-line chain with a parallel, coplanar middle segment forms a trapezoid with two triangular wings and two bends; aligned concentric arcs on parallel planes, with equal sweep and possibly different radii, form chordal facets joined by bends. Other profiles are unsupported. rule is required, a sheet rule of the library supplying thickness, bend radius and K-factor. tolerance (mm) is required and controls the chordal deviation; side is left (default), right or middle. The reply names the part and its rule.",
+        description: "A loft-flange between two sketch profiles (D264). A straight line transitions to a parallel coplanar line, a two-line V, or a three-line chain. Aligned concentric arcs on parallel planes with equal sweep form chordal facets joined by bends. A circle and a rectangle on parallel planes form a sheet-metal transition with a seam. The optional positive gap (mm, default 1) opens the seam for the closed profiles. The required sheet rule supplies thickness, bend radius and K-factor. The required tolerance (mm) controls chordal deviation. side is left (default), right or middle. The reply names the part and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -270,7 +270,8 @@ const COMMANDS: &[Command] = &[
                 "second": {"type": "string"},
                 "rule": {"type": "string"},
                 "side": {"type": "string", "enum": ["left", "right", "middle"]},
-                "tolerance": {"type": ["number", "string"]}
+                "tolerance": {"type": ["number", "string"]},
+                "gap": {"type": ["number", "string"]}
             }, "required": ["name", "first", "second", "rule", "tolerance"], "additionalProperties": false})
         },
         run: |s, p| s.loft(p),

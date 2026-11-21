@@ -66,6 +66,7 @@ fn arc_loft(tolerance: f64) -> Op {
         k_factor: Some(Num::Value(0.44)),
         side: Side::Left,
         tolerance: Num::Value(tolerance),
+        gap: None,
     }
 }
 
@@ -137,7 +138,7 @@ fn concentric_arc_profiles_with_different_radii_make_a_tapered_sheet() {
 
 fn body(side: Side, offset: f64) -> Result<datum_brep::Body, BrepError> {
     let (first, second) = sketches(offset);
-    let loft = Op::Loft { thickness: Some(Num::Value(2.0)), radius: None, k_factor: None, side, tolerance: Num::Value(1.0) };
+    let loft = Op::Loft { thickness: Some(Num::Value(2.0)), radius: None, k_factor: None, side, tolerance: Num::Value(1.0), gap: None };
     let value = loft.eval(id("loft.body"), &[&first, &second])?;
     Ok(value.body().ok_or_else(|| BrepError::Invalid("loft returned no body".into()))?.clone())
 }
@@ -183,7 +184,7 @@ fn non_parallel_line_profiles_are_refused_as_degenerate() {
         ]
     });
     let second = op(serde_json::json!({"op": "sketch", "sketch": second_sketch})).eval(id("nonparallel.second"), &[&plane]).unwrap();
-    let loft = Op::Loft { thickness: Some(Num::Value(2.0)), radius: None, k_factor: None, side: Side::Left, tolerance: Num::Value(1.0) };
+    let loft = Op::Loft { thickness: Some(Num::Value(2.0)), radius: None, k_factor: None, side: Side::Left, tolerance: Num::Value(1.0), gap: None };
     assert!(matches!(loft.eval(id("nonparallel.body"), &[&first, &second]), Err(BrepError::Degenerate(_))));
 }
 
@@ -217,6 +218,7 @@ fn bent_op(side: Side, radius: f64) -> Op {
         k_factor: Some(Num::Value(0.44)),
         side,
         tolerance: Num::Value(1.0),
+        gap: None,
     }
 }
 
@@ -284,6 +286,7 @@ fn one_line_to_three_lines_unfolds_and_keeps_mounting_references() {
             k_factor: Some(Num::Value(k)),
             side,
             tolerance: Num::Value(1.0),
+            gap: None,
         };
         loft.eval(id("three.body"), &[&first, &second]).unwrap().body().unwrap().clone()
     };
@@ -433,6 +436,7 @@ proptest::proptest! {
             k_factor: Some(Num::Value(k)),
             side: Side::Middle,
             tolerance: Num::Value(1.0),
+            gap: None,
         };
         for (first, second) in [reference_sketches(half_a, leg), three_segment_sketches(half_a, middle, leg * 0.5, false)] {
             let value = loft.eval(id("reference.body"), &[&first, &second]).unwrap();
@@ -459,6 +463,7 @@ fn mounting_edge_and_blank_references_survive_profile_and_rule_edits() {
             k_factor: Some(Num::Value(k)),
             side: Side::Left,
             tolerance: Num::Value(1.0),
+            gap: None,
         };
         loft.eval(id("reference.body"), &[&first, &second]).unwrap().body().unwrap().clone()
     };

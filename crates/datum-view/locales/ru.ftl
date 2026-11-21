@@ -91,6 +91,7 @@ act-sheet-loft-about = Листовой переход между двумя п�
 loft-first-profile = Первый профиль
 loft-second-profile = Второй профиль
 loft-chord-tolerance = Допуск хорды, мм
+loft-seam-gap = Зазор на шве, мм
 loft-side = Сторона
 loft-side-hint = Для дуг «Внутри» означает к центру дуги. Для прямых профилей проверьте сторону в предпросмотре.
 loft-middle = Середина
