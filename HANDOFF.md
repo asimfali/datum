@@ -32,6 +32,7 @@
 - `crates/datum-ops/src/loft.rs` — геометрия и строитель кусочка 2; `lib.rs` — `Op::Loft`, `Op::Component`.
 - `crates/datum-ops/tests/loft.rs` — эталонные случаи шагов 1–2; `tests/models/loft-01-line.json`, `tests/model-hashes.json`.
 - `status/loft-01-trapezoid.md`, `status/loft-02-bend.md` — планы кусочков.
+- `status/` — планы в формате status-memory (`# План:`, этапы `##`, чекбоксы); читать через `python3 scripts/status_summary.py overview|next|done|plan`, а не целиком; формат — `.opencode/README.md`.
 - Локально не закоммичено: `crates/datum-ops/tests/stamp_spike.rs`, `examples/stamp-leaf.json` (заготовки штампа).
 
 ## Проверки

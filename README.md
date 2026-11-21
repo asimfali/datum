@@ -79,7 +79,7 @@ Datum is built in the open, and every kind of help counts:
 - **Feedback** — what hurts in your CAD every day, and what you would want instead. Engineers' real pain points shape the plan.
 - **Stars** — they help other engineers find the project.
 - **Issues** — bugs, models that fail to rebuild, ideas.
-- **Pull requests** — welcome when they follow the project's principles (determinism, exact predicates, no hidden tolerances; see [`CLAUDE.md`](CLAUDE.md)). For anything large, open an issue first so we can discuss the approach.
+- **Pull requests** — welcome when they follow the project's principles (determinism, exact predicates, no hidden tolerances; see [`AGENTS.md`](AGENTS.md)). For anything large, open an issue first so we can discuss the approach.
 - **Unconventional ideas** — welcome. Datum itself started from questioning how CAD kernels are usually built.
 
 ## Documentation
@@ -89,7 +89,7 @@ Design documents are in Russian:
 - [`VISION.md`](VISION.md): how Datum works with engineers, agents and documentation
 - [`ROADMAP.md`](ROADMAP.md): the development plan
 - [`ARCHITECTURE.md`](ARCHITECTURE.md): goals, data structures, algorithms, decision log
-- [`CLAUDE.md`](CLAUDE.md): project rules (determinism, geometry, code style)
+- [`AGENTS.md`](AGENTS.md): project rules (determinism, geometry, code style)
 - [`PAINS.md`](PAINS.md): real engineering pain points that drive priorities
 
 ## Try it

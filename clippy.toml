@@ -2,7 +2,7 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
-# Maths whose result is not exact differs between OS libraries: only through `libm` (CLAUDE.md).
+# Maths whose result is not exact differs between OS libraries: only through `libm` (AGENTS.md).
 disallowed-methods = [
     { path = "f64::hypot", reason = "libm::hypot: the same bits on every OS" },
     { path = "f64::sin", reason = "libm::sin" },

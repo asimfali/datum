@@ -1,51 +1,27 @@
-# Loft, step 1 — two lines → trapezoid (D264 skeleton)
+# План: Loft, шаг 1 — две линии → трапеция (скелет D264)
 
-## Goal
+> Влит: #260, squash `916832d`. Все пункты закрыты — план оставлен как запись
+> «как сделано» (режим `done`); текущую задачу ведёт `HANDOFF.md`.
 
-The skeleton of the loft-flange op (D264) on the degenerate case: the transition
-between two profiles, each a single line, on two parallel planes. Almost all of
-the op plumbing is solved here without any curved surface.
+## Входы и контракт
 
-## Inputs
+- [x] Взят эталон автора `loft(1 to 1 line)(first stage).json` (два эскиза и плоскость): линия 20 мм на базовой XY (`x ∈ [−10, 10]`, `y = 0`, `z = 0`), рабочая плоскость XZ со смещением 15 (нормаль −Y → `y = ±15`), линия 30 мм на ней (`x ∈ [−15, 15]`, `z = 0`).
+- [x] Зафиксирована форма перехода: обе линии параллельны X и лежат в `z = 0`, четыре конца компланарны → ОДНА плоская четырёхугольная грань-трапеция; на треугольники не делится, правило разметки D264 действует только там, где есть сгиб.
+- [x] Решённая геометрия читается с построенного тела, а не из чисел файла (сохранённые координаты разъехались с ограничениями — как в `жалюзи2`).
 
-Author's test model `C:\develop\datum-test\Детали\loft(1 to 1 line)(first stage).json`
-(two sketches + a plane):
+## Тело и развёртка
 
-- sketch1 (base XY): line 20 mm, horizontal, midpoint at sketch origin →
-  along X, x ∈ [−10, 10], y = 0, z = 0;
-- plane1: base XZ, offset 15 (normal −Y) → plane y = ±15;
-- sketch2 on plane1: line 30 mm, horizontal, midpoint at sketch origin →
-  along X, x ∈ [−15, 15], z = 0.
+- [x] Трапеция строится в datum: одна плоская грань (`Surface::Plane`), грани толщины и обработка рёбер по правилу листа (Left/Right/Middle) — `loft::planar_loft`.
+- [x] Развёртка работает: `unfold_side`, плоская развёртка (слой 0, D186) — тест `two_line_profiles_make_one_thick_trapezoid_and_unfold`.
+- [x] Торцы открытых профилей остаются открытыми, стенок нет.
 
-Both lines are parallel to X, both lie in z = 0: the four ends are coplanar,
-the transition is ONE flat quadrilateral face — a trapezoid. Not split into
-triangles: the D264 marking rule (triangle over each straight segment) applies
-where there is a fold; splitting a flat face would create fake bends.
+## Операция и проверки
 
-Stored point coordinates in the file diverged from its constraints (same as
-жалюзи2) — datum solves constraints; verify the solved geometry on the built
-body, read the structure, not the numbers.
+- [x] Добавлен `Op::Loft` (`crates/datum-ops/src/lib.rs`) с входом `loft::loft`; сериализация, чтение модели и вид «loft» идут общим путём, как у остальных операций (`add-op`).
+- [x] Непараллельные линии и нулевая длина — честный `Err(Degenerate)` (D264), не приблизительный результат.
+- [x] Эталон `tests/models/loft-01-line.json` влит и заблёссен в `tests/model-hashes.json`.
+- [x] Юнит-тесты `crates/datum-ops/tests/loft.rs` (7) зелёные, `scripts/check.sh` exit 0.
 
-## Result
+## Примечания
 
-- a new sheet body (sheet rule, thickness/side as in обечайка, D264);
-- one planar face (Surface::Plane), thickness faces and edge treatment per
-  the sheet rule;
-- the flat development (layer 0, D186) of the body.
-
-## Done when
-
-- [ ] the author's model file transferred into `tests/models/` (English name,
-  e.g. `loft-01-line.json`);
-- [ ] the trapezoid body is fully built in datum (author verifies the result
-  in datum itself — no PNG renders in this step);
-- [ ] the development (unfold) works on it;
-- [ ] `Op` variant + window + MCP wiring (`add-op` path);
-- [ ] parallel-planes check, honest `Err(Degenerate)` otherwise (D264);
-- [ ] unit tests, reference model blessed, `scripts/check.sh` exit 0.
-
-## Notes
-
-- Ends of open profiles stay open: no end walls.
-- Next step (one line → two angled lines) starts ONLY after this step is
-  fully done.
+- Заголовок файла и его дата — запись о шаге 1; следующий шаг (одна линия → две наклонные) вёлся отдельным планом `loft-02-bend.md` и начат только после полного закрытия этого.
