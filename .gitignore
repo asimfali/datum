@@ -4,5 +4,3 @@
 # Local notes for the agent: paths on the author's machine
 .claude/CLAUDE.md
 .opencode/bin/
-# The status/ summary is a cache the script rewrites on every call: not in git.
-/status/summary.md
