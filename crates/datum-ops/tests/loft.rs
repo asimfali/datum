@@ -147,6 +147,102 @@ fn reference_sketches(half_a: f64, leg: f64) -> (Value, Value) {
     (first, second)
 }
 
+fn three_segment_sketches(half_a: f64, middle: f64, leg: f64, reverse: bool) -> (Value, Value) {
+    let half_b = middle / 2.0;
+    let wing = leg * libm::cos(std::f64::consts::FRAC_PI_4);
+    let first = op(serde_json::json!({"op": "sketch", "sketch": profile(half_a)})).eval(id("three.first"), &[]).unwrap();
+    let plane = op(serde_json::json!({"op": "plane", "base": "xz", "offset": 300.0})).eval(id("three.plane"), &[]).unwrap();
+    let (l0, l1, m0, m1, r0, r1) = if reverse {
+        ("joint_left", "left", "joint_right", "joint_left_copy", "right", "joint_right")
+    } else {
+        ("left", "joint_left", "joint_left_copy", "joint_right", "joint_right", "right")
+    };
+    let sketch = serde_json::json!({
+        "points": {
+            "left": [-half_b - wing, wing], "joint_left": [-half_b, 0.0],
+            "joint_left_copy": [-half_b, 0.0], "joint_right": [half_b, 0.0], "right": [half_b + wing, wing]
+        },
+        "lines": {
+            "wing_left": {"from": l0, "to": l1},
+            "middle": {"from": m0, "to": m1},
+            "wing_right": {"from": r0, "to": r1}
+        },
+        "constraints": [
+            {"type": "fix", "point": "left", "at": [-half_b - wing, wing]},
+            {"type": "fix", "point": "joint_left", "at": [-half_b, 0.0]},
+            {"type": "coincident", "points": ["joint_left", "joint_left_copy"]},
+            {"type": "fix", "point": "joint_right", "at": [half_b, 0.0]},
+            {"type": "fix", "point": "right", "at": [half_b + wing, wing]}
+        ]
+    });
+    let second = op(serde_json::json!({"op": "sketch", "sketch": sketch})).eval(id("three.second"), &[&plane]).unwrap();
+    (first, second)
+}
+
+/// D269's three-segment B profile has an explicitly coincident endpoint at one joint.
+#[test]
+fn one_line_to_three_lines_unfolds_and_keeps_mounting_references() {
+    let build = |half_a, middle, leg, radius, k, side, reverse| {
+        let (first, second) = three_segment_sketches(half_a, middle, leg, reverse);
+        let loft = Op::Loft {
+            thickness: Some(Num::Value(2.0)),
+            radius: Some(Num::Value(radius)),
+            k_factor: Some(Num::Value(k)),
+            side,
+            tolerance: Num::Value(1.0),
+        };
+        loft.eval(id("three.body"), &[&first, &second]).unwrap().body().unwrap().clone()
+    };
+    for side in [Side::Left, Side::Right, Side::Middle] {
+        let body = build(50.0, 200.0, 100.0, 2.0, 0.44, side, false);
+        body.validate().unwrap();
+        assert_eq!(body.faces().iter().filter(|face| matches!(face.surface, datum_brep::Surface::Cylinder(_))).count(), 4, "side {side:?}");
+        for back in [false, true] {
+            let flat = unfold_side(&body, back, 0.44).unwrap();
+            assert_eq!(flat.outer.len(), flat.pieces.len(), "side {side:?}, back {back}");
+            assert!(!flat.outer.is_empty());
+            assert!(flat.overlaps.is_empty(), "side {side:?}, back {back}: {:?}", flat.overlaps);
+            assert_eq!(flat.bends.len(), 4);
+            assert!(flat.bends.iter().all(|line| line[0] != line[1]));
+            assert_eq!(flat.bend_ids.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), 4);
+        }
+    }
+    let before = build(50.0, 200.0, 100.0, 2.0, 0.44, Side::Left, false);
+    let after = build(52.0, 205.0, 105.0, 2.5, 0.40, Side::Left, false);
+    for back in [false, true] {
+        let flat_before = unfold_side(&before, back, 0.44).unwrap();
+        let flat_after = unfold_side(&after, back, 0.40).unwrap();
+        assert_eq!(flat_before.ids.iter().copied().collect::<std::collections::BTreeSet<_>>(), flat_after.ids.iter().copied().collect());
+        assert_eq!(flat_before.bend_ids.iter().copied().collect::<std::collections::BTreeSet<_>>(), flat_after.bend_ids.iter().copied().collect());
+    }
+    let edges = datum_ops::flange_edges(&before);
+    let selected: Vec<_> = edges
+        .iter()
+        .filter(|(_, ends)| {
+            let d = ends[1] - ends[0];
+            d.x.abs() > 100.0 && d.y.abs() < 1e-7 && d.z.abs() < 1e-7 && (ends[0].y.abs() - 300.0).abs() < 1e-7 && ends[0].z.abs() < 1e-7
+        })
+        .map(|(edge, _)| *edge)
+        .collect();
+    assert_eq!(selected.len(), 1, "mounting edge: {selected:?}, candidates: {edges:?}");
+    assert!(datum_ops::flange_edges(&after).iter().any(|(edge, _)| *edge == selected[0]));
+    for body in [before, after] {
+        let target = Value::Body(body);
+        let flange = op(
+            serde_json::json!({"op": "flange", "edges": [format!("{:?}", selected[0])], "height": 10.0, "height_along": true, "angle": 60.0, "radius": 2.0}),
+        );
+        flange.eval(id("three.flange"), &[&target]).unwrap().body().unwrap().validate().unwrap();
+    }
+    let reversed = build(50.0, 200.0, 100.0, 2.0, 0.44, Side::Left, true);
+    reversed.validate().unwrap();
+    let flat = unfold_side(&reversed, false, 0.44).unwrap();
+    assert_eq!(flat.bends.len(), 4);
+    assert!(flat.overlaps.is_empty());
+    let parallel_bends = build(50.0, 100.0, 100.0, 2.0, 0.44, Side::Left, false);
+    parallel_bends.validate().unwrap();
+    assert_eq!(unfold_side(&parallel_bends, false, 0.44).unwrap().bends.len(), 4);
+}
+
 /// D266's reference profile has two 200 mm legs at 20 degrees, 300 mm from A.
 #[test]
 fn one_line_to_two_lines_has_three_facets_and_two_valid_bends() {
@@ -231,12 +327,12 @@ proptest::proptest! {
     #[test]
     fn bent_loft_keeps_a_single_sheet_as_dimensions_change(
         half_a in 40.0..60.0,
+        middle in 95.0..220.0,
         leg in 180.0..220.0,
         thickness in 1.0..3.0,
         radius in 1.0..4.0,
         k in 0.3..0.6,
     ) {
-        let (first, second) = reference_sketches(half_a, leg);
         let loft = Op::Loft {
             thickness: Some(Num::Value(thickness)),
             radius: Some(Num::Value(radius)),
@@ -244,15 +340,17 @@ proptest::proptest! {
             side: Side::Middle,
             tolerance: Num::Value(1.0),
         };
-        let value = loft.eval(id("reference.body"), &[&first, &second]).unwrap();
-        let body = value.body().unwrap();
-        body.validate().unwrap();
-        for back in [false, true] {
-            let flat = unfold_side(body, back, k).unwrap();
-            proptest::prop_assert_eq!(flat.polylines(), 0);
-            proptest::prop_assert_eq!(flat.outer.len(), flat.pieces.len());
-            proptest::prop_assert_eq!(flat.bends.len(), 4);
-            proptest::prop_assert!(flat.overlaps.is_empty());
+        for (first, second) in [reference_sketches(half_a, leg), three_segment_sketches(half_a, middle, leg * 0.5, false)] {
+            let value = loft.eval(id("reference.body"), &[&first, &second]).unwrap();
+            let body = value.body().unwrap();
+            body.validate().unwrap();
+            for back in [false, true] {
+                let flat = unfold_side(body, back, k).unwrap();
+                proptest::prop_assert_eq!(flat.polylines(), 0);
+                proptest::prop_assert_eq!(flat.outer.len(), flat.pieces.len());
+                proptest::prop_assert_eq!(flat.bends.len(), 4);
+                proptest::prop_assert!(flat.overlaps.is_empty());
+            }
         }
     }
 }

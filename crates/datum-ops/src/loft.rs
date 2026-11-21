@@ -21,7 +21,7 @@ pub struct LoftDims {
 /// Builds the planar or three-facet sheet loft.
 ///
 /// In the planar case the line profiles must be parallel and coplanar in world space. For
-/// the bent case the first line must lie in a plane parallel to the V profile.
+/// the bent cases the first line must lie in a plane parallel to the second profile.
 pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) -> Result<Body, BrepError> {
     let LoftDims { thickness, radius, k_factor, side, tolerance } = dims;
     if !(thickness > 0.0 && thickness.is_finite()) {
@@ -35,26 +35,22 @@ pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) ->
     let second_lines = profile_lines(second, "second")?;
     match second_lines.as_slice() {
         [(_, b0, b1)] => planar_loft(feature, a0, a1, *b0, *b1, thickness, side),
-        [_, _] => {
+        [_, _] | [_, _, _] => {
             let (Some(radius), Some(k)) = (radius, k_factor) else {
-                return Err(BrepError::Invalid(
-                    "loft with two lines in its second profile takes thickness, bend radius and K-factor from the part's sheet rule".into(),
-                ));
+                return Err(BrepError::Invalid("loft with bends takes thickness, bend radius and K-factor from the part's sheet rule".into()));
             };
-            let [b0, apex, b1] = two_bend_profile([a0, a1], second, &second_lines)?;
+            let profile = bent_profile([a0, a1], second, &second_lines)?;
             let rule = BendRule { thickness, radius, k_factor: k, side };
-            let body = two_bend_body(feature, [a0, a1], [b0, apex, b1], rule)?;
+            let body = two_bend_body(feature, [a0, a1], profile, rule)?;
             let flat = crate::unfold_side(&body, false, k)?;
             if !flat.overlaps.is_empty() {
-                return Err(BrepError::Degenerate(format!(
-                    "loft: the blank overlaps for second profile lines {} and {}",
-                    second_lines[0].0, second_lines[1].0
-                )));
+                let names = second_lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>().join(", ");
+                return Err(BrepError::Degenerate(format!("loft: the blank overlaps for second profile lines {names}")));
             }
             Ok(body)
         }
         [] => Err(BrepError::Sketch("loft: the second sketch has no profile line".into())),
-        _ => Err(BrepError::Unsupported("loft: the second profile must be one line or two connected lines".into())),
+        _ => Err(BrepError::Unsupported("loft: the second profile must be one line or a chain of two or three lines".into())),
     }
 }
 
@@ -130,15 +126,42 @@ struct BendRule {
     side: Side,
 }
 
-fn two_bend_profile(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, Vec3)]) -> Result<[Vec3; 3], BrepError> {
+enum BendProfile {
+    Shared { corner: Vec3, ends: [Vec3; 2] },
+    Separate { corners: [Vec3; 2], ends: [Vec3; 2] },
+}
+
+fn bent_profile(profile: [Vec3; 2], second: &Placed, lines: &[(String, Vec3, Vec3)]) -> Result<BendProfile, BrepError> {
     let [a0, a1] = profile;
     let displacement = a1 - a0;
     let direction = unit(displacement).ok_or_else(|| BrepError::Degenerate("loft: the first profile line has zero length".into()))?;
     if !within_rounding(direction.dot(second.frame[3]), 1.0) {
         return Err(BrepError::Unsupported("loft: the first profile line must be parallel to the plane of the second profile".into()));
     }
-    let (b0, apex, b1) = second_profile_corner(second, lines, a0 + displacement * 0.5, direction)?;
-    Ok([b0, apex, b1])
+    if lines.len() == 2 {
+        let (left, corner, right) = second_profile_corner(second, lines, a0 + displacement * 0.5, direction)?;
+        return Ok(BendProfile::Shared { corner, ends: [left, right] });
+    }
+
+    let chain = second.contours(&|_, construction| !construction);
+    let [path] = chain.paths.as_slice() else {
+        return Err(BrepError::Sketch("loft: the three lines must form one open chain".into()));
+    };
+    let [first, middle, last] = path.as_slice() else {
+        return Err(BrepError::Sketch("loft: the three lines must form one open chain".into()));
+    };
+    let point = |name| profile_point(second, "second", name);
+    let [left, mut b0, mut b1, right] = [point(first.from)?, point(middle.from)?, point(middle.to)?, point(last.to)?];
+    let mut ends = [left, right];
+    let center = b1 - b0;
+    if center.dot(center) == 0.0 || !parallel(displacement, center) || orient3d_coords(a0, a1, b0, b1) != Sign::Zero {
+        return Err(BrepError::Degenerate("loft: A and the middle line of B must be nonzero, parallel and coplanar".into()));
+    }
+    if center.dot(direction) < 0.0 {
+        std::mem::swap(&mut b0, &mut b1);
+        ends.reverse();
+    }
+    Ok(BendProfile::Separate { corners: [b0, b1], ends })
 }
 
 fn bend(start: Vec3, apex: Vec3, opposite: [Vec3; 2], radial_sign: f64, rule: BendRule) -> Result<Bend, BrepError> {
@@ -173,7 +196,7 @@ fn bend(start: Vec3, apex: Vec3, opposite: [Vec3; 2], radial_sign: f64, rule: Be
     })
 }
 
-/// The two tangent lines, both contained by the middle facet, meet at p + d*s.
+/// Where two lines in a facet meet, with their parameters along d and e.
 fn line_meeting(p: Vec3, d: Vec3, q: Vec3, e: Vec3) -> Result<(Vec3, f64, f64), BrepError> {
     let n = d.cross(e);
     let n2 = n.dot(n);
@@ -209,16 +232,8 @@ fn second_profile_corner(sketch: &Placed, lines: &[(String, Vec3, Vec3)], midpoi
         *ends_a.iter().find(|&&p| p != vertex_name).ok_or_else(|| BrepError::Sketch("loft: the first line has no outer endpoint".into()))?;
     let outer_b =
         *ends_b.iter().find(|&&p| p != vertex_name).ok_or_else(|| BrepError::Sketch("loft: the second line has no outer endpoint".into()))?;
-    let world = |name: &str| -> Result<Vec3, BrepError> {
-        let p = sketch
-            .solved
-            .points
-            .get(name)
-            .copied()
-            .ok_or_else(|| BrepError::LostReference(format!("loft: the second profile lost point {}", name)))?;
-        Ok(sketch.frame[0] + sketch.frame[1] * p.x + sketch.frame[2] * p.y)
-    };
-    let (mut a, mut b, vertex) = (world(outer_a)?, world(outer_b)?, world(vertex_name)?);
+    let point = |name| profile_point(sketch, "second", name);
+    let (mut a, mut b, vertex) = (point(outer_a)?, point(outer_b)?, point(vertex_name)?);
     let midpoint_offset = (vertex - midpoint).dot(direction);
     let size = [midpoint, vertex, a, b].iter().flat_map(|p| p.to_array()).fold(1.0_f64, |m, x| m.max(x.abs()));
     if !within_rounding(midpoint_offset, size) {
@@ -254,16 +269,14 @@ fn profile_lines(sketch: &Placed, which: &str) -> Result<Vec<(String, Vec3, Vec3
     {
         return Err(BrepError::Unsupported(format!("loft: the {which} profile must contain only straight lines")));
     }
-    let world = |name: &str| -> Result<Vec3, BrepError> {
-        let p = sketch
-            .solved
-            .points
-            .get(name)
-            .copied()
-            .ok_or_else(|| BrepError::LostReference(format!("loft: the {which} profile lost point {}", name)))?;
-        Ok(sketch.frame[0] + sketch.frame[1] * p.x + sketch.frame[2] * p.y)
-    };
-    sketch.lines.iter().filter(|(_, line)| !line.construction).map(|(name, line)| Ok((name.clone(), world(&line.from)?, world(&line.to)?))).collect()
+    let point = |name: &str| profile_point(sketch, which, name);
+    sketch.lines.iter().filter(|(_, line)| !line.construction).map(|(name, line)| Ok((name.clone(), point(&line.from)?, point(&line.to)?))).collect()
+}
+
+fn profile_point(sketch: &Placed, which: &str, name: &str) -> Result<Vec3, BrepError> {
+    let p =
+        sketch.solved.points.get(name).copied().ok_or_else(|| BrepError::LostReference(format!("loft: the {which} profile lost point {name}")))?;
+    Ok(sketch.frame[0] + sketch.frame[1] * p.x + sketch.frame[2] * p.y)
 }
 
 fn thickness_sides(side: Side, thickness: f64) -> (f64, f64) {
@@ -311,19 +324,17 @@ struct BendOutline {
     end: f64,
     middle_a: Option<Vec3>,
     wing_a: Option<Vec3>,
-    wing_b: Vec3,
+    middle_b: Option<Vec3>,
+    wing_b: Option<Vec3>,
 }
 
-fn bend_outline(bend: Bend, end: f64, a: Vec3, a_other: Vec3, b: Vec3, apex: Vec3) -> Result<BendOutline, BrepError> {
+fn shared_bend_outline(bend: Bend, end: f64, a: Vec3, a_other: Vec3, b: Vec3, apex: Vec3) -> Result<BendOutline, BrepError> {
     let [middle_edge, wing_edge] = [a_other - a, b - a];
-    let (_, middle_station, middle_fraction) = line_meeting(bend.middle_tangent, bend.axis, a, middle_edge)?;
-    let (_, wing_station, wing_fraction) = line_meeting(bend.wing_tangent, bend.axis, a, wing_edge)?;
+    let (_, middle_station) = tangent_crossing(bend.middle_tangent, bend.axis, a, middle_edge)?;
+    let (_, wing_station) = tangent_crossing(bend.wing_tangent, bend.axis, a, wing_edge)?;
     let start = middle_station.max(wing_station);
     let bad_trim = || BrepError::Degenerate("loft: a bend does not fit between the profile edges".into());
     if !(start >= 0.0 && start < end && end < bend.length) {
-        return Err(bad_trim());
-    }
-    if [middle_fraction, wing_fraction].into_iter().any(|t| !(t > 0.0 && t < 1.0)) {
         return Err(bad_trim());
     }
     let cut = |station: f64, from: Vec3, to: Vec3| {
@@ -340,7 +351,39 @@ fn bend_outline(bend: Bend, end: f64, a: Vec3, a_other: Vec3, b: Vec3, apex: Vec
     {
         return Err(bad_trim());
     }
-    Ok(BendOutline { start, end, middle_a, wing_a, wing_b })
+    Ok(BendOutline { start, end, middle_a, wing_a, middle_b: None, wing_b: Some(wing_b) })
+}
+
+fn tangent_crossing(tangent: Vec3, axis: Vec3, start: Vec3, edge: Vec3) -> Result<(Vec3, f64), BrepError> {
+    let (point, station, fraction) = line_meeting(tangent, axis, start, edge)?;
+    if !(0.0 < fraction && fraction < 1.0) {
+        return Err(BrepError::Degenerate("loft: a tangent does not cross its profile edge".into()));
+    }
+    Ok((point, station))
+}
+
+// Cut the cylinder square at the nearer of the two boundary crossings at each end. If the
+// other facet runs farther along the axis, its remaining tangent segment is on the outline.
+fn separate_bend_outline(bend: Bend, a: [Vec3; 2], b: [Vec3; 2], outer: Vec3) -> Result<BendOutline, BrepError> {
+    let crossing = |tangent, from, to| tangent_crossing(tangent, bend.axis, from, to - from);
+    let [a0, a1] = a;
+    let [b0, b1] = b;
+    let (middle_a, ma) = crossing(bend.middle_tangent, a0, a1)?;
+    let (wing_a, wa) = crossing(bend.wing_tangent, a0, outer)?;
+    let (middle_b, mb) = crossing(bend.middle_tangent, b0, b1)?;
+    let (wing_b, wb) = crossing(bend.wing_tangent, b0, outer)?;
+    let (start, end) = (ma.max(wa), mb.min(wb));
+    if start >= end {
+        return Err(BrepError::Degenerate("loft: a bend does not fit between the profile edges".into()));
+    }
+    Ok(BendOutline {
+        start,
+        end,
+        middle_a: (start != ma).then_some(middle_a),
+        wing_a: (start != wa).then_some(wing_a),
+        middle_b: (end != mb).then_some(middle_b),
+        wing_b: (end != wb).then_some(wing_b),
+    })
 }
 
 #[derive(Clone, Copy)]
@@ -350,14 +393,10 @@ struct WingVertices {
     wing_tangent_a: usize,
     wing_a: usize,
     outer: usize,
+    middle_b: usize,
+    middle_tangent_b: usize,
     wing_b: usize,
     wing_tangent_b: usize,
-}
-
-#[derive(Clone, Copy)]
-struct SkinVertices {
-    corner: usize,
-    wings: [WingVertices; 2],
 }
 
 struct LoftShell {
@@ -435,7 +474,7 @@ impl LoftShell {
     }
 }
 
-fn two_bend_body(feature: TopoId, a: [Vec3; 2], b: [Vec3; 3], rule: BendRule) -> Result<Body, BrepError> {
+fn two_bend_body(feature: TopoId, a: [Vec3; 2], profile: BendProfile, rule: BendRule) -> Result<Body, BrepError> {
     if !(rule.radius > 0.0 && rule.radius.is_finite()) {
         return Err(BrepError::Degenerate(format!("loft: bend radius must be positive and finite, got {}", rule.radius)));
     }
@@ -443,37 +482,47 @@ fn two_bend_body(feature: TopoId, a: [Vec3; 2], b: [Vec3; 3], rule: BendRule) ->
         return Err(BrepError::Degenerate(format!("loft: K-factor must lie between 0 and 1, got {}", rule.k_factor)));
     }
     let [a0, a1] = a;
-    let [b0, apex, b1] = b;
-    let ends = [b0, b1];
-    let normal =
-        |p: Vec3, q: Vec3, r: Vec3| unit((q - p).cross(r - p)).ok_or_else(|| BrepError::Degenerate("loft: a triangular facet has no area".into()));
-    let middle_normal = normal(a0, a1, apex)?;
-    let wing_normals = [normal(a0, apex, b0)?, normal(a1, b1, apex)?];
+    let (b, ends, shared) = match profile {
+        BendProfile::Shared { corner, ends } => ([corner; 2], ends, true),
+        BendProfile::Separate { corners, ends } => (corners, ends, false),
+    };
+    let [b0, b1] = b;
+    let [left_end, right_end] = ends;
+    let normal = |p: Vec3, q: Vec3, r: Vec3| unit((q - p).cross(r - p)).ok_or_else(|| BrepError::Degenerate("loft: a facet has no area".into()));
+    let middle_normal = normal(a0, a1, b0)?;
+    let wing_normals = [normal(a0, b0, left_end)?, normal(a1, right_end, b1)?];
     // The exact side of the wing's third point also gives the side of the bend centre.
-    let radial_sign = |end| match orient3d_coords(a0, a1, apex, end) {
+    let radial_sign = |end| match orient3d_coords(a0, a1, b0, end) {
         Sign::Positive => Ok(1.0),
         Sign::Negative => Ok(-1.0),
         Sign::Zero => Err(BrepError::Degenerate("loft: a bend has no angle".into())),
     };
-    let bends = [bend(a0, apex, [a1, b0], radial_sign(b0)?, rule)?, bend(a1, apex, [a0, b1], radial_sign(b1)?, rule)?];
+    let bends = [bend(a0, b0, [a1, left_end], radial_sign(left_end)?, rule)?, bend(a1, b1, [a0, right_end], radial_sign(right_end)?, rule)?];
     let [left, right] = bends;
-    let (corner, end0, end1) = line_meeting(left.middle_tangent, left.axis, right.middle_tangent, right.axis)?;
-    let outlines = [bend_outline(left, end0, a0, a1, b0, apex)?, bend_outline(right, end1, a1, a0, b1, apex)?];
+    let (corner, outlines) = if shared {
+        let (corner, end0, end1) = line_meeting(left.middle_tangent, left.axis, right.middle_tangent, right.axis)?;
+        (Some(corner), [shared_bend_outline(left, end0, a0, a1, left_end, b0)?, shared_bend_outline(right, end1, a1, a0, right_end, b1)?])
+    } else {
+        (None, [separate_bend_outline(left, a, b, left_end)?, separate_bend_outline(right, [a1, a0], [b1, b0], right_end)?])
+    };
     let along_a = a1 - a0;
-    if (outlines[1].middle_a.unwrap_or(right.middle_tangent + right.axis * outlines[1].start)
-        - outlines[0].middle_a.unwrap_or(left.middle_tangent + left.axis * outlines[0].start))
-    .dot(along_a)
-        <= 0.0
-    {
+    let [a_left, a_right] = [0, 1].map(|i| outlines[i].middle_a.unwrap_or(bends[i].middle_tangent + bends[i].axis * outlines[i].start));
+    if (a_right - a_left).dot(along_a) <= 0.0 {
         return Err(BrepError::Degenerate("loft: the two bends consume profile A".into()));
+    }
+    if !shared {
+        let [b_left, b_right] = [0, 1].map(|i| outlines[i].middle_b.unwrap_or(bends[i].middle_tangent + bends[i].axis * outlines[i].end));
+        if (b_right - b_left).dot(along_a) <= 0.0 {
+            return Err(BrepError::Degenerate("loft: the two bends consume the middle of profile B".into()));
+        }
     }
 
     let (low, high) = thickness_sides(rule.side, rule.thickness);
     let wing_roles = ["first", "second"];
-    let mut shell = LoftShell { feature, vertices: Vec::with_capacity(30), faces: Vec::with_capacity(17), curves: Vec::with_capacity(8) };
+    let mut shell = LoftShell { feature, vertices: Vec::with_capacity(36), faces: Vec::with_capacity(22), curves: Vec::with_capacity(8) };
     let [lower, upper] = [("lower", low, -1.0), ("upper", high, 1.0)].map(|(skin, offset, outward)| {
         let middle_shift = middle_normal * offset;
-        let corner = shell.vertex(skin, "middle", "B", corner + middle_shift);
+        let shared_b = corner.map(|p| shell.vertex(skin, "middle", "B", p + middle_shift));
         let wings = [0, 1].map(|i| {
             let role = wing_roles[i];
             let bend = bends[i];
@@ -483,10 +532,13 @@ fn two_bend_body(feature: TopoId, a: [Vec3; 2], b: [Vec3; 3], rule: BendRule) ->
             let middle_tangent = vertex("middle_tangent_A", bend.middle_tangent + bend.axis * outline.start + middle_shift);
             let wing_tangent_a = vertex("wing_tangent_A", bend.wing_tangent + bend.axis * outline.start + wing_shift);
             let wing_tangent_b = vertex("wing_tangent_B", bend.wing_tangent + bend.axis * outline.end + wing_shift);
+            let middle_tangent_b =
+                shared_b.unwrap_or_else(|| vertex("middle_tangent_B", bend.middle_tangent + bend.axis * outline.end + middle_shift));
             let middle_a = outline.middle_a.map_or(middle_tangent, |p| vertex("middle_outline_A", p + middle_shift));
             let wing_a = outline.wing_a.map_or(wing_tangent_a, |p| vertex("wing_outline_A", p + wing_shift));
             let outer = vertex("outer_B", ends[i] + wing_shift);
-            let wing_b = vertex("wing_outline_B", outline.wing_b + wing_shift);
+            let middle_b = outline.middle_b.map_or(middle_tangent_b, |p| vertex("middle_outline_B", p + middle_shift));
+            let wing_b = outline.wing_b.map_or(wing_tangent_b, |p| vertex("wing_outline_B", p + wing_shift));
 
             shell.plane(skin, role, wing_normals[i] * outward, vec![wing_tangent_a, wing_a, outer, wing_b, wing_tangent_b]);
             let convex = outward == bend.radial_sign;
@@ -495,33 +547,57 @@ fn two_bend_body(feature: TopoId, a: [Vec3; 2], b: [Vec3; 3], rule: BendRule) ->
                 skin,
                 if i == 0 { "first_bend" } else { "second_bend" },
                 Surface::Cylinder(Cylinder { origin: bend.center, axis: bend.axis, radius, convex }),
-                vec![middle_tangent, corner, wing_tangent_b, wing_tangent_a],
+                vec![middle_tangent, middle_tangent_b, wing_tangent_b, wing_tangent_a],
             );
             shell.arc(middle_tangent, wing_tangent_a, bend.center + bend.axis * outline.start, bend.axis, radius);
-            shell.arc(corner, wing_tangent_b, bend.center + bend.axis * outline.end, bend.axis, radius);
-            WingVertices { middle_a, middle_tangent, wing_tangent_a, wing_a, outer, wing_b, wing_tangent_b }
+            shell.arc(middle_tangent_b, wing_tangent_b, bend.center + bend.axis * outline.end, bend.axis, radius);
+            WingVertices { middle_a, middle_tangent, wing_tangent_a, wing_a, outer, middle_b, middle_tangent_b, wing_b, wing_tangent_b }
         });
         let [l, r] = wings;
-        shell.plane(skin, "middle", middle_normal * outward, vec![l.middle_a, r.middle_a, r.middle_tangent, corner, l.middle_tangent]);
-        SkinVertices { corner, wings }
+        shell.plane(
+            skin,
+            "middle",
+            middle_normal * outward,
+            vec![l.middle_a, r.middle_a, r.middle_tangent, r.middle_tangent_b, r.middle_b, l.middle_b, l.middle_tangent_b, l.middle_tangent],
+        );
+        wings
     });
 
-    let [l, r] = lower.wings;
-    let [u, v] = upper.wings;
-    shell.wall("outline", "A", [l.middle_a, r.middle_a, v.middle_a, u.middle_a], lower.corner)?;
+    let [l, r] = lower;
+    let [u, v] = upper;
+    shell.wall("outline", "A", [l.middle_a, r.middle_a, v.middle_a, u.middle_a], l.middle_tangent_b)?;
+    if !shared {
+        shell.wall("outline", "B", [l.middle_b, r.middle_b, v.middle_b, u.middle_b], l.middle_tangent)?;
+    }
     for i in 0..2 {
         let role = wing_roles[i];
-        let (l, u) = (lower.wings[i], upper.wings[i]);
+        let (l, u) = (lower[i], upper[i]);
         let axis = bends[i].axis;
         shell.wall(role, "side", [l.wing_a, l.outer, u.outer, u.wing_a], l.wing_b)?;
         shell.wall(role, "B", [l.outer, l.wing_b, u.wing_b, u.outer], l.wing_a)?;
-        shell.plane(
-            role,
-            "A_end",
-            -axis,
-            vec![l.middle_a, l.middle_tangent, l.wing_tangent_a, l.wing_a, u.wing_a, u.wing_tangent_a, u.middle_tangent, u.middle_a],
-        );
-        shell.plane(role, "B_end", axis, vec![lower.corner, l.wing_tangent_b, l.wing_b, u.wing_b, u.wing_tangent_b, upper.corner]);
+        if shared {
+            shell.plane(
+                role,
+                "A_end",
+                -axis,
+                vec![l.middle_a, l.middle_tangent, l.wing_tangent_a, l.wing_a, u.wing_a, u.wing_tangent_a, u.middle_tangent, u.middle_a],
+            );
+            shell.plane(role, "B_end", axis, vec![l.middle_tangent_b, l.wing_tangent_b, l.wing_b, u.wing_b, u.wing_tangent_b, u.middle_tangent_b]);
+        } else {
+            shell.plane(role, "A_end", -axis, vec![l.middle_tangent, l.wing_tangent_a, u.wing_tangent_a, u.middle_tangent]);
+            shell.plane(role, "B_end", axis, vec![l.middle_tangent_b, l.wing_tangent_b, u.wing_tangent_b, u.middle_tangent_b]);
+            // The steps join the square caps to the straight profile edges along the tangents.
+            for (name, edge, inside) in [
+                ("middle_A_step", [l.middle_a, l.middle_tangent, u.middle_tangent, u.middle_a], lower[1 - i].middle_a),
+                ("middle_B_step", [l.middle_tangent_b, l.middle_b, u.middle_b, u.middle_tangent_b], lower[1 - i].middle_b),
+                ("wing_A_step", [l.wing_tangent_a, l.wing_a, u.wing_a, u.wing_tangent_a], l.outer),
+                ("wing_B_step", [l.wing_b, l.wing_tangent_b, u.wing_tangent_b, u.wing_b], l.outer),
+            ] {
+                if edge[0] != edge[1] {
+                    shell.wall(role, name, edge, inside)?;
+                }
+            }
+        }
     }
     shell.build()
 }

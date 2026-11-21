@@ -74,6 +74,12 @@
     "profile_a": "9f83ba886656c00adea644245f5ce8a3532eb01f06b8c7c7449f8e7252f60264",
     "profile_b": "7eb5ada54433b3d3011f15b988953bc2b885a462b0f973e933d9a69e5b116ff2"
   },
+  "loft-03-trapezoid-wings.json": {
+    "loft": "627a097e917351f4f7115a71f8e25382a236b3fa08b192f273cb1c6ae8ee490b",
+    "plane1": "6241ac0f2cbe9bd8666fd6b597684039b58953fda015d7594014e9e7f59cb369",
+    "sketch1": "d2f81833114fd399cecb081bf88ca29cfb27e00e9f284215a91baa062a3c3006",
+    "sketch2": "9ddd7d192567025ddcb9cde5aebe9dd89e91c5c308afe85fcf550e977d7615cd"
+  },
   "mirror_part.json": {
     "other": "56f5d64946fb4ca3642e94b694ba02a2cc1cc659f7b73ad7aa41404ea22634ef",
     "outline": "51ee6be2257cb5f4373177b804c2752817560ad681a8ed6333a2007d7aa396a8",
