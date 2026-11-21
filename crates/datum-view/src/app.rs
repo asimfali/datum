@@ -2830,6 +2830,7 @@ impl Viewer {
                 (Act::NewSketch, Icon::NewSketch),
                 (Act::Extrude, Icon::Extrude),
                 (Act::Revolve, Icon::Revolve),
+                (Act::Loft, Icon::Loft),
                 (Act::MirrorPart, Icon::Mirror),
                 (Act::FlatPane, Icon::Flat),
                 (Act::WorkPlane, Icon::WorkPlane),
@@ -9283,6 +9284,25 @@ mod tests {
         assert!(v.loft.is_none());
         v.reedit("loft");
         assert_eq!(v.edited_feature().as_deref(), Some("loft"));
+    }
+
+    #[test]
+    fn the_toolbar_loft_starts_profile_picking_with_a_sheet_rule() {
+        let (mut v, _) = viewer("loft-01-line.json");
+        v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
+        v.next_rule = None;
+        let label = v.i18n.label(Act::Loft).to_string();
+        let mut h = egui_kittest::Harness::builder().with_size([900.0, 200.0]).build_ui_state(|ui, v: &mut Viewer| v.toolbar(ui), v);
+
+        h.get_by_label(&label).click();
+        h.run();
+        assert!(!h.state().loft_is_picking());
+        assert!(h.state().contour_hint.is_some_and(|(_, _, act)| act == Act::Loft));
+
+        h.state_mut().next_rule = Some("Sheet".into());
+        h.get_by_label(&label).click();
+        h.run();
+        assert!(h.state().loft_is_picking());
     }
 
     #[test]
