@@ -1,0 +1,123 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "sketch1",
+      "op": "sketch",
+      "plane": {
+        "normal": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "sketch": {
+        "arcs": {
+          "a1": {
+            "center": "p1",
+            "from": "origin",
+            "to": "p2"
+          }
+        },
+        "constraints": [
+          {
+            "points": [
+              "p1",
+              "origin"
+            ],
+            "type": "vertical"
+          },
+          {
+            "arc": "a1",
+            "type": "radius",
+            "value": 50.0
+          },
+          {
+            "arc": "a1",
+            "degrees": 45.0,
+            "type": "arc_angle"
+          }
+        ],
+        "lines": {},
+        "points": {
+          "p1": [
+            0.2087271902471741,
+            45.24630134408705
+          ],
+          "p2": [
+            35.56224899598394,
+            17.008032128514056
+          ]
+        }
+      }
+    },
+    {
+      "base": "xz",
+      "name": "plane1",
+      "offset": -50.0,
+      "op": "plane"
+    },
+    {
+      "inputs": [
+        "plane1",
+        "sketch1"
+      ],
+      "name": "sketch2",
+      "op": "sketch",
+      "project": {
+        "e1": {
+          "at": [
+            [
+              0.0,
+              50.00000000000001
+            ],
+            [
+              0.0,
+              0.0
+            ],
+            [
+              35.355339059327385,
+              14.64466094067263
+            ]
+          ],
+          "construction": false,
+          "element": "a1",
+          "from": "sketch1"
+        }
+      },
+      "sketch": {
+        "constraints": [],
+        "lines": {},
+        "points": {}
+      }
+    },
+    {
+      "name": "loft",
+      "op": "loft",
+      "inputs": [
+        "sketch1",
+        "sketch2"
+      ],
+      "thickness": 2,
+      "radius": 2,
+      "k_factor": 0.44,
+      "side": "left",
+      "tolerance": 1
+    }
+  ],
+  "flats": {
+    "loft": {
+      "k_factor": 0.44
+    }
+  }
+}

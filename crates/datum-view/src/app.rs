@@ -25,7 +25,7 @@ use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
-use forms::RibForm;
+use forms::{LoftForm, RibForm};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -911,6 +911,7 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    loft: Option<LoftForm>,
     /// A mirror of a part being asked for: its form (D247).
     mirror: Option<MirrorForm>,
     /// The main pipe of a branch being asked for: its body's feature, once clicked.
@@ -1595,6 +1596,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            loft: None,
             mirror: None,
             branch_main: None,
             extrusion: None,
@@ -2113,6 +2115,7 @@ impl Viewer {
             self.close_revolve();
             self.close_trim();
             self.close_rib();
+            self.close_loft();
             self.close_mirror();
         } else {
             self.leave();
@@ -2647,6 +2650,7 @@ impl Viewer {
     /// Starts editing sketch feature `name`, once the model brings its context.
     fn enter(&mut self, name: String) {
         self.close_extrusion();
+        self.close_loft();
         self.picking = None;
         self.sketch = None;
         self.send(Request::Editing(Some(name.clone())));
@@ -2658,6 +2662,7 @@ impl Viewer {
         self.close_revolve();
         self.close_trim();
         self.close_rib();
+        self.close_loft();
         self.close_mirror();
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
@@ -3684,7 +3689,7 @@ impl Viewer {
                         });
                     }
                     // Changed in the form it was made in, its values in it.
-                    None if matches!(op, "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange") => {
+                    None if matches!(op, "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange" | "loft") => {
                         ui.horizontal(|ui| {
                             tree.label(ui, &self.i18n, f, Icon::Done, op);
                             let hint = self.i18n.t("edit-feature", "Change it");
@@ -4730,6 +4735,10 @@ impl Viewer {
             Some("rib") => {
                 self.rib = Some(RibForm::editing(name.to_string(), input(0), input(1), f["tool"].as_str().map(String::from), f["flip"] == true));
             }
+            Some("loft") => {
+                self.clear_loft_selection();
+                self.loft = Some(LoftForm::editing(name.to_string(), &f));
+            }
             Some("flange") => {
                 self.flange = Some(FlangeForm {
                     name: name.to_string(),
@@ -4815,7 +4824,7 @@ impl Viewer {
         let trim = self.trim.as_ref().filter(|f| f.editing).map(|f| &f.name).or(self.rib.as_ref().and_then(RibForm::edited));
         let mirror = self.mirror.as_ref().filter(|f| f.editing).map(|f| &f.name);
         let extrusion = self.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        flange.or(revolve).or(trim).or(mirror).or(extrusion).cloned()
+        flange.or(revolve).or(trim).or(mirror).or(extrusion).or(self.loft.as_ref().and_then(LoftForm::edited)).cloned()
     }
 
     /// With a form changing a feature, Shift or Ctrl held: what is under the cursor of what the
@@ -6888,7 +6897,8 @@ impl Viewer {
             | Act::MaterialTable
             | Act::RuleTable
             | Act::ToolTable
-            | Act::Rib => self.model.is_some(),
+            | Act::Rib
+            | Act::Loft => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Extrude | Act::Revolve => {
                 self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
@@ -6943,6 +6953,7 @@ impl Viewer {
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::ParameterTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
             Act::Rib => self.rib.is_some(),
+            Act::Loft => self.loft.is_some(),
             Act::ToolTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Tools),
             Act::MaterialTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
             Act::RuleTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Rules),
@@ -7008,6 +7019,10 @@ impl Viewer {
             Act::Flange => {
                 self.leave();
                 self.pick(Purpose::Flange);
+            }
+            Act::Loft => {
+                self.leave();
+                self.open_loft();
             }
             Act::Rib => {
                 self.leave();
@@ -7256,6 +7271,7 @@ impl Viewer {
             self.item(ui, Act::Extrude, true);
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
+            self.item(ui, Act::Loft, true);
             self.item(ui, Act::Trim, true);
             self.item(ui, Act::Rib, true);
             self.item(ui, Act::MirrorPart, true);
@@ -7594,6 +7610,7 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
+        self.loft_window(ui.ctx());
         self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
@@ -7729,6 +7746,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            loft: None,
             mirror: None,
             branch_main: None,
             extrusion: None,
@@ -9141,6 +9159,20 @@ mod tests {
         v.entering = Some("outline".into());
         v.sync_sketch();
         (v, inbox)
+    }
+
+    #[test]
+    fn l_in_the_model_opens_the_loft_form() {
+        let (mut v, _inbox) = viewer("loft-01-line.json");
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert!(v.loft.is_some() && v.sketch.is_none());
+        v.leave();
+        assert!(v.loft.is_none());
+        v.reedit("loft");
+        assert_eq!(v.edited_feature().as_deref(), Some("loft"));
     }
 
     /// The actions' keys in a sketch: L takes up the line, Shift+L does not; S, the model's key

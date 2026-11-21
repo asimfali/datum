@@ -18,6 +18,71 @@ fn trapezoid_wings_use_the_sheet_rule_and_flat_sketch() {
     check_loft("loft_session_trapezoid_wings", include_str!("../../../tests/models/loft-03-trapezoid-wings.json"), "sketch1", "sketch2", "l1");
 }
 
+#[test]
+fn arc_bridge_follows_the_projected_profile() {
+    check_arc_bridge("loft-04-arc-chords.json", false);
+}
+
+#[test]
+fn concentric_arc_bridge_follows_the_projected_profile() {
+    check_arc_bridge("loft-04-concentric-arcs.json", true);
+}
+
+fn check_arc_bridge(model: &str, fixed_second_radius: bool) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
+    let mut s = Session::default();
+    run(&mut s, "open", json!({"path": path}));
+    let before = run(&mut s, "inspect", json!({}));
+    let feature = |inspect: &Value, name: &str| inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap().clone();
+    let projected = feature(&before, "sketch2");
+    let loft = feature(&before, "loft");
+    let flat = s.flat_of("loft").unwrap();
+    assert_eq!(flat.k_factor, 0.44);
+    assert_eq!(flat.bend_ids.len(), 2);
+    let ids = flat.bend_ids.clone();
+    let changed = run(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "sketch1",
+        "remove_constraints": [{"type": "radius", "arc": "a1", "value": 50}],
+        "add_constraints": [{"type": "radius", "arc": "a1", "value": 51}]}),
+    );
+    assert!(changed["failed"].as_array().unwrap().is_empty(), "{changed}");
+    let after = run(&mut s, "inspect", json!({}));
+    let new_projected = feature(&after, "sketch2");
+    let new_loft = feature(&after, "loft");
+    assert_ne!(projected["status"]["hash"], new_projected["status"]["hash"]);
+    assert_ne!(loft["status"]["hash"], new_loft["status"]["hash"]);
+    assert_eq!(new_projected["project"]["e1"]["element"], "a1");
+    if fixed_second_radius {
+        for sketch in [&projected, &new_projected] {
+            let points = &sketch["status"]["sketch"]["points"];
+            let p = |name: &str, axis: usize| points[name][axis].as_f64().unwrap();
+            let radius = libm::hypot(p("p1", 0) - p("p2", 0), p("p1", 1) - p("p2", 1));
+            assert!((radius - 40.0).abs() < 1e-8, "{radius}");
+        }
+    }
+    let flat = s.flat_of("loft").unwrap();
+    assert_eq!(flat.k_factor, 0.44);
+    assert_eq!(flat.bend_ids, ids);
+}
+
+#[test]
+fn an_existing_loft_can_replace_its_profiles() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/loft-01-line.json");
+    let mut session = Session::default();
+    run(&mut session, "open", json!({"path": path}));
+    let edited = run(&mut session, "edit", json!({"name": "loft", "inputs": ["profile_b", "profile_a"], "tolerance": 0.5, "side": "middle"}));
+    assert!(edited["failed"].as_array().unwrap().is_empty(), "{edited}");
+    let inputs = |s: &Session| s.graph().nodes()[s.graph().find("loft").unwrap() as usize].inputs.clone();
+    let expected = [session.graph().find("profile_b").unwrap(), session.graph().find("profile_a").unwrap()];
+    assert_eq!(inputs(&session), expected);
+    assert!(session.execute("edit", &json!({"name": "loft", "inputs": ["profile_a", "profile_a"]})).is_err());
+    assert!(session.execute("edit", &json!({"name": "loft", "inputs": ["profile_a", "loft"]})).is_err());
+    assert_eq!(inputs(&session), expected);
+    assert!(session.value("loft").unwrap().body().is_some());
+}
+
 fn check_loft(test_name: &str, model: &str, first: &str, second: &str, line: &str) {
     let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(test_name);
     std::fs::create_dir_all(root.join("part")).unwrap();

@@ -1,14 +1,15 @@
-//! Planar and two-bend sheet lofts.
+//! Sheet lofts between line profiles or coaxial circular arcs.
 
 use std::collections::BTreeMap;
 
-use datum_brep::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Plane, Surface, TopoId, Vertex, build_with_curves};
-use datum_math::{Sign, Vec3, orient3d_coords};
+use datum_brep::{Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Plane, ProfileArc, Surface, TopoId, Vertex, build_with_curves};
+use datum_math::{Sign, Vec2, Vec3, orient3d_coords};
 
+use crate::sheet::{Sheet, loft_chords};
 use crate::sketch::within_rounding;
 use crate::{Placed, Side, parallel};
 
-/// Parameters shared by the planar and first bent D264 loft cases.
+/// Sheet and approximation parameters for the D264 loft cases.
 #[derive(Clone, Copy)]
 pub struct LoftDims {
     pub thickness: f64,
@@ -18,7 +19,7 @@ pub struct LoftDims {
     pub tolerance: f64,
 }
 
-/// Builds the planar or three-facet sheet loft.
+/// Builds a sheet loft from a line or circular arc.
 ///
 /// In the planar case the line profiles must be parallel and coplanar in world space. For
 /// the bent cases the first line must lie in a plane parallel to the second profile.
@@ -31,27 +32,156 @@ pub fn loft(feature: TopoId, first: &Placed, second: &Placed, dims: LoftDims) ->
         return Err(BrepError::Degenerate(format!("loft: tolerance must be positive and finite, got {tolerance}")));
     }
 
+    if first.arcs.values().any(|arc| !arc.construction) {
+        let (radius, k) = loft_bend_rule(radius, k_factor)?;
+        let body = arc_loft(feature, first, second, Sheet { thickness, radius, side }, tolerance)?;
+        check_blank(&body, k, "the arc profiles")?;
+        return Ok(body);
+    }
     let (a0, a1) = profile_line(first, "first")?;
     let second_lines = profile_lines(second, "second")?;
     match second_lines.as_slice() {
         [(_, b0, b1)] => planar_loft(feature, a0, a1, *b0, *b1, thickness, side),
         [_, _] | [_, _, _] => {
-            let (Some(radius), Some(k)) = (radius, k_factor) else {
-                return Err(BrepError::Invalid("loft with bends takes thickness, bend radius and K-factor from the part's sheet rule".into()));
-            };
+            let (radius, k) = loft_bend_rule(radius, k_factor)?;
             let profile = bent_profile([a0, a1], second, &second_lines)?;
-            let rule = BendRule { thickness, radius, k_factor: k, side };
+            let rule = BendRule { thickness, radius, side };
             let body = two_bend_body(feature, [a0, a1], profile, rule)?;
-            let flat = crate::unfold_side(&body, false, k)?;
-            if !flat.overlaps.is_empty() {
-                let names = second_lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>().join(", ");
-                return Err(BrepError::Degenerate(format!("loft: the blank overlaps for second profile lines {names}")));
-            }
+            let names = second_lines.iter().map(|line| line.0.as_str()).collect::<Vec<_>>().join(", ");
+            check_blank(&body, k, &format!("second profile lines {names}"))?;
             Ok(body)
         }
         [] => Err(BrepError::Sketch("loft: the second sketch has no profile line".into())),
         _ => Err(BrepError::Unsupported("loft: the second profile must be one line or a chain of two or three lines".into())),
     }
+}
+
+fn loft_bend_rule(radius: Option<f64>, k_factor: Option<f64>) -> Result<(f64, f64), BrepError> {
+    let (Some(radius), Some(k)) = (radius, k_factor) else {
+        return Err(BrepError::Invalid("loft with bends takes thickness, bend radius and K-factor from the part's sheet rule".into()));
+    };
+    if !(radius > 0.0 && radius.is_finite()) {
+        return Err(BrepError::Degenerate(format!("loft: bend radius must be positive and finite, got {radius}")));
+    }
+    if !(0.0..=1.0).contains(&k) {
+        return Err(BrepError::Degenerate(format!("loft: K-factor must lie between 0 and 1, got {k}")));
+    }
+    Ok((radius, k))
+}
+
+fn check_blank(body: &Body, k: f64, profile: &str) -> Result<(), BrepError> {
+    if !crate::unfold_side(body, false, k)?.overlaps.is_empty() {
+        return Err(BrepError::Degenerate(format!("loft: the blank overlaps for {profile}")));
+    }
+    Ok(())
+}
+
+fn single_arc<'a>(sketch: &'a Placed, which: &str) -> Result<(&'a str, &'a datum_sketch::Arc), BrepError> {
+    let unsupported = || BrepError::Unsupported(format!("loft: the {which} profile must be one open circular arc"));
+    let mut arcs = sketch.arcs.iter().filter(|(_, arc)| !arc.construction);
+    let (name, arc) = arcs.next().ok_or_else(unsupported)?;
+    if arcs.next().is_some()
+        || sketch.developed.is_some()
+        || sketch.lines.values().any(|line| !line.construction)
+        || sketch.circles.values().any(|circle| !circle.construction)
+        || !sketch.ellipses.is_empty()
+    {
+        return Err(unsupported());
+    }
+    Ok((name, arc))
+}
+
+fn arc_loft(feature: TopoId, first: &Placed, second: &Placed, sheet: Sheet, tolerance: f64) -> Result<Body, BrepError> {
+    let (name, a) = single_arc(first, "first")?;
+    let (_, b) = single_arc(second, "second")?;
+    let normal = first.frame[3];
+    let other_normal = second.frame[3];
+    let incompatible = || BrepError::Unsupported("loft: arc profiles must be coaxial on parallel planes and have matching angular ends".into());
+    if !within_rounding(length(normal.cross(other_normal)), 1.0) {
+        return Err(incompatible());
+    }
+    let distance = (second.frame[0] - first.frame[0]).dot(normal);
+    if distance == 0.0 || !distance.is_finite() {
+        return Err(BrepError::Degenerate("loft: arc profiles have no separation".into()));
+    }
+    let ac = profile_point(first, "first", &a.center)?;
+    let bc = profile_point(second, "second", &b.center)?;
+    let offset = normal * distance;
+    let matches = |pa: Vec3, pb: Vec3| {
+        let scale = length(pa).max(length(pb)).max(distance.abs());
+        within_rounding(length(pb - pa - offset), scale)
+    };
+    if !matches(ac, bc) {
+        return Err(incompatible());
+    }
+    let (b_from, b_to) = if normal.dot(other_normal) > 0.0 { (&b.from, &b.to) } else { (&b.to, &b.from) };
+    let ap = profile_point(first, "first", &a.from)?;
+    let aq = profile_point(first, "first", &a.to)?;
+    let bp = profile_point(second, "second", b_from)?;
+    let bq = profile_point(second, "second", b_to)?;
+    let b_radius = length(bp - bc);
+    for (u, v) in [(ap - ac, bp - bc), (aq - ac, bq - bc)] {
+        let (Some(u), Some(v)) = (unit(u), unit(v)) else {
+            return Err(BrepError::Degenerate("loft: an arc has no radius".into()));
+        };
+        if !within_rounding(length(u - v), 1.0) {
+            return Err(incompatible());
+        }
+    }
+    let translated = matches(ap, bp) && matches(aq, bq);
+
+    let point = |name: &str| {
+        first.solved.points.get(name).copied().ok_or_else(|| BrepError::LostReference(format!("loft: the first profile lost point {name}")))
+    };
+    let (center, start, end) = (point(&a.center)?, point(&a.from)?, point(&a.to)?);
+    let radial = Vec2::new(start.x - center.x, start.y - center.y);
+    let radius = libm::hypot(radial.x, radial.y);
+    if !(radius > 0.0 && radius.is_finite()) || start == end {
+        return Err(BrepError::Degenerate("loft: the first arc must have a radius and two distinct ends".into()));
+    }
+    let sweep = ProfileArc { center, ccw: true }.turn(start, end);
+    let count = chord_count(if translated { radius } else { radius.max(b_radius) }, sweep, tolerance)?;
+    let mut points = Vec::with_capacity(count + 1);
+    points.push(start);
+    for k in 1..count {
+        let (sn, cs) = libm::sincos(sweep * k as f64 / count as f64);
+        points.push(Vec2::new(center.x + radial.x * cs - radial.y * sn, center.y + radial.x * sn + radial.y * cs));
+    }
+    points.push(end);
+    if translated {
+        return loft_chords(feature, first.frame, name, &points, sheet, distance);
+    }
+    let [origin, x, y, _] = first.frame;
+    let at = |p: Vec2| origin + x * p.x + y * p.y;
+    let a: Vec<_> = points.into_iter().map(at).collect();
+    let b: Vec<_> = a.iter().map(|&p| ac + (p - ac) * (b_radius / radius) + offset).collect();
+    tapered_arc_body(feature, name, &a, &b, sheet, distance.is_sign_negative())
+}
+
+fn chord_count(radius: f64, sweep: f64, tolerance: f64) -> Result<usize, BrepError> {
+    // Invert the chord's sagitta without subtracting two almost equal numbers.
+    let max_angle = 4.0 * libm::asin(libm::sqrt((0.5 * (tolerance / radius)).min(1.0)));
+    let n = (sweep / max_angle).ceil();
+    const MAX_CHORDS: usize = 4096;
+    let too_many = || BrepError::Unsupported(format!("loft: the tolerance requires more than {MAX_CHORDS} chords"));
+    if !n.is_finite() || n > (MAX_CHORDS + 1) as f64 {
+        return Err(too_many());
+    }
+    let sagitta = |count: usize| {
+        let sine = libm::sin(0.25 * sweep / count as f64);
+        2.0 * (radius * (sine * sine))
+    };
+    // Check the neighbouring counts at a floating-point boundary of the inverse.
+    let mut count = (n as usize).max(1);
+    if count > 1 && sagitta(count - 1) <= tolerance {
+        count -= 1;
+    } else if sagitta(count) > tolerance {
+        count += 1;
+    }
+    if count > MAX_CHORDS {
+        return Err(too_many());
+    }
+    Ok(count)
 }
 
 /// The one-face trapezoid: the first complete loft case.
@@ -122,7 +252,6 @@ struct Bend {
 struct BendRule {
     thickness: f64,
     radius: f64,
-    k_factor: f64,
     side: Side,
 }
 
@@ -475,12 +604,6 @@ impl LoftShell {
 }
 
 fn two_bend_body(feature: TopoId, a: [Vec3; 2], profile: BendProfile, rule: BendRule) -> Result<Body, BrepError> {
-    if !(rule.radius > 0.0 && rule.radius.is_finite()) {
-        return Err(BrepError::Degenerate(format!("loft: bend radius must be positive and finite, got {}", rule.radius)));
-    }
-    if !(0.0..=1.0).contains(&rule.k_factor) {
-        return Err(BrepError::Degenerate(format!("loft: K-factor must lie between 0 and 1, got {}", rule.k_factor)));
-    }
     let [a0, a1] = a;
     let (b, ends, shared) = match profile {
         BendProfile::Shared { corner, ends } => ([corner; 2], ends, true),
@@ -598,6 +721,114 @@ fn two_bend_body(feature: TopoId, a: [Vec3; 2], profile: BendProfile, rule: Bend
                 }
             }
         }
+    }
+    shell.build()
+}
+
+/// The square ends of a bend between two successive chord facets.
+struct TaperBend {
+    bend: Bend,
+    ends: [f64; 2],
+}
+
+fn tapered_arc_body(feature: TopoId, source: &str, a: &[Vec3], b: &[Vec3], sheet: Sheet, reversed: bool) -> Result<Body, BrepError> {
+    let panels = a.len() - 1;
+    let factor = if reversed { -1.0 } else { 1.0 };
+    let bad_facet = || BrepError::Degenerate("loft: a chord facet has no room between the bends".into());
+    let normals: Vec<_> = (0..panels).map(|i| unit((b[i] - a[i]).cross(a[i + 1] - a[i]) * factor).ok_or_else(bad_facet)).collect::<Result<_, _>>()?;
+    let rule = BendRule { thickness: sheet.thickness, radius: sheet.radius, side: sheet.side };
+    let mut bends = Vec::with_capacity(panels - 1);
+    for i in 1..panels {
+        let sign = match orient3d_coords(a[i - 1], b[i - 1], a[i], a[i + 1]) {
+            Sign::Positive => factor,
+            Sign::Negative => -factor,
+            Sign::Zero => return Err(bad_facet()),
+        };
+        let bend = bend(a[i], b[i], [a[i - 1], a[i + 1]], sign, rule)?;
+        let cap = |p: &[Vec3]| -> Result<f64, BrepError> {
+            let (_, left) = tangent_crossing(bend.middle_tangent, bend.axis, p[i], p[i - 1] - p[i])?;
+            let (_, right) = tangent_crossing(bend.wing_tangent, bend.axis, p[i], p[i + 1] - p[i])?;
+            // Matching angular increments make the two stations equal analytically. The two
+            // constructions may differ by rounding in the sampled chord endpoints.
+            let size = bend.length.max(length(p[i] - p[i - 1])).max(length(p[i + 1] - p[i]));
+            if !within_rounding(left - right, size) {
+                return Err(BrepError::Degenerate("loft: the two sides of an arc bend do not meet its profile at one station".into()));
+            }
+            Ok(left)
+        };
+        let (start, end) = (cap(a)?, cap(b)?);
+        if start >= end {
+            return Err(bad_facet());
+        }
+        bends.push(TaperBend { bend, ends: [start, end] });
+    }
+
+    let last = a.len() - 1;
+    let (low, high) = thickness_sides(sheet.side, sheet.thickness);
+    let mut shell = LoftShell {
+        feature,
+        vertices: Vec::with_capacity(8 * panels),
+        faces: Vec::with_capacity(8 * panels),
+        curves: Vec::with_capacity(4 * bends.len()),
+    };
+    let [lower, upper] = [("lower", low, -1.0), ("upper", high, 1.0)].map(|(skin, offset, outward)| {
+        let names = |i| format!("{source}.chord.{i}/{panels}");
+        let mut sides = Vec::with_capacity(panels);
+        let mut left =
+            [shell.vertex(skin, source, "A_start", a[0] + normals[0] * offset), shell.vertex(skin, source, "B_start", b[0] + normals[0] * offset)];
+        for (i, TaperBend { bend, ends }) in bends.iter().enumerate() {
+            let name = names(i);
+            let pair = |shell: &mut LoftShell, origin: Vec3, normal: Vec3, roles: [&str; 2]| {
+                [0, 1].map(|j| shell.vertex(skin, &name, roles[j], origin + bend.axis * ends[j] + normal * offset))
+            };
+            let entry = pair(&mut shell, bend.middle_tangent, normals[i], ["A_entry", "B_entry"]);
+            let exit = pair(&mut shell, bend.wing_tangent, normals[i + 1], ["A_exit", "B_exit"]);
+            let convex = outward == bend.radial_sign;
+            let radius = sheet.radius + if convex { sheet.thickness } else { 0.0 };
+            shell.face(
+                skin,
+                &format!("{name}.bend"),
+                Surface::Cylinder(Cylinder { origin: bend.center, axis: bend.axis, radius, convex }),
+                vec![entry[0], entry[1], exit[1], exit[0]],
+            );
+            for j in 0..2 {
+                shell.arc(entry[j], exit[j], bend.center + bend.axis * ends[j], bend.axis, radius);
+            }
+            sides.push([left, entry]);
+            left = exit;
+        }
+        sides.push([
+            left,
+            [
+                shell.vertex(skin, source, "A_end", a[last] + normals[last - 1] * offset),
+                shell.vertex(skin, source, "B_end", b[last] + normals[last - 1] * offset),
+            ],
+        ]);
+        for (i, [left, right]) in sides.iter().enumerate() {
+            shell.plane(skin, &names(i), normals[i] * outward, vec![left[0], right[0], right[1], left[1]]);
+        }
+        sides
+    });
+
+    for (i, (&[ll, lr], &[ul, ur])) in lower.iter().zip(&upper).enumerate() {
+        let name = format!("{source}.chord.{i}/{panels}");
+        for (j, section, chord) in [(0, "A", a), (1, "B", b)] {
+            if (shell.point(lr[j]) - shell.point(ll[j])).dot(chord[i + 1] - chord[i]) <= 0.0 {
+                return Err(bad_facet());
+            }
+            shell.wall(&name, section, [ll[j], lr[j], ur[j], ul[j]], ll[1 - j])?;
+        }
+        if let Some(cut) = bends.get(i) {
+            let (entry, exit) = (lr, lower[i + 1][0]);
+            let (entry_top, exit_top) = (ur, upper[i + 1][0]);
+            for (j, (role, normal)) in [("A_end", -cut.bend.axis), ("B_end", cut.bend.axis)].into_iter().enumerate() {
+                shell.plane(&name, role, normal, vec![entry[j], exit[j], exit_top[j], entry_top[j]]);
+            }
+        }
+    }
+    for (i, edge, toward, name) in [(0, 0, 1, "start"), (panels - 1, 1, 0, "end")] {
+        let (lo, up) = (lower[i][edge], upper[i][edge]);
+        shell.wall(source, name, [lo[0], lo[1], up[1], up[0]], lower[i][toward][0])?;
     }
     shell.build()
 }
