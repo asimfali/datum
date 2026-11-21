@@ -132,21 +132,27 @@ impl Profiles {
                 cycle.push([center + radial * round, self.circle + radial * self.radius]);
             }
         }
-        // Split one chord facet at its midpoint. Both seam edges lie on that plane.
+        // Split one chord facet into two panels with parallel seam edges. A fixed
+        // fraction of the two chords would narrow the gap at the smaller end.
         let seam = self.count / 2;
-        let [a, b] = cycle[seam];
-        let [c, d] = cycle[seam + 1];
-        let width = length(c - a).max(length(d - b));
-        let half = (gap * 0.5) / width;
-        if !(half > 0.0 && half < 0.5) {
-            return Err(BrepError::Degenerate("loft: the seam gap does not fit on its chord facet".into()));
+        let left = cycle[seam];
+        let right = cycle[seam + 1];
+        let chords = [0, 1].map(|j| right[j] - left[j]);
+        let widths = chords.map(length);
+        let too_wide = || BrepError::Degenerate("loft: the seam gap does not fit on both ends of its chord facet".into());
+        if !widths.into_iter().all(|width| width > gap && width.is_finite()) {
+            return Err(too_wide());
         }
-        let point = |t| [a + (c - a) * t, b + (d - b) * t];
+        let edge = |side| [0, 1].map(|j| left[j] + chords[j] * (0.5 + side * (0.5 * gap / widths[j])));
+        let (start, end) = (edge(1.0), edge(-1.0));
+        if start.into_iter().zip(end).any(|(a, b)| a == b) {
+            return Err(BrepError::Degenerate("loft: the seam gap is too small to separate its edges".into()));
+        }
         let mut open = Vec::with_capacity(cycle.len() + 2);
-        open.push(point(0.5 + half));
+        open.push(start);
         open.extend_from_slice(&cycle[seam + 1..]);
         open.extend_from_slice(&cycle[..=seam]);
-        open.push(point(0.5 - half));
+        open.push(end);
         Ok(open)
     }
 }
@@ -341,6 +347,12 @@ mod tests {
         let (round, strip) = profiles.rounded_strip(sheet, 1.0).unwrap();
         assert!((2.0..10.0).contains(&round));
         assert!(Strip::new(&profiles.stations(round - 0.01, 1.0).unwrap(), rule).is_err());
+        let start = &strip.panels[0].outline;
+        let end = &strip.panels.last().unwrap().outline;
+        for j in 0..2 {
+            let width = length(start[j][0] - *end[j].last().unwrap());
+            assert!(within_rounding(width - 1.0, profiles.radius), "seam gap on section {j}: {width}");
+        }
         let body = strip.body(TopoId::derive("loft.test").finish(), sheet).unwrap();
         body.validate().unwrap();
         let flat = crate::unfold_side(&body, false, 0.44).unwrap();
