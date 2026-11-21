@@ -155,4 +155,12 @@ fn check_loft(test_name: &str, model: &str, first: &str, second: &str, line: &st
     assert_eq!(export["polylines"], 0, "{export}");
     let dxf = std::fs::read_to_string(path).unwrap();
     assert_eq!(dxf.lines().filter(|line| line.trim() == "CIRCLE").count(), 1);
+    let mut thicker = rule(4, 0.38);
+    thicker["element"]["name"] = json!("Thicker");
+    run(&mut s, "put_library", thicker);
+    let changed = run(&mut s, "set_part", json!({"body": "loft", "rule": "Thicker"}));
+    assert!(changed["parts"].as_array().unwrap().iter().any(|p| p["part"] == "loft" && p["rule"] == "Thicker"), "{changed}");
+    let thicker = run(&mut s, "mass_properties", json!({"name": "cut"}))["volume"].as_f64().unwrap();
+    assert!(thicker > after);
+    assert_eq!(s.flat_of("cut").unwrap().k_factor, 0.38);
 }

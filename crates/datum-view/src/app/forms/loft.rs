@@ -6,6 +6,12 @@ use crate::actions::Act;
 use crate::app::{Request, Viewer, definition};
 use crate::dims::value_of;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ProfilePick {
+    First,
+    Second,
+}
+
 pub(in crate::app) struct LoftForm {
     name: String,
     first: String,
@@ -15,6 +21,7 @@ pub(in crate::app) struct LoftForm {
     rule: Option<String>,
     editing: bool,
     sent: Option<Json>,
+    picking: Option<ProfilePick>,
 }
 
 impl LoftForm {
@@ -33,6 +40,7 @@ impl LoftForm {
             rule: feature["rule"].as_str().map(String::from),
             editing: true,
             sent: None,
+            picking: None,
         }
     }
 
@@ -57,20 +65,88 @@ impl LoftForm {
 }
 
 impl Viewer {
-    pub(in crate::app) fn open_loft(&mut self) {
+    pub(in crate::app) fn open_loft(&mut self, at: egui::Pos2) {
         self.clear_loft_selection();
-        let rules: Vec<_> = self.rules.iter().filter(|r| r["kind"] == "sheet").filter_map(|r| r["name"].as_str().map(String::from)).collect();
-        let rule = self.sheet_rule().or_else(|| (rules.len() == 1).then(|| rules[0].clone()));
+        self.contour_hint = None;
+        let Some(rule) = self.loft_toolbar_rule() else {
+            self.contour_hint = Some((at, std::time::Instant::now(), Act::Loft));
+            return;
+        };
         self.loft = Some(LoftForm {
             name: self.feature_name("loft"),
             first: String::new(),
             second: String::new(),
             tolerance: "1".into(),
             side: "left",
-            rule,
+            rule: Some(rule),
             editing: false,
             sent: None,
+            picking: Some(ProfilePick::First),
         });
+    }
+
+    pub(in crate::app) fn loft_is_picking(&self) -> bool {
+        self.loft.as_ref().is_some_and(|f| f.picking.is_some())
+    }
+
+    pub(in crate::app) fn loft_can_pick(&self, name: &str) -> bool {
+        let Some(f) = &self.loft else { return false };
+        let Some(which) = f.picking else { return false };
+        if name == if which == ProfilePick::First { &f.second } else { &f.first } {
+            return false;
+        }
+        self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).is_some_and(|features| {
+            features.iter().take_while(|g| !f.editing || g["name"] != f.name.as_str()).any(|g| g["op"] == "sketch" && g["name"] == name)
+        })
+    }
+
+    pub(in crate::app) fn pick_loft_profile(&mut self, name: &str) {
+        if !self.loft_can_pick(name) {
+            return;
+        }
+        let Some(f) = &mut self.loft else { return };
+        match f.picking {
+            Some(ProfilePick::First) => {
+                f.first = name.into();
+                f.picking = if f.second.is_empty() { Some(ProfilePick::Second) } else { None };
+            }
+            Some(ProfilePick::Second) => {
+                f.second = name.into();
+                f.picking = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub(in crate::app) fn loft_pick_hint(&mut self, ctx: &egui::Context) {
+        if !self.loft_is_picking() {
+            return;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.close_loft();
+            return;
+        }
+        if self.loft.as_ref().is_some_and(|f| !f.editing) && self.loft_toolbar_rule().is_none() {
+            let at = ctx.pointer_hover_pos().unwrap_or(egui::Pos2::ZERO);
+            self.close_loft();
+            self.contour_hint = Some((at, std::time::Instant::now(), Act::Loft));
+            return;
+        }
+        let Some(at) = ctx.pointer_hover_pos() else { return };
+        let first = self.loft.as_ref().is_some_and(|f| f.picking == Some(ProfilePick::First));
+        let label = if first {
+            self.i18n.t("loft-pick-first", "Select the first profile")
+        } else {
+            self.i18n.t("loft-pick-second", "Select the second profile")
+        };
+        egui::Area::new(egui::Id::new("loft-pick-hint")).fixed_pos(at + egui::vec2(16.0, 20.0)).order(egui::Order::Tooltip).interactable(false).show(
+            ctx,
+            |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.label(label);
+                });
+            },
+        );
     }
 
     pub(in crate::app) fn clear_loft_selection(&mut self) {
@@ -97,18 +173,19 @@ impl Viewer {
         if self.loft.is_none() {
             return;
         }
-        let sketches: Vec<String> = self
-            .model
-            .as_ref()
-            .and_then(|m| m.inspect["features"].as_array())
-            .into_iter()
-            .flatten()
-            .take_while(|g| self.loft.as_ref().is_none_or(|f| !f.editing || g["name"] != f.name.as_str()))
-            .filter(|g| g["op"] == "sketch")
-            .filter_map(|g| g["name"].as_str().map(String::from))
-            .collect();
-        let rules: Vec<String> = self.rules.iter().filter(|r| r["kind"] == "sheet").filter_map(|r| r["name"].as_str().map(String::from)).collect();
+        let rule = self.loft_toolbar_rule();
+        if self.loft.as_ref().is_some_and(|f| !f.editing) && rule.is_none() {
+            self.close_loft();
+            self.contour_hint = Some((ctx.pointer_hover_pos().unwrap_or(egui::Pos2::ZERO), std::time::Instant::now(), Act::Loft));
+            return;
+        }
         let Some(f) = &mut self.loft else { return };
+        if !f.editing {
+            f.rule = rule;
+        }
+        if f.picking.is_some() {
+            return;
+        }
         let before = f.params();
         let preview =
             self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| Some(p) == before.as_ref().map(|(_, p)| p)).map(|(_, r)| r);
@@ -118,23 +195,15 @@ impl Viewer {
             .resizable(false)
             .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 60.0))
             .show(ctx, |ui| {
-                let first = f.first.clone();
-                let second = f.second.clone();
-                for (id, label, selected, other) in [
-                    ("loft-first", self.i18n.t("loft-first-profile", "First profile"), &mut f.first, &second),
-                    ("loft-second", self.i18n.t("loft-second-profile", "Second profile"), &mut f.second, &first),
+                for (index, label, selected) in [
+                    (ProfilePick::First, self.i18n.t("loft-first-profile", "First profile"), &f.first),
+                    (ProfilePick::Second, self.i18n.t("loft-second-profile", "Second profile"), &f.second),
                 ] {
-                    let shown =
-                        if selected.is_empty() { self.i18n.t("loft-choose-profile", "Choose a sketch").to_string() } else { selected.clone() };
                     ui.horizontal(|ui| {
-                        ui.label(label);
-                        egui::ComboBox::from_id_salt(id).selected_text(shown).show_ui(ui, |ui| {
-                            for sketch in &sketches {
-                                if sketch != other {
-                                    ui.selectable_value(selected, sketch.clone(), sketch);
-                                }
-                            }
-                        });
+                        ui.label(format!("{label}: {selected}"));
+                        if ui.button(self.i18n.t("loft-repick-profile", "Select again")).clicked() {
+                            f.picking = Some(index);
+                        }
                     });
                 }
                 ui.horizontal(|ui| {
@@ -155,41 +224,33 @@ impl Viewer {
                 .on_hover_text(
                     self.i18n.t("loft-side-hint", "For arcs, inside is toward the centre. Use the preview to check the side of line profiles."),
                 );
-                if f.editing {
-                    if let Some(rule) = &f.rule {
-                        ui.label(format!("{}: {rule}", self.i18n.t("loft-rule", "Sheet rule")));
-                    }
-                } else {
-                    let shown = f.rule.as_deref().unwrap_or_else(|| self.i18n.t("loft-choose-rule", "Choose a rule"));
-                    egui::ComboBox::from_label(self.i18n.t("loft-rule", "Sheet rule")).selected_text(shown).show_ui(ui, |ui| {
-                        for rule in &rules {
-                            ui.selectable_value(&mut f.rule, Some(rule.clone()), rule);
-                        }
-                    });
-                    if rules.is_empty() {
-                        ui.label(self.i18n.t("loft-no-sheet-rules", "No sheet rules"));
-                    }
-                }
                 if before == f.params()
                     && let Some(Err(why)) = preview
                 {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
-                let ok = before == f.params() && preview.is_some_and(Result::is_ok);
+                let ok = f.picking.is_none() && before == f.params() && preview.is_some_and(Result::is_ok);
                 ui.horizontal(|ui| {
                     add = ui.add_enabled(ok, egui::Button::new(self.i18n.t("ok", "OK"))).clicked();
                     cancel = ui.button(self.i18n.t("cancel", "Cancel")).clicked();
                 });
             });
         let params = f.params();
-        let ok = before == params && preview.is_some_and(Result::is_ok);
+        let ok = f.picking.is_none() && before == params && preview.is_some_and(Result::is_ok);
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if cancel || esc {
             self.close_loft();
         } else if (add || enter) && ok {
             self.close_loft();
             if let Some((command, params)) = params {
+                if command == "loft" {
+                    self.part = params["name"].as_str().map(String::from);
+                }
                 self.send(Request::Command(command, params));
+            }
+        } else if f.picking.is_some() {
+            if f.sent.take().is_some() {
+                self.send(Request::Preview(None));
             }
         } else if let Some((command, params)) = params {
             if f.sent.as_ref() != Some(&params) {
@@ -223,13 +284,27 @@ mod tests {
     }
 
     #[test]
+    fn loft_without_toolbar_rule_does_not_start_picking() {
+        let (mut v, _) = viewer("loft-01-line.json");
+        v.rules.clear();
+        v.next_rule = None;
+        v.open_loft(egui::pos2(10.0, 20.0));
+        assert!(v.loft.is_none());
+        assert!(!v.loft_is_picking());
+        assert!(v.contour_hint.is_some_and(|(_, _, action)| action == crate::actions::Act::Loft));
+    }
+
+    #[test]
     fn only_the_current_successful_preview_can_make_a_loft() {
         let (mut v, inbox) = viewer("loft-01-line.json");
         v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
-        v.open_loft();
-        let f = v.loft.as_mut().unwrap();
-        f.first = "profile_a".into();
-        f.second = "profile_b".into();
+        v.next_rule = Some("Sheet".into());
+        v.open_loft(egui::Pos2::ZERO);
+        assert!(v.loft_is_picking());
+        v.pick_loft_profile("profile_a");
+        assert!(!v.loft_can_pick("profile_a"));
+        v.pick_loft_profile("profile_b");
+        assert!(!v.loft_is_picking());
         frame(&mut v, None);
         let sent: Vec<_> = inbox.try_iter().collect();
         let [Request::Preview(Some(("loft", initial)))] = sent.as_slice() else { panic!("preview: {sent:?}") };
@@ -257,6 +332,7 @@ mod tests {
             rule: Some("Sheet".into()),
             editing: false,
             sent: None,
+            picking: None,
         };
         assert!(f.params().is_none());
         f.second = "b".into();
