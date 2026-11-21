@@ -3,7 +3,7 @@
 //! axis, a part of its own made by a sheet rule,
 //! whose thickness (and bend radius) it takes (D193).
 
-use datum_graph::Op;
+use datum_graph::{NodeIx, Op};
 use serde_json::{Map, Value, json};
 
 use super::{Session, text};
@@ -65,19 +65,27 @@ impl Session {
         self.sheet_part(p, fields)
     }
 
-    /// Adds the first planar loft-flange case (D264): two one-line sketches form one trapezoid.
+    /// Resolves two different sketches before the loft they will drive.
+    pub(super) fn loft_inputs(&self, first: &str, second: &str, before: NodeIx) -> Result<[NodeIx; 2], String> {
+        if first == second {
+            return Err("loft needs two different sketch features".into());
+        }
+        let profile = |name: &str| {
+            let ix = self.find(name)?;
+            if ix >= before || !matches!(self.graph.nodes()[ix as usize].op, Op::Sketch { .. }) {
+                return Err(format!("loft profile `{name}` must be an earlier sketch"));
+            }
+            Ok(ix)
+        };
+        Ok([profile(first)?, profile(second)?])
+    }
+
+    /// Adds a sheet loft between two profile sketches and assigns its rule.
     pub(super) fn loft(&mut self, p: &Map<String, Value>) -> Result<Value, String> {
         let name = text(p, "name")?;
         let first = text(p, "first")?;
         let second = text(p, "second")?;
-        if first == second {
-            return Err("loft needs two different sketch features".into());
-        }
-        for sketch in [first, second] {
-            if !matches!(self.graph.nodes()[self.find(sketch)? as usize].op, Op::Sketch { .. }) {
-                return Err(format!("`{sketch}` is not a sketch"));
-            }
-        }
+        self.loft_inputs(first, second, self.graph.nodes().len() as NodeIx)?;
         let rule = p.get("rule").and_then(Value::as_str).ok_or("loft needs `rule`: a sheet rule of the library, its thickness")?;
         let tolerance = p.get("tolerance").cloned().ok_or("loft needs `tolerance`: the chordal deviation for its profiles")?;
         let fields = json!({

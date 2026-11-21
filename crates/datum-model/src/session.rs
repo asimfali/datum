@@ -262,7 +262,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "loft",
-        description: "A loft-flange between two open sketches: one straight line to a parallel, coplanar straight line forms a planar trapezoid (D264); one straight line to a two-line V with its apex above the first line's midpoint forms three facets and two bends (D265–D266); one straight line to a three-line chain with a parallel, coplanar middle segment forms a trapezoid with two triangular wings and two bends. Other profiles are unsupported. rule is required, a sheet rule of the library supplying thickness, bend radius and K-factor. tolerance (mm) is required; side is left (default), right or middle. The reply names the part and its rule.",
+        description: "A loft-flange between two open sketches: one straight line to a parallel, coplanar straight line forms a planar trapezoid (D264); one straight line to a two-line V with its apex above the first line's midpoint forms three facets and two bends (D265–D266); one straight line to a three-line chain with a parallel, coplanar middle segment forms a trapezoid with two triangular wings and two bends; aligned concentric arcs on parallel planes, with equal sweep and possibly different radii, form chordal facets joined by bends. Other profiles are unsupported. rule is required, a sheet rule of the library supplying thickness, bend radius and K-factor. tolerance (mm) is required and controls the chordal deviation; side is left (default), right or middle. The reply names the part and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
@@ -345,7 +345,7 @@ const COMMANDS: &[Command] = &[
     Command {
         name: "edit",
         description: "Change a feature's parameters: give `name` and only the fields to change (e.g. {name: \"moved\", angle_deg: 45}); \
-                      `op` changes its kind. Inputs stay (a flange's follow the planes in its `to`). `enabled` (true, false, a number, 0: off, or a formula) turns it off or on: \
+                      `op` changes its kind. A flange follows its planes in `to`, a loft accepts new sketch names in `inputs`. `enabled` (true, false, a number, 0: off, or a formula) turns it off or on: \
                       off, it passes its first input on unchanged — in a variant, the way to do without a parent's feature.",
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"], "additionalProperties": true}),
         run: |s, p| {
@@ -354,10 +354,10 @@ const COMMANDS: &[Command] = &[
                 Ok(Value::Object(m)) => m,
                 _ => Map::new(),
             };
-            if let Some(e) = p.get("enabled") {
-                s.graph.set_enabled(ix, crate::enabled_of(text(p, "name")?, e.clone())?);
-            }
-            fields.extend(p.iter().filter(|(k, _)| *k != "name" && *k != "enabled").map(|(k, v)| (k.clone(), v.clone())));
+            let name = text(p, "name")?;
+            let enabled = p.get("enabled").cloned().map(|e| crate::enabled_of(name, e)).transpose()?;
+            let profiles = p.get("inputs");
+            fields.extend(p.iter().filter(|(k, _)| !matches!(k.as_str(), "name" | "enabled" | "inputs")).map(|(k, v)| (k.clone(), v.clone())));
             let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
             // A flange's inputs follow the planes its wall goes to (D229): the sheet, then those.
             let inputs = match &op {
@@ -375,11 +375,22 @@ const COMMANDS: &[Command] = &[
                     }
                     Some(all)
                 }
+                Op::Loft { .. } if profiles.is_some() => {
+                    let profiles = profiles.and_then(Value::as_array).ok_or("loft inputs must be two sketch names")?;
+                    let [first, second] = profiles.as_slice() else { return Err("loft inputs must be two sketch names".into()) };
+                    let (Some(first), Some(second)) = (first.as_str(), second.as_str()) else {
+                        return Err("loft inputs must be two sketch names".into());
+                    };
+                    Some(s.loft_inputs(first, second, ix)?.to_vec())
+                }
                 _ => None,
             };
             s.graph.set_op(ix, op).map_err(|e| e.to_string())?;
             if let Some(inputs) = inputs {
                 s.graph.set_inputs(ix, &inputs).map_err(|e| e.to_string())?;
+            }
+            if let Some(enabled) = enabled {
+                s.graph.set_enabled(ix, enabled);
             }
             Ok(s.rebuild_recording(ix))
         },

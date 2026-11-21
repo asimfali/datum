@@ -48,6 +48,8 @@ pub enum Icon {
     Flat,
     /// An axis dashed, a turn around it with an arrow: revolve.
     Revolve,
+    /// A transition between two profiles of different widths.
+    Loft,
     /// A check mark: built, done.
     Done,
     /// A cross: failed.
@@ -262,6 +264,14 @@ pub fn paint(painter: &Painter, c: Pos2, icon: Icon, colour: Color32) {
             let turn: Vec<Pos2> = (0..=12).map(|k| k as f32 / 12.0 * std::f32::consts::PI).map(|t| at(-7.0 * t.cos(), 3.0 * t.sin())).collect();
             painter.add(egui::Shape::line(turn, stroke));
             painter.add(egui::Shape::line(vec![at(4.0, -1.5), at(7.0, 0.0), at(7.5, -3.5)], stroke));
+        }
+        Icon::Loft => {
+            let upper = [at(-3.5, -5.0), at(0.0, -6.0), at(3.5, -5.0)];
+            let lower = [at(-6.5, 4.0), at(0.0, 6.0), at(6.5, 4.0)];
+            painter.add(egui::Shape::line(upper.to_vec(), stroke));
+            painter.add(egui::Shape::line(lower.to_vec(), stroke));
+            painter.line_segment([upper[0], lower[0]], stroke);
+            painter.line_segment([upper[2], lower[2]], stroke);
         }
         Icon::Flat => {
             painter.add(egui::Shape::closed_line(vec![at(-7.0, -5.0), at(7.0, -5.0), at(7.0, 5.0), at(-7.0, 5.0)], stroke));

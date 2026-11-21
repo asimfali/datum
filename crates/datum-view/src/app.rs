@@ -25,7 +25,7 @@ use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
-use forms::RibForm;
+use forms::{LoftForm, RibForm};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -321,6 +321,7 @@ struct Model {
     spots: Vec<(Json, datum_math::Vec3)>,
     /// The lines of the sketches shown a work plane may go through: its sketch and its name, ends.
     lines: Vec<PlaneLine>,
+    loft_profiles: Vec<LoftProfile>,
     /// The faces of the bodies shown a flange may stand on (D205).
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
     /// What the feature whose form is open stands on.
@@ -340,9 +341,45 @@ struct Picture {
     inspect: Json,
     spots: Vec<(Json, datum_math::Vec3)>,
     lines: Vec<PlaneLine>,
+    loft_profiles: Vec<LoftProfile>,
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
     uses: Option<crate::uses::Uses>,
     contours: Vec<(usize, datum_ops::FlangeLoop)>,
+}
+
+/// A placed sketch's drawable profile, named for a loft's input.
+struct LoftProfile {
+    name: String,
+    value: datum_graph::ValueRef,
+    edges: std::cell::OnceCell<Vec<[datum_math::Vec3; 2]>>,
+}
+
+impl LoftProfile {
+    fn new(name: &str, value: &datum_graph::ValueRef) -> Option<Self> {
+        value.sketch()?.developed.is_none().then(|| Self { name: name.to_string(), value: value.clone(), edges: Default::default() })
+    }
+
+    fn screen(&self, project: &impl Fn(datum_math::Vec3) -> Option<egui::Pos2>) -> impl Iterator<Item = [egui::Pos2; 2]> {
+        self.edges
+            .get_or_init(|| {
+                let Some(sketch) = self.value.sketch() else { return Vec::new() };
+                let names = sketch
+                    .lines
+                    .iter()
+                    .filter(|(_, c)| !c.construction)
+                    .map(|(n, _)| n)
+                    .chain(sketch.arcs.iter().filter(|(_, c)| !c.construction).map(|(n, _)| n))
+                    .chain(sketch.circles.iter().filter(|(_, c)| !c.construction).map(|(n, _)| n))
+                    .chain(sketch.ellipses.iter().filter(|(_, c)| !c.construction).map(|(n, _)| n));
+                let mut edges = Vec::new();
+                for points in names.filter_map(|n| SketchEdit::curve_points(sketch, n)) {
+                    crate::scene::chords(sketch, points, &mut edges);
+                }
+                edges
+            })
+            .iter()
+            .filter_map(|&[a, b]| Some([project(a)?, project(b)?]))
+    }
 }
 
 /// A line of a sketch a work plane goes through: the sketch feature, the line's name, its ends.
@@ -458,7 +495,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses, contours } = picture;
+        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } = picture;
         if models
             .send(Model {
                 inspect,
@@ -477,6 +514,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 preview,
                 spots,
                 lines,
+                loft_profiles,
                 ends,
                 uses,
                 contours,
@@ -663,8 +701,19 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         .collect();
     let ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])> =
         bodies_shown().flat_map(|(k, (_, b))| datum_ops::flange_edges(b).into_iter().map(move |(f, e)| (k, f, e))).collect();
+    let loft_profiles = graph
+        .nodes()
+        .iter()
+        .zip(&evaluation.results)
+        .filter_map(|(node, result)| {
+            if !session.visible(&node.name) || matches!(node.op, datum_graph::Op::Sketch { flat: Some(_), .. }) {
+                return None;
+            }
+            LoftProfile::new(&node.name, result.as_ref().ok()?)
+        })
+        .collect();
     let uses = using.and_then(|name| crate::uses::uses(graph, evaluation, name, meshes));
-    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, ends, uses, contours }
+    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -911,6 +960,7 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    loft: Option<LoftForm>,
     /// A mirror of a part being asked for: its form (D247).
     mirror: Option<MirrorForm>,
     /// The main pipe of a branch being asked for: its body's feature, once clicked.
@@ -1595,6 +1645,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            loft: None,
             mirror: None,
             branch_main: None,
             extrusion: None,
@@ -2113,6 +2164,7 @@ impl Viewer {
             self.close_revolve();
             self.close_trim();
             self.close_rib();
+            self.close_loft();
             self.close_mirror();
         } else {
             self.leave();
@@ -2647,6 +2699,7 @@ impl Viewer {
     /// Starts editing sketch feature `name`, once the model brings its context.
     fn enter(&mut self, name: String) {
         self.close_extrusion();
+        self.close_loft();
         self.picking = None;
         self.sketch = None;
         self.send(Request::Editing(Some(name.clone())));
@@ -2658,6 +2711,7 @@ impl Viewer {
         self.close_revolve();
         self.close_trim();
         self.close_rib();
+        self.close_loft();
         self.close_mirror();
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
@@ -2776,6 +2830,7 @@ impl Viewer {
                 (Act::NewSketch, Icon::NewSketch),
                 (Act::Extrude, Icon::Extrude),
                 (Act::Revolve, Icon::Revolve),
+                (Act::Loft, Icon::Loft),
                 (Act::MirrorPart, Icon::Mirror),
                 (Act::FlatPane, Icon::Flat),
                 (Act::WorkPlane, Icon::WorkPlane),
@@ -2826,6 +2881,24 @@ impl Viewer {
         self.rules.iter().any(|r| r["name"] == *rule && r["kind"] == kind).then(|| rule.clone())
     }
 
+    fn toolbar_rule(&self, part: Option<&str>) -> Option<&str> {
+        let Some(part) = part else { return self.next_rule.as_deref() };
+        let inspect = &self.model.as_ref()?.inspect;
+        let row = if let Some(level) = inspect["level"].as_str() {
+            inspect["levels"].as_array()?.iter().find(|l| l["name"] == level)
+        } else {
+            inspect["parts"].as_array()?.iter().find(|r| r["part"] == part)
+        };
+        row?.get("rule")?.as_str()
+    }
+
+    /// The current sheet rule in the top toolbar, including when a sheet part is selected.
+    fn loft_toolbar_rule(&self) -> Option<String> {
+        let part = self.active_part();
+        let rule = self.toolbar_rule(part.as_deref())?;
+        self.rules.iter().any(|r| r["name"] == rule && r["kind"] == "sheet").then(|| rule.to_string())
+    }
+
     /// The toolbar's material and rule of the active part, or of the next new part.
     fn material_and_rule(&mut self, ui: &mut egui::Ui) {
         let part = self.active_part();
@@ -2836,17 +2909,7 @@ impl Viewer {
             if features.clone().any(|f| f["name"] == *p && matches!(f["op"].as_str(), Some("sheet" | "plate" | "loft"))) { "sheet" } else { "part" }
         });
         // The variant's own rule (or the nearest up its chain) while one is active, else the part's.
-        let rule = match (&part, self.model.as_ref()) {
-            (Some(p), Some(m)) => {
-                let row = match m.inspect["level"].as_str() {
-                    Some(level) => m.inspect["levels"].as_array().into_iter().flatten().find(|l| l["name"] == level),
-                    None => m.inspect["parts"].as_array().into_iter().flatten().find(|r| r["part"] == *p),
-                };
-                row.and_then(|r| r["rule"].as_str())
-            }
-            _ => self.next_rule.as_deref(),
-        }
-        .map(String::from);
+        let rule = self.toolbar_rule(part.as_deref()).map(String::from);
         let record = rule.as_ref().and_then(|n| self.rules.iter().find(|r| r["name"] == *n));
         let material = record
             .and_then(|r| r["material"].as_str())
@@ -3684,7 +3747,7 @@ impl Viewer {
                         });
                     }
                     // Changed in the form it was made in, its values in it.
-                    None if matches!(op, "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange") => {
+                    None if matches!(op, "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange" | "loft") => {
                         ui.horizontal(|ui| {
                             tree.label(ui, &self.i18n, f, Icon::Done, op);
                             let hint = self.i18n.t("edit-feature", "Change it");
@@ -3790,7 +3853,9 @@ impl Viewer {
         };
         let mut picked: Option<(String, egui::Pos2)> = None;
         if let Some(key) = clicked {
-            if waiting && is_sketch(&key) {
+            if self.loft_is_picking() && is_sketch(&key) {
+                self.pick_loft_profile(&key);
+            } else if waiting && is_sketch(&key) {
                 picked = Some((key, ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()));
             } else if self.tree.selected.as_ref() == Some(&key) {
                 self.start_rename();
@@ -3899,7 +3964,18 @@ impl Viewer {
         } else {
             self.view_input(ui, rect, &r);
         }
-        self.pick_input(ui, rect, &r, offset);
+        let loft_hover = if self.loft_is_picking() {
+            let hover = r.hover_pos().or(r.interact_pointer_pos()).and_then(|cursor| self.loft_profile_at(rect, cursor));
+            if r.clicked()
+                && let Some(name) = hover.and_then(|i| self.model.as_ref()?.loft_profiles.get(i)).map(|p| p.name.clone())
+            {
+                self.pick_loft_profile(&name);
+            }
+            hover
+        } else {
+            self.pick_input(ui, rect, &r, offset);
+            None
+        };
         let Some(m) = &self.model else { return };
         let (lo, hi) = crate::origin::held(m.scene.bounds);
         let radius = sphere(&m.scene).1;
@@ -3968,6 +4044,15 @@ impl Viewer {
         let painter = ui.painter().with_clip_rect(rect);
         if sketched {
             self.paint_sketch(&painter, rect);
+        }
+        if self.loft_is_picking() {
+            let project = |point| on_screen(&view_projection, point - anchor, rect);
+            for (i, profile) in m.loft_profiles.iter().enumerate().filter(|(_, p)| self.loft_can_pick(&p.name)) {
+                let colour = if loft_hover == Some(i) { egui::Color32::from_rgb(235, 110, 20) } else { egui::Color32::from_rgb(40, 90, 200) };
+                for line in profile.screen(&project) {
+                    painter.line_segment(line, egui::Stroke::new(if loft_hover == Some(i) { 3.0 } else { 1.5 }, colour));
+                }
+            }
         }
         // Work planes always; what a click would take lit while picking (a face tinted).
         let size = crate::origin::half(m.scene.bounds);
@@ -4163,6 +4248,29 @@ impl Viewer {
             egui::Color32::DARK_GRAY,
         );
         self.view_cube(ui, rect);
+    }
+
+    /// The eligible sketch whose projected outline is nearest the cursor.
+    fn loft_profile_at(&self, rect: egui::Rect, cursor: egui::Pos2) -> Option<usize> {
+        let m = self.model.as_ref()?;
+        let (anchor, radius) = sphere(&m.scene);
+        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+        let project = |point| on_screen(&vp, point - anchor, rect);
+        m.loft_profiles
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| self.loft_can_pick(&p.name))
+            .flat_map(|(i, p)| {
+                p.screen(&project).map(move |[a, b]| {
+                    let d = b - a;
+                    let t = ((cursor - a).dot(d) / d.length_sq().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+                    (i, (a + d * t).distance(cursor))
+                })
+            })
+            .filter(|(_, distance)| *distance < 8.0)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
     }
 
     /// Picking an origin plane or a face, for a sketch or to look at: the nearest under the
@@ -4730,6 +4838,11 @@ impl Viewer {
             Some("rib") => {
                 self.rib = Some(RibForm::editing(name.to_string(), input(0), input(1), f["tool"].as_str().map(String::from), f["flip"] == true));
             }
+            Some("loft") => {
+                self.clear_loft_selection();
+                self.part = Some(name.to_string());
+                self.loft = Some(LoftForm::editing(name.to_string(), &f));
+            }
             Some("flange") => {
                 self.flange = Some(FlangeForm {
                     name: name.to_string(),
@@ -4815,7 +4928,7 @@ impl Viewer {
         let trim = self.trim.as_ref().filter(|f| f.editing).map(|f| &f.name).or(self.rib.as_ref().and_then(RibForm::edited));
         let mirror = self.mirror.as_ref().filter(|f| f.editing).map(|f| &f.name);
         let extrusion = self.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        flange.or(revolve).or(trim).or(mirror).or(extrusion).cloned()
+        flange.or(revolve).or(trim).or(mirror).or(extrusion).or(self.loft.as_ref().and_then(LoftForm::edited)).cloned()
     }
 
     /// With a form changing a feature, Shift or Ctrl held: what is under the cursor of what the
@@ -5443,13 +5556,15 @@ impl Viewer {
                 let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(at) + egui::vec2(14.0, 14.0);
                 egui::Area::new(egui::Id::new("datum_contour_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(match act {
+                        let text = match act {
                             Act::Revolve => self.i18n.t("revolve-pick", "Open a sketch with a profile and an axis line, then R"),
                             Act::Trim => self.i18n.t("trim-pick", "Click the sheet first"),
                             Act::Rib => self.i18n.t("rib-pick", "Draw the rib's path in a sketch on a flat wall of the sheet first"),
+                            Act::Loft => self.i18n.t("loft-require-rule", "Choose a sheet-metal rule"),
                             Act::MirrorPart => self.i18n.t("mirror-pick", "Click the part first"),
                             _ => self.i18n.t("extrude-contour-hint", "Select a contour or a chain, then E"),
-                        })
+                        };
+                        if act == Act::Loft { ui.colored_label(ui.visuals().error_fg_color, text) } else { ui.label(text) }
                     });
                 });
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
@@ -6888,7 +7003,8 @@ impl Viewer {
             | Act::MaterialTable
             | Act::RuleTable
             | Act::ToolTable
-            | Act::Rib => self.model.is_some(),
+            | Act::Rib
+            | Act::Loft => self.model.is_some(),
             Act::CloseProject => self.project.is_some(),
             Act::Extrude | Act::Revolve => {
                 self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
@@ -6943,6 +7059,7 @@ impl Viewer {
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
             Act::ParameterTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
             Act::Rib => self.rib.is_some(),
+            Act::Loft => self.loft.is_some(),
             Act::ToolTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Tools),
             Act::MaterialTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
             Act::RuleTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Rules),
@@ -7008,6 +7125,11 @@ impl Viewer {
             Act::Flange => {
                 self.leave();
                 self.pick(Purpose::Flange);
+            }
+            Act::Loft => {
+                self.leave();
+                let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
+                self.open_loft(at);
             }
             Act::Rib => {
                 self.leave();
@@ -7256,6 +7378,7 @@ impl Viewer {
             self.item(ui, Act::Extrude, true);
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
+            self.item(ui, Act::Loft, true);
             self.item(ui, Act::Trim, true);
             self.item(ui, Act::Rib, true);
             self.item(ui, Act::MirrorPart, true);
@@ -7594,6 +7717,8 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
+        self.loft_pick_hint(ui.ctx());
+        self.loft_window(ui.ctx());
         self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
@@ -7651,6 +7776,7 @@ mod tests {
                 preview: None,
                 spots: Vec::new(),
                 lines: Vec::new(),
+                loft_profiles: Vec::new(),
                 ends: Vec::new(),
                 uses: None,
                 contours: Vec::new(),
@@ -7729,6 +7855,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            loft: None,
             mirror: None,
             branch_main: None,
             extrusion: None,
@@ -9141,6 +9268,77 @@ mod tests {
         v.entering = Some("outline".into());
         v.sync_sketch();
         (v, inbox)
+    }
+
+    #[test]
+    fn l_in_the_model_opens_the_loft_form() {
+        let (mut v, _inbox) = viewer("loft-01-line.json");
+        v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
+        v.next_rule = Some("Sheet".into());
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert!(v.loft_is_picking() && v.sketch.is_none());
+        v.leave();
+        assert!(v.loft.is_none());
+        v.reedit("loft");
+        assert_eq!(v.edited_feature().as_deref(), Some("loft"));
+    }
+
+    #[test]
+    fn the_toolbar_loft_starts_profile_picking_with_a_sheet_rule() {
+        let (mut v, _) = viewer("loft-01-line.json");
+        v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
+        v.next_rule = None;
+        let label = v.i18n.label(Act::Loft).to_string();
+        let mut h = egui_kittest::Harness::builder().with_size([900.0, 200.0]).build_ui_state(|ui, v: &mut Viewer| v.toolbar(ui), v);
+
+        h.get_by_label(&label).click();
+        h.run();
+        assert!(!h.state().loft_is_picking());
+        assert!(h.state().contour_hint.is_some_and(|(_, _, act)| act == Act::Loft));
+
+        h.state_mut().next_rule = Some("Sheet".into());
+        h.get_by_label(&label).click();
+        h.run();
+        assert!(h.state().loft_is_picking());
+    }
+
+    #[test]
+    fn a_loft_can_pick_visible_arcs_and_uses_the_active_parts_rule() {
+        let (mut v, _) = viewer("loft-04-concentric-arcs.json");
+        let mut session = Session::default();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/loft-04-concentric-arcs.json");
+        session.execute("open", &json!({"path": path})).unwrap();
+        let picture = picture(&session, None, None, &mut MeshCache::default());
+        let model = v.model.as_mut().unwrap();
+        model.scene = picture.scene;
+        model.loft_profiles = picture.loft_profiles;
+        model.inspect["parts"] = json!([{"part":"loft","rule":"Active"}]);
+        v.rules = vec![json!({"name":"Next","kind":"sheet"}), json!({"name":"Active","kind":"sheet"})];
+        v.next_rule = Some("Next".into());
+        assert_eq!(v.loft_toolbar_rule().as_deref(), Some("Next"));
+        v.part = Some("loft".into());
+        assert_eq!(v.loft_toolbar_rule().as_deref(), Some("Active"));
+        v.open_loft(egui::Pos2::ZERO);
+
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        let (anchor, radius) = sphere(&v.model.as_ref().unwrap().scene);
+        let (vp, _) = v.camera.matrices(anchor, 800.0 / 600.0, radius);
+        let project = |q| on_screen(&vp, q - anchor, rect);
+        for name in ["sketch1", "sketch2"] {
+            let model = v.model.as_ref().unwrap();
+            let profile = model.loft_profiles.iter().find(|p| p.name == name).unwrap();
+            let hit = profile.screen(&project).map(|[a, b]| a + (b - a) * 0.5).find_map(|p| {
+                let i = v.loft_profile_at(rect, p)?;
+                (model.loft_profiles[i].name == name).then_some(i)
+            });
+            assert!(hit.is_some(), "{name} must be pickable");
+            v.pick_loft_profile(name);
+            assert!(!v.loft_can_pick(name));
+        }
+        assert!(!v.loft_is_picking());
     }
 
     /// The actions' keys in a sketch: L takes up the line, Shift+L does not; S, the model's key

@@ -5,8 +5,8 @@
 //! arcs, so the body is an extrusion of plane and cylinder faces (M5a); its flat blank comes from
 //! `unfold`.
 
-use datum_brep::{BrepError, ProfileArc, ProfileLoop, Region, TopoId, extrude};
-use datum_math::{Rigid, Sign, Vec2, orient2d};
+use datum_brep::{Body, BrepError, ProfileArc, ProfileLoop, Region, TopoId, extrude};
+use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
 use datum_sketch::Step;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -102,10 +102,6 @@ pub fn sheet(
         return Err(BrepError::Unsupported("sheet metal from a sketch on a cylinder face".into()));
     }
     let chain = chain(s, path)?;
-    let Sheet { thickness: t, radius: r, side } = sheet;
-    if !(t > 0.0 && r > 0.0 && t.is_finite() && r.is_finite()) {
-        return Err(BrepError::Degenerate(format!("sheet metal needs a positive thickness and bend radius, got {t} and {r}")));
-    }
 
     let chain = match start {
         None => chain,
@@ -116,10 +112,58 @@ pub fn sheet(
     let names: Vec<&str> = std::iter::once(chain[0].from).chain(chain.iter().map(|st| st.to)).collect();
     let lines: Vec<&str> = chain.iter().map(|st| st.curve).collect();
     let p: Vec<Vec2> = names.iter().map(|n| s.solved.points[*n]).collect();
-    let n = p.len() - 1;
     // Each step's arc, if it is one: its centre, and whether the path turns counterclockwise
     // along it.
     let arcs: Vec<Option<(Vec2, bool)>> = chain.iter().map(|st| s.arcs.get(st.curve).map(|a| (s.solved.points[&a.center], st.forward))).collect();
+
+    let tangent = |a: &str, b: &str| {
+        let pair = if a <= b { [a, b] } else { [b, a] };
+        s.tangent.iter().any(|[a, b]| a == pair[0] && b == pair[1])
+    };
+    let path = SheetPath { p: &p, names: &names, lines: &lines, arcs: &arcs };
+    sweep_sheet(feature, s.frame, path, sheet, [z0, z1], &tangent)
+}
+
+struct SheetPath<'a> {
+    p: &'a [Vec2],
+    names: &'a [&'a str],
+    lines: &'a [&'a str],
+    arcs: &'a [Option<(Vec2, bool)>],
+}
+
+/// Sweep a loft's chord path, using the same solid and bend geometry as an authored sheet path.
+pub(crate) fn loft_chords(feature: TopoId, frame: [Vec3; 4], source: &str, points: &[Vec2], sheet: Sheet, distance: f64) -> Result<Body, BrepError> {
+    let count = points.len() - 1;
+    let names: Vec<_> = (0..=count)
+        .map(|k| match k {
+            0 => format!("{source}.start"),
+            k if k == count => format!("{source}.end"),
+            _ => format!("{source}.station.{k}/{count}"),
+        })
+        .collect();
+    let lines: Vec<_> = (0..count).map(|k| format!("{source}.chord.{k}/{count}")).collect();
+    let names: Vec<_> = names.iter().map(String::as_str).collect();
+    let lines: Vec<_> = lines.iter().map(String::as_str).collect();
+    let arcs = vec![None; count];
+    let path = SheetPath { p: points, names: &names, lines: &lines, arcs: &arcs };
+    sweep_sheet(feature, frame, path, sheet, [distance.min(0.0), distance.max(0.0)], &|_, _| false)
+}
+
+fn sweep_sheet(
+    feature: TopoId,
+    frame: [Vec3; 4],
+    path: SheetPath<'_>,
+    sheet: Sheet,
+    depth: [f64; 2],
+    tangent: &dyn Fn(&str, &str) -> bool,
+) -> Result<Body, BrepError> {
+    let SheetPath { p, names, lines, arcs } = path;
+    let n = lines.len();
+    let [z0, z1] = depth;
+    let Sheet { thickness: t, radius: r, side } = sheet;
+    if !(t > 0.0 && r > 0.0 && t.is_finite() && r.is_finite()) {
+        return Err(BrepError::Degenerate(format!("sheet metal needs a positive thickness and bend radius, got {t} and {r}")));
+    }
 
     // Offsets of the two faces to the left of the path.
     let (d0, d1) = match side {
@@ -164,11 +208,7 @@ pub fn sheet(
         }
     }
     // Each corner: smooth where the sketch makes its curves tangent, else a bend of two lines.
-    let tangent = |k: usize| {
-        let pair = if lines[k - 1] <= lines[k] { [lines[k - 1], lines[k]] } else { [lines[k], lines[k - 1]] };
-        s.tangent.iter().any(|[a, b]| a == pair[0] && b == pair[1])
-    };
-    let smooth: Vec<bool> = (0..=n).map(|k| k > 0 && k < n && tangent(k)).collect();
+    let smooth: Vec<bool> = (0..=n).map(|k| k > 0 && k < n && tangent(lines[k - 1], lines[k])).collect();
     // Every bend: its centre, its turn (left or not), and where it leaves the lines before and
     // after.
     struct Bend {
@@ -337,7 +377,7 @@ pub fn sheet(
         }
     }
     let caps = ["sheet.cap_start", "sheet.cap_end"].map(|tag| TopoId::derive(tag).id(feature).finish());
-    let [o, x, y, z] = s.frame;
+    let [o, x, y, z] = frame;
     Ok(extrude(&[Region { outer: ring, holes: Vec::new(), caps }], z0, z1)?.transformed(&Rigid::frame(o, x, y, z)))
 }
 

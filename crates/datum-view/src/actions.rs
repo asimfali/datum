@@ -46,6 +46,7 @@ pub enum Act {
     LookAt,
     WorkPlane,
     Flange,
+    Loft,
     Rib,
     ToolTable,
     Trim,
@@ -110,7 +111,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 59] = [
+pub const ACTIONS: [Action; 60] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -278,6 +279,7 @@ pub const ACTIONS: [Action; 59] = [
         None,
         Model,
     ),
+    action(Act::Loft, "sheet.loft", "Loft flange", "A sheet metal transition between two sketch profiles", plain(Key::L), Model),
     action(
         Act::Rib,
         "sheet.rib",
@@ -514,6 +516,15 @@ mod tests {
                 assert!(!(a.context.overlaps(b.context) && a.key.is_some() && a.key == b.key), "{} and {}", a.name, b.name);
             }
         }
+    }
+
+    #[test]
+    fn l_starts_loft_in_model_and_line_in_sketch() {
+        let keys = Keys::default();
+        let key = KeyboardShortcut::new(Modifiers::NONE, Key::L);
+        assert_eq!(keys.with(&key), [Act::Line, Act::Loft]);
+        assert_eq!(Act::Loft.action().context, Context::Model);
+        assert_eq!(Act::Line.action().context, Context::Sketch);
     }
 
     /// A key given to one action is taken from another it would run with, not from one in

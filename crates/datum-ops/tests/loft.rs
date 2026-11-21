@@ -41,6 +41,100 @@ fn sketches(second_plane_offset: f64) -> (Value, Value) {
     (first, second)
 }
 
+fn arc_profiles(radius: f64, dx: f64) -> (Value, Value) {
+    arc_profiles_at_angle(radius, dx, std::f64::consts::FRAC_PI_4)
+}
+
+fn arc_profiles_at_angle(radius: f64, dx: f64, angle: f64) -> (Value, Value) {
+    let arc = |r: f64, x: f64, a: f64| {
+        serde_json::json!({
+            "points": {"center": [x, 0.0], "start": [x + r, 0.0],
+                "end": [x + r * libm::cos(a), r * libm::sin(a)]},
+            "arcs": {"arc": {"center": "center", "from": "start", "to": "end"}}
+        })
+    };
+    let first = op(serde_json::json!({"op": "sketch", "sketch": arc(50.0, 0.0, std::f64::consts::FRAC_PI_4)})).eval(id("arc.first"), &[]).unwrap();
+    let plane = op(serde_json::json!({"op": "plane", "base": "xy", "offset": 50.0})).eval(id("arc.plane"), &[]).unwrap();
+    let second = op(serde_json::json!({"op": "sketch", "sketch": arc(radius, dx, angle)})).eval(id("arc.second"), &[&plane]).unwrap();
+    (first, second)
+}
+
+fn arc_loft(tolerance: f64) -> Op {
+    Op::Loft {
+        thickness: Some(Num::Value(2.0)),
+        radius: Some(Num::Value(2.0)),
+        k_factor: Some(Num::Value(0.44)),
+        side: Side::Left,
+        tolerance: Num::Value(tolerance),
+    }
+}
+
+/// Two congruent arcs define a faceted sheet; each internal chord boundary is a bend.
+#[test]
+fn equal_arc_profiles_make_chords_and_bends_at_the_requested_tolerance() {
+    let (first, second) = arc_profiles(50.0, 0.0);
+    for (tolerance, chords) in [(4.0, 1), (1.0, 2), (0.25, 4)] {
+        let value = arc_loft(tolerance).eval(id("arc.body"), &[&first, &second]).unwrap();
+        let body = value.body().unwrap();
+        body.validate().unwrap();
+        let cylinders = body.faces().iter().filter(|face| matches!(face.surface, datum_brep::Surface::Cylinder(_))).count();
+        assert_eq!(cylinders, 2 * (chords - 1), "tolerance {tolerance}");
+        let planes = body.faces().iter().filter(|face| matches!(face.surface, datum_brep::Surface::Plane(_))).count();
+        assert_eq!(planes, 2 * chords + 4, "tolerance {tolerance}");
+        for back in [false, true] {
+            let flat = unfold_side(body, back, 0.44).unwrap();
+            assert_eq!(flat.outer.len(), flat.pieces.len());
+            assert!(!flat.outer.is_empty());
+            assert!(flat.overlaps.is_empty(), "tolerance {tolerance}, back {back}: {:?}", flat.overlaps);
+            assert_eq!(flat.bends.len(), 2 * (chords - 1));
+            assert!(flat.bends.iter().all(|line| line[0] != line[1]));
+            assert_eq!(flat.bend_ids.iter().copied().collect::<std::collections::BTreeSet<_>>().len(), flat.bends.len());
+        }
+        let sagitta = 50.0 * (1.0 - libm::cos(std::f64::consts::FRAC_PI_4 / (2.0 * chords as f64)));
+        assert!(sagitta <= tolerance);
+        if chords > 1 {
+            let previous = 50.0 * (1.0 - libm::cos(std::f64::consts::FRAC_PI_4 / (2.0 * (chords - 1) as f64)));
+            assert!(previous > tolerance);
+        }
+    }
+}
+
+#[test]
+fn shifted_or_different_sweep_arc_profiles_are_refused() {
+    for (dx, angle) in [(1.0, std::f64::consts::FRAC_PI_4), (0.0, std::f64::consts::FRAC_PI_4 * 0.8)] {
+        let (first, second) = arc_profiles_at_angle(50.0, dx, angle);
+        let error = arc_loft(1.0).eval(id("arc.invalid"), &[&first, &second]).unwrap_err();
+        assert!(matches!(error, BrepError::Unsupported(_)), "offset {dx}, angle {angle}: {error}");
+    }
+}
+
+#[test]
+fn concentric_arc_profiles_with_different_radii_make_a_tapered_sheet() {
+    for (radius_b, tolerance, chords) in [(40.0, 4.0, 1), (40.0, 1.0, 2), (40.0, 0.25, 4), (60.0, 1.0, 3)] {
+        let (first, second) = arc_profiles(radius_b, 0.0);
+        for side in [Side::Left, Side::Right, Side::Middle] {
+            let mut loft = arc_loft(tolerance);
+            if let Op::Loft { side: loft_side, .. } = &mut loft {
+                *loft_side = side;
+            }
+            let value = loft.eval(id("arc.taper"), &[&first, &second]).unwrap();
+            let body = value.body().unwrap();
+            body.validate().unwrap();
+            assert!(body.volume().is_finite() && body.volume() > 0.0);
+            assert_eq!(body.faces().iter().filter(|f| matches!(f.surface, datum_brep::Surface::Cylinder(_))).count(), 2 * (chords - 1));
+            assert_eq!(body.faces().iter().filter(|f| matches!(f.surface, datum_brep::Surface::Plane(_))).count(), 6 * chords);
+            for back in [false, true] {
+                let flat = unfold_side(body, back, 0.44).unwrap();
+                assert!(!flat.outer.is_empty());
+                assert_eq!(flat.outer.len(), flat.pieces.len());
+                assert!(flat.overlaps.is_empty(), "side {side:?}, tolerance {tolerance}, back {back}: {:?}", flat.overlaps);
+                assert_eq!(flat.bends.len(), 2 * (chords - 1));
+                assert!(flat.bends.iter().all(|line| line[0] != line[1]));
+            }
+        }
+    }
+}
+
 fn body(side: Side, offset: f64) -> Result<datum_brep::Body, BrepError> {
     let (first, second) = sketches(offset);
     let loft = Op::Loft { thickness: Some(Num::Value(2.0)), radius: None, k_factor: None, side, tolerance: Num::Value(1.0) };

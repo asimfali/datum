@@ -116,6 +116,7 @@ mod tests {
         let sources = [
             ("actions.rs", include_str!("actions.rs")),
             ("app.rs", include_str!("app.rs")),
+            ("app/forms/loft.rs", include_str!("app/forms/loft.rs")),
             ("camera.rs", include_str!("camera.rs")),
             ("capture.rs", include_str!("capture.rs")),
             ("constrain.rs", include_str!("constrain.rs")),
@@ -177,6 +178,7 @@ mod tests {
         let sources = [
             include_str!("app.rs"),
             include_str!("app/forms/rib.rs"),
+            include_str!("app/forms/loft.rs"),
             include_str!("sidebar.rs"),
             include_str!("dock.rs"),
             include_str!("table.rs"),
