@@ -10,7 +10,16 @@ fn run(s: &mut Session, command: &str, params: Value) -> Value {
 
 #[test]
 fn loft_uses_the_sheet_rule_and_flat_sketch() {
-    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("loft_session_rule_flat");
+    check_loft("loft_session_rule_flat", include_str!("../../../tests/models/loft-02-bend.json"), "profile_a", "profile_b", "profile");
+}
+
+#[test]
+fn trapezoid_wings_use_the_sheet_rule_and_flat_sketch() {
+    check_loft("loft_session_trapezoid_wings", include_str!("../../../tests/models/loft-03-trapezoid-wings.json"), "sketch1", "sketch2", "l1");
+}
+
+fn check_loft(test_name: &str, model: &str, first: &str, second: &str, line: &str) {
+    let root = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(test_name);
     std::fs::create_dir_all(root.join("part")).unwrap();
     std::fs::write(root.join("datum-project.json"), "{}").unwrap();
     let mut s = Session::default();
@@ -18,11 +27,11 @@ fn loft_uses_the_sheet_rule_and_flat_sketch() {
     run(&mut s, "put_library", json!({"level": "material", "element": {"name": "Steel", "density": 7850}}));
     let rule = |t, k| json!({"level": "rule", "element": {"name": "Sheet", "kind": "sheet", "material": "Steel", "thickness": t, "radius": "t", "k_factor": k}});
     run(&mut s, "put_library", rule(2, 0.44));
-    let model: Value = serde_json::from_str(include_str!("../../../tests/models/loft-02-bend.json")).unwrap();
+    let model: Value = serde_json::from_str(model).unwrap();
     for feature in model["features"].as_array().unwrap().iter().take(3) {
         run(&mut s, "add", feature.clone());
     }
-    run(&mut s, "loft", json!({"name": "loft", "first": "profile_a", "second": "profile_b", "rule": "Sheet", "tolerance": 1}));
+    run(&mut s, "loft", json!({"name": "loft", "first": first, "second": second, "rule": "Sheet", "tolerance": 1}));
     let flat = s.flats().into_iter().find(|(name, _)| name == "loft").unwrap().1.unwrap();
     assert_eq!(flat.k_factor, 0.44);
     let (bend_index, [a, b]) = flat.bends.iter().copied().enumerate().find(|(_, [a, b])| (a.x - b.x).abs() > 1.0 && (a.y - b.y).abs() > 1.0).unwrap();
@@ -56,9 +65,9 @@ fn loft_uses_the_sheet_rule_and_flat_sketch() {
     let changed = run(
         &mut s,
         "edit_sketch",
-        json!({"name": "profile_a",
-        "remove_constraints": [{"type": "length", "line": "profile", "value": 100}],
-        "add_constraints": [{"type": "length", "line": "profile", "value": 110}]}),
+        json!({"name": first,
+        "remove_constraints": [{"type": "length", "line": line, "value": 100}],
+        "add_constraints": [{"type": "length", "line": line, "value": 110}]}),
     );
     assert!(changed["failed"].as_array().unwrap().is_empty(), "{changed}");
     run(&mut s, "put_library", rule(3, 0.4));

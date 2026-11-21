@@ -1,0 +1,206 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "sketch1",
+      "op": "sketch",
+      "plane": {
+        "normal": [
+          0.0,
+          -1.0,
+          0.0
+        ],
+        "origin": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "x_axis": [
+          1.0,
+          0.0,
+          0.0
+        ]
+      },
+      "sketch": {
+        "constraints": [
+          {
+            "line": "l1",
+            "type": "length",
+            "value": 100.0
+          },
+          {
+            "line": "l1",
+            "type": "horizontal"
+          },
+          {
+            "line": "l1",
+            "point": "origin",
+            "type": "midpoint"
+          }
+        ],
+        "lines": {
+          "l1": {
+            "from": "p1",
+            "to": "p2"
+          }
+        },
+        "points": {
+          "p1": [
+            -50,
+            0
+          ],
+          "p2": [
+            50,
+            0
+          ]
+        }
+      }
+    },
+    {
+      "base": "xz",
+      "name": "plane1",
+      "offset": -300.0,
+      "op": "plane"
+    },
+    {
+      "inputs": [
+        "plane1"
+      ],
+      "name": "sketch2",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "line": "l2",
+            "type": "vertical"
+          },
+          {
+            "line": "l3",
+            "type": "horizontal"
+          },
+          {
+            "line": "l3",
+            "type": "length",
+            "value": 200.0
+          },
+          {
+            "line": "l3",
+            "point": "origin",
+            "type": "midpoint"
+          },
+          {
+            "line": "l4",
+            "type": "length",
+            "value": 100.0
+          },
+          {
+            "degrees": 315.0,
+            "lines": [
+              "l4",
+              "l3"
+            ],
+            "type": "angle"
+          },
+          {
+            "line": "l2",
+            "points": [
+              "p4",
+              "p6"
+            ],
+            "type": "symmetric"
+          },
+          {
+            "line": "l2",
+            "points": [
+              "p5",
+              "p7"
+            ],
+            "type": "symmetric"
+          },
+          {
+            "lines": [
+              "l4",
+              "l5"
+            ],
+            "type": "equal"
+          },
+          {
+            "line": "l5",
+            "type": "length",
+            "value": 100.0
+          },
+          {
+            "type": "coincident",
+            "points": [
+              "p3",
+              "p6"
+            ]
+          }
+        ],
+        "lines": {
+          "l2": {
+            "construction": true,
+            "from": "origin",
+            "to": "p2"
+          },
+          "l3": {
+            "from": "p3",
+            "to": "p4"
+          },
+          "l4": {
+            "from": "p4",
+            "to": "p5"
+          },
+          "l5": {
+            "from": "p6",
+            "to": "p7"
+          }
+        },
+        "points": {
+          "p2": [
+            0,
+            100
+          ],
+          "p3": [
+            -100,
+            0
+          ],
+          "p4": [
+            100,
+            0
+          ],
+          "p5": [
+            170.71067811865476,
+            70.71067811865474
+          ],
+          "p6": [
+            -100,
+            0
+          ],
+          "p7": [
+            -170.71067811865476,
+            70.71067811865474
+          ]
+        }
+      }
+    },
+    {
+      "name": "loft",
+      "op": "loft",
+      "inputs": [
+        "sketch1",
+        "sketch2"
+      ],
+      "thickness": 2,
+      "radius": 2,
+      "k_factor": 0.44,
+      "side": "left",
+      "tolerance": 1
+    }
+  ],
+  "flats": {
+    "loft": {
+      "k_factor": 0.44
+    }
+  }
+}
