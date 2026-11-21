@@ -300,7 +300,7 @@ impl Path {
         if let Some(n) = curves.iter().find(|n| s.circles.contains_key(*n)) {
             return Err(format!("the path takes lines and arcs; round a circle, copy `around` its centre: `{n}`"));
         }
-        let found = datum_sketch::contours(&s.lines, &s.arcs, &|n, _| curves.iter().any(|c| c == n));
+        let found = s.contours(&|n, _| curves.iter().any(|c| c == n));
         if let Some(p) = found.branches.first() {
             return Err(format!("the path branches at `{p}`"));
         }

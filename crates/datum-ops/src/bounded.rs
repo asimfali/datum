@@ -7,7 +7,7 @@ use std::f64::consts::TAU;
 
 use datum_brep::{BrepError, ProfileArc};
 use datum_math::{Carrier, Vec2, crossings};
-use datum_sketch::{Offset, Pattern, Sketch, contours};
+use datum_sketch::{Offset, Pattern, Sketch};
 
 use crate::copies::{Copies, whole};
 use crate::sketch::{ChainPiece, Placed, first_corner, named_pieces, within_rounding};
@@ -91,7 +91,7 @@ fn group(sketch: &Sketch, n: &str) -> Vec<String> {
 /// `members`. The first runs the way its first curve is drawn, the others along with it.
 fn chains_of(s: &Placed, cell: &BTreeSet<String>, members: &[String]) -> Result<Vec<Chain>, String> {
     let keep = |n: &str, construction: bool| !construction && cell.contains(n);
-    let found = contours(&s.lines, &s.arcs, &keep);
+    let found = s.contours(&keep);
     if !found.branches.is_empty() {
         return Err(format!("its chains branch at point `{}`", found.branches[0]));
     }

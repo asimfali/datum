@@ -1,0 +1,134 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "profile_a",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "mid": [
+            0,
+            0
+          ],
+          "a": [
+            -50,
+            0
+          ],
+          "b": [
+            50,
+            0
+          ]
+        },
+        "lines": {
+          "profile": {
+            "from": "a",
+            "to": "b"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "mid",
+            "at": [
+              0,
+              0
+            ]
+          },
+          {
+            "type": "midpoint",
+            "point": "mid",
+            "line": "profile"
+          },
+          {
+            "type": "horizontal",
+            "line": "profile"
+          },
+          {
+            "type": "length",
+            "line": "profile",
+            "value": 100
+          }
+        ]
+      }
+    },
+    {
+      "name": "plane_b",
+      "op": "plane",
+      "base": "xz",
+      "offset": 300
+    },
+    {
+      "name": "profile_b",
+      "op": "sketch",
+      "inputs": [
+        "plane_b"
+      ],
+      "sketch": {
+        "points": {
+          "left": [
+            -187.9385241571817,
+            0
+          ],
+          "peak": [
+            0,
+            68.40402866513374
+          ],
+          "right": [
+            187.9385241571817,
+            0
+          ]
+        },
+        "lines": {
+          "left_segment": {
+            "from": "left",
+            "to": "peak"
+          },
+          "right_segment": {
+            "from": "peak",
+            "to": "right"
+          }
+        },
+        "constraints": [
+          {
+            "type": "fix",
+            "point": "left",
+            "at": [
+              -187.9385241571817,
+              0
+            ]
+          },
+          {
+            "type": "fix",
+            "point": "peak",
+            "at": [
+              0,
+              68.40402866513374
+            ]
+          },
+          {
+            "type": "fix",
+            "point": "right",
+            "at": [
+              187.9385241571817,
+              0
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "loft",
+      "op": "loft",
+      "inputs": [
+        "profile_a",
+        "profile_b"
+      ],
+      "thickness": 2,
+      "side": "left",
+      "tolerance": 1,
+      "radius": 2,
+      "k_factor": 0.44
+    }
+  ]
+}

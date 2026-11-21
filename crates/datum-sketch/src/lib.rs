@@ -24,7 +24,7 @@ use rayon::prelude::*;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-pub use contours::{Contours, Step, contours, reversed};
+pub use contours::{Contours, Step, contours, contours_by, reversed};
 use equations::{Equations, Group};
 
 /// A sketch in its own plane. In JSON:

@@ -68,6 +68,12 @@
     "profile_a": "00e9022cd8da5fe37369cb667479415c58f2323c040db984276b47e0fc01fa7e",
     "profile_b": "9cfbeff41cc8b139014c0ec5b40b426c3f9950ebf2c336d5fe386d4225411939"
   },
+  "loft-02-bend.json": {
+    "loft": "eff963ead3a57f343e5c85831a8428b702b1229f2e3a30359cc03c2b1613a7e7",
+    "plane_b": "680805eaadacc955401dccd6b496f2f07f48ff11a45482cfbac7d579b9e72b73",
+    "profile_a": "9f83ba886656c00adea644245f5ce8a3532eb01f06b8c7c7449f8e7252f60264",
+    "profile_b": "7eb5ada54433b3d3011f15b988953bc2b885a462b0f973e933d9a69e5b116ff2"
+  },
   "mirror_part.json": {
     "other": "56f5d64946fb4ca3642e94b694ba02a2cc1cc659f7b73ad7aa41404ea22634ef",
     "outline": "51ee6be2257cb5f4373177b804c2752817560ad681a8ed6333a2007d7aa396a8",

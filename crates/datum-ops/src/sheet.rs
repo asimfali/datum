@@ -38,7 +38,7 @@ impl Side {
 /// from its end named first.
 fn chain<'s>(s: &'s Placed, path: Option<&str>) -> Result<Vec<Step<'s>>, BrepError> {
     let bad = |m: String| BrepError::Sketch(format!("sheet path: {m}"));
-    let found = datum_sketch::contours(&s.lines, &s.arcs, &|_, c| !c);
+    let found = s.contours(&|_, c| !c);
     if let Some(p) = found.branches.first() {
         return Err(bad(format!("it branches at point `{p}`")));
     }
@@ -64,7 +64,7 @@ fn chain<'s>(s: &'s Placed, path: Option<&str>) -> Result<Vec<Step<'s>>, BrepErr
 /// A curve of each open chain of the profile curves of `s`, by its lowest-named end: the paths a
 /// sheet may take.
 pub fn paths(s: &Placed) -> Vec<String> {
-    datum_sketch::contours(&s.lines, &s.arcs, &|_, c| !c).paths.iter().map(|c| c[0].curve.to_string()).collect()
+    s.contours(&|_, c| !c).paths.iter().map(|c| c[0].curve.to_string()).collect()
 }
 
 /// The two end points of the open chain curve `curve` of `s` lies on (none: it is on none), the
@@ -109,8 +109,8 @@ pub fn sheet(
 
     let chain = match start {
         None => chain,
-        Some(p) if p == chain[0].from => chain,
-        Some(p) if p == chain[chain.len() - 1].to => datum_sketch::reversed(&chain),
+        Some(p) if s.canonical_point(p) == chain[0].from => chain,
+        Some(p) if s.canonical_point(p) == chain[chain.len() - 1].to => datum_sketch::reversed(&chain),
         Some(p) => return Err(bad(format!("`{p}` is not an end of the path"))),
     };
     let names: Vec<&str> = std::iter::once(chain[0].from).chain(chain.iter().map(|st| st.to)).collect();
@@ -399,4 +399,38 @@ fn sub(a: Vec2, b: Vec2) -> Vec2 {
 fn unit(v: Vec2) -> Vec2 {
     let l = libm::hypot(v.x, v.y);
     Vec2::new(v.x / l, v.y / l)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datum_sketch::{Constraint, Sketch};
+    use std::collections::BTreeMap;
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_sheet_path_joins_explicitly_coincident_ends() {
+        let mut sketch: Sketch = serde_json::from_value(serde_json::json!({
+            "points": {"p": [0, 0], "b": [10, 0], "q": [10, 0], "a": [10, 0], "r": [10, 20], "rr": [10, 20], "guide": [20, 20]},
+            "lines": {"base": {"from": "p", "to": "b"}, "wing": {"from": "q", "to": "r"}, "guide": {"from": "rr", "to": "guide", "construction": true}}
+        }))
+        .unwrap();
+        let place = |sketch: &Sketch| crate::sketch::place(sketch, None, None, None, None, &BTreeMap::new(), &|_| unreachable!(), None).unwrap();
+        let separate = place(&sketch);
+        assert_eq!(paths(&separate).len(), 2);
+        for [a, b] in [["q", "a"], ["a", "b"], ["rr", "r"]] {
+            sketch.constraints.push(Constraint::Coincident { points: [a.to_string(), b.to_string()] });
+        }
+        let joined = place(&sketch);
+        assert_eq!(separate.solved.points, joined.solved.points);
+        assert_ne!(separate.hash, joined.hash);
+        assert_eq!(joined.lines["wing"].from, "q");
+        assert_eq!(joined.canonical_point("q"), "b");
+        assert_eq!(path_ends(&joined, "wing"), Some(["p".to_string(), "r".to_string()]));
+
+        let feature = TopoId::derive("test.sheet").finish();
+        let dims = Sheet { thickness: 1.0, radius: 2.0, side: Side::Left };
+        let body = |start| sheet(feature, &joined, None, Some(start), dims, 0.0, 30.0).unwrap();
+        assert_eq!(body("rr").hash(), body("r").hash());
+    }
 }

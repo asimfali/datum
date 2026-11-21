@@ -6,8 +6,8 @@
 //! an angle with its lines swapped (a mirror turns it the other way); horizontal and vertical
 //! only across a horizontal or vertical axis. A constraint that ties the copied to anything
 //! else is not copied, nor a fix. Points on the axis (its ends, or held on it) are the copy's as
-//! well, so half a profile drawn from the axis closes. Tab: the original goes, only the copy
-//! is left.
+//! well, so half a profile drawn from the axis closes. A reflected point that lands on a
+//! point of the sketch is tied to it by coincidence. Tab: only the copy is left.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -16,7 +16,7 @@ use serde_json::{Value as Json, json};
 
 use crate::draw::Patch;
 use crate::sketch::{Pick, SketchEdit};
-use crate::trim::{Plan, Shape, Sketch, dot, sub};
+use crate::trim::{Plan, Shape, Sketch, dist, dot, sub};
 
 /// What mirroring `picks` across line `axis` would do, the original kept if `keep`.
 pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option<Plan> {
@@ -58,6 +58,23 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
     // A point on the axis is its own mirror.
     let ends = [line.from.as_str(), line.to.as_str()];
     let on_axis = |q: &str| ends.iter().any(|e| sk.same(e, q)) || sk.on(q, axis);
+    // In move mode the points kept by other curves or patterns are still available as targets.
+    let mut removed = BTreeSet::new();
+    if !keep {
+        let picked: BTreeSet<&str> = curves.iter().map(|(_, n)| n.as_str()).collect();
+        for q in points.iter().filter(|q| !on_axis(q)) {
+            let held = ["lines", "arcs", "circles", "patterns"].iter().filter_map(|k| json[*k].as_object()).any(|m| {
+                m.iter().filter(|(n, _)| !picked.contains(n.as_str())).any(|(_, v)| {
+                    let mut found = false;
+                    datum_model::visit_names(&mut v.clone(), &mut |n| found |= n == q);
+                    found
+                })
+            });
+            if !held {
+                removed.insert(q.as_str());
+            }
+        }
+    }
     let mut patch = Patch::new(edit);
     let mut map: BTreeMap<String, String> = BTreeMap::new();
     map.insert(axis.to_string(), axis.to_string());
@@ -71,6 +88,17 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
             let n = patch.fresh("p");
             let y = mirrored(x);
             patch.set("points", &n, json!(y));
+            let coincident =
+                sk.p.solved
+                    .points
+                    .iter()
+                    .filter(|(target, _)| *target != q && !removed.contains(target.as_str()))
+                    .map(|(target, at)| (target, dist(y, [at.x, at.y])))
+                    .filter(|(_, distance)| *distance <= sk.p.solved.tolerance)
+                    .min_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+            if let Some((target, _)) = coincident {
+                patch.constrain(json!({"type": "coincident", "points": [target, n]}));
+            }
             map.insert(q.clone(), n.clone());
             at.insert(n, y);
         }
@@ -171,23 +199,12 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
         }
         patch.constrain(copy);
     }
-    // Only the copy: the original's curves, and its points off the axis nothing else holds.
     if !keep {
-        let picked: BTreeSet<&str> = curves.iter().map(|(_, n)| n.as_str()).collect();
         for (key, n) in &curves {
             patch.set(key, n, Json::Null);
         }
-        for q in points.iter().filter(|q| !on_axis(q)) {
-            let held = ["lines", "arcs", "circles", "patterns"].iter().filter_map(|k| json[*k].as_object()).any(|m| {
-                m.iter().filter(|(n, _)| !picked.contains(n.as_str())).any(|(_, v)| {
-                    let mut found = false;
-                    datum_model::visit_names(&mut v.clone(), &mut |n| found |= n == q);
-                    found
-                })
-            });
-            if !held {
-                patch.set("points", q, Json::Null);
-            }
+        for q in removed {
+            patch.set("points", q, Json::Null);
         }
     }
     Some(Plan { patch: patch.done()?, gone, added })
@@ -306,6 +323,38 @@ mod tests {
         assert_eq!(got, [[-10.0, 0.0], [-10.0, 10.0]]);
         // Nothing left to tie the copy to.
         assert!(cons(&e, "symmetric").is_empty() && cons(&e, "equal").is_empty());
+    }
+
+    #[test]
+    fn mirror_joins_the_reflected_end_to_the_opposite_end_of_a_line() {
+        for keep in [true, false] {
+            let mut e = editor(
+                json!({
+                    "points": {"t": [0, 20], "left": [-100, 0], "right": [100, 0], "tip": [170.71, 70.71]},
+                    "lines": {
+                        "axis": {"from": "origin", "to": "t", "construction": true},
+                        "middle": {"from": "left", "to": "right"},
+                        "leg": {"from": "right", "to": "tip"}
+                    },
+                    "constraints": [
+                        {"type": "vertical", "line": "axis"},
+                        {"type": "horizontal", "line": "middle"},
+                        {"type": "midpoint", "point": "origin", "line": "middle"},
+                        {"type": "length", "line": "middle", "value": 200},
+                        {"type": "length", "line": "leg", "value": 100}
+                    ]
+                }),
+                false,
+            );
+            pick(&mut e, &["leg"]);
+            let plan = super::plan(&e, &e.selected, "axis", keep).unwrap();
+            e.apply(plan.patch);
+            let placed = e.placed.as_ref().unwrap();
+            let lines = fresh(&e, "lines", &["axis", "middle", "leg"]);
+            let copied_end = &placed.lines[&lines[0]].from;
+            assert_eq!(cons(&e, "coincident"), [json!({"type": "coincident", "points": ["left", copied_end]})]);
+            assert_eq!(cons(&e, "symmetric").len(), if keep { 2 } else { 0 });
+        }
     }
 
     /// Across an axis at 45 degrees a horizontal line of length 5 comes out as a vertical one

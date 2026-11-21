@@ -262,7 +262,7 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "loft",
-        description: "The first planar loft-flange case (D264): join the one straight line of sketch first to the one straight line of sketch second. Their solved world-space directions must be parallel and the four endpoints coplanar; the sketch planes themselves may differ. The result is one planar trapezoid, thickened as a sheet part. rule is required, a sheet rule of the library. tolerance (mm) is required; side is left (default), right or middle. This first step refuses arcs, multiple lines and non-parallel profiles. The reply names the part and its rule.",
+        description: "A loft-flange between two open sketches: one straight line to a parallel, coplanar straight line forms a planar trapezoid (D264); one straight line to a two-line V with its apex above the first line's midpoint forms three facets and two bends (D265–D266). Other profiles are unsupported. rule is required, a sheet rule of the library supplying thickness, bend radius and K-factor. tolerance (mm) is required; side is left (default), right or middle. The reply names the part and its rule.",
         params: || {
             json!({"type": "object", "properties": {
                 "name": {"type": "string"},
