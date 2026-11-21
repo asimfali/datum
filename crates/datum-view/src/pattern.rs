@@ -136,7 +136,7 @@ pub fn base_of(sk: &SketchEdit) -> Result<Base, String> {
 
 /// Lines and arcs `curves`, all of them, as one chain: closed or not; None if they are not one.
 fn chain(placed: &datum_ops::Placed, curves: &[String]) -> Option<bool> {
-    let c = datum_sketch::contours(&placed.lines, &placed.arcs, &|n, _| curves.iter().any(|m| m == n));
+    let c = placed.contours(&|n, _| curves.iter().any(|m| m == n));
     let all = c.loops.iter().chain(&c.paths).map(Vec::len).sum::<usize>() == curves.len();
     match (&c.loops[..], &c.paths[..]) {
         ([_], []) if all && c.ends.is_empty() && c.branches.is_empty() => Some(true),

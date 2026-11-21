@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use datum_brep::{Body, BrepError, Curve, Cylinder, Development, Ix, ProfileArc, ProfileLoop, Region, Surface, TopoId, extrude};
 use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d, orient3d_coords};
-use datum_sketch::{Arc, Circle, Constraint, Line, Sketch, Solved, Step, contours, solve};
+use datum_sketch::{Arc, Circle, Constraint, Contours, Line, Sketch, Solved, Step, contours_by, solve};
 use rayon::prelude::*;
 
 use crate::copies::{Copies, moved, place_patterns};
@@ -209,6 +209,8 @@ pub struct Placed {
     pub solved: Solved,
     pub lines: BTreeMap<String, Line>,
     pub arcs: BTreeMap<String, Arc>,
+    /// Alternate names of explicitly coincident curve endpoints.
+    point_aliases: BTreeMap<String, String>,
     /// Circles, each diameter a number.
     pub circles: BTreeMap<String, Circle>,
     /// Ellipses projections made (D218).
@@ -223,6 +225,52 @@ pub struct Placed {
     /// The patterns, by name: their profiles are made with the sketch's own.
     pub patterns: Vec<Copies>,
     pub hash: [u8; 32],
+}
+
+impl Placed {
+    /// The shared name of an explicitly coincident endpoint in the contour graph.
+    pub fn canonical_point<'a>(&'a self, name: &'a str) -> &'a str {
+        self.point_aliases.get(name).map_or(name, String::as_str)
+    }
+
+    /// The lines and arcs `keep` keeps, joined at their shared or explicitly coincident ends.
+    pub fn contours(&self, keep: &dyn Fn(&str, bool) -> bool) -> Contours<'_> {
+        contours_by(&self.lines, &self.arcs, &|name| self.canonical_point(name), keep)
+    }
+}
+
+/// Coincident constraints form classes through both endpoints and standalone points. Only a
+/// class linking at least two distinct endpoint names affects contours; its lowest endpoint
+/// name is the representative, regardless of the order points or constraints were authored.
+fn point_aliases(sketch: &Sketch) -> BTreeMap<String, String> {
+    let mut links: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for c in &sketch.constraints {
+        if let Constraint::Coincident { points: [a, b] } = c {
+            links.entry(a).or_default().push(b);
+            links.entry(b).or_default().push(a);
+        }
+    }
+    if links.is_empty() {
+        return BTreeMap::new();
+    }
+    let endpoints: BTreeSet<&str> =
+        sketch.lines.values().map(|l| [&*l.from, &*l.to]).chain(sketch.arcs.values().map(|a| [&*a.from, &*a.to])).flatten().collect();
+    let mut aliases = BTreeMap::new();
+    while let Some((start, mut pending)) = links.pop_first() {
+        let mut class = vec![start];
+        while let Some(p) = pending.pop() {
+            if let Some(neighbors) = links.remove(p) {
+                class.push(p);
+                pending.extend(neighbors);
+            }
+        }
+        let mut ends = class.iter().copied().filter(|p| endpoints.contains(p));
+        if let (Some(first), Some(second)) = (ends.next(), ends.next()) {
+            let canonical = ends.fold(first.min(second), |low, end| low.min(end));
+            aliases.extend(class.into_iter().filter(|p| *p != canonical).map(|p| (p.to_string(), canonical.to_string())));
+        }
+    }
+    aliases
 }
 
 /// A sketch on a cylinder face of a rolled sheet (M5c, D68): its coordinates are the sheet's
@@ -963,6 +1011,7 @@ pub fn place<'a>(
         solved,
         lines: sketch.lines.clone(),
         arcs: sketch.arcs.clone(),
+        point_aliases: point_aliases(sketch),
         circles: sketch.circles.clone(),
         ellipses,
         tangent: sketch
@@ -1001,6 +1050,11 @@ pub fn place<'a>(
             bytes(s.as_bytes());
         }
         bytes(&[u8::from(a.construction)]);
+    }
+    for (name, point) in &placed.point_aliases {
+        bytes(b"coincident endpoint");
+        bytes(name.as_bytes());
+        bytes(point.as_bytes());
     }
     for (name, c) in &sketch.circles {
         for s in [name, &c.center] {
@@ -1265,7 +1319,7 @@ type Named<'s> = (datum_sketch::Contours<'s>, Vec<Found>, Vec<Vec<&'s str>>);
 /// The curves of `s` on open chains, none of them construction, by name.
 pub fn open_curves(s: &Placed) -> Vec<String> {
     let keep = |_: &str, construction: bool| !construction;
-    let found = contours(&s.lines, &s.arcs, &keep);
+    let found = s.contours(&keep);
     found.paths.iter().flatten().map(|st| st.curve.to_string()).collect()
 }
 
@@ -1287,7 +1341,7 @@ pub(crate) fn open_chains(s: &Placed) -> Result<Vec<(String, Vec<ChainPiece>)>, 
 /// [`open_chains`] of the curves `keep` keeps, with each curve's name.
 pub(crate) fn open_chains_named(s: &Placed, keep: &dyn Fn(&str) -> bool) -> Result<Vec<Vec<(String, ChainPiece)>>, BrepError> {
     let keep = |n: &str, construction: bool| !construction && keep(n);
-    let found = contours(&s.lines, &s.arcs, &keep);
+    let found = s.contours(&keep);
     found.paths.iter().map(|path| if path[0].forward { named_pieces(s, path) } else { named_pieces(s, &datum_sketch::reversed(path)) }).collect()
 }
 
@@ -1319,7 +1373,7 @@ pub fn profile_curves(feature: TopoId, s: &Placed) -> Result<Vec<Vec<String>>, B
 fn named_loops(feature: TopoId, s: &Placed) -> Result<Named<'_>, BrepError> {
     no_ellipse(s, &|_| true)?;
     let keep = |_: &str, construction: bool| !construction;
-    let found = contours(&s.lines, &s.arcs, &keep);
+    let found = s.contours(&keep);
     if let Some(p) = found.branches.first() {
         return Err(BrepError::Sketch(format!("the profile branches at point `{p}`")));
     }
@@ -1349,14 +1403,14 @@ pub fn contour_at(feature: TopoId, s: &Placed, p: Vec2) -> Option<Vec<String>> {
 
 /// The closed loops of the curves `keep` keeps (construction ones too if `construction`), an
 /// error if a curve is on none: lines and arcs joined at their points, each loop starting at its
-/// lowest point (see [`contours`]); then circles, each a loop of three arcs from its own points at
+/// lowest point (see [`Placed::contours`]); then circles, each a loop of three arcs from its own points at
 /// 0°, 120° and 240°.
 pub(crate) fn loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool, construction: bool) -> Result<Vec<Found>, BrepError> {
     if !construction {
         no_ellipse(s, keep)?;
     }
     let keep = |name: &str, c: bool| keep(name) && (construction || !c);
-    let found = contours(&s.lines, &s.arcs, &keep);
+    let found = s.contours(&keep);
     if let Some(p) = found.odd() {
         return Err(BrepError::Sketch(format!("the profile is open or branches at point `{p}`")));
     }
@@ -1367,7 +1421,7 @@ pub(crate) fn loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool, co
 /// yet, a path, a sheet's profile bound nothing.
 pub(crate) fn closed_loops(feature: TopoId, s: &Placed, keep: &dyn Fn(&str) -> bool) -> Vec<Found> {
     let keep = |name: &str, c: bool| keep(name) && !c;
-    rings(feature, s, &contours(&s.lines, &s.arcs, &keep).loops, &keep)
+    rings(feature, s, &s.contours(&keep).loops, &keep)
 }
 
 /// Chains `chains` of `s` as profile loops, then the circles `keep` keeps.

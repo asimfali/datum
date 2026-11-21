@@ -3,9 +3,9 @@
 //! normal, across a bend along the radius, on into the next wall. Bends lie flat at the sketch's
 //! K-factor as [`crate::unfold`] lays them, so the blank shows the profile as it was drawn.
 //!
-//! The blank's coordinates `(s, y)`: `y` along the bend lines from the sketch's origin, `s` across
-//! them, lengths along each wall and along each bend's neutral layer; on the sketch's wall they
-//! are its own coordinates turned. Each profile is cut at the bend lines into pieces, one face
+//! The blank's coordinates `(s, y)` measure lengths along each wall and each bend's neutral
+//! layer. On the sketch's wall they are its own coordinates turned. The main chain's bend lines
+//! run along `y`. Each profile is cut at the bend lines into pieces, one face
 //! each; the faces of both sides it crosses are built anew, their bend lines broken where it
 //! crosses, and every piece gets its wall. A piece of a curve after the first, and the next arc
 //! of a circle, take the wall [`next_piece`] of the one before: the blank joins them back into the
@@ -39,6 +39,9 @@ pub(crate) fn punch(feature: TopoId, target: &Body, sketch: &Placed, grow: bool)
     }
     let blank = Blank::new(target, f as Ix, sketch.frame, sketch.k_factor)?;
     let Some(blank) = blank else { return within() };
+    if grow && blank.seams.iter().any(Seam::oblique) {
+        return Err(later("on a sheet with oblique bend lines"));
+    }
     let profiles = blank.laid(feature, sketch)?;
     cut(feature, target, &blank, profiles, grow, Some(&within))
 }
@@ -534,7 +537,7 @@ pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Res
             .strips
             .iter()
             .filter_map(|s| match s.lay {
-                Lay::Bend { radii, .. } => {
+                Lay::Bend { radii, .. } if s.span.is_some() => {
                     let gap = distorting
                         .iter()
                         .filter(|(a, b)| !cuts_away(s.lo(), s.hi(), a.y, b.y))
@@ -542,7 +545,7 @@ pub(crate) fn near_bends(feature: TopoId, target: &Body, sketch: &Placed) -> Res
                         .min_by(f64::total_cmp)?;
                     Some((gap, 2.0 * blank.thickness + radii[0].min(radii[1])))
                 }
-                Lay::Plane { .. } => None,
+                _ => None,
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
         match nearest {
@@ -821,10 +824,15 @@ fn arc_arc_crossings(a: Vec2, b: Vec2, arc: ProfileArc, r: f64, p: Vec2, q: Vec2
     Ok(found.into_iter().map(|x| (arc.turn(a, x) / total, x)).filter(|&(t, x)| t < 1.0 && other.turn(p, x) / span < 1.0).collect())
 }
 
-/// Where the segment or arc from `a` to `b` (radius `radius`) crosses bend line `p`–`q`, which runs
-/// along an axis of the blank (the chain's across X, a flange's on the side along it): each point
-/// with its share of the way, on the line exactly. A tangent is refused.
+/// Where the segment or arc from `a` to `b` crosses the bend line `p`–`q`, with each point
+/// given as a share of the way. A tangent is refused.
 fn across_seam(a: Vec2, b: Vec2, arc: Option<ProfileArc>, radius: f64, p: Vec2, q: Vec2) -> Result<Vec<(f64, Vec2)>, BrepError> {
+    if p.x != q.x && p.y != q.y {
+        return match arc {
+            None => Ok(segment_crossing(a, b, p, q)?.into_iter().collect()),
+            Some(arc) => arc_segment_crossings(a, b, arc, radius, p, q),
+        };
+    }
     // As if the line ran along X = s: a horizontal one with the axes swapped.
     let swap = p.x != q.x;
     let f = |v: Vec2| if swap { Vec2::new(v.y, v.x) } else { v };
@@ -927,38 +935,59 @@ enum Lay {
     Bend { dev: Development, map: UvMap, near: f64, radii: [f64; 2], neutral: Option<f64> },
 }
 
-/// From the blank to a development and back: `(u, v)` is `s` times the offset from `o`, its X and
-/// Y swapped for a bend across the chain (a flange on the sheet's side).
+/// A bend's orthonormal frame on the blank: `u` measures distance around the cylinder and
+/// `v` measures distance along the cylinder axis.
 #[derive(Clone, Copy)]
-struct UvMap {
-    swap: bool,
-    o: Vec2,
-    s: [f64; 2],
+enum UvMap {
+    Aligned { swap: bool, o: Vec2, s: [f64; 2] },
+    Oblique { o: Vec2, u: Vec2, v: Vec2 },
 }
 
 impl UvMap {
     fn uv(&self, p: Vec2) -> Vec2 {
-        let (a, b) = if self.swap { (p.y - self.o.y, p.x - self.o.x) } else { (p.x - self.o.x, p.y - self.o.y) };
-        Vec2::new(self.s[0] * a, self.s[1] * b)
+        match *self {
+            Self::Aligned { swap, o, s } => {
+                let (a, b) = if swap { (p.y - o.y, p.x - o.x) } else { (p.x - o.x, p.y - o.y) };
+                Vec2::new(s[0] * a, s[1] * b)
+            }
+            Self::Oblique { o, u, v } => {
+                let (x, y) = (p.x - o.x, p.y - o.y);
+                Vec2::new(u.x * x + u.y * y, v.x * x + v.y * y)
+            }
+        }
     }
 
     fn blank(&self, uv: Vec2) -> Vec2 {
-        let (a, b) = (self.s[0] * uv.x, self.s[1] * uv.y);
-        let (dx, dy) = if self.swap { (b, a) } else { (a, b) };
-        Vec2::new(self.o.x + dx, self.o.y + dy)
+        match *self {
+            Self::Aligned { swap, o, s } => {
+                let (a, b) = (s[0] * uv.x, s[1] * uv.y);
+                let (dx, dy) = if swap { (b, a) } else { (a, b) };
+                Vec2::new(o.x + dx, o.y + dy)
+            }
+            Self::Oblique { o, u, v } => Vec2::new(o.x + (u.x * uv.x + v.x * uv.y), o.y + (u.y * uv.x + v.y * uv.y)),
+        }
     }
 
     /// Whether the development is the blank mirrored: turning senses swap.
     fn mirrored(&self) -> bool {
-        (self.s[0] * self.s[1] < 0.0) != self.swap
+        match *self {
+            Self::Aligned { swap, s, .. } => (s[0] * s[1] < 0.0) != swap,
+            Self::Oblique { u, v, .. } => u.x * v.y < u.y * v.x,
+        }
     }
 }
 
-/// A bend line between strips `strips`, from `a` to `b` on the blank: along one of its axes.
+/// A bend line between two strips, from `a` to `b` on the blank.
 struct Seam {
     a: Vec2,
     b: Vec2,
     strips: [usize; 2],
+}
+
+impl Seam {
+    fn oblique(&self) -> bool {
+        self.a.x != self.b.x && self.a.y != self.b.y
+    }
 }
 
 /// A closed loop of the blank's edges (its outline or a cut in it), and for each edge the
@@ -1009,7 +1038,7 @@ struct Blank {
 impl Blank {
     /// The blank of the sheet `target` whose face `f` the sketch lies on, by the same tree of strips
     /// the flat blank is laid by (D233), from that face in the sketch's frame; none for a sheet
-    /// without bends. Bend lines must run along the blank's axes. Without a K-factor the strips off
+    /// without bends. Oblique strips are located by their outlines. Without a K-factor the strips off
     /// the sketch's face have no true place: a cut reaching them is refused.
     fn new(target: &Body, f: Ix, frame: [Vec3; 4], k: Option<f64>) -> Result<Option<Self>, BrepError> {
         let unsupported = |m: &str| BrepError::Unsupported(format!("cut across a bend: {m}"));
@@ -1027,6 +1056,7 @@ impl Blank {
         let e = unit(a.cross(z));
         let root = crate::unfold::Lay::Plane { o: Vec2::new(0.0, 0.0), start: o, ex: e, ey: a };
         let lays = crate::unfold::lay_tree(target, &nodes, root, k.unwrap_or(0.5))?;
+        let oblique = lays.iter().any(|&(_, u)| u.x != 0.0 && u.y != 0.0);
 
         // The other side, strip by strip: a bend across each bend, and across each wall the wall that
         // goes on from the bend beside it there.
@@ -1074,15 +1104,17 @@ impl Blank {
             crate::unfold::Lay::Plane { o, .. } | crate::unfold::Lay::Bend { o, .. } => o.x,
         };
         let child = |p: usize, sign: f64| (0..nodes.len()).find(|&j| nodes[j].parent.is_some_and(|q| q.0 == p) && way(j) * sign > 0.0);
-        let (right, left) = (child(0, 1.0), child(0, -1.0));
-        spans[0] = Some((left.map_or(f64::NEG_INFINITY, at_x), right.map_or(f64::INFINITY, at_x)));
-        for (first, sign) in [(right, 1.0), (left, -1.0)] {
-            let mut cur = first;
-            while let Some(i) = cur {
-                let next = child(i, sign);
-                let far = next.map_or(sign * f64::INFINITY, at_x);
-                spans[i] = Some(if sign > 0.0 { (at_x(i), far) } else { (far, at_x(i)) });
-                cur = next;
+        if !oblique {
+            let (right, left) = (child(0, 1.0), child(0, -1.0));
+            spans[0] = Some((left.map_or(f64::NEG_INFINITY, at_x), right.map_or(f64::INFINITY, at_x)));
+            for (first, sign) in [(right, 1.0), (left, -1.0)] {
+                let mut cur = first;
+                while let Some(i) = cur {
+                    let next = child(i, sign);
+                    let far = next.map_or(sign * f64::INFINITY, at_x);
+                    spans[i] = Some(if sign > 0.0 { (at_x(i), far) } else { (far, at_x(i)) });
+                    cur = next;
+                }
             }
         }
         // In order along the chain, the others after.
@@ -1114,19 +1146,18 @@ impl Blank {
                     };
                     let (_, other) = opposite_cylinder(target, nodes[i].faces[0] as usize)
                         .ok_or_else(|| unsupported("a bend without the face across the sheet"))?;
-                    // Only bend lines along the blank's axes: `split` and `UvMap` go by them.
-                    if (u.x != 0.0 && u.y != 0.0) || (v.x != 0.0 && v.y != 0.0) {
-                        return Err(unsupported("a bend line oblique to the blank's axes comes later"));
-                    }
-                    let swap = u.x == 0.0;
                     let s_axis = if axis.dot(d) > 0.0 { 1.0 } else { -1.0 };
                     let at_v = at.x * v.x + at.y * v.y;
                     // `v` of the development is 0 where the blank's coordinate along the line is 0.
                     let foot = origin - d * ((origin - line).dot(d) + at_v);
-                    let map = if swap {
-                        UvMap { swap, o: Vec2::new(0.0, at.y), s: [u.y, s_axis * v.x] }
+                    // Keep the aligned transform as a signed coordinate swap so it preserves
+                    // signed zeros and the hashes of existing axis-aligned cuts.
+                    let map = if u.x == 0.0 {
+                        UvMap::Aligned { swap: true, o: Vec2::new(0.0, at.y), s: [u.y, s_axis * v.x] }
+                    } else if u.y == 0.0 {
+                        UvMap::Aligned { swap: false, o: Vec2::new(at.x, 0.0), s: [u.x, s_axis * v.y] }
                     } else {
-                        UvMap { swap, o: Vec2::new(at.x, 0.0), s: [u.x, s_axis * v.y] }
+                        UvMap::Oblique { o: Vec2::new(at.x - at_v * v.x, at.y - at_v * v.y), u, v: Vec2::new(s_axis * v.x, s_axis * v.y) }
                     };
                     let dev = Development { origin: foot, axis, start, neutral: n };
                     Lay::Bend { dev, map, near: 0.5 * n * span, radii: [c.radius, other.radius], neutral: k.map(|_| n) }
@@ -1144,7 +1175,7 @@ impl Blank {
             })
             .unwrap_or(0.0);
         let mut blank = Self { a, e, thickness, strips, seams: Vec::new(), home: index(0), layered: false };
-        // The bend lines: along an axis, as far along it as the faces meet.
+        // The bend lines, as far along them as the faces meet.
         for (i, node) in nodes.iter().enumerate() {
             let Some((p, _)) = node.parent else { continue };
             let u = lays[i].1;
@@ -1160,10 +1191,18 @@ impl Blank {
                 .flat_map(|h| [he(h).origin, he(target.next(h)).origin])
                 .map(|v| blank.flat(index(i), target.point(v)))
                 .collect();
-            let across_x = u.x != 0.0;
-            let along = |q: &Vec2| if across_x { q.y } else { q.x };
-            let (lo, hi) = (points.iter().map(along).fold(f64::INFINITY, f64::min), points.iter().map(along).fold(f64::NEG_INFINITY, f64::max));
-            let (a, b) = if across_x { (Vec2::new(at.x, lo), Vec2::new(at.x, hi)) } else { (Vec2::new(lo, at.y), Vec2::new(hi, at.y)) };
+            let (a, b) = if u.x != 0.0 && u.y != 0.0 {
+                let v = Vec2::new(-u.y, u.x);
+                let along = |q: &Vec2| (q.x - at.x) * v.x + (q.y - at.y) * v.y;
+                let (lo, hi) = (points.iter().map(along).fold(f64::INFINITY, f64::min), points.iter().map(along).fold(f64::NEG_INFINITY, f64::max));
+                let point = |s| Vec2::new(at.x + s * v.x, at.y + s * v.y);
+                (point(lo), point(hi))
+            } else {
+                let across_x = u.x != 0.0;
+                let along = |q: &Vec2| if across_x { q.y } else { q.x };
+                let (lo, hi) = (points.iter().map(along).fold(f64::INFINITY, f64::min), points.iter().map(along).fold(f64::NEG_INFINITY, f64::max));
+                if across_x { (Vec2::new(at.x, lo), Vec2::new(at.x, hi)) } else { (Vec2::new(lo, at.y), Vec2::new(hi, at.y)) }
+            };
             blank.seams.push(Seam { a, b, strips: [index(p), index(i)] });
         }
         // Where each strip's faces lie on the blank. Those of the chain go by their span, unless

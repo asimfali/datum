@@ -1,5 +1,5 @@
 //! Contours (D165): lines and arcs joined end to end at their named points into closed loops and
-//! open paths, by names alone (where the curves run is for the caller). One walk for every user:
+//! open paths, by canonical names (where the curves run is for the caller). One walk for every user:
 //! the profiles an extrusion sweeps, a sheet's path, a pattern's path and region, what a selection
 //! in the window bounds. A circle is a loop by itself and is not walked.
 
@@ -47,10 +47,21 @@ impl<'a> Contours<'a> {
 
 /// The chains of the lines and arcs `keep` keeps (by name and whether construction).
 pub fn contours<'a>(lines: &'a BTreeMap<String, Line>, arcs: &'a BTreeMap<String, Arc>, keep: &dyn Fn(&str, bool) -> bool) -> Contours<'a> {
+    contours_by(lines, arcs, &|p| p, keep)
+}
+
+/// Like [`contours`], with the canonical name of each endpoint given by `point`.
+pub fn contours_by<'a>(
+    lines: &'a BTreeMap<String, Line>,
+    arcs: &'a BTreeMap<String, Arc>,
+    point: &dyn Fn(&'a str) -> &'a str,
+    keep: &dyn Fn(&str, bool) -> bool,
+) -> Contours<'a> {
     // Curves at each point: (curve, the other end, whether it starts here).
     let mut at: BTreeMap<&str, Vec<(&str, &str, bool)>> = BTreeMap::new();
     let ends = lines.iter().map(|(n, l)| (n, &l.from, &l.to, l.construction)).chain(arcs.iter().map(|(n, a)| (n, &a.from, &a.to, a.construction)));
     for (name, from, to, _) in ends.filter(|(n, _, _, c)| keep(n, *c)) {
+        let (from, to) = (point(from), point(to));
         at.entry(from).or_default().push((name, to, true));
         at.entry(to).or_default().push((name, from, false));
     }
