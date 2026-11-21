@@ -1,57 +1,41 @@
-# Loft, step 2 — one line → two angled lines (the fan from the apex)
+# План: Loft, шаг 2 — одна линия → две наклонные (веер из апекса)
 
-## Goal
+> Контракт подтверждён примером автора в Inventor 2026-11-17. Геометрия и
+> сборка тела в коде, в `Op::Loft` ещё не подключены — идёт доводка
+> (`HANDOFF.md`).
 
-The second case of the loft op (D264): the transition from one straight
-profile to a two-segment angled profile (a V), the first real bends.
+## Входы и контракт
 
-## Inputs
+- [x] Входы зафиксированы: профиль A — одна линия (эталон: длина 10, `(−5,0,0)→(5,0,0)`); профиль B — открытая цепь из двух линий с вершиной-апексом (эталон: ноги по 10, 20° к горизонтали, апекс `(0,15,0)`); ограничение шага — апекс над серединой A.
+- [x] Разобран файл автора `loft(1 to 2 line)(2 stage).json`: он дублирует ногу (`l1`/`l2`, один отрезок дважды) — эталон берёт чистую цепь `p1 → apex → p2`, длину на одной ноге и `equal` на паре.
+- [x] Контракт результата: три плоские треугольные фасеты (средняя — начало A, конец A, апекс — лежит в плоскости A; два крыла — конец A, апекс, конец B) и два цилиндрических гиба по линиям апекс→концы A с радиусом правила (не острые, D181) и K-фактором правила для развёртки.
+- [x] Торец гиба у ребра A — квадратный срез толщины (гиб выходит на боковое ребро; ступень на углу автор подтвердил); толщина на стороне листа (`left`/`right`/`middle`), как в шаге 1.
+- [x] Развёртка — через `unfold_side`: плоский веер с двумя гибами, шов по правилу развёрток тел вращения.
 
-- profile A: one line (the reference model: length 10, world (-5,0,0)→(5,0,0));
-- profile B: an open chain of two lines meeting at a vertex (the apex; the
-  reference model: legs 10 long, 20° off the horizontal, apex at (0,15,0));
-- the apex sits over the middle of A (step-2 restriction; general matching of
-  open chains comes later, after a third real case).
+## Отказы
 
-The pre-code topological sketch (three views, a scheme of the axes and panels,
-not a CAD result and not a proof of the radius geometry):
-`/mnt/data/loft-02-bend-preview.png`. The author's own picture is the shape
-reference.
+- [x] Апекс на линии A (у средней фасеты нет площади) → `Degenerate`.
+- [x] Нога B на линии гиба (у крыла нет площади) → `Degenerate` (фасета нулевой площади).
+- [x] Касательные двух гибов не сходятся в общей точке или станции выходят за шарниры → `Degenerate`.
+- [x] Профили вне случая (дуги, больше двух сегментов) → `Unsupported` с текстом; апекс не над серединой A → `Degenerate` (тест `two_line_loft_requires_the_vertex_over_the_first_line_midpoint`).
 
-## Result (the contract, confirmed by the author's Inventor example 2026-11-17)
+## Геометрия и сборка
 
-- **three planar triangular facets**: the middle one (A's start, A's end, the
-  apex) lies in A's plane; two wings (A's end, the apex, B's end);
-- **two cylindrical bends** along the apex→A's-ends lines, the rule's radius
-  (not sharp: production, D181), K-factor of the rule for the development;
-- the bend's end at A's edge is a square cut of the thickness (the bend runs
-  out onto the side edge; the author confirmed the step on the corner);
-- thickness on `side` of the sheet, as in step 1 (left / right / middle);
-- the development through `unfold_side`: the flat fan with two bends, the seam
-  by the rule of developments of bodies of revolution.
+- [x] Планировка `two_bend_layout`: углы сгибов, радиусы inner/outer/neutral, смещения касательных, центры, общие станции угла.
+- [x] Кожи `two_bend_geom`/`BendSkin`: точки обеих кож, оси гибов `a0→vertex`/`a1→vertex`, цилиндры с дугами; у offset-кожи гребень ≠ сдвинутая вершина, крылья подрезаются гребнем (точка R = ridge ∩ дальнее ребро), у апекса появляется полоска.
+- [x] `two_bend_body` собирает полный набор граней: средние, крылья, стенки, цилиндры с дугами, ступени.
+- [ ] `Body::validate()` проходит на собранном теле: сейчас non-manifold — нечётный цикл ориентации у пар стенка/ступень; тест строителя под `#[ignore]`.
 
-## Refusals
+## Операция и проверки
 
-- the apex on the line A (the middle facet has no area) → `Degenerate`;
-- a leg of B lying on a bend line (a wing has no area) → `Degenerate`;
-- profiles outside the case (arcs, more segments, the apex off the middle) →
-  `Unsupported` with names.
-
-## Done when
-
-- [ ] unit tests, reference model in `tests/models/`, blessed hashes;
+- [ ] `two_bend_body` подключён в `Op::Loft` вместо ответа `Unsupported` (сейчас в ответе печатаются углы, радиусы и станции — отладочная заглушка), тест снят с `#[ignore]`.
+- [ ] Развёртка `unfold_side` даёт на веере 4 линии сгиба.
+- [ ] Эталон `tests/models/loft-02-*.json` + bless, `TESTERS.md`, Windows-сборка.
 - [ ] `scripts/check.sh` exit 0.
 
-## Notes
+## Примечания
 
-- The author said renders are not needed (the Inventor screenshots were the
-  reference); the old done-when "renders before code" is dropped.
-- The old assumption "two facets, one bend" is wrong: with the apex over the
-  middle and B's ends lifted, the wing quad is not planar (checked by numbers,
-  2026-11-17). The fan from the apex to A's ends is the Inventor construction.
-- The author's test file `C:\Users\Simanov\datum-demo\part\loft(1 to 2
-  line)(2 stage).json` duplicates a leg (`l1`/`l2`, one segment twice); the
-  reference model takes the clean chain `p1 → apex → p2`, the length on one
-  leg, `equal` on the pair.
-- Built on the branch of the closed draft PR #261: the layout validation, the
-  two-line recognition and the Left/Right/Middle tests there are reused.
+- Прежнее допущение «2 фасеты + 1 гиб» ошибочно: крыло — четырёхугольник и не плоский (проверено числами 2026-11-17); верная конструкция — веер из апекса к концам A.
+- Рендеры не нужны: эталон — скриншоты Inventor, требование «рендеры до кода» снято.
+- Основано на ветке закрытого черновика #261: оттуда переиспользованы проверка разметки, распознавание двух линий и тесты Left/Right/Middle.
+- При переходе к случаю «квадрат → круг» из закрытого PR #251 переносится: `verify`-проверки разметки (плоскости фасет, оси и касательные гибов, станции торцов, «ничего над плоскостью верхнего профиля»), разгрузочные секторы в вершинах, шов ребром с `gap` как у `Rolled`.
