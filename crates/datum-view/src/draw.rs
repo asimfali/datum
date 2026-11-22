@@ -1482,7 +1482,7 @@ fn preset_row(painter: &egui::Painter, at: egui::Pos2, now: f64, chamfer: bool, 
 pub fn preset_step(presets: &[f64], now: f64, up: bool) -> Option<f64> {
     let mut sorted = presets.to_vec();
     sorted.sort_by(f64::total_cmp);
-    let [first, .., last] = sorted[..] else { return None };
+    let (first, last) = (*sorted.first()?, *sorted.last()?);
     Some(if up {
         sorted.iter().copied().find(|r| *r > now).unwrap_or(first)
     } else {
@@ -2220,6 +2220,7 @@ pub(crate) mod tests {
         assert_eq!(preset_step(&r, 7.0, true), Some(10.0), "a size of no preset: the next larger");
         assert_eq!(preset_step(&r, 7.0, false), Some(5.0), "a size of no preset: the next smaller");
         assert_eq!(preset_step(&[3.0, 1.0, 2.0], 1.0, true), Some(2.0), "the presets of any order");
+        assert_eq!(preset_step(&[2.0], f64::NAN, true), Some(2.0), "one preset is enough");
         assert_eq!(preset_step(&[], 5.0, true), None, "no presets, no step");
     }
 }

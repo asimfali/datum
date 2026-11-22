@@ -113,12 +113,13 @@ pub struct LineCut {
     pub arc: Option<(Vec3, bool)>,
 }
 
-/// The three free sides of the tongue's pre-cut window (D289–D294), in wall coordinates.
+/// The free boundary of the tongue's pre-cut window, in wall coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StampCut {
-    pub points: [Vec3; 4],
+    pub points: Vec<Vec3>,
     pub normal: Vec3,
-    pub ids: [TopoId; 3],
+    pub ids: Vec<TopoId>,
+    pub arcs: Vec<Option<(Vec3, bool)>>,
 }
 
 /// The line a cut's gap closes to on the blank, as a length along it and a distance off it.
@@ -224,9 +225,16 @@ impl Flat {
             .frame
             .filter(|f| crate::sketch::nearly_parallel(f[3], cut.normal))
             .ok_or_else(|| BrepError::Unsupported("unfold: lay the tongue sheet from either side of its wall".into()))?;
-        let [a, b, c, d] = cut.points.map(|p| Vec2::new((p - origin).dot(x), (p - origin).dot(y)));
-        self.pieces.extend([FlatPiece::Line(a, b), FlatPiece::Line(b, c), FlatPiece::Line(c, d)]);
-        self.ids.extend(cut.ids);
+        let project = |p: Vec3| Vec2::new((p - origin).dot(x), (p - origin).dot(y));
+        let same_side = x.cross(y).dot(cut.normal) > 0.0;
+        self.pieces.extend(cut.points.windows(2).zip(&cut.arcs).map(|(edge, arc)| {
+            let (a, b) = (project(edge[0]), project(edge[1]));
+            match arc {
+                Some((center, ccw)) => arc_piece(project(*center), a, b, *ccw == same_side),
+                None => FlatPiece::Line(a, b),
+            }
+        }));
+        self.ids.extend(&cut.ids);
         Ok(Self {
             k_factor: self.k_factor,
             overlaps: self.overlaps,

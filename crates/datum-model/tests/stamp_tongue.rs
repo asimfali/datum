@@ -1,7 +1,9 @@
 //! The sharp and rounded two-sketch tongues placed on a flat plate.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
-use datum_math::Vec2;
+use datum_brep::{Curve, Surface};
+use datum_graph::Evaluator;
+use datum_math::{Vec2, Vec3};
 use datum_model::Session;
 use datum_ops::FlatPiece;
 use serde_json::{Value, json};
@@ -9,6 +11,7 @@ use std::path::Path;
 
 const MODEL: &str = include_str!("../../../tests/models/stamp-tongue-straight.json");
 const ROUNDED: &str = include_str!("../../../tests/models/stamp-tongue-rounded.json");
+const NOSE: &str = include_str!("../../../tests/models/stamp-tongue-nose.json");
 
 fn run(session: &mut Session, command: &str, params: Value) -> Value {
     session.execute(command, &params).unwrap_or_else(|error| panic!("{command}: {error}"))
@@ -288,4 +291,91 @@ fn rounded_tongue_develops_at_the_current_sheet_rule() {
     run(&mut session, "set_part", json!({"body": "plate", "rule": "Thin sheet"}));
     check_length(&mut session, 0.5, 0.2, 0.35);
     close(run(&mut session, "mass_properties", json!({"name": "plate"}))["volume"].as_f64().unwrap(), 10_000.0);
+}
+
+#[test]
+fn nose_fillet_keeps_its_radius_in_the_tilted_face_and_in_the_blank() {
+    let doc = datum_model::parse_doc(NOSE).unwrap();
+    let (_, graph) = doc.graphs().into_iter().next().unwrap();
+    let graph = graph.unwrap();
+    let evaluation = Evaluator::default().evaluate(&graph);
+    let stamp = evaluation.results[graph.find("stamp").unwrap() as usize].as_ref().unwrap();
+    let body = stamp.body().unwrap();
+    let axis = Vec3::new(-libm::sin(15_f64.to_radians()), 0.0, libm::cos(15_f64.to_radians()));
+    let tip_radius = |r: f64| (r - 2.0).abs() < 1e-12;
+    let nose: Vec<_> = body
+        .faces()
+        .iter()
+        .filter_map(|face| match face.surface {
+            Surface::Cylinder(c) if c.convex && tip_radius(c.radius) => Some(c),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(nose.len(), 2);
+    for cylinder in nose {
+        close(cylinder.axis.dot(axis).abs(), 1.0);
+    }
+    let tip_arcs: Vec<_> = body
+        .edges()
+        .iter()
+        .filter_map(|edge| match body.edge_curve(edge) {
+            Some(Curve::Arc(arc)) if tip_radius(arc.radius) && arc.axis.dot(axis).abs() > 0.99 => Some(arc),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tip_arcs.len(), 4);
+    let mut tangencies = 0;
+    for edge in body.edges().iter().filter(|edge| body.edge_curve(edge).is_none()) {
+        let a = body.half_edges()[edge.half as usize];
+        let b = body.half_edges()[a.twin as usize];
+        let surface = |half: datum_brep::HalfEdge| body.faces()[body.loops()[half.loop_ix as usize].face as usize].surface;
+        let (cylinder, plane) = match (surface(a), surface(b)) {
+            (Surface::Cylinder(c), Surface::Plane(p)) | (Surface::Plane(p), Surface::Cylinder(c)) if c.convex && tip_radius(c.radius) => (c, p),
+            _ => continue,
+        };
+        let v = body.point(a.origin) - cylinder.origin;
+        let radial = v - cylinder.axis * v.dot(cylinder.axis);
+        let cosine = radial.dot(plane.normal) / libm::sqrt(radial.dot(radial) * plane.normal.dot(plane.normal));
+        close(cosine.abs(), 1.0);
+        tangencies += 1;
+    }
+    assert_eq!(tangencies, 4);
+    let blank = evaluation.results[graph.find("blank").unwrap() as usize].as_ref().unwrap();
+    let datum_ops::Value::Flat(flat) = &**blank else { panic!("expected blank") };
+    nose_cut_end(flat);
+}
+
+fn nose_cut_end(flat: &datum_ops::Flat) -> f64 {
+    let cuts: Vec<_> = flat.pieces.iter().enumerate().filter(|(i, _)| !flat.outer.contains(i)).map(|(_, piece)| piece).collect();
+    let [
+        FlatPiece::Line(..),
+        FlatPiece::Arc { center, radius: left, .. },
+        FlatPiece::Line(..),
+        FlatPiece::Arc { radius: right, .. },
+        FlatPiece::Line(..),
+    ] = cuts.as_slice()
+    else {
+        panic!("expected a five-piece open cut: {cuts:?}");
+    };
+    close(*left, 2.0);
+    close(*right, 2.0);
+    center.x + left
+}
+
+#[test]
+fn nose_fillet_contour_moves_with_the_sheet_rule_and_keeps_its_radius() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("nose_fillet_rule_{}", std::process::id()));
+    std::fs::create_dir_all(root.join("part")).unwrap();
+    std::fs::write(root.join("datum-project.json"), "{}").unwrap();
+    let mut session = Session::default();
+    run(&mut session, "save", json!({"path": root.join("part/model.json")}));
+    run(&mut session, "put_library", json!({"level": "material", "element": {"name": "Steel", "density": 7850}}));
+    let model = serde_json::from_str(NOSE).unwrap();
+    add_base(&mut session, &model);
+    add_stamp(&mut session, &model);
+    let original = nose_cut_end(&session.flat_of("stamp").unwrap());
+    put_sheet_rule(&mut session, "Thin sheet", 0.75);
+    run(&mut session, "set_part", json!({"body": "plate", "rule": "Thin sheet"}));
+    let updated = nose_cut_end(&session.flat_of("stamp").unwrap());
+    assert!((updated - original).abs() > 1e-9);
 }

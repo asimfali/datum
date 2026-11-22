@@ -1,10 +1,17 @@
-use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, ProfileLoop, Surface, TopoId, Vertex, build_with_curves};
+use datum_brep::{
+    Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Ix, Plane, ProfileArc, ProfileLoop, Surface, TopoId, Vertex, build_with_curves,
+};
 use datum_math::{Rigid, Sign, Vec2, Vec3, orient3d_coords};
 
-use crate::cut::{Frame, outline};
+use crate::cut::Frame;
 use crate::sketch::{nearly_parallel, within_rounding};
 
-#[derive(Clone, Copy)]
+pub(super) struct FreeBoundary {
+    pub points: Vec<Vec2>,
+    pub arcs: Vec<Option<ProfileArc>>,
+    pub ids: Vec<TopoId>,
+}
+
 pub(super) struct Window {
     pub face: TopoId,
     pub thickness: f64,
@@ -18,11 +25,12 @@ pub(super) struct Window {
     pub inner_root: f64,
     pub outer_root: f64,
     pub far: f64,
+    pub outline: FreeBoundary,
 }
 
 /// Join a raised strip to a simple flat plate, leaving its unfolded window in the plate.
 pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window) -> Result<Body, BrepError> {
-    let Window { face, thickness: t, root_cap: root, root_ids, root_cross, to_world, sides, inner_root, outer_root, far } = *window;
+    let Window { face, thickness: t, root_cap: root, root_ids, root_cross, to_world, sides, inner_root, outer_root, far, ref outline } = *window;
     let bad = || BrepError::Unsupported("stamp: the tongue needs a clear window in a flat plate".into());
     if !t.is_finite()
         || t <= 0.0
@@ -33,6 +41,7 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         || !far.is_finite()
         || outer_root > inner_root
         || inner_root >= far
+        || root_cross.is_some_and(|x| x >= outline.points[1].x || x >= outline.points[outline.points.len() - 2].x)
     {
         return Err(bad());
     }
@@ -112,7 +121,7 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         arcs: vec![None; 4],
     };
     for f in [top, bottom] {
-        let outlines = outline(wall, f as Ix, &frame)?;
+        let outlines = crate::cut::outline(wall, f as Ix, &frame)?;
         if outlines.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() == 0 || outlines.iter().any(|l| l.touches(&ring)) {
             return Err(bad());
         }
@@ -122,19 +131,10 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
     let id = |k: usize| TopoId::derive("stamp.window.vertex").id(feature).tag(names[k]).finish();
     let mut vertices = wall.vertices().to_vec();
     vertices.extend_from_slice(strip.vertices());
-    let positions = [
-        (far, sides[0], 0.0),
-        (far, sides[1], 0.0),
-        (inner_root, sides[0], -t),
-        (far, sides[0], -t),
-        (far, sides[1], -t),
-        (inner_root, sides[1], -t),
-    ];
-    for (k, &(a, b, c)) in positions.iter().enumerate() {
-        if root_cross.is_some() && (k == 2 || k == 5) {
-            continue;
+    if root_cross.is_none() {
+        for (i, y) in [(2, sides[0]), (5, sides[1])] {
+            vertices.push(Vertex { id: id(i), point: at(inner_root, y, -t) });
         }
-        vertices.push(Vertex { id: id(k), point: at(a, b, c) });
     }
     let mut faces: Vec<FaceSpec> = (0..wall.faces().len()).map(|i| wall.face_spec(i as Ix)).collect();
     let [top_left, top_right, bottom_left, bottom_right] = root_ids;
@@ -155,8 +155,24 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         [bottom_left, bottom_right]
     };
     let [lower_left, lower_right] = if root_cross.is_some() { [bottom_left, bottom_right] } else { [id(2), id(5)] };
-    faces[top].loops.push(vec![top_left, top_right, upper_right, id(1), id(0), upper_left]);
-    faces[bottom].loops.push(vec![lower_left, id(3), id(4), lower_right]);
+    let mut upper = vec![upper_left];
+    let mut lower = vec![lower_left];
+    let end = outline.points.len() - 1;
+    for (i, p) in outline.points.iter().enumerate().take(end).skip(1) {
+        let [a, b] = if end == 3 {
+            [[id(0), id(3)], [id(1), id(4)]][i - 1]
+        } else {
+            ["top", "bottom"].map(|layer| TopoId::derive("stamp.window.vertex").id(outline.ids[i - 1]).tag(layer).finish())
+        };
+        vertices.push(Vertex { id: a, point: at(p.x, p.y, 0.0) });
+        vertices.push(Vertex { id: b, point: at(p.x, p.y, -t) });
+        upper.push(a);
+        lower.push(b);
+    }
+    upper.push(upper_right);
+    lower.push(lower_right);
+    faces[top].loops.push([top_left, top_right].into_iter().chain(upper.iter().rev().copied()).collect());
+    faces[bottom].loops.push(lower.clone());
     faces.extend((0..strip.faces().len()).filter(|&i| i != cap).map(|i| {
         let mut face = strip.face_spec(i as Ix);
         if root_cross.is_some() {
@@ -179,22 +195,39 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         }
         face
     }));
-    let upper = [upper_left, id(0), id(1), upper_right];
-    let lower = [lower_left, id(3), id(4), lower_right];
-    let xy = [(inner_root, sides[0]), (far, sides[0]), (far, sides[1]), (inner_root, sides[1])];
-    for k in 0..4 {
-        if k == 3 && root_cross.is_some() {
-            continue;
-        }
-        let next = (k + 1) % 4;
-        let d = at(xy[next].0, xy[next].1, 0.0) - at(xy[k].0, xy[k].1, 0.0);
-        faces.push(FaceSpec {
-            id: TopoId::derive("stamp.window.face").id(feature).tag(["left", "tip", "right", "root"][k]).finish(),
-            surface: Surface::Plane(Plane { origin: at(xy[k].0, xy[k].1, 0.0), normal: z.cross(d) }),
-            loops: vec![vec![upper[k], upper[next], lower[next], lower[k]]],
-        });
-    }
     let mut curves = wall.curve_specs();
     curves.extend(strip_curves);
+    for k in 0..=end {
+        if k == end && root_cross.is_some() {
+            continue;
+        }
+        let next = (k + 1) % outline.points.len();
+        let (a, b) = (outline.points[k], outline.points[next]);
+        let plane = || {
+            let o = at(a.x, a.y, 0.0);
+            Surface::Plane(Plane { origin: o, normal: z.cross(at(b.x, b.y, 0.0) - o) })
+        };
+        let surface = if let Some(arc) = outline.arcs.get(k).copied().flatten() {
+            let radius = libm::hypot(a.x - arc.center.x, a.y - arc.center.y);
+            for (height, ids) in [(0.0, &upper), (-t, &lower)] {
+                curves.push(CurveSpec {
+                    from: ids[k],
+                    to: ids[next],
+                    curve: Curve::Arc(Arc { center: at(arc.center.x, arc.center.y, height), axis: if arc.ccw { z } else { -z }, radius }),
+                });
+            }
+            Surface::Cylinder(Cylinder { origin: at(arc.center.x, arc.center.y, 0.0), axis: z, radius, convex: false })
+        } else {
+            plane()
+        };
+        let id = if k == end {
+            TopoId::derive("stamp.window.face").id(feature).tag("root").finish()
+        } else if end == 3 {
+            TopoId::derive("stamp.window.face").id(feature).tag(["left", "tip", "right"][k]).finish()
+        } else {
+            TopoId::derive("stamp.window.face").id(outline.ids[k]).finish()
+        };
+        faces.push(FaceSpec { id, surface, loops: vec![vec![upper[k], upper[next], lower[next], lower[k]]] });
+    }
     build_with_curves(vertices, faces, curves)
 }

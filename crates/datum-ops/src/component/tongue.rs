@@ -4,11 +4,12 @@ use std::collections::BTreeMap;
 
 use datum_brep::{Body, BrepError, ProfileLoop, Region, TopoId, extrude, segments_touch};
 use datum_math::expr::Num;
-use datum_math::{Rigid, Vec2, Vec3};
+use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
 use datum_sketch::Step;
 
-use super::stitch::{Window, stitch};
+use super::stitch::{FreeBoundary, Window, stitch};
 use super::{Forming, PartDef, STAMP_ROLE, SectionSide, at, evaluate_features, on_wall, section, unit};
+use crate::edge_finish::{EdgeMode, corner, finish};
 use crate::rib::Formed;
 use crate::sheet::{Sheet, Side};
 use crate::sketch::{Placed, within_rounding};
@@ -32,53 +33,121 @@ fn to_part(sketch: &Placed, p: Vec2) -> Vec3 {
     o + x * p.x + y * p.y
 }
 
-/// Get the boundary loop in order, beginning at the transition.
+/// The virtual rectangle and the source of each side and rounded tip corner.
+struct Boundary<'a> {
+    corners: [Vec2; 4],
+    sides: [&'a str; 4],
+    rounds: Option<[(&'a str, f64); 2]>,
+}
+
 fn boundary_loop<'a>(
     name: &str,
     sketch: &'a Placed,
     metadata: &BTreeMap<String, BTreeMap<String, serde_json::Value>>,
-) -> Result<[Step<'a>; 4], BrepError> {
-    let mut root = None;
+) -> Result<Boundary<'a>, BrepError> {
+    let role = |curve: &str| metadata.get(curve).and_then(|p| p.get(STAMP_ROLE));
+    let transition = |curve: &str| role(curve).and_then(serde_json::Value::as_str) == Some("transition");
+    let bad = || unsupported(format!("boundary `{name}` needs a rectangle with optional tangent rounds at its tip"));
     for (curve, construction) in sketch.lines.iter().map(|(n, l)| (n, l.construction)).chain(sketch.arcs.iter().map(|(n, a)| (n, a.construction))) {
-        let role = metadata.get(curve).and_then(|p| p.get(STAMP_ROLE));
-        match role.and_then(serde_json::Value::as_str) {
+        match role(curve).and_then(serde_json::Value::as_str) {
             Some("cut") => {}
-            Some("transition") => {
-                if let Some(previous) = root.replace(curve) {
-                    return Err(unsupported(format!("boundary `{name}` has two transitions `{previous}` and `{curve}`")));
-                }
-            }
-            None if role.is_none() && construction => continue,
-            None if role.is_none() => return Err(invalid(format!("boundary `{name}`: curve `{curve}` needs a {STAMP_ROLE}"))),
-            _ => return Err(invalid(format!("boundary `{name}`: curve `{curve}` needs {STAMP_ROLE} set to cut or transition"))),
-        }
-        if sketch.arcs.contains_key(curve) {
-            return Err(unsupported(format!("boundary `{name}`: arc `{curve}` in a straight tongue")));
+            Some("transition") if sketch.lines.contains_key(curve) => {}
+            None if role(curve).is_none() && construction => continue,
+            None if role(curve).is_none() => return Err(invalid(format!("boundary `{name}`: curve `{curve}` needs a {STAMP_ROLE}"))),
+            _ => return Err(invalid(format!("boundary `{name}`: curve `{curve}` needs {STAMP_ROLE} set to cut or a straight transition"))),
         }
     }
-    let root = root.ok_or_else(|| invalid(format!("boundary `{name}` needs a transition")))?;
-    let keep = |n: &str, _| metadata.get(n).is_some_and(|p| p.contains_key(STAMP_ROLE));
-    let contours = sketch.contours(&keep);
+    let contours = sketch.contours(&|n, _| role(n).is_some());
     if let Some(p) = contours.odd() {
         return Err(invalid(format!("boundary `{name}` is open or branches at point `{p}`")));
     }
     if sketch.circles.values().any(|c| !c.construction) || sketch.ellipses.values().any(|e| !e.construction) || !sketch.patterns.is_empty() {
-        return Err(unsupported(format!("boundary `{name}` must be a loop of marked lines")));
+        return Err(bad());
     }
-    let [ring] = contours.loops.as_slice() else { return Err(invalid(format!("boundary `{name}` needs one loop"))) };
-    if ring.len() != 4 {
-        return Err(unsupported(format!("boundary `{name}` of a straight tongue needs four lines, got {}", ring.len())));
+    let [path] = contours.loops.as_slice() else { return Err(invalid(format!("boundary `{name}` needs one loop"))) };
+    let start = (0..path.len())
+        .find(|&i| transition(path[i].curve) && !transition(path[(i + path.len() - 1) % path.len()].curve))
+        .ok_or_else(|| invalid(format!("boundary `{name}` needs a transition")))?;
+    let ring: Vec<_> = path[start..].iter().chain(&path[..start]).copied().collect();
+    let roots = ring.iter().take_while(|s| transition(s.curve)).count();
+    let (root, cuts) = ring.split_at(roots);
+    if cuts.iter().any(|s| transition(s.curve)) {
+        return Err(bad());
     }
-    let start = ring.iter().position(|s| s.curve == root).ok_or_else(|| invalid(format!("boundary `{name}` has no transition `{root}`")))?;
-    let ring = std::array::from_fn(|i| ring[(i + start) % 4]);
-    let [a, b, c, d] = points(sketch, ring.map(|s| s.from));
+    let point = |p: &str| sketch.solved.points[p];
+    let root_a = point(root[0].from);
+    let root_b = point(root[roots - 1].to);
+    if !collinear(root, sketch) {
+        return Err(bad());
+    }
+    let (side_b, tip, side_a, rounds) = match cuts {
+        [side_b, tip, side_a] if cuts.iter().all(|s| sketch.lines.contains_key(s.curve)) => (*side_b, std::slice::from_ref(tip), *side_a, None),
+        [side_b, arc_b, tip @ .., arc_a, side_a]
+            if !tip.is_empty() && sketch.arcs.contains_key(arc_b.curve) && sketch.arcs.contains_key(arc_a.curve) =>
+        {
+            (*side_b, tip, *side_a, Some([*arc_b, *arc_a]))
+        }
+        _ => return Err(bad()),
+    };
+    if ![side_b, side_a].iter().chain(tip).all(|s| sketch.lines.contains_key(s.curve)) || !collinear(tip, sketch) {
+        return Err(bad());
+    }
+    let corners = match rounds {
+        None => [root_a, root_b, point(tip[0].from), point(side_a.from)],
+        Some(_) => {
+            let ends = [point(tip[0].from), point(tip[tip.len() - 1].to)];
+            let apex = |side: Step<'_>| intersection([point(side.from), point(side.to)], ends).ok_or_else(bad);
+            [root_a, root_b, apex(side_b)?, apex(side_a)?]
+        }
+    };
     for (u, v) in [(0, 2), (1, 3)] {
-        let p = [a, b, c, d];
-        if segments_touch(p[u], p[(u + 1) % 4], p[v], p[(v + 1) % 4]) {
-            return Err(BrepError::Degenerate(format!("component: boundary `{name}`: `{}` touches `{}`", ring[u].curve, ring[v].curve)));
+        if segments_touch(corners[u], corners[(u + 1) % 4], corners[v], corners[(v + 1) % 4]) {
+            return Err(BrepError::Degenerate(format!("component: boundary `{name}` crosses itself")));
         }
     }
-    Ok(ring)
+    let rounds = if let Some([a, b]) = rounds {
+        let round = |step: Step<'a>, i| {
+            let center = point(&sketch.arcs[step.curve].center);
+            let [p, q] = [point(step.from), point(step.to)];
+            let r = libm::hypot(p.x - center.x, p.y - center.y);
+            let ([from, to], Some(arc)) = corner(corners[i], [corners[i - 1], corners[(i + 1) % 4]], r, EdgeMode::Fillet)? else {
+                return Err(bad());
+            };
+            let scale = [p, q, center].iter().fold(r, |s, p| s.max(p.x.abs()).max(p.y.abs()));
+            let same = |p: Vec2, q: Vec2| within_rounding(libm::hypot(p.x - q.x, p.y - q.y), scale);
+            if !same(from, p) || !same(to, q) || !same(arc.center, center) || arc.ccw != step.forward {
+                return Err(bad());
+            }
+            Ok((step.curve, r))
+        };
+        Some([round(a, 2)?, round(b, 3)?])
+    } else {
+        None
+    };
+    Ok(Boundary { corners, sides: [root[0].curve, side_b.curve, tip[0].curve, side_a.curve], rounds })
+}
+
+fn collinear(steps: &[Step<'_>], sketch: &Placed) -> bool {
+    let point = |p: &str| sketch.solved.points[p];
+    let a = point(steps[0].from);
+    let b = point(steps[steps.len() - 1].to);
+    let direction = Vec2::new(b.x - a.x, b.y - a.y);
+    steps.iter().all(|step| {
+        let p = point(step.to);
+        let from = point(step.from);
+        let d = Vec2::new(p.x - from.x, p.y - from.y);
+        orient2d(a, b, p) == Sign::Zero && direction.x * d.x + direction.y * d.y > 0.0
+    })
+}
+
+fn intersection([a, b]: [Vec2; 2], [c, d]: [Vec2; 2]) -> Option<Vec2> {
+    let u = Vec2::new(b.x - a.x, b.y - a.y);
+    let v = Vec2::new(d.x - c.x, d.y - c.y);
+    if orient2d(Vec2::default(), u, v) == Sign::Zero {
+        return None;
+    }
+    let t = ((c.x - a.x) * v.y - (c.y - a.y) * v.x) / (u.x * v.y - u.y * v.x);
+    Some(Vec2::new(a.x + t * u.x, a.y + t * u.y))
 }
 
 fn section_chain<'a>(name: &str, sketch: &'a Placed) -> Result<[Step<'a>; 3], BrepError> {
@@ -160,10 +229,10 @@ fn prepare<'a>(
     let solved = |i: usize| made[i].sketch().ok_or_else(|| invalid(format!("feature `{}` is no sketch", def.features[i].name)));
     let profile = solved(profile_i)?;
     let boundary = solved(boundary_i)?;
-    let ring = boundary_loop(&forming.boundary, boundary, &boundary_def.metadata)?;
+    let Boundary { corners, sides: [root, side_b, tip, side_a], rounds } = boundary_loop(&forming.boundary, boundary, &boundary_def.metadata)?;
     let mut chain = section_chain(&forming.section, profile)?;
     let anchor = def.anchor()?;
-    let [b0, b1, b2, b3] = points(boundary, ring.map(|s| s.from)).map(|p| to_part(boundary, p) - anchor);
+    let [b0, b1, b2, b3] = corners.map(|p| to_part(boundary, p) - anchor);
     let z = boundary.frame[3];
     let y = unit(b1 - b0);
     let toward_tip = b3 - b0;
@@ -177,10 +246,7 @@ fn prepare<'a>(
     if !(run > 0.0 && lo < 0.0 && 0.0 < hi)
         || ![b0.dot(z), b0.dot(x), b1.dot(x), (b2 - b1).dot(width), (b3 - b0).dot(width), b2.dot(x) - run].into_iter().all(zero)
     {
-        return Err(unsupported(format!(
-            "boundary `{}` needs a rectangle with its transition `{}` through the anchor",
-            forming.boundary, ring[0].curve
-        )));
+        return Err(unsupported(format!("boundary `{}` needs a rectangle with its transition `{}` through the anchor", forming.boundary, root)));
     }
     let positions = |chain: [Step<'_>; 3]| {
         let [a, b, c] = chain;
@@ -200,7 +266,7 @@ fn prepare<'a>(
     {
         return Err(unsupported(format!(
             "section `{}` needs a root wall at the anchor, in the plane across transition `{}`, and a tip at the far cut",
-            forming.section, ring[0].curve
+            forming.section, root
         )));
     }
     // These are the anchor and the vertical root line after removing frame roundoff.
@@ -211,7 +277,7 @@ fn prepare<'a>(
     let nodes = [chain[0].from, chain[0].to, chain[1].to, chain[2].to];
     let lines = chain.map(|s| s.curve);
     let id = |kind, side: &str, name: &str| TopoId::derive(kind).id(feature).tag(side).tag(name).finish();
-    let root_cap = id("stamp.surface", "root", ring[0].curve);
+    let root_cap = id("stamp.surface", "root", root);
     let (outer, [bottom, top], [outer_root, inner_root], far, root_cross) = if forming.round_section {
         let radius = num(radius.ok_or_else(|| invalid("a rounded tongue needs a bend radius from the sheet rule"))?)?;
         let k = k_factor.map(num).transpose()?.unwrap_or(0.5);
@@ -221,7 +287,7 @@ fn prepare<'a>(
         let root = outer.points[0].x;
         (outer, [0, last], [root, root], root + length, Some(cross))
     } else {
-        let (outer, roots) = sharp_profile(feature, forming, front, nodes, lines, [ring[0].curve, ring[2].curve], t)?;
+        let (outer, roots) = sharp_profile(feature, forming, front, nodes, lines, [root, tip], t)?;
         let [outer_root, inner_root] = roots;
         // At the root the parent plate still occupies the strip up to its inside edge.
         // Take only the raised strip's volume out of the wall beyond that edge (D291).
@@ -234,9 +300,17 @@ fn prepare<'a>(
     if !far.is_finite() || outer.points.iter().any(|p| p.x >= far) {
         return Err(unsupported(format!("section `{}` does not fit over its developed window", forming.section)));
     }
-    let left = if b0.dot(width) < b1.dot(width) { ring[3].curve } else { ring[1].curve };
-    let right = if left == ring[3].curve { ring[1].curve } else { ring[3].curve };
-    let strip = extrude(&[Region { outer, holes: Vec::new(), caps: [id("stamp.cap", "", right), id("stamp.cap", "", left)] }], -hi, -lo)?;
+    let (left, right, rounds) = if b0.dot(width) < b1.dot(width) { (side_a, side_b, rounds.map(|[a, b]| [b, a])) } else { (side_b, side_a, rounds) };
+    let tip_index = outer.points.len() / 2 - 1;
+    let [a, b] = outer.vertices[tip_index];
+    let [c, d] = outer.vertices[tip_index + 1];
+    let mut strip = extrude(&[Region { outer, holes: Vec::new(), caps: [id("stamp.cap", "", right), id("stamp.cap", "", left)] }], -hi, -lo)?;
+    if let Some(rounds) = rounds {
+        for ((name, radius), [a, b]) in rounds.into_iter().zip([[b, d], [a, c]]) {
+            let edge = TopoId::derive("edge").id(a.min(b)).id(a.max(b)).finish();
+            strip = finish(id("stamp.nose", "", name), &strip, edge, radius, EdgeMode::Fillet)?;
+        }
+    }
     let origin = at(def, placement, values)?;
     let [_, bx, by, bz] = boundary.frame;
     let [_, wx, wy, wz] = on.frame;
@@ -245,10 +319,40 @@ fn prepare<'a>(
     validated(&strip)?;
     let to_world = Rigid::frame(Vec3::ZERO, x, width, z).then(onto_wall);
     let face = on.face.ok_or_else(|| invalid("a tongue needs a placement face"))?;
-    let window = Window { face, thickness: t, root_cap, root_ids, root_cross, to_world, sides: [lo, hi], inner_root, outer_root, far };
-    let points = [(inner_root, lo), (far, lo), (far, hi), (inner_root, hi)].map(|(x, y)| to_world.apply(Vec3::new(x, y, 0.0)));
-    let cut = StampCut { points, normal: wz, ids: [left, ring[2].curve, right].map(|curve| id("stamp.cut", "", curve)) };
+    let outline = free_boundary(feature, [inner_root, far], [lo, hi], [left, tip, right], rounds)?;
+    let at_wall = |p: Vec2| to_world.apply(Vec3::new(p.x, p.y, 0.0));
+    let cut = StampCut {
+        points: outline.points.iter().copied().map(at_wall).collect(),
+        normal: wz,
+        ids: outline.ids.clone(),
+        arcs: outline.arcs.iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
+    };
+    let window = Window { face, thickness: t, root_cap, root_ids, root_cross, to_world, sides: [lo, hi], inner_root, outer_root, far, outline };
     Ok((wall, strip, window, cut))
+}
+
+fn free_boundary(
+    feature: TopoId,
+    [root, far]: [f64; 2],
+    [lo, hi]: [f64; 2],
+    [left, tip, right]: [&str; 3],
+    rounds: Option<[(&str, f64); 2]>,
+) -> Result<FreeBoundary, BrepError> {
+    let [a, b, c, d] = [Vec2::new(root, lo), Vec2::new(far, lo), Vec2::new(far, hi), Vec2::new(root, hi)];
+    let id = |curve| TopoId::derive("stamp.cut").id(feature).tag("").tag(curve).finish();
+    let Some([(left_arc, lr), (right_arc, rr)]) = rounds else {
+        return Ok(FreeBoundary { points: vec![a, b, c, d], arcs: vec![None; 3], ids: [left, tip, right].map(id).into() });
+    };
+    let ([b0, b1], arc_b) = corner(b, [a, c], lr, EdgeMode::Fillet)?;
+    let ([c0, c1], arc_c) = corner(c, [b, d], rr, EdgeMode::Fillet)?;
+    if b1.y >= c0.y {
+        return Err(BrepError::Degenerate("stamp: nose rounds overlap on the blank".into()));
+    }
+    Ok(FreeBoundary {
+        points: vec![a, b0, b1, c0, c1, d],
+        arcs: vec![None, arc_b, None, arc_c, None],
+        ids: [left, left_arc, tip, right_arc, right].map(id).into(),
+    })
 }
 
 fn sharp_profile(
@@ -388,7 +492,7 @@ mod tests {
             let value = op.eval(stamp(), &inputs).unwrap();
             let Value::Formed(formed) = value else { panic!("expected formed sheet") };
             let body = &formed.body;
-            for point in formed.stamp.as_ref().unwrap().points {
+            for &point in &formed.stamp.as_ref().unwrap().points {
                 assert!(body.vertices().iter().any(|v| within_rounding(length(v.point - point), t)));
             }
             body.validate().unwrap();

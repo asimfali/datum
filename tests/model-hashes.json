@@ -54,6 +54,13 @@
     "window": "5d1cb8a12e7dea0dbf3f1fef3abfa507d11179d9c611704d7cc11b153e01130b",
     "with_boss": "051f9dbd296e3c6ecae5641b3b2f1447951338b1d082d642d7f482f784c486a6"
   },
+  "edge-finish.json": {
+    "box": "bff338a990352f5f54eded919c6a63dbf3958d6e13d65db76e181decefad3a98",
+    "chamfer": "f3aa93494c1c2622c0eb248b30f66f8000984509d47cae0dcc24fbbd4a8dab60",
+    "chamfer_box": "535c9125484810a429fcc0b6c053bd8995afc3169a49cd9db5f3cc1982f0fa97",
+    "fillet": "057640db7437d53f47e82c69fb6b216910880c3bf3a198fba54fff5c86905757",
+    "outline": "9abf4f329182c4c4f346df40e1fb43e535bff8423f68fe3d7411b515157f7ccb"
+  },
   "far_site.json": {
     "placed": "aea4b8cdf98102d9747fde10aec75351371fe5d9e6f052f6dede1bc6ac2d8574",
     "slab": "78bd115c4e70f1e53f144303b2c6008af7210f014be1f968d9ddebcf50891646"
@@ -469,6 +476,13 @@
     "plate": "d53ff77727a46206cb7a42d0d356c9cab1aa491d1a517c470ad87df0b34f03c9",
     "pocket": "a5cf4357502ca0a6d0758843ca25e3884e2c864bed2679b3ce2e8b022b037267",
     "pocket_sketch": "a0f71a762196d90768a8bd80916299b1165fff8b1d006f9fe1579181c8e48f1c"
+  },
+  "stamp-tongue-nose.json": {
+    "blank": "323f262132a917034591f929cf5ddee03ed1b4c6e3b52d4efe27db139eae6a5d",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "places": "3d9162bc3a0c3e30e0cfaa9c7506219562ed859642408a25aedc9b02ace1786d",
+    "plate": "7a21ef7b280c18b858ca405d01cff918e2690c3dae8256b182f37392473c5d06",
+    "stamp": "a382fd282d62e5ea510010db368594c773d978217d0a21382cb1734f70d5c678"
   },
   "stamp-tongue-rounded.json": {
     "blank": "08a5784dd3542a6f72f196c17f74b4446aef527e0af430c00f41b0209ac1831d",
