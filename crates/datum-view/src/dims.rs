@@ -234,8 +234,10 @@ impl SketchEdit {
         self.field = Some(Field { entry: Entry::New { constraint: c, key }, text: text_of(&json!(now)), at });
     }
 
-    /// Opens the field to change the dimension under a double click: a constraint's value or a
-    /// circle's diameter (of a circle equal to another, that one's).
+    /// Opens the field to change the dimension under a double click: a constraint's value, a
+    /// circle's diameter (of a circle equal to another, that one's), or a curve's own dimension —
+    /// the size or angle tied to the curve clicked (D287). A copy of a pattern stands for its
+    /// cell: one curve's copy edits that curve's dimension.
     pub fn edit_label(&mut self, pick: &crate::sketch::Pick, at: [f64; 2]) {
         let followed = self.followed_circles();
         let sketch = &self.json["sketch"];
@@ -247,6 +249,65 @@ impl SketchEdit {
             Pick::Curve(n) if sketch["circles"].get(n).is_some() => {
                 let n = followed.get(n).unwrap_or(n);
                 Some(Field { entry: Entry::Diameter(n.clone()), text: text_of(&sketch["circles"][n]["diameter"]), at })
+            }
+            Pick::Curve(n) | Pick::Copy(n, _) => {
+                // A copy stands for its pattern's cell: one curve's copy edits that curve's
+                // dimension; a group's copy has no one curve to edit.
+                let n = match pick {
+                    Pick::Copy(name, _) => sketch["patterns"][name]["of"].as_str().filter(|of| sketch["groups"].get(*of).is_none()),
+                    _ => None,
+                }
+                .unwrap_or(n);
+                // A circle's copy stands for the circle's diameter, as the circle itself would.
+                if sketch["circles"].get(n).is_some() {
+                    let n: &str = followed.get(n).map(String::as_str).unwrap_or(n);
+                    Some(Field { entry: Entry::Diameter(n.to_string()), text: text_of(&sketch["circles"][n]["diameter"]), at })
+                } else {
+                    // The curve's own sizes: its length, or its share in an angle; of several,
+                    // the one whose label stands nearest the click.
+                    let tied: Vec<usize> = sketch["constraints"]
+                        .as_array()
+                        .map(|cs| {
+                            cs.iter()
+                                .enumerate()
+                                .filter(|(_, c)| {
+                                    let of_curve = |q: &Json| q.as_str().is_some_and(|s| s == n);
+                                    (c.get("line").is_some_and(of_curve)
+                                        || c.get("lines").is_some_and(|l| l.as_array().is_some_and(|l| l.iter().any(of_curve))))
+                                        && (c.get("value").is_some() || c.get("degrees").is_some())
+                                })
+                                .map(|(i, _)| i)
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    let field = |k| {
+                        let c = &sketch["constraints"][k];
+                        let key = if c.get("degrees").is_some() { "degrees" } else { "value" };
+                        Some(Field { entry: Entry::Edit(k), text: text_of(&c[key]), at })
+                    };
+                    match tied[..] {
+                        [k] => field(k),
+                        [] => None,
+                        ref many => {
+                            let picks: Vec<Pick> = many.iter().map(|k| Pick::Constraint(*k)).collect();
+                            let k = self
+                                .laid_out(600.0, |_: &str| (100.0, 18.0))
+                                .iter()
+                                .filter(|(l, _, _)| picks.contains(&l.pick))
+                                .min_by(|a, b| {
+                                    // The squared distance orders the same, and `hypot` is banned.
+                                    let d = |q: &(f64, f64)| (q.0 - at[0]) * (q.0 - at[0]) + (q.1 - at[1]) * (q.1 - at[1]);
+                                    d(&a.1).total_cmp(&d(&b.1))
+                                })
+                                .and_then(|(l, _, _)| match l.pick {
+                                    Pick::Constraint(k) if many.contains(&k) => Some(k),
+                                    _ => None,
+                                })
+                                .unwrap_or(many[0]);
+                            field(k)
+                        }
+                    }
+                }
             }
             _ => None,
         };
@@ -419,6 +480,62 @@ mod tests {
         assert!(e.conflict.is_some());
         let sent = e.conflict_as_reference().unwrap();
         assert_eq!(sent["measures"], json!({"d1": {"type": "length", "line": "top"}}));
+    }
+
+    /// A double click on a curve (or a pattern's copy of it) edits its own dimension: a line's
+    /// length, a circle's diameter; of several, the one whose label is nearest (D287).
+    #[test]
+    fn a_curve_edits_its_own_dimension() {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
+        "points": {"a": [0, 0], "b": [4, 0], "c": [4, 2], "d": [0, 2], "h": [10, 10]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
+        "circles": {"c1": {"center": "h", "diameter": 5}},
+        "groups": {"cell": ["ab", "bc", "cd", "da"]},
+        "patterns": {"holes": {"of": "c1", "step": [[6, 0], [0, 0]], "count": [3, 1]}},
+        "constraints": [
+            {"type": "fix", "point": "a"}, {"type": "fix", "point": "b"},
+            {"type": "length", "line": "ab", "value": 4},
+        ]}});
+        let mut e = SketchEdit::new(
+            "s".into(),
+            Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new(), sources: Vec::new() },
+            json,
+            BTreeMap::new(),
+            None,
+        );
+        // A line's length, by the line itself.
+        e.edit_label(&Pick::Curve("ab".into()), [0.0, 0.0]);
+        let f = e.field.as_ref().unwrap();
+        assert!(matches!(f.entry, Entry::Edit(2)), "{f:?}");
+        assert_eq!(f.text, "4");
+        // The copy of a circle's pattern: its diameter.
+        e.edit_label(&Pick::Copy("holes".into(), [1, 0]), [0.0, 0.0]);
+        let f = e.field.as_ref().unwrap();
+        assert_eq!(f.entry, Entry::Diameter("c1".into()), "{f:?}");
+        assert_eq!(f.text, "5");
+        // No dimension on the curve: no field.
+        e.field = None;
+        e.edit_label(&Pick::Curve("cd".into()), [0.0, 0.0]);
+        assert!(e.field.is_none());
+        // Two sizes on one line: the one whose label stands nearest the click. The length and
+        // the angle to the vertical side both name `ab`.
+        let json2 = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
+        "points": {"a": [0, 0], "b": [4, 0], "c": [0, 4]},
+        "lines": {"ab": {"from": "a", "to": "b"}, "ac": {"from": "a", "to": "c"}},
+        "constraints": [
+            {"type": "length", "line": "ab", "value": 4},
+            {"type": "angle", "lines": ["ab", "ac"], "degrees": 90},
+        ]}});
+        let mut e2 = SketchEdit::new(
+            "s".into(),
+            Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new(), sources: Vec::new() },
+            json2,
+            BTreeMap::new(),
+            None,
+        );
+        e2.edit_label(&Pick::Curve("ab".into()), [0.0, 0.0]);
+        let f = e2.field.as_ref().unwrap();
+        assert!(matches!(f.entry, Entry::Edit(0) | Entry::Edit(1)), "{f:?}");
     }
 
     /// A click on a circle dimensions it at once: the field with its diameter, selected.

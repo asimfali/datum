@@ -6749,7 +6749,7 @@ impl Viewer {
         }
         // A dimension changes on a double click.
         if r.double_clicked()
-            && let (Some(p @ (Pick::Constraint(_) | Pick::Curve(_))), Some((x, y))) = (sk.hover.clone(), offset)
+            && let (Some(p @ (Pick::Constraint(_) | Pick::Curve(_) | Pick::Copy(..))), Some((x, y))) = (sk.hover.clone(), offset)
         {
             sk.edit_label(&p, sk.camera.at(x, y, h));
         }

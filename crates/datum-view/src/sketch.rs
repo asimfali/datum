@@ -292,6 +292,9 @@ pub(crate) fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colo
 
 /// Pixels within which the cursor is on a point, and on a curve or a label.
 const NEAR_POINT: f64 = 8.0;
+/// How far around a label's text its hit reaches (D287): the size's line is thin, the text alone
+/// is a small target.
+const NEAR_LABEL: f64 = 7.0;
 const NEAR_CURVE: f64 = 6.0;
 
 const DEFINED: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
@@ -1450,7 +1453,7 @@ impl SketchEdit {
             return Some(b.pick);
         }
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
-            if (dx - x).abs() <= w * 0.5 && (dy - y).abs() <= h * 0.5 {
+            if (dx - x).abs() <= w * 0.5 + NEAR_LABEL && (dy - y).abs() <= h * 0.5 + NEAR_LABEL {
                 return Some(l.pick);
             }
         }
