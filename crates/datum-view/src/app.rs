@@ -4,6 +4,7 @@
 //! picture, drawn again only when the camera, the model or the view's size changes.
 
 mod forms;
+mod native_windows;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
 use forms::{EdgeFinishForm, LoftForm, MetadataForm, RibForm};
+use native_windows::NativeWindows;
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -53,6 +55,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let kept = |key| cc.storage.and_then(|s| s.get_string(key)).unwrap_or_default();
             let mut viewer = Viewer::new(path, cc.egui_ctx.clone(), adapter);
             viewer.maximized = maximized;
+            viewer.native_windows = NativeWindows::load(cc.storage);
             viewer.recent = serde_json::from_str(&kept(RECENT)).unwrap_or_default();
             viewer.recent_projects = serde_json::from_str(&kept(RECENT_PROJECTS)).unwrap_or_default();
             if let Some(layout) = cc.storage.and_then(|s| s.get_string(LAYOUT)) {
@@ -861,6 +864,7 @@ struct Viewer {
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
     table: Option<(crate::table::Source, crate::table::Editor)>,
+    native_windows: NativeWindows,
     /// The library's materials and rules the tables show, read when one opens and after the
     /// commands it sent were run; the new material's and the new rule's cells as typed so far; and
     /// the material whose rules the rules table shows.
@@ -1601,6 +1605,7 @@ impl Viewer {
             new_parameter: Default::default(),
             local_error: None,
             table: None,
+            native_windows: NativeWindows::default(),
             materials: Vec::new(),
             rules: Vec::new(),
             tools: Vec::new(),
@@ -4577,13 +4582,11 @@ impl Viewer {
 
     /// The fillet presets' editor in a window of its own (D284): the radiuses and the chamfer
     /// sizes typed in; OK parses them, applies at once and writes them into `settings.json`.
-    fn presets_window(&mut self, ctx: &egui::Context) {
+    fn presets_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         let Some(mut ed) = self.fillet_presets_editor.take() else { return };
         let (mut close, mut save) = (false, false);
-        let builder =
-            egui::ViewportBuilder::default().with_title(self.i18n.t("presets-title", "Fillet presets").to_string()).with_inner_size([360.0, 420.0]);
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fillet_presets"), builder, |ui, _| {
-            close = ui.input(|i| i.viewport().close_requested());
+        let title = self.i18n.t("presets-title", "Fillet presets");
+        let close_requested = self.native_windows.show(ctx, frame, "fillet_presets", title, egui::vec2(360.0, 420.0), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 let width = 70.0;
                 ui.heading(self.i18n.t("presets-fillet", "Fillet radiuses"));
@@ -4635,6 +4638,7 @@ impl Viewer {
                 });
             });
         });
+        close |= close_requested;
         if save {
             match ed.parse() {
                 Ok((fillet, chamfer)) => match crate::settings::path().map(|p| crate::settings::save_presets(&p, &fillet, &chamfer)) {
@@ -4659,7 +4663,7 @@ impl Viewer {
     /// The parameters, the materials or the rules of one material in a window of their own
     /// (D178): rebuilt every frame, from the model or from the library read last, the edits sent
     /// as the side bar sends them.
-    fn table_window(&mut self, ctx: &egui::Context) {
+    fn table_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use crate::table::{MATERIALS, RULES, Source, TOOLS};
         let Some((source, mut editor)) = self.table.take() else { return };
         // The presets are those of the element being kept; the others are the model's or the library's.
@@ -4691,12 +4695,9 @@ impl Viewer {
             Source::Materials | Source::Rules | Source::Tools => Box::new(crate::table::editable_records),
             Source::Presets => Box::new(crate::table::editable_presets),
         };
-        let (mut out, mut closed, mut picked) = (Default::default(), false, None);
-        // As wide as the table, when it opens.
+        let (mut out, mut picked) = (Default::default(), None);
         let width = datum_table::layout(&table).size()[0] as f32 * crate::table::SCALE * self.table_zoom + 40.0;
-        let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size([width, 400.0]);
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
-            closed = ui.input(|i| i.viewport().close_requested());
+        let closed = self.native_windows.show(ctx, frame, source.window_key(), title, egui::vec2(width, 400.0), |ui| {
             // The viewport's root draws nothing under its widgets: the theme's panel is its background.
             egui::CentralPanel::default().show(ui, |ui| {
                 if source == Source::Rules {
@@ -4704,7 +4705,7 @@ impl Viewer {
                         ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in the View menu, Materials"));
                         return;
                     }
-                    let rows = 6.0 * ui.spacing().interact_size.y;
+                    let rows = (6.0 * ui.spacing().interact_size.y).min(ui.available_height() * 0.3);
                     egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
                         for name in &materials {
                             if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
@@ -7819,7 +7820,7 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.window(ui, frame.wgpu_render_state());
+        self.window(ui, Some(frame));
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -7828,6 +7829,7 @@ impl eframe::App for Viewer {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
+        self.native_windows.save(storage);
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
         storage.set_string(TOUCHPAD, self.touchpad.to_string());
@@ -7848,7 +7850,7 @@ impl eframe::App for Viewer {
 
 impl Viewer {
     /// One frame of the whole window; no render state: all but the 3D picture.
-    fn window(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
+    fn window(&mut self, ui: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let start = std::time::Instant::now();
         if self.shown < 2 {
             self.shown += 1;
@@ -7907,13 +7909,15 @@ impl Viewer {
         self.loft_window(ui.ctx());
         self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
-        self.table_window(ui.ctx());
-        self.presets_window(ui.ctx());
+        self.table_window(ui.ctx(), frame);
+        self.presets_window(ui.ctx(), frame);
+        self.native_windows.finish_frame();
         self.settings_said(ui.ctx());
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
             let style = egui_dock::Style::from_egui(ui.style());
+            let rs = frame.and_then(eframe::Frame::wgpu_render_state);
             egui_dock::DockArea::new(&mut dock).style(style).show_add_buttons(false).show_inside(ui, &mut Tabs { v: self, rs });
             self.dock = dock;
         });
@@ -7988,6 +7992,7 @@ mod tests {
             tree: TreeRows::default(),
             local_error: None,
             table: None,
+            native_windows: NativeWindows::default(),
             materials: Vec::new(),
             rules: Vec::new(),
             tools: Vec::new(),
@@ -10565,7 +10570,7 @@ mod tests {
     fn the_parameters_table_sets_a_value() {
         let (mut v, inbox) = viewer("parametric.json");
         v.table = Some(Default::default());
-        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui(|ui| v.table_window(ui.ctx()));
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui(|ui| v.table_window(ui.ctx(), None));
         h.run();
         for key in [egui::Key::ArrowDown, egui::Key::ArrowRight] {
             h.key_press(key);
