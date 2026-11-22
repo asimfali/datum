@@ -25,7 +25,7 @@ use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
-use forms::{LoftForm, RibForm};
+use forms::{LoftForm, MetadataForm, RibForm};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -960,6 +960,8 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    /// Properties of the sketch's curves being edited (D276): the F12 editor.
+    metadata: Option<MetadataForm>,
     loft: Option<LoftForm>,
     /// A mirror of a part being asked for: its form (D247).
     mirror: Option<MirrorForm>,
@@ -1645,6 +1647,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            metadata: None,
             loft: None,
             mirror: None,
             branch_main: None,
@@ -1706,10 +1709,7 @@ impl Viewer {
     /// The project the window works in: the model file's own (a model keeps its project's
     /// rules), else, for a model without a file, the project open.
     fn current_project(&self) -> Option<PathBuf> {
-        match &self.path {
-            Some(p) => datum_model::workspace::project_root(p),
-            None => self.project.clone(),
-        }
+        datum_model::workspace::project_of(self.path.as_deref(), self.project.as_deref())
     }
 
     fn reload_library_records(&mut self) {
@@ -2701,6 +2701,7 @@ impl Viewer {
         self.close_extrusion();
         self.close_loft();
         self.picking = None;
+        self.metadata = None;
         self.sketch = None;
         self.send(Request::Editing(Some(name.clone())));
         self.entering = Some(name);
@@ -2713,6 +2714,7 @@ impl Viewer {
         self.close_rib();
         self.close_loft();
         self.close_mirror();
+        self.metadata = None;
         self.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
         if let Some(sk) = &self.sketch {
@@ -7229,6 +7231,8 @@ impl Viewer {
                     }
                 }
             }
+            // Properties of the selected lines and arcs, or of the sketch's marked curves (D276).
+            Act::Metadata => self.open_metadata(),
             // The menu a held right click opens, at once, by the cursor.
             Act::Pattern => {
                 if let Some(sk) = &mut self.sketch {
@@ -7384,9 +7388,16 @@ impl Viewer {
             self.item(ui, Act::MirrorPart, true);
             self.item(ui, Act::Branch, true);
             ui.separator();
-            for act in
-                TOOLS.into_iter().chain([Act::ProjectSection, Act::Rectangle, Act::Tangent, Act::Pattern, Act::Group, Act::Mirror, Act::Construction])
-            {
+            for act in TOOLS.into_iter().chain([
+                Act::ProjectSection,
+                Act::Rectangle,
+                Act::Tangent,
+                Act::Pattern,
+                Act::Group,
+                Act::Mirror,
+                Act::Construction,
+                Act::Metadata,
+            ]) {
                 self.item(ui, act, true);
             }
             ui.separator();
@@ -7717,6 +7728,7 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
+        self.metadata_window(ui.ctx());
         self.loft_pick_hint(ui.ctx());
         self.loft_window(ui.ctx());
         self.mirror_window(ui.ctx());
@@ -7855,6 +7867,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            metadata: None,
             loft: None,
             mirror: None,
             branch_main: None,
@@ -9361,6 +9374,172 @@ mod tests {
         h.run();
         drop(h);
         assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+    }
+
+    /// A harness of the metadata window alone, as the window draws it.
+    fn metadata_harness(v: Viewer) -> egui_kittest::Harness<'static, Viewer> {
+        egui_kittest::Harness::builder().with_size([700.0, 500.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let ctx = ui.ctx().clone();
+                v.metadata_window(&ctx);
+            },
+            v,
+        )
+    }
+
+    /// F12 in a sketch with the lines selected opens the editor on them, sending nothing by
+    /// itself; the selection made in the sketch afterwards is not taken for a target.
+    #[test]
+    fn f12_opens_metadata_on_the_selection() {
+        let (mut v, inbox) = sketching();
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into()), Pick::Curve("left_hole".into())];
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        let form = v.metadata.as_ref().expect("the editor opened");
+        assert_eq!(form.targets, ["bottom"], "a line only: a circle is no target");
+        assert!(inbox.try_iter().next().is_none(), "opening sends no command");
+        // A second F12 keeps the draft, and the sketch's selection changing does not retarget it.
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
+        assert_eq!(v.metadata.as_ref().unwrap().targets, ["bottom"]);
+    }
+
+    /// On a clean sketch F12 opens a form that takes the selection made in the sketch while it is
+    /// open; a second F12 does the same for a form still without targets.
+    #[test]
+    fn a_form_without_targets_takes_the_selection_made_in_the_sketch() {
+        let (mut v, _inbox) = sketching();
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.selected.clear();
+            sk.json["sketch"]["metadata"] = Json::Null;
+        }
+        v.open_metadata();
+        assert!(v.metadata.as_ref().is_some_and(|f| f.targets.is_empty() && f.marked.is_empty()));
+        // The window is open; a curve selected in the sketch becomes its target.
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        let mut h = metadata_harness(v);
+        h.run();
+        assert_eq!(h.state().metadata.as_ref().unwrap().targets, ["bottom"]);
+    }
+
+    /// A second F12 fills a form that is still without targets, and leaves one with targets alone.
+    #[test]
+    fn a_second_f12_only_fills_a_form_without_targets() {
+        let (mut v, _inbox) = sketching();
+        v.sketch.as_mut().unwrap().selected.clear();
+        v.open_metadata();
+        assert!(v.metadata.as_ref().is_some_and(|f| f.targets.is_empty()));
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.metadata.as_ref().unwrap().targets, ["top"]);
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        assert_eq!(v.metadata.as_ref().unwrap().targets, ["top"], "a begun draft is not retargeted");
+    }
+
+    /// Leaving the sketch, or entering another, closes the metadata editor.
+    #[test]
+    fn leaving_a_sketch_closes_the_metadata_editor() {
+        let (mut v, _inbox) = sketching();
+        v.open_metadata();
+        assert!(v.metadata.is_some());
+        v.leave();
+        assert!(v.metadata.is_none(), "leave closes it");
+        let (mut v, _inbox) = viewer_in_sketch();
+        v.open_metadata();
+        assert!(v.metadata.is_some());
+        v.enter("other".into());
+        assert!(v.metadata.is_none(), "enter closes it");
+    }
+
+    /// Without a selection F12 lists the marked curves; one picked is edited, and Apply sends one
+    /// `edit_metadata` with the changed value.
+    #[test]
+    fn the_metadata_editor_changes_a_marked_curve() {
+        let (mut v, inbox) = sketching();
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.selected.clear();
+            sk.json["sketch"]["metadata"] = json!({"bottom": {"note": "old"}, "top": {"stamp.role": "cut"}});
+        }
+        v.open_metadata();
+        let form = v.metadata.as_ref().unwrap();
+        assert!(form.targets.is_empty() && form.marked == ["bottom", "top"], "{:?}", form.marked);
+        let mut h = metadata_harness(v);
+        h.run();
+        h.get_by_label("bottom").click();
+        h.run();
+        let form = h.state().metadata.as_ref().expect("still open");
+        assert_eq!(form.targets, ["bottom"]);
+        assert_eq!(form.values.get("note").map(String::as_str), Some("\"old\""), "the existing value shown");
+        h.state_mut().metadata.as_mut().unwrap().values.insert("note".into(), "42".into());
+        h.get_by_label("OK").click();
+        h.run();
+        assert!(h.state().metadata.is_none(), "applied, the window closes");
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_metadata", p) = r { Some(p) } else { None }).collect();
+        assert_eq!(sent.len(), 1, "one Apply, one command");
+        assert_eq!(sent[0], json!({"name": "outline", "elements": ["bottom"], "set": {"note": 42}, "remove": []}));
+    }
+
+    /// Escape closes the editor without sending the draft; a mixed value is shown as none of the
+    /// targets' own, and typing nothing changes nothing.
+    #[test]
+    fn escape_closes_metadata_and_a_mixed_value_is_honest() {
+        let (mut v, inbox) = sketching();
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.selected = vec![Pick::Curve("bottom".into()), Pick::Curve("top".into())];
+            sk.json["sketch"]["metadata"] = json!({"bottom": {"note": "a"}, "top": {"note": "b", "stamp.role": "cut"}});
+        }
+        v.open_metadata();
+        let form = v.metadata.as_ref().unwrap();
+        assert!(form.mixed.contains("note"), "the targets disagree");
+        assert_eq!(form.values.get("note").map(String::as_str), Some(""), "no false common value");
+        assert!(form.mixed.contains("stamp.role"), "on one target only");
+        assert_eq!(form.values.get("stamp.role").map(String::as_str), Some(""), "no false common value");
+        assert!(v.apply_metadata().is_err(), "nothing typed, nothing to change");
+        assert!(inbox.try_iter().next().is_none());
+        // Typed, it is set on every target; Escape drops it.
+        v.metadata.as_mut().unwrap().values.insert("note".into(), "7".into());
+        let mut h = metadata_harness(v);
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.state().metadata.is_none(), "Escape closes it");
+        assert!(inbox.try_iter().next().is_none(), "the draft is not sent");
+    }
+
+    /// A preset fills the draft's properties and is sent as an ordinary `edit_metadata.set`: the
+    /// model keeps the values, not a reference to the preset.
+    #[test]
+    fn a_preset_fills_the_properties_to_send() {
+        let (mut v, inbox) = sketching();
+        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        v.open_metadata();
+        let form = v.metadata.as_mut().unwrap();
+        form.presets.push(super::forms::Preset {
+            id: "mine".into(),
+            label: "Mine".into(),
+            set: json!({"stamp.role": "cut"}).as_object().unwrap().clone(),
+        });
+        assert!(form.use_preset("mine"));
+        assert_eq!(form.values.get("stamp.role").map(String::as_str), Some("\"cut\""));
+        assert_eq!(form.initial.get("stamp.role"), None, "a preset is typed over, so it is set");
+        v.apply_metadata().unwrap();
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_metadata", p) = r { Some(p) } else { None }).collect();
+        assert_eq!(sent, [json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut"}, "remove": []})]);
     }
 
     /// N with a circle selected takes up the polygon; with nothing selected it does nothing, as

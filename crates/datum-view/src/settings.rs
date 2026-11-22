@@ -16,7 +16,8 @@
 //! is the interface language; not given, the system's. Section `theme` (`system`, `light`, `dark`)
 //! is the panels' colours; not given, the system's. Section `table` holds `zoom`, how large
 //! the table editor draws (1 by default, 1.5 half as large again). What cannot be applied is
-//! said, never dropped silently.
+//! said, never dropped silently. Section `metadata_presets` (D277) is read by the presets'
+//! command, not here: it only names sets of properties the metadata editor offers.
 
 use std::path::PathBuf;
 
@@ -25,21 +26,9 @@ use serde_json::Value as Json;
 
 use crate::actions::{ACTIONS, Keys};
 
-const FILE: &str = "settings.json";
-
 /// The settings file: beside the program if there, else in the user's folder (there or not).
 pub fn path() -> Option<PathBuf> {
-    let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(FILE)));
-    if let Some(p) = beside.filter(|p| p.exists()) {
-        return Some(p);
-    }
-    let env = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
-    let folder = if cfg!(windows) {
-        env("APPDATA").map(|d| d.join("Datum"))
-    } else {
-        env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("datum"))
-    };
-    folder.map(|d| d.join(FILE))
+    datum_model::workspace::settings_path()
 }
 
 /// The themes the window has, by the word the settings file and the kept choice use.
@@ -86,7 +75,7 @@ fn parse(text: &str) -> Settings {
     };
     settings.problems = sections
         .keys()
-        .filter(|k| !["keys", "language", "theme", "table"].contains(&k.as_str()))
+        .filter(|k| !["keys", "language", "theme", "table", "metadata_presets"].contains(&k.as_str()))
         .map(|k| format!("`{k}`: no such section"))
         .collect();
     match sections.get("language").map(|l| l.as_str().filter(|c| crate::i18n::known(c))) {
@@ -205,7 +194,7 @@ mod tests {
                 {"key": "Ctrl+S", "action": "sketch.line"},
                 {"key": "Ctrl+Q", "action": "file.quit"},
                 {"key": "Hyper+Q", "action": "file.exit"},
-                {"key": "F12", "action": null},
+                {"key": "Ctrl+F12", "action": null},
                 {"action": "file.exit"},
                 {"key": "Ctrl+Q", "action": "file.exit"}
             ],

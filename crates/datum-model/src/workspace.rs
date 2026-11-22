@@ -15,9 +15,35 @@ use serde_json::Value;
 /// The file that makes a folder a project (VISION §6).
 pub const PROJECT_FILE: &str = "datum-project.json";
 
+/// The engineer's settings file name (D132): one, shared by the window and the presets the
+/// command layer lists (D277).
+pub const SETTINGS_FILE: &str = "settings.json";
+
+/// The settings file: beside the program if there, else in the user's folder (there or not):
+/// `%APPDATA%\Datum` on Windows, `$XDG_CONFIG_HOME/datum` or `~/.config/datum` elsewhere.
+pub fn settings_path() -> Option<PathBuf> {
+    let beside = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join(SETTINGS_FILE)));
+    if let Some(p) = beside.filter(|p| p.exists()) {
+        return Some(p);
+    }
+    let env = |name| std::env::var_os(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let folder = if cfg!(windows) {
+        env("APPDATA").map(|d| d.join("Datum"))
+    } else {
+        env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config"))).map(|d| d.join("datum"))
+    };
+    folder.map(|d| d.join(SETTINGS_FILE))
+}
+
 /// The project the model file `model` belongs to.
 pub fn project_root(model: &Path) -> Option<PathBuf> {
     model.ancestors().skip(1).find(|d| d.join(PROJECT_FILE).is_file()).map(Path::to_path_buf)
+}
+
+/// The project the model at `model` works in: its file's, or, for a model without a file, the
+/// folder open for it.
+pub fn project_of(model: Option<&Path>, open: Option<&Path>) -> Option<PathBuf> {
+    model.and_then(project_root).or_else(|| open.map(Path::to_path_buf))
 }
 
 /// The workspace of the model at `model`: its project, or else the folder beside the program.
