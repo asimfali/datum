@@ -28,7 +28,7 @@ pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
 pub use bounded::ChainCopy;
 pub use component::strip_body; // TEMPORARY: the strip's step, before its placement into the sheet
-pub use component::{PartDef, PartFeature, PartParameter, Roles, Tool, tool};
+pub use component::{Forming, PartDef, PartFeature, PartParameter, Roles, SectionSide, Tool, tool};
 pub use copies::{Copies, Place};
 use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
@@ -383,10 +383,11 @@ pub enum Op {
     /// sheet's faces. Inputs: the sheet, then the sketch the placements name. Refused: a
     /// parameter the part has not, no placements, a line or a point the sketch has not, a line
     /// placement of a part without an `axis`, a `cut` role that is no extrusion of a sketch, a
-    /// profile off the wall's plane; a part that forms at a point, a `form` role that is no
+    /// profile off the wall's plane; a legacy tool that forms at a point, a `form` role that is no
     /// extrusion of a sketch or whose section is no chain of lines and arcs, a sheet thickness
     /// outside the part's range, a die the transitions do not reach; a part with both roles, or
-    /// with a `hinge`, comes next.
+    /// with a `hinge`, comes next. A `forming` definition (D288) takes two named sketches and
+    /// builds a straight tongue at a point on a flat plate, with its pre-cut on the blank.
     Component {
         part: PartDef,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -402,6 +403,9 @@ pub enum Op {
         /// The sheet's bend radius, from the part's sheet rule: the forming transitions' radius.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         radius: Option<Num>,
+        /// The neutral layer for developing a rounded stamp (D294).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_factor: Option<Num>,
     },
     /// The flat blank of sheet metal (a rolled sheet, a sheet from a path): the sheet's faces on
     /// the side of face `face`, plane and bent, laid flat with every cut; bends by their neutral
@@ -588,11 +592,26 @@ impl Value {
         }
     }
 
-    /// The body sheet metal is laid flat from: without its ribs (D250).
+    /// The body sheet metal is laid flat from, before local forming (D250, D290).
     pub fn blank(&self) -> Option<&Body> {
         match self {
             Self::Formed(f) => Some(&f.blank),
             _ => self.body(),
+        }
+    }
+
+    pub fn has_stamp(&self) -> bool {
+        matches!(self, Self::Formed(f) if f.stamp.is_some())
+    }
+
+    /// Add the pre-cut corresponding to the opening left by a formed tongue.
+    pub fn with_stamp_cut(&self, flat: Flat) -> Result<Flat, BrepError> {
+        if let Self::Formed(f) = self
+            && let Some(cut) = &f.stamp
+        {
+            flat.with_stamp_cut(cut)
+        } else {
+            Ok(flat)
         }
     }
 
@@ -826,7 +845,7 @@ impl Op {
             // The definition keeps its own numbers: they resolve inside the tool, against its
             // parameters (D260). What the occurrence gives them, and where it is placed, are the
             // model's numbers, as everywhere else.
-            Self::Component { part, library, group, params, placements, thickness, radius } => Self::Component {
+            Self::Component { part, library, group, params, placements, thickness, radius, k_factor } => Self::Component {
                 part: part.clone(),
                 library: library.clone(),
                 group: group.clone(),
@@ -834,6 +853,7 @@ impl Op {
                 placements: placements.iter().map(|p| p.resolved(lookup)).collect::<Result<_, String>>()?,
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
+                k_factor: k_factor.as_ref().map(|n| r(n, "k_factor")).transpose()?,
             },
             Self::Boolean { .. } | Self::Terrain { .. } => return Ok(Cow::Borrowed(self)),
         }))
@@ -881,6 +901,20 @@ impl Op {
                 num(value(k_factor));
                 h.update(face.as_bytes());
             }
+            Self::Component { part, .. } => {
+                h.update(format!("{self:?}").as_bytes());
+                // Sketch geometry's Debug leaves metadata out. Forming reads just the roles
+                // on its boundary; other properties and legacy punches need no such key.
+                if let Some(forming) = &part.forming
+                    && let Some(Self::Sketch { sketch, .. }) = part.features.iter().find(|f| f.name == forming.boundary).map(|f| &f.op)
+                {
+                    for (name, props) in &sketch.metadata {
+                        if let Some(role) = props.get(component::STAMP_ROLE) {
+                            h.update(format!("{name:?}{role:?}").as_bytes());
+                        }
+                    }
+                }
+            }
             // `Debug` spells every field exactly, as for a sketch.
             Self::Mirror { .. }
             | Self::Sheet { .. }
@@ -892,8 +926,7 @@ impl Op {
             | Self::Trim { .. }
             | Self::Saddle { .. }
             | Self::BranchHole { .. }
-            | Self::Rib { .. }
-            | Self::Component { .. } => {
+            | Self::Rib { .. } => {
                 h.update(format!("{self:?}").as_bytes());
             }
         }
@@ -927,6 +960,17 @@ impl Op {
         if !self.arity().contains(&values.len()) {
             return Err(BrepError::Invalid(format!("{} takes {} input(s), got {}", self.kind(), describe_arity(self.arity()), values.len())));
         }
+        if values.iter().any(|v| v.has_stamp()) {
+            match self {
+                Self::Unfold { face, k_factor } => {
+                    let body = values[0].blank().ok_or_else(|| BrepError::Sketch("unfold takes a sheet".into()))?;
+                    let flat = values[0].with_stamp_cut(unfold(body, face, num(k_factor)?)?)?;
+                    return Ok(Value::Flat(Box::new(flat)));
+                }
+                Self::Plane { .. } | Self::Sketch { flat: None, .. } => {}
+                _ => return Err(BrepError::Unsupported(format!("{}: applying this operation to a sheet with a tongue comes later", self.kind()))),
+            }
+        }
         if let (Some(Value::Formed(f)), true) = (values.first(), self.reads_blank()) {
             let blank = Value::Body(f.blank.clone());
             let mut plain = values.to_vec();
@@ -938,7 +982,7 @@ impl Op {
                         laid = rib::imprint(&laid, i)?;
                     }
                     validated(&laid)?;
-                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone() })))
+                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone(), stamp: None })))
                 }
                 other => Ok(other),
             };
@@ -1064,11 +1108,14 @@ impl Op {
                     _ => (body.clone(), Vec::new()),
                 };
                 imprints.push(i);
-                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints })));
+                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, stamp: None })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
-            Self::Component { part, params, placements, thickness, radius, .. } => {
-                return if part.roles.form.is_some() {
+            Self::Component { part, params, placements, thickness, radius, k_factor, .. } => {
+                return if let Some(forming) = &part.forming {
+                    let rule = [thickness.as_ref(), radius.as_ref(), k_factor.as_ref()];
+                    component::form_tongue(feature, part, forming, params, placements, rule, values)
+                } else if part.roles.form.is_some() {
                     component::form(feature, part, params, placements, thickness.clone(), radius.clone(), values)
                 } else {
                     component::cut(feature, part, params, placements, values)

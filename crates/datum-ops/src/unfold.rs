@@ -113,6 +113,14 @@ pub struct LineCut {
     pub arc: Option<(Vec3, bool)>,
 }
 
+/// The three free sides of the tongue's pre-cut window (D289–D294), in wall coordinates.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct StampCut {
+    pub points: [Vec3; 4],
+    pub normal: Vec3,
+    pub ids: [TopoId; 3],
+}
+
 /// The line a cut's gap closes to on the blank, as a length along it and a distance off it.
 #[derive(Clone, Copy)]
 enum Centre {
@@ -210,6 +218,23 @@ pub(crate) const ON_KERF: f64 = 1e-7;
 pub(crate) const KERF_PAST: f64 = 4.0;
 
 impl Flat {
+    /// Add the pre-cut to the developed face of the plate, keeping the root intact.
+    pub(crate) fn with_stamp_cut(mut self, cut: &StampCut) -> Result<Self, BrepError> {
+        let [origin, x, y, _] = self
+            .frame
+            .filter(|f| crate::sketch::nearly_parallel(f[3], cut.normal))
+            .ok_or_else(|| BrepError::Unsupported("unfold: lay the tongue sheet from either side of its wall".into()))?;
+        let [a, b, c, d] = cut.points.map(|p| Vec2::new((p - origin).dot(x), (p - origin).dot(y)));
+        self.pieces.extend([FlatPiece::Line(a, b), FlatPiece::Line(b, c), FlatPiece::Line(c, d)]);
+        self.ids.extend(cut.ids);
+        Ok(Self {
+            k_factor: self.k_factor,
+            overlaps: self.overlaps,
+            planes: self.planes,
+            ..Self::new(self.pieces, self.ids, self.size, self.bends, self.bend_ids, (self.outer, self.ends), self.home.zip(self.frame))
+        })
+    }
+
     /// The blank with cuts along lines `lines` (ends in space, width; D235) as the laser cuts them:
     /// each one line, the gap the part shows closed. The sides and ends of each cut go; the edges
     /// running into them go on to the line; the line stands where metal met it. A curve running
