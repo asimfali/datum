@@ -2,7 +2,8 @@
 //! the field by the cursor and kept from one click to the next. A click on a corner, a point
 //! where two of the sketch's own lines or arcs meet, rounds or bevels it; a click inside a closed
 //! region does every corner of its outline, the fillets of one radius (`radius` on the first,
-//! `equal_radius` to it on the rest), the chamfers of one size.
+//! `equal_radius` to it on the rest), the chamfers of one size. The tool's presets (D283) come
+//! from `settings.json`: ↑/↓ step through the radiuses' or the chamfers' sizes.
 //!
 //! The corner point stays, on both curves (`on`): a virtual sharp, so the dimensions and the fix
 //! that hold the corner hold it still. A fillet is an arc tangent to both curves, its centre where

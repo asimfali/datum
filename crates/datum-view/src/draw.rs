@@ -256,6 +256,10 @@ pub struct Draft {
     pub midline: bool,
     pub wall: Option<String>,
     pub under: Option<String>,
+    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
+    /// sizes. Arrow up takes the next larger, down the next smaller; empty: the arrows stand idle.
+    pub fillet_presets: Vec<f64>,
+    pub chamfer_presets: Vec<f64>,
 }
 
 impl Default for Draft {
@@ -287,6 +291,8 @@ impl Default for Draft {
             plan: None,
             fillet: None,
             chamfer: false,
+            fillet_presets: Vec::new(),
+            chamfer_presets: Vec::new(),
             mirrored: Vec::new(),
             mirror_moves: false,
             offset: None,
@@ -1169,7 +1175,8 @@ impl Draft {
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
         }
-        // The fillet's radius or the chamfer's size by the cursor, or what to type.
+        // The fillet's radius or the chamfer's size by the cursor, or what to type; the tool's
+        // presets (D283) beside, the one the size now is, larger.
         if self.tool == Tool::Fillet && edit.field.is_none() {
             let text = match (&self.fillet, self.chamfer) {
                 (Some((_, v)), false) => i18n.f("fillet-radius", "Fillet R{ $v } (Tab: chamfer)", &[("v", &short(*v).to_string())]),
@@ -1178,6 +1185,26 @@ impl Draft {
                 (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
+            let presets = if self.chamfer { &self.chamfer_presets } else { &self.fillet_presets };
+            if !presets.is_empty() {
+                let now = self.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v);
+                let at = screen(spot.at) + egui::vec2(12.0, 30.0);
+                let mut x = 0.0;
+                for r in presets {
+                    let label = if self.chamfer { format!("{}x{}", short(*r), short(*r)) } else { format!("R{}", short(*r)) };
+                    let font = egui::FontId::proportional(if r.total_cmp(&now) == std::cmp::Ordering::Equal { 15.0 } else { 13.0 });
+                    let wide = painter.layout_no_wrap(label.clone(), font.clone(), DRAFT).size().x;
+                    painter.text(at + egui::vec2(x, 0.0), egui::Align2::LEFT_TOP, label, font, DRAFT);
+                    x += wide + 10.0;
+                }
+                painter.text(
+                    at + egui::vec2(x, 0.0),
+                    egui::Align2::LEFT_TOP,
+                    i18n.t("fillet-presets", "Up/Down: a preset"),
+                    egui::FontId::proportional(13.0),
+                    DRAFT,
+                );
+            }
         }
         // The offset's size by the cursor, or what to type.
         if self.tool == Tool::Offset && edit.field.is_none() {
@@ -1426,6 +1453,20 @@ fn foot(pts: &[[f64; 2]], q: [f64; 2]) -> Option<[f64; 2]> {
 /// A diameter as typed: six decimals at most.
 fn short(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
+}
+
+/// The preset of `presets` the arrows step to (D283): up the next larger than `now`, around from
+/// the largest to the smallest; down the other way. No value yet (`now` not a number): up takes
+/// the smallest, down the largest. None of `presets`, none to take.
+pub fn preset_step(presets: &[f64], now: f64, up: bool) -> Option<f64> {
+    let mut sorted = presets.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let [first, .., last] = sorted[..] else { return None };
+    Some(if up {
+        sorted.iter().copied().find(|r| *r > now).unwrap_or(first)
+    } else {
+        sorted.iter().rev().copied().find(|r| *r < now).unwrap_or(last)
+    })
 }
 
 /// An `edit_sketch` patch being made ([`SketchPatch`]), with the window's snaps.
@@ -2120,5 +2161,22 @@ pub(crate) mod tests {
         });
         out.textures_delta.clear();
         assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
+    }
+
+    /// The preset the arrows step to (D283): up the next larger, down the next smaller, around
+    /// from an end to the other; no value yet, up the smallest and down the largest; none, none.
+    #[test]
+    fn the_arrows_step_through_the_presets() {
+        let r = [2.0, 5.0, 10.0];
+        assert_eq!(preset_step(&r, f64::NAN, true), Some(2.0), "no value yet: up the smallest");
+        assert_eq!(preset_step(&r, f64::NAN, false), Some(10.0), "no value yet: down the largest");
+        assert_eq!(preset_step(&r, 2.0, true), Some(5.0));
+        assert_eq!(preset_step(&r, 5.0, false), Some(2.0));
+        assert_eq!(preset_step(&r, 10.0, true), Some(2.0), "around from the largest");
+        assert_eq!(preset_step(&r, 2.0, false), Some(10.0), "around from the smallest");
+        assert_eq!(preset_step(&r, 7.0, true), Some(10.0), "a size of no preset: the next larger");
+        assert_eq!(preset_step(&r, 7.0, false), Some(5.0), "a size of no preset: the next smaller");
+        assert_eq!(preset_step(&[3.0, 1.0, 2.0], 1.0, true), Some(2.0), "the presets of any order");
+        assert_eq!(preset_step(&[], 5.0, true), None, "no presets, no step");
     }
 }

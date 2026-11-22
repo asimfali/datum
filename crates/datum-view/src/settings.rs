@@ -17,7 +17,9 @@
 //! is the panels' colours; not given, the system's. Section `table` holds `zoom`, how large
 //! the table editor draws (1 by default, 1.5 half as large again). What cannot be applied is
 //! said, never dropped silently. Section `metadata_presets` (D277) is read by the presets'
-//! command, not here: it only names sets of properties the metadata editor offers.
+//! command, not here: it only names sets of properties the metadata editor offers. Sections
+//! `fillet_presets` and `chamfer_presets` (D283) are the sizes the fillet tool offers: radiuses,
+//! and chamfer sizes (one size, the same both ways, so `2` is the 2x2 bevel).
 
 use std::path::PathBuf;
 
@@ -49,12 +51,24 @@ pub struct Settings {
     pub theme: Option<egui::ThemePreference>,
     /// The table editor's zoom.
     pub table_zoom: f32,
+    /// The fillet tool's presets (D283): the radiuses, sorted, without repeats; empty: none.
+    pub fillet_presets: Vec<f64>,
+    /// The chamfers' presets of the same tool (D283): the sizes, sorted, without repeats.
+    pub chamfer_presets: Vec<f64>,
     pub problems: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { keys: Keys::default(), language: None, theme: None, table_zoom: 1.0, problems: Vec::new() }
+        Self {
+            keys: Keys::default(),
+            language: None,
+            theme: None,
+            table_zoom: 1.0,
+            fillet_presets: vec![2.0, 5.0],
+            chamfer_presets: vec![2.0, 4.0],
+            problems: Vec::new(),
+        }
     }
 }
 
@@ -75,7 +89,7 @@ fn parse(text: &str) -> Settings {
     };
     settings.problems = sections
         .keys()
-        .filter(|k| !["keys", "language", "theme", "table", "metadata_presets"].contains(&k.as_str()))
+        .filter(|k| !["keys", "language", "theme", "table", "metadata_presets", "fillet_presets", "chamfer_presets"].contains(&k.as_str()))
         .map(|k| format!("`{k}`: no such section"))
         .collect();
     match sections.get("language").map(|l| l.as_str().filter(|c| crate::i18n::known(c))) {
@@ -92,6 +106,24 @@ fn parse(text: &str) -> Settings {
         None => {}
         Some(Some(zoom)) => settings.table_zoom = zoom as f32,
         Some(None) => settings.problems.push("`table`: `zoom` from 0.5 to 4 (1 stands)".into()),
+    }
+    // The fillet tool's presets (D283): positive numbers; what is not one is said, what is, stays.
+    for (name, list) in [("fillet_presets", &mut settings.fillet_presets), ("chamfer_presets", &mut settings.chamfer_presets)] {
+        match sections.get(name) {
+            None | Some(Json::Null) => {}
+            Some(Json::Array(v)) => {
+                list.clear();
+                for (i, size) in v.iter().enumerate() {
+                    match size.as_f64().filter(|r| r.is_finite() && *r > 0.0) {
+                        Some(r) => list.push(r),
+                        None => settings.problems.push(format!("`{name}`: positive numbers (the {i}th is not; it stands not)")),
+                    }
+                }
+                list.sort_by(f64::total_cmp);
+                list.dedup();
+            }
+            Some(_) => settings.problems.push(format!("`{name}`: a list of numbers (the defaults stand)")),
+        }
     }
     let entries = match sections.get("keys") {
         None => &Vec::new(),
@@ -246,6 +278,26 @@ mod tests {
         let Settings { table_zoom, problems, .. } = parse(&json!({"table": {"zoom": 10}}).to_string());
         assert_eq!(table_zoom, 1.0);
         assert!(problems.join("\n").contains("`table`: `zoom` from 0.5 to 4"), "{problems:?}");
+    }
+
+    /// The fillet tool's presets (D283): radiuses and chamfer sizes, positive numbers; sorted and
+    /// without repeats; an empty list stands for none; what is wrong is said, what is right stays.
+    #[test]
+    fn the_fillet_tool_has_its_presets() {
+        let Settings { fillet_presets, chamfer_presets, .. } = parse("{}");
+        assert_eq!(fillet_presets, [2.0, 5.0], "the defaults");
+        assert_eq!(chamfer_presets, [2.0, 4.0], "the defaults");
+        let s = parse(&json!({"fillet_presets": [5, 2, 5, 3], "chamfer_presets": []}).to_string());
+        assert_eq!(s.fillet_presets, [2.0, 3.0, 5.0], "sorted, without repeats");
+        assert!(s.chamfer_presets.is_empty(), "an empty list is none");
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        let Settings { fillet_presets, problems, .. } = parse(&json!({"fillet_presets": [2, "big", -1, 0]}).to_string());
+        assert_eq!(fillet_presets, [2.0], "the one that stands, stands");
+        let said = problems.join("\n");
+        assert!(said.contains("`fillet_presets`: positive numbers"), "{problems:?}");
+        let Settings { fillet_presets, problems, .. } = parse(&json!({"fillet_presets": 2}).to_string());
+        assert_eq!(fillet_presets, [2.0, 5.0], "not a list: the defaults stand");
+        assert!(problems.join("\n").contains("`fillet_presets`: a list of numbers"), "{problems:?}");
     }
 
     #[test]

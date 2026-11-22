@@ -4,7 +4,9 @@
 
 ## Задача
 
-Библиотечная штамповка 0.5.6: согласуем построение по `Жалюзи2.json` и `язык.json`. План: `status/stamp-component.md`, ветка `plan/stamp-component`.
+Пресеты скругления/фаски (D283) — сделано, ветка `feat/fillet-presets`, PR открыт: секции `fillet_presets`/`chamfer_presets` в `settings.rs`, поля и отрисовка в `draw.rs`, стрелки в `app.rs` (`sketch_input`), тесты, TESTERS.md, журнал. `scripts/check.sh` зелёный. Несимметричные/угловые фаски — отдельно (геометрия `fillet.rs`, один параметр `distance` сейчас).
+
+Предыдущая: план библиотечной штамповки 0.5.6 влит ([PR #275](https://github.com/asimfali/datum/pull/275)), план: `status/stamp-component.md`; реализация не начата.
 
 ## Состояние
 

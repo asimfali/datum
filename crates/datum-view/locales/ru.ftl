@@ -493,6 +493,7 @@ fillet-radius = Скругление R{ $v } (Tab — фаска)
 fillet-chamfer = Фаска { $v } (Tab — скругление)
 fillet-type-radius = Введите радиус
 fillet-type-chamfer = Введите размер фаски
+fillet-presets = Вверх/вниз — пресет
 mirror-copies = Зеркало: щёлкните ось; копия (Tab — оригинал удаляется)
 mirror-moves = Зеркало: щёлкните ось; оригинал удаляется (Tab — оставить)
 offset-size = Эквидистанта { $v } (Shift — с обеих сторон; Tab — средняя линия)

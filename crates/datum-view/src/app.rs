@@ -931,6 +931,9 @@ struct Viewer {
     settings_problems: Vec<String>,
     /// The table editor's zoom, from `settings.json`.
     table_zoom: f32,
+    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers' sizes.
+    fillet_presets: Vec<f64>,
+    chamfer_presets: Vec<f64>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -1558,7 +1561,8 @@ impl Viewer {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let settings = crate::settings::path();
-        let crate::settings::Settings { keys, language, theme, table_zoom, problems: settings_problems } = crate::settings::load(settings.as_deref());
+        let crate::settings::Settings { keys, language, theme, table_zoom, fillet_presets, chamfer_presets, problems: settings_problems } =
+            crate::settings::load(settings.as_deref());
         for p in &settings_problems {
             crate::log::write(&format!("settings: {p}"));
         }
@@ -1633,6 +1637,8 @@ impl Viewer {
             settings,
             settings_problems,
             table_zoom,
+            fillet_presets,
+            chamfer_presets,
             shown: 0,
             maximized: false,
             picking: None,
@@ -2774,7 +2780,11 @@ impl Viewer {
         let Some(name) = wanted else { return };
         match (&m.editing, feature(&name)) {
             (Some((n, context)), Some(json)) if *n == name => match &mut self.sketch {
-                Some(s) => s.refresh(context.clone(), json, params),
+                Some(s) => {
+                    s.refresh(context.clone(), json, params);
+                    s.draft.fillet_presets = self.fillet_presets.clone();
+                    s.draft.chamfer_presets = self.chamfer_presets.clone();
+                }
                 None => {
                     let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
                     let mut sk = SketchEdit::new(name, context.clone(), json, params, scene);
@@ -2785,6 +2795,8 @@ impl Viewer {
                         self.blank_fitted = false;
                         crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
                     }
+                    sk.draft.fillet_presets = self.fillet_presets.clone();
+                    sk.draft.chamfer_presets = self.chamfer_presets.clone();
                     self.sketch = Some(sk);
                     // Its section under the part's, the library beside the 3D view (D163).
                     self.side_bar.visible = true;
@@ -6418,6 +6430,22 @@ impl Viewer {
             sk.field = None;
             sk.draft.typed = None;
         }
+        // The fillet tool's presets by the arrows (D283): up the next larger, down the next
+        // smaller, around; the chamfers' presets while Tab has turned it to chamfers.
+        if sk.draft.tool == Tool::Fillet && !typing_field && !typing {
+            let mut step = None;
+            for (key, up) in [(egui::Key::ArrowUp, true), (egui::Key::ArrowDown, false)] {
+                if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                    step = Some(up);
+                }
+            }
+            if let Some(up) = step {
+                let presets = if sk.draft.chamfer { sk.draft.chamfer_presets.clone() } else { sk.draft.fillet_presets.clone() };
+                if let Some(v) = crate::draw::preset_step(&presets, sk.draft.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v), up) {
+                    sk.draft.fillet = Some((json!(v), v));
+                }
+            }
+        }
         // A digit typed while drawing opens the field with it.
         if !typing_field && !typing && sk.draft.takes_value() {
             let first = ui.input(|i| i.events.iter().find_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }));
@@ -7853,6 +7881,8 @@ mod tests {
             settings: None,
             settings_problems: Vec::new(),
             table_zoom: 1.0,
+            fillet_presets: vec![2.0, 5.0],
+            chamfer_presets: vec![2.0, 4.0],
             shown: 0,
             maximized: false,
             picking: None,
@@ -10097,6 +10127,44 @@ mod tests {
         assert!(sk.placed.is_ok(), "{:?}", sk.placed.as_ref().err());
         let kept = sk.json["sketch"]["constraints"].as_array().unwrap();
         assert!(kept.iter().any(|c| c["type"] == "horizontal_distance" && c["points"] == json!(["o", "a"])));
+    }
+
+    /// The fillet tool's presets (D283) by the arrows: up the next larger, down the next smaller,
+    /// the value kept as a typed one would be; Tab turned to chamfers, the chamfers' presets.
+    #[test]
+    fn the_arrows_take_a_preset_of_the_fillet_tool() {
+        let (mut v, _inbox) = sketching();
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.draft.fillet_presets = vec![2.0, 5.0];
+            sk.draft.chamfer_presets = vec![2.0, 4.0];
+        }
+        let press = |v: &mut Viewer, key: egui::Key| {
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+            h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+            drop(h);
+        };
+        let taken = |v: &Viewer| v.sketch.as_ref().unwrap().draft.fillet.as_ref().map(|(j, s)| (j.as_f64(), *s));
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "no value yet: up the smallest");
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(5.0), 5.0)), "up the next larger");
+        press(&mut v, egui::Key::ArrowDown);
+        assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "down the next smaller");
+        press(&mut v, egui::Key::Tab);
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(4.0), 4.0)), "the chamfers' presets: the size 2 stood, the next larger");
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "the chamfers' presets: around from the largest");
     }
 
     /// Constraints by hand: the plate is fully defined and its holes 50 apart, so concentric is
