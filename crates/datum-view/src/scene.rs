@@ -130,10 +130,8 @@ impl BodyMesh {
                 }
             }
         }
-        // The caps a set of faces may take: by the kernel's rule (`edge_finish_caps`), so what
-        // is lit is what will build (D296). A cap a finish already rounded has curves in its
-        // boundary and is not offered again; the straight runs of such a boundary stay corner
-        // edges above, so a click on an edge still works on them.
+        // The kernel supplies the corners the tool lights for each cap (D296), including
+        // the free corners of a flange and the remaining corners of a partly rounded cap.
         for (cap, corners) in datum_ops::edge_finish_caps(body) {
             let mut ixs = Vec::with_capacity(corners.len());
             for id in corners {

@@ -252,3 +252,44 @@ fn edge_finish_combines_faces_and_edges_then_excludes_corners() {
     let empty = feature(&mut s, "empty");
     assert!(empty.get("error").is_some(), "{empty}");
 }
+
+#[test]
+fn flange_face_finishes_only_free_corners() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/sheet_tray.json")).unwrap();
+    let mut s = Session::default();
+    for feature in &model["features"].as_array().unwrap()[..2] {
+        run(&mut s, "add", feature.clone());
+    }
+    let mut flange = model["features"][2].clone();
+    flange["edges"].as_array_mut().unwrap().truncate(1);
+    run(&mut s, "add", flange);
+    let faces = run(&mut s, "query_faces", json!({"name": "tray"}));
+    let face =
+        faces["faces"].as_array().unwrap().iter().find(|f| f["offset"].as_f64().is_some_and(|v| (v + 2.0).abs() < 1e-9)).unwrap()["id"].clone();
+    let bend_ids: Vec<_> = faces["faces"].as_array().unwrap().iter().filter(|f| f.get("cylinder").is_some()).map(|f| f["id"].clone()).collect();
+    assert_eq!(bend_ids.len(), 2);
+    let edges = run(&mut s, "query_edges", json!({"name": "tray"}));
+    let free: Vec<_> = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            let a = &e["from"]["point"];
+            let b = &e["to"]["point"];
+            a[0] == b[0] && a[2] == 20.0 && b[2] == 20.0 && a[1] != b[1]
+        })
+        .map(|e| e["id"].clone())
+        .collect();
+    assert_eq!(free.len(), 2);
+    run(&mut s, "add", json!({"name": "by_face", "op": "edge_finish", "inputs": ["tray"], "faces": [face], "size": 1.0}));
+    let built = feature(&mut s, "by_face");
+    assert!(built.get("error").is_none(), "{built}");
+    run(&mut s, "add", json!({"name": "by_edges", "op": "edge_finish", "inputs": ["tray"], "edges": free, "size": 1.0}));
+    let built = feature(&mut s, "by_edges");
+    assert!(built.get("error").is_none(), "{built}");
+    close(volume(&mut s, "by_face"), volume(&mut s, "by_edges"));
+    let finished = run(&mut s, "query_faces", json!({"name": "by_face"}));
+    for bend in bend_ids {
+        assert!(finished["faces"].as_array().unwrap().iter().any(|f| f["id"] == bend && f.get("cylinder").is_some()), "bend {bend} lost: {finished}");
+    }
+}

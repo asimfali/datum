@@ -254,8 +254,8 @@ pub(crate) fn finish(feature: TopoId, body: &Body, edge: TopoId, size: f64, mode
 }
 
 /// Return the straight corner edges normal to a planar face, in its outer boundary order.
-/// The cap must be a single outer loop (holes are refused); curved runs skip their vertices:
-/// a partly rounded cap finishes its remaining corners, a cap with none of them is refused.
+/// The cap must be a single outer loop (holes are refused). Vertices on curved runs and
+/// cylinder seams are skipped, so the face can select the remaining corners of a flange.
 pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepError> {
     let bad = || BrepError::Unsupported("edge finish: expected an unambiguous planar face with straight convex corners".into());
     let cap = body.faces().iter().find(|f| f.id == face).ok_or_else(bad)?;
@@ -271,12 +271,16 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
     for (at, &h) in boundary.iter().enumerate() {
         let half = body.half_edges()[h as usize];
         let vertex = half.origin;
-        // A corner has both boundary edges at the vertex straight. A vertex on a curve, or
-        // where a straight run meets one — a run an earlier finish left — is not a corner and
-        // is skipped: a cap partly rounded finishes its remaining corners (D296).
+        // A fillet arc and the straight seam of a sheet bend both leave these vertices
+        // without a planar corner to finish through the thickness (D296).
         let around = [(at + boundary.len() - 1) % boundary.len(), at];
-        let curved = around.into_iter().any(|i| body.edge_curve(&body.edges()[body.half_edges()[boundary[i] as usize].edge as usize]).is_some());
-        if curved {
+        let at_curve = around.into_iter().any(|i| {
+            let h = body.half_edges()[boundary[i] as usize];
+            let twin = body.half_edges()[h.twin as usize];
+            let adjacent = body.loops()[twin.loop_ix as usize].face as usize;
+            body.edge_curve(&body.edges()[h.edge as usize]).is_some() || matches!(body.faces()[adjacent].surface, Surface::Cylinder(_))
+        });
+        if at_curve {
             continue;
         }
         let candidates: Vec<_> = body
