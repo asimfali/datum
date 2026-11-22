@@ -6660,6 +6660,9 @@ impl Viewer {
                 }
             } else if placing && let Some(patch) = draft.click(sk) {
                 sent.push(Request::Command("edit_sketch", sk.apply(patch)));
+                // A circle placed untyped: its diameter's field opens at the click, the value
+                // selected (D286); Esc keeps it as drawn, digits give the real size.
+                sk.ask_sized();
                 if field_done.0 || typing_field {
                     sk.field = None;
                 }

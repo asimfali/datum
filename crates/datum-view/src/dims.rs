@@ -255,6 +255,14 @@ impl SketchEdit {
         }
     }
 
+    /// A circle the draft just placed untyped (D286): its diameter's field opens at the click,
+    /// the drawn value in it selected to retype; the app calls this after the patch applies.
+    pub fn ask_sized(&mut self) {
+        if let Some((n, at)) = self.draft.sized.take() {
+            self.edit_label(&crate::sketch::Pick::Curve(n), at);
+        }
+    }
+
     /// Applies the field (Enter): the `edit_sketch` parameters to send, applied here already;
     /// None when there is nothing to send (drawing, which the tool completes, or a conflict, now
     /// offered as a reference dimension).
@@ -419,6 +427,26 @@ mod tests {
         assert!(e.conflict.is_some());
         let sent = e.conflict_as_reference().unwrap();
         assert_eq!(sent["measures"], json!({"d1": {"type": "length", "line": "top"}}));
+    }
+
+    /// A click on a circle dimensions it at once: the field with its diameter, selected.
+    #[test]
+    fn a_circle_dimensions_at_once() {
+        let json = json!({"name": "s", "op": "sketch", "inputs": [], "sketch": {
+            "points": {"h": [15.0, 5.0]},
+            "circles": {"circle": {"center": "h", "diameter": 6}},
+            "constraints": [{"type": "fix", "point": "h"}]}});
+        let mut e = SketchEdit::new(
+            "s".into(),
+            Context { id: TopoId::derive("feature").tag("s").finish(), inputs: Vec::new(), sources: Vec::new() },
+            json,
+            BTreeMap::new(),
+            None,
+        );
+        assert!(e.dimension_now(&[Pick2::Curve("circle".into())], [15.0, 5.0], None));
+        let f = e.field.as_ref().unwrap();
+        assert_eq!(f.entry, Entry::Diameter("circle".into()), "{f:?}");
+        assert_eq!(f.text, "6");
     }
 
     /// A click on a line dimensions it at once; two points wait for where the dimension goes.
