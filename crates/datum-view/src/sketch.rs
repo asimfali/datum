@@ -1523,6 +1523,37 @@ impl SketchEdit {
                 out.push(Pick::Curve(n.clone()));
             }
         }
+        // A frame takes a pattern's copies the way a click on its badge takes them (D285): each
+        // copy's curves are the cell's, placed; crossing takes what it touches, inside what is
+        // fully in. The source copy is the cell's own curves, taken above.
+        for c in &p.patterns {
+            let cell: Vec<Vec<[f64; 2]>> = c.cell.iter().filter_map(|n| Self::curve_points(p, n)).collect();
+            if cell.is_empty() {
+                continue;
+            }
+            for (k, place) in &c.at {
+                if c.source && *k == [0, 0] {
+                    continue;
+                }
+                let screen: Vec<(f64, f64)> = cell
+                    .iter()
+                    .flat_map(|pts| {
+                        pts.iter().map(|q| {
+                            let m = place.apply(datum_math::Vec2::new(q[0], q[1]));
+                            self.camera.offset([m.x, m.y], height)
+                        })
+                    })
+                    .collect();
+                let taken = if crossing {
+                    screen.iter().any(|q| inside(*q)) || screen.windows(2).any(|w| segment_meets_box(w[0], w[1], lo, hi))
+                } else {
+                    screen.iter().all(|q| inside(*q))
+                };
+                if taken {
+                    out.push(Pick::Copy(c.name.clone(), *k));
+                }
+            }
+        }
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
             if !matches!(l.pick, Pick::Constraint(_) | Pick::Measure(_)) {
                 continue;
@@ -2413,6 +2444,43 @@ mod tests {
         assert!(e.framed(frame(b, a), 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
         // The dimension tool's frame takes what it touches either way.
         assert_eq!(e.framed(SelectFrame { ends: [b, a], touching: true }, 600.0, size), e.framed(frame(a, b), 600.0, size));
+    }
+
+    /// A frame takes a pattern's copies the way a click on its badge does (D285): inside what
+    /// lies wholly in, crossing what it touches; the cell's own curves stay plain curves.
+    #[test]
+    fn frames_take_a_patterns_copies() {
+        let e = sketch_of(json!({
+            "points": {"a": [0, 0], "b": [4, 0], "c": [4, 2], "d": [0, 2]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
+            "constraints": [
+                {"type": "fix", "point": "a", "at": [0, 0]}, {"type": "fix", "point": "b", "at": [4, 0]},
+                {"type": "fix", "point": "c", "at": [4, 2]}, {"type": "fix", "point": "d", "at": [0, 2]},
+            ],
+            "groups": {"cell": ["ab", "bc", "cd", "da"]},
+            "patterns": {"holes": {"of": "cell", "step": [[6, 0], [0, 0]], "count": [3, 1]}}
+        }));
+        if let Err(err) = &e.placed {
+            panic!("not solved: {err:?}");
+        }
+        let at = |q: [f64; 2]| e.camera.offset(q, 600.0);
+        let size = |_: &str| (0.0, 0.0);
+        let frame = |a, b| SelectFrame { ends: [a, b], touching: false };
+        // Around the copy at x = 12: only that copy; the cell at 0 stays out.
+        let got = e.framed(frame(at([11.0, -1.0]), at([17.0, 3.0])), 600.0, size);
+        assert_eq!(got, [Pick::Copy("holes".into(), [2, 0])], "{got:?}");
+        // Around the cell itself: the curves and points, no copy for the source.
+        let got = e.framed(frame(at([-1.0, -1.0]), at([5.0, 3.0])), 600.0, size);
+        assert!(got.contains(&Pick::Curve("ab".into())) && !got.iter().any(|p| matches!(p, Pick::Copy(..))), "{got:?}");
+        // Both copies the frame covers, in one go.
+        let got = e.framed(frame(at([5.0, -1.0]), at([17.0, 3.0])), 600.0, size);
+        assert_eq!(got, [Pick::Copy("holes".into(), [1, 0]), Pick::Copy("holes".into(), [2, 0])], "{got:?}");
+        // A crossing frame takes the copy it touches.
+        let (a, b) = (at([13.0, 0.0]), at([15.0, 5.0]));
+        let got = e.framed(SelectFrame { ends: [a, b], touching: true }, 600.0, size);
+        assert_eq!(got, [Pick::Copy("holes".into(), [2, 0])], "{got:?}");
+        // Nothing where the frame is: no copy.
+        assert!(e.framed(frame(at([20.0, -1.0]), at([24.0, 3.0])), 600.0, size).is_empty());
     }
 
     /// An angle's label stands inside the angle, by the point where its lines meet.

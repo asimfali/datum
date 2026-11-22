@@ -5,7 +5,7 @@
 ## Задача
 
 Копия и зеркало массива (D285) — сделано, ветка `feat/sketch-pattern-copy`. `Pattern::references()` (datum-sketch), `extract` с `Selection {curves, points, groups, patterns}` берёт группы и массивы вместе с тем, чем они являются; `place` ставит свежеименованные группы и массивы, переименовывая `of`/`fill`/`offset.start,end`/`along.path`/`around.center`; `mirrored` вместо отказа берёт массив с собой, отказ — только если ссылка не собственная (проверка по JSON, не по разбору `Sketch`); `check` валидирует группы и ссылки массивов; `SketchEdit::extract` берёт `Pick::Pattern`/`Pick::Copy`; `mirror::plan` расширяет выделение ячейкой массива, делает зеркальную группу и массив (keep) или переадресует `of` на зеркальную ячейку (move, старые кривые и группа удаляются). Тесты: `a_pattern_is_copied_and_pasted`, `a_pattern_is_mirrored_with_the_element`, `a_pattern_is_mirrored`; старый тест «паттерн отказом» переписан под новое поведение. `scripts/check.sh` зелёный. TESTERS.md: рецепт перфорации кластером. D285 записан в журнал решений.
-
+ Доработка: рамка выделения берёт копии массива тем же способом, что клик по значку (`SketchEdit::framed`, `Pick::Copy` через `place.apply`; тест `frames_take_a_patterns_copies`).
 Предыдущая: план библиотечной штамповки 0.5.6 влит ([PR #275](https://github.com/asimfali/datum/pull/275)), план: `status/stamp-component.md`; реализация не начата.
 
 ## Состояние
@@ -20,7 +20,7 @@
 
 ## Следующий шаг
 
-- Собрать Windows-версию для проверки автором (M — зеркало, Ctrl+C/V — копия массива), затем PR.
+- PR #277 открыт; Windows-сборку на `3d84b1f` автор проверил (копия и зеркало работают). Доработка рамки закоммичена следом — пересобрать Windows и обновить PR.
 - Далее: штамповка (`status/stamp-component.md`), развёртка изломов языка.
 
 ## Проверки
