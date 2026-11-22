@@ -255,14 +255,6 @@ impl SketchEdit {
         }
     }
 
-    /// A circle the draft just placed untyped (D286): its diameter's field opens at the click,
-    /// the drawn value in it selected to retype; the app calls this after the patch applies.
-    pub fn ask_sized(&mut self) {
-        if let Some((n, at)) = self.draft.sized.take() {
-            self.edit_label(&crate::sketch::Pick::Curve(n), at);
-        }
-    }
-
     /// Applies the field (Enter): the `edit_sketch` parameters to send, applied here already;
     /// None when there is nothing to send (drawing, which the tool completes, or a conflict, now
     /// offered as a reference dimension).

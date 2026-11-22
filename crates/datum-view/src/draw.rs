@@ -257,7 +257,8 @@ pub struct Draft {
     pub wall: Option<String>,
     pub under: Option<String>,
     /// A circle placed by the last click and not typed: its name and where the click was, to
-    /// open its diameter's field with the value selected (D286).
+    /// open its diameter's field with the value selected (D286). Esc closes the field and ends
+    /// the command, the circle stays; Enter takes the value, typed or as drawn.
     pub sized: Option<(String, [f64; 2])>,
     /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
     /// sizes. Arrow up takes the next larger, down the next smaller; empty: the arrows stand idle.
@@ -2003,7 +2004,8 @@ pub(crate) mod tests {
         e.draft.tool = Tool::Circle;
         assert!(click_at(&mut e, [2.0, 2.0], true).is_none());
         assert!(click_at(&mut e, [5.0, 6.0], true).is_some());
-        e.ask_sized();
+        let (n, at) = e.draft.sized.take().unwrap();
+        e.edit_label(&crate::sketch::Pick::Curve(n), at);
         let f = e.field.as_ref().unwrap();
         assert_eq!(f.entry, crate::dims::Entry::Diameter("c1".into()), "{f:?}");
         assert_eq!(f.text, "10");

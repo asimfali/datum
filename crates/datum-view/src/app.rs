@@ -6514,6 +6514,11 @@ impl Viewer {
         if field_done.1 {
             sk.field = None;
             sk.draft.typed = None;
+            // A circle placed for its diameter's field (D286): Esc takes the size back, the
+            // circle stays as drawn, and the command ends, as Esc always does.
+            if sk.draft.sized.take().is_some() {
+                sk.draft.escape();
+            }
         }
         // The fillet tool's presets by the arrows (D283): up the next larger, down the next
         // smaller, around; the chamfers' presets while Tab has turned it to chamfers.
@@ -6661,8 +6666,11 @@ impl Viewer {
             } else if placing && let Some(patch) = draft.click(sk) {
                 sent.push(Request::Command("edit_sketch", sk.apply(patch)));
                 // A circle placed untyped: its diameter's field opens at the click, the value
-                // selected (D286); Esc keeps it as drawn, digits give the real size.
-                sk.ask_sized();
+                // selected (D286); Esc keeps the circle unsized, digits give the real size. The
+                // draft is taken out of `sk` while the click runs, so it comes from the local one.
+                if let Some((n, at)) = &draft.sized {
+                    sk.edit_label(&crate::sketch::Pick::Curve(n.clone()), *at);
+                }
                 if field_done.0 || typing_field {
                     sk.field = None;
                 }
@@ -6680,6 +6688,7 @@ impl Viewer {
                 && let Some(p) = sk.commit_field()
             {
                 sent.push(Request::Command("edit_sketch", p));
+                draft.sized = None;
             }
             // The dimension the picks made is in (or its field gone): the next pick starts anew.
             if draft.asked.is_some() && sk.field.is_none() {
