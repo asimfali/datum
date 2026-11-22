@@ -259,7 +259,8 @@ pub struct Draft {
     /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
     /// sizes. Arrow up takes the next larger, down the next smaller; empty: the arrows stand idle.
     pub fillet_presets: Vec<f64>,
-    pub chamfer_presets: Vec<f64>,
+    /// D284: a pair, the second size waits for the geometry.
+    pub chamfer_presets: Vec<(f64, Option<f64>)>,
 }
 
 impl Default for Draft {
@@ -1185,25 +1186,14 @@ impl Draft {
                 (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
             };
             painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
-            let presets = if self.chamfer { &self.chamfer_presets } else { &self.fillet_presets };
-            if !presets.is_empty() {
-                let now = self.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v);
+            if self.chamfer && !self.chamfer_presets.is_empty() {
                 let at = screen(spot.at) + egui::vec2(12.0, 30.0);
-                let mut x = 0.0;
-                for r in presets {
-                    let label = if self.chamfer { format!("{}x{}", short(*r), short(*r)) } else { format!("R{}", short(*r)) };
-                    let font = egui::FontId::proportional(if r.total_cmp(&now) == std::cmp::Ordering::Equal { 15.0 } else { 13.0 });
-                    let wide = painter.layout_no_wrap(label.clone(), font.clone(), DRAFT).size().x;
-                    painter.text(at + egui::vec2(x, 0.0), egui::Align2::LEFT_TOP, label, font, DRAFT);
-                    x += wide + 10.0;
-                }
-                painter.text(
-                    at + egui::vec2(x, 0.0),
-                    egui::Align2::LEFT_TOP,
-                    i18n.t("fillet-presets", "Up/Down: a preset"),
-                    egui::FontId::proportional(13.0),
-                    DRAFT,
-                );
+                let now = self.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v);
+                preset_row(painter, at, now, self.chamfer, i18n, self.chamfer_presets.iter().copied());
+            } else if !self.chamfer && !self.fillet_presets.is_empty() {
+                let at = screen(spot.at) + egui::vec2(12.0, 30.0);
+                let now = self.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v);
+                preset_row(painter, at, now, self.chamfer, i18n, self.fillet_presets.iter().copied().map(|r| (r, None)));
             }
         }
         // The offset's size by the cursor, or what to type.
@@ -1451,8 +1441,29 @@ fn foot(pts: &[[f64; 2]], q: [f64; 2]) -> Option<[f64; 2]> {
 }
 
 /// A diameter as typed: six decimals at most.
-fn short(x: f64) -> f64 {
+pub(crate) fn short(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
+}
+
+/// The row of the fillet tool's presets (D283) beside the size hint: a radius `R2`, or a chamfer
+/// `2x2` (D284: the second size shown as it is set, the first one the geometry uses); the one the
+/// size now is, larger; then what steps through them.
+fn preset_row(painter: &egui::Painter, at: egui::Pos2, now: f64, chamfer: bool, i18n: &I18n, entries: impl Iterator<Item = (f64, Option<f64>)>) {
+    let mut x = 0.0;
+    for (a, b) in entries {
+        let label = if chamfer { format!("{}x{}", short(a), short(b.unwrap_or(a))) } else { format!("R{}", short(a)) };
+        let font = egui::FontId::proportional(if a.total_cmp(&now) == std::cmp::Ordering::Equal { 15.0 } else { 13.0 });
+        let wide = painter.layout_no_wrap(label.clone(), font.clone(), DRAFT).size().x;
+        painter.text(at + egui::vec2(x, 0.0), egui::Align2::LEFT_TOP, label, font, DRAFT);
+        x += wide + 10.0;
+    }
+    painter.text(
+        at + egui::vec2(x, 0.0),
+        egui::Align2::LEFT_TOP,
+        i18n.t("fillet-presets", "Up/Down: a preset"),
+        egui::FontId::proportional(13.0),
+        DRAFT,
+    );
 }
 
 /// The preset of `presets` the arrows step to (D283): up the next larger than `now`, around from

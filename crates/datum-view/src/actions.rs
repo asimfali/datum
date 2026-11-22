@@ -49,6 +49,7 @@ pub enum Act {
     Loft,
     Rib,
     ToolTable,
+    FilletPresets,
     Trim,
     MirrorPart,
     Branch,
@@ -112,7 +113,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 61] = [
+pub const ACTIONS: [Action; 62] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -294,6 +295,14 @@ pub const ACTIONS: [Action; 61] = [
         "view.tool_table",
         "Tools",
         "The punch press's tools of the library: diameter, depth, shoulder radius, shortest path",
+        None,
+        Anywhere,
+    ),
+    action(
+        Act::FilletPresets,
+        "view.fillet_presets",
+        "Fillet presets",
+        "The radiuses and the chamfer sizes the sketch's fillet tool offers by the arrows; they are kept in settings.json (D283, D284)",
         None,
         Anywhere,
     ),

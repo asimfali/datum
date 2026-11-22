@@ -931,9 +931,12 @@ struct Viewer {
     settings_problems: Vec<String>,
     /// The table editor's zoom, from `settings.json`.
     table_zoom: f32,
-    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers' sizes.
+    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
+    /// sizes (D284: a pair, the second waits for the geometry).
     fillet_presets: Vec<f64>,
-    chamfer_presets: Vec<f64>,
+    chamfer_presets: Vec<(f64, Option<f64>)>,
+    /// The presets' editor (D284), open or none.
+    fillet_presets_editor: Option<crate::presets::Editor>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -1639,6 +1642,7 @@ impl Viewer {
             table_zoom,
             fillet_presets,
             chamfer_presets,
+            fillet_presets_editor: None,
             shown: 0,
             maximized: false,
             picking: None,
@@ -4552,6 +4556,87 @@ impl Viewer {
             .collect()
     }
 
+    /// The fillet presets' editor in a window of its own (D284): the radiuses and the chamfer
+    /// sizes typed in; OK parses them, applies at once and writes them into `settings.json`.
+    fn presets_window(&mut self, ctx: &egui::Context) {
+        let Some(mut ed) = self.fillet_presets_editor.take() else { return };
+        let (mut close, mut save) = (false, false);
+        let builder =
+            egui::ViewportBuilder::default().with_title(self.i18n.t("presets-title", "Fillet presets").to_string()).with_inner_size([360.0, 420.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fillet_presets"), builder, |ui, _| {
+            close = ui.input(|i| i.viewport().close_requested());
+            egui::CentralPanel::default().show(ui, |ui| {
+                let width = 70.0;
+                ui.heading(self.i18n.t("presets-fillet", "Fillet radiuses"));
+                let mut gone = None;
+                for (i, row) in ed.fillet.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(row).desired_width(width));
+                        if ui.button("\u{2212}").clicked() {
+                            gone = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = gone {
+                    ed.fillet.remove(i);
+                }
+                if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
+                    ed.fillet.push(String::new());
+                }
+                ui.separator();
+                ui.heading(self.i18n.t("presets-chamfer", "Chamfer sizes (the second waits for the geometry)"));
+                let mut gone = None;
+                for (i, (a, b)) in ed.chamfer.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(a).desired_width(width));
+                        ui.label("x");
+                        ui.add(egui::TextEdit::singleline(b).desired_width(width));
+                        if ui.button("\u{2212}").clicked() {
+                            gone = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = gone {
+                    ed.chamfer.remove(i);
+                }
+                if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
+                    ed.chamfer.push((String::new(), String::new()));
+                }
+                if let Some(e) = &ed.error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 40, 40), e.clone());
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(self.i18n.t("ok", "OK")).clicked() {
+                        save = true;
+                    }
+                    if ui.button(self.i18n.t("cancel", "Cancel")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if save {
+            match ed.parse() {
+                Ok((fillet, chamfer)) => match crate::settings::path().map(|p| crate::settings::save_presets(&p, &fillet, &chamfer)) {
+                    None => ed.error = Some(self.i18n.t("presets-no-file", "The settings file is not found").into()),
+                    Some(Err(e)) => ed.error = Some(e),
+                    Some(Ok(())) => {
+                        self.fillet_presets = fillet;
+                        self.chamfer_presets = chamfer;
+                        if let Some(sk) = &mut self.sketch {
+                            sk.draft.fillet_presets = self.fillet_presets.clone();
+                            sk.draft.chamfer_presets = self.chamfer_presets.clone();
+                        }
+                        close = true;
+                    }
+                },
+                Err(e) => ed.error = Some(e),
+            }
+        }
+        self.fillet_presets_editor = (!close).then_some(ed);
+    }
+
     /// The parameters, the materials or the rules of one material in a window of their own
     /// (D178): rebuilt every frame, from the model or from the library read last, the edits sent
     /// as the side bar sends them.
@@ -6440,7 +6525,9 @@ impl Viewer {
                 }
             }
             if let Some(up) = step {
-                let presets = if sk.draft.chamfer { sk.draft.chamfer_presets.clone() } else { sk.draft.fillet_presets.clone() };
+                // D284: a chamfer's pair steps by its first size, the one the geometry uses.
+                let presets: Vec<f64> =
+                    if sk.draft.chamfer { sk.draft.chamfer_presets.iter().map(|(a, _)| *a).collect() } else { sk.draft.fillet_presets.clone() };
                 if let Some(v) = crate::draw::preset_step(&presets, sk.draft.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v), up) {
                     sk.draft.fillet = Some((json!(v), v));
                 }
@@ -7124,6 +7211,9 @@ impl Viewer {
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::ToolTable => self.toggle_table(crate::table::Source::Tools),
+            Act::FilletPresets => {
+                self.fillet_presets_editor = Some(crate::presets::Editor::of(&self.fillet_presets, &self.chamfer_presets));
+            }
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
             Act::RuleTable => self.toggle_table(crate::table::Source::Rules),
             Act::Rename => self.start_rename(),
@@ -7374,6 +7464,7 @@ impl Viewer {
             self.item(ui, Act::MaterialTable, true);
             self.item(ui, Act::RuleTable, true);
             self.item(ui, Act::ToolTable, true);
+            self.item(ui, Act::FilletPresets, true);
             self.item(ui, Act::SmoothEdges, true);
             self.item(ui, Act::Touchpad, true);
             self.item(ui, Act::Perspective, true);
@@ -7762,6 +7853,7 @@ impl Viewer {
         self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
+        self.presets_window(ui.ctx());
         self.settings_said(ui.ctx());
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -7882,7 +7974,8 @@ mod tests {
             settings_problems: Vec::new(),
             table_zoom: 1.0,
             fillet_presets: vec![2.0, 5.0],
-            chamfer_presets: vec![2.0, 4.0],
+            chamfer_presets: vec![(2.0, None), (4.0, None)],
+            fillet_presets_editor: None,
             shown: 0,
             maximized: false,
             picking: None,
@@ -10208,7 +10301,7 @@ mod tests {
         {
             let sk = v.sketch.as_mut().unwrap();
             sk.draft.fillet_presets = vec![2.0, 5.0];
-            sk.draft.chamfer_presets = vec![2.0, 4.0];
+            sk.draft.chamfer_presets = vec![(2.0, None), (4.0, None)];
         }
         let press = |v: &mut Viewer, key: egui::Key| {
             let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
