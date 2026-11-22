@@ -318,7 +318,7 @@ pub(crate) const SNAP_CURVE: f64 = 8.0;
 /// Degrees within which a line is taken as horizontal, vertical, parallel or perpendicular.
 const LEAN_DEG: f64 = 3.0;
 
-const DRAFT: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
+pub(crate) const DRAFT: egui::Color32 = egui::Color32::from_rgb(235, 110, 20);
 /// What the trim tool would take away.
 const GONE: egui::Color32 = egui::Color32::from_rgb(220, 40, 40);
 
@@ -1458,7 +1458,14 @@ pub(crate) fn short(x: f64) -> f64 {
 /// The row of the fillet tool's presets (D283) beside the size hint: a radius `R2`, or a chamfer
 /// `2x2` (D284: the second size shown as it is set, the first one the geometry uses); the one the
 /// size now is, larger; then what steps through them.
-fn preset_row(painter: &egui::Painter, at: egui::Pos2, now: f64, chamfer: bool, i18n: &I18n, entries: impl Iterator<Item = (f64, Option<f64>)>) {
+pub(crate) fn preset_row(
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    now: f64,
+    chamfer: bool,
+    i18n: &I18n,
+    entries: impl Iterator<Item = (f64, Option<f64>)>,
+) {
     let mut x = 0.0;
     for (a, b) in entries {
         let label = if chamfer { format!("{}x{}", short(a), short(b.unwrap_or(a))) } else { format!("R{}", short(a)) };

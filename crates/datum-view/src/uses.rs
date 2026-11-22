@@ -118,10 +118,14 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
         }
     }
     match &node.op {
-        Op::EdgeFinish { edge, .. } => {
+        Op::EdgeFinish { edge, edges, faces, .. } => {
             let body = input(0)?.body()?;
-            if let Some(ends) = u128::from_str_radix(edge, 16).ok().and_then(|id| edge_ends(body, TopoId(id))) {
-                u.lines.push(ends);
+            if let Ok(targets) = datum_ops::edge_finish_targets(body, edge, edges, faces) {
+                for id in targets {
+                    if let Some(ends) = edge_ends(body, id) {
+                        u.lines.push(ends);
+                    }
+                }
             }
         }
         Op::Flange { edges, .. } => {

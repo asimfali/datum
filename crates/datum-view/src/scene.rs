@@ -3,7 +3,7 @@
 //! before rounding to `f32` (D24): a site ten thousand kilometres from the origin draws as
 //! steadily as a bolt.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
@@ -31,6 +31,9 @@ pub struct BodyMesh {
     pub edges: Vec<[Vec3; 2]>,
     /// Straight visible corners between planar faces, with their B-rep IDs for the Edge tool.
     pub(crate) finish_edges: Vec<FinishEdge>,
+    /// The corners of each flat face, as indices into `finish_edges`: a flat end picked by its
+    /// outline.
+    pub(crate) finish_edges_of: BTreeMap<TopoId, Vec<usize>>,
     /// What can become the outline of a sphere or a torus on screen.
     pub contours: Vec<Contour>,
 }
@@ -40,6 +43,8 @@ pub(crate) struct FinishEdge {
     pub id: TopoId,
     pub ends: [Vec3; 2],
     pub normals: [Vec3; 2],
+    /// The two flat faces this corner lies between.
+    pub faces: [TopoId; 2],
 }
 
 /// An edge of the triangles of spheres and tori: drawn only while one of its two triangles faces
@@ -110,7 +115,8 @@ impl BodyMesh {
         // its outline is the foot, where a flat face meets a curved one. Between nearly coplanar
         // faces (a terrain's cells, a split face) or along the seams of a cylinder an edge says
         // nothing either. A display threshold; the model never sees it.
-        let surface = |h: Ix| &body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface;
+        let face = |h: Ix| body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize;
+        let surface = |h: Ix| &body.faces()[face(h)].surface;
         let flat = |s: &Surface| matches!(s, Surface::Plane(_));
         let round = |s: &Surface| matches!(s, Surface::Torus(_));
         for (e, edge) in body.edges().iter().enumerate() {
@@ -121,7 +127,15 @@ impl BodyMesh {
             if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || normals[0].dot(normals[1]) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
                 if flat(a) && flat(b) && body.edge_curve(edge).is_none() {
-                    mesh.finish_edges.push(FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals });
+                    let sides = [face(edge.half), face(body.half_edges()[edge.half as usize].twin)];
+                    let line = FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals, faces: sides.map(|f| body.faces()[f].id) };
+                    let ix = mesh.finish_edges.len();
+                    for (k, s) in [a, b].iter().enumerate() {
+                        if s.plane().is_some() {
+                            mesh.finish_edges_of.entry(line.faces[k]).or_default().push(ix);
+                        }
+                    }
+                    mesh.finish_edges.push(line);
                 }
             }
         }
@@ -442,5 +456,53 @@ impl Geometry {
             })
         });
         Self { triangles, lines, contours }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use datum_brep::cuboid;
+
+    use super::*;
+
+    fn cube() -> Body {
+        cuboid(TopoId::derive("scene-test-cube").finish(), Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap()
+    }
+
+    /// The four corners of the top of a cube, and only flat faces in the map.
+    #[test]
+    fn a_flat_end_lists_its_corners() {
+        let body = cube();
+        let mesh = BodyMesh::new(&body, false);
+        let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal == Vec3::new(0.0, 0.0, 1.0))).unwrap().id;
+        let corners = mesh.finish_edges_of.get(&top).unwrap();
+        assert_eq!(corners.len(), 4, "a cube's top has four corners");
+        for &i in corners {
+            assert!(mesh.finish_edges[i].faces.contains(&top), "the corner must name the face it outlines");
+        }
+        for id in mesh.finish_edges_of.keys() {
+            let face = body.faces().iter().find(|f| f.id == *id).unwrap();
+            assert!(face.surface.plane().is_some(), "only flat ends are listed");
+        }
+    }
+
+    /// A face that is not flat, or not there, has no corners to pick.
+    #[test]
+    fn a_curved_or_absent_face_has_no_corners() {
+        let body = cube();
+        let mesh = BodyMesh::new(&body, false);
+        let absent = TopoId::derive("scene-test-cube").tag("nowhere").finish();
+        assert!(!mesh.finish_edges_of.contains_key(&absent));
+        assert_eq!(mesh.finish_edges_of.len(), 6, "all six faces of the cube are flat and listed");
+    }
+
+    /// The same body meshed twice gives the same map, whatever order the work ran in.
+    #[test]
+    fn two_meshes_of_one_body_agree() {
+        let body = cube();
+        let (a, b) = (BodyMesh::new(&body, false), BodyMesh::new(&body, false));
+        assert_eq!(a.finish_edges_of, b.finish_edges_of);
+        assert_eq!(a.finish_edges.iter().map(|e| e.faces).collect::<Vec<_>>(), b.finish_edges.iter().map(|e| e.faces).collect::<Vec<_>>());
     }
 }

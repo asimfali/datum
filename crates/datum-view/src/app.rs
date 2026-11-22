@@ -970,6 +970,8 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    /// Something under the cursor for the Edge tool: an edge, or a flat cap with its corners.
+    edge_hover: Option<forms::EdgeHover>,
     edge_finish: Option<EdgeFinishForm>,
     /// Properties of the sketch's curves being edited (D276): the F12 editor.
     metadata: Option<MetadataForm>,
@@ -1663,6 +1665,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            edge_hover: None,
             edge_finish: None,
             metadata: None,
             loft: None,
@@ -4082,10 +4085,15 @@ impl Viewer {
         if sketched {
             self.paint_sketch(&painter, rect);
         }
-        if let Some([a, b]) = edge_hover
-            && let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect))
-        {
-            painter.line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgb(235, 110, 20)));
+        if let Some(lines) = edge_hover {
+            for [a, b] in lines {
+                if let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect)) {
+                    painter.line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgb(235, 110, 20)));
+                }
+            }
+        }
+        if let Some(cursor) = r.hover_pos().or(r.interact_pointer_pos()) {
+            self.edge_finish_hints(ui, &painter, cursor);
         }
         if self.loft_is_picking() {
             let project = |point| on_screen(&view_projection, point - anchor, rect);
@@ -7309,7 +7317,7 @@ impl Viewer {
                 let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
                 self.open_rib(at);
             }
-            Act::EdgeFinish => self.open_edge_finish(ui.input(|i| i.pointer.latest_pos())),
+            Act::EdgeFinish => self.open_edge_finish(),
             Act::Trim => {
                 self.leave();
                 if self.trim_body().is_some() {
@@ -7903,7 +7911,7 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
-        self.edge_finish_window(ui.ctx());
+        self.edge_finish_ui(ui.ctx());
         self.metadata_window(ui.ctx());
         self.loft_pick_hint(ui.ctx());
         self.loft_window(ui.ctx());
@@ -8050,6 +8058,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            edge_hover: None,
             edge_finish: None,
             metadata: None,
             loft: None,
