@@ -1,0 +1,105 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "sketch1",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {
+            "points": [
+              "p5",
+              "origin"
+            ],
+            "type": "coincident"
+          },
+          {
+            "line": "l1",
+            "type": "horizontal"
+          },
+          {
+            "line": "l5",
+            "type": "vertical"
+          },
+          {
+            "line": "l6",
+            "type": "horizontal"
+          },
+          {
+            "line": "l3",
+            "type": "vertical"
+          },
+          {
+            "line": "l2",
+            "point": "p5",
+            "type": "midpoint"
+          },
+          {
+            "line": "l4",
+            "point": "p5",
+            "type": "midpoint"
+          }
+        ],
+        "lines": {
+          "l1": {
+            "from": "p1",
+            "to": "p2"
+          },
+          "l2": {
+            "construction": true,
+            "from": "p1",
+            "to": "p3"
+          },
+          "l3": {
+            "from": "p4",
+            "to": "p1"
+          },
+          "l4": {
+            "construction": true,
+            "from": "p2",
+            "to": "p4"
+          },
+          "l5": {
+            "from": "p2",
+            "to": "p3"
+          },
+          "l6": {
+            "from": "p3",
+            "to": "p4"
+          }
+        },
+        "points": {
+          "p1": [
+            5.020080321285141,
+            -4.598393574297189
+          ],
+          "p2": [
+            -5.020080321285141,
+            -4.598393574297189
+          ],
+          "p3": [
+            -5.020080321285141,
+            4.598393574297189
+          ],
+          "p4": [
+            5.020080321285141,
+            4.598393574297189
+          ],
+          "p5": [
+            0.0,
+            0.0
+          ]
+        }
+      }
+    },
+    {
+      "name": "part",
+      "op": "extrude",
+      "inputs": [
+        "sketch1"
+      ],
+      "z0": 0.0,
+      "z1": 8.0
+    }
+  ]
+}

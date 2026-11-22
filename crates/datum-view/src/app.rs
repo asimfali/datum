@@ -931,6 +931,12 @@ struct Viewer {
     settings_problems: Vec<String>,
     /// The table editor's zoom, from `settings.json`.
     table_zoom: f32,
+    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
+    /// sizes (D284: a pair, the second waits for the geometry).
+    fillet_presets: Vec<f64>,
+    chamfer_presets: Vec<(f64, Option<f64>)>,
+    /// The presets' editor (D284), open or none.
+    fillet_presets_editor: Option<crate::presets::Editor>,
     /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
     /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
     /// shows the window.
@@ -1558,7 +1564,8 @@ impl Viewer {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let settings = crate::settings::path();
-        let crate::settings::Settings { keys, language, theme, table_zoom, problems: settings_problems } = crate::settings::load(settings.as_deref());
+        let crate::settings::Settings { keys, language, theme, table_zoom, fillet_presets, chamfer_presets, problems: settings_problems } =
+            crate::settings::load(settings.as_deref());
         for p in &settings_problems {
             crate::log::write(&format!("settings: {p}"));
         }
@@ -1633,6 +1640,9 @@ impl Viewer {
             settings,
             settings_problems,
             table_zoom,
+            fillet_presets,
+            chamfer_presets,
+            fillet_presets_editor: None,
             shown: 0,
             maximized: false,
             picking: None,
@@ -2774,7 +2784,11 @@ impl Viewer {
         let Some(name) = wanted else { return };
         match (&m.editing, feature(&name)) {
             (Some((n, context)), Some(json)) if *n == name => match &mut self.sketch {
-                Some(s) => s.refresh(context.clone(), json, params),
+                Some(s) => {
+                    s.refresh(context.clone(), json, params);
+                    s.draft.fillet_presets = self.fillet_presets.clone();
+                    s.draft.chamfer_presets = self.chamfer_presets.clone();
+                }
                 None => {
                     let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
                     let mut sk = SketchEdit::new(name, context.clone(), json, params, scene);
@@ -2785,6 +2799,8 @@ impl Viewer {
                         self.blank_fitted = false;
                         crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
                     }
+                    sk.draft.fillet_presets = self.fillet_presets.clone();
+                    sk.draft.chamfer_presets = self.chamfer_presets.clone();
                     self.sketch = Some(sk);
                     // Its section under the part's, the library beside the 3D view (D163).
                     self.side_bar.visible = true;
@@ -4538,6 +4554,87 @@ impl Viewer {
                 Some((name.to_string(), crate::origin::square(name, &plane, near)))
             })
             .collect()
+    }
+
+    /// The fillet presets' editor in a window of its own (D284): the radiuses and the chamfer
+    /// sizes typed in; OK parses them, applies at once and writes them into `settings.json`.
+    fn presets_window(&mut self, ctx: &egui::Context) {
+        let Some(mut ed) = self.fillet_presets_editor.take() else { return };
+        let (mut close, mut save) = (false, false);
+        let builder =
+            egui::ViewportBuilder::default().with_title(self.i18n.t("presets-title", "Fillet presets").to_string()).with_inner_size([360.0, 420.0]);
+        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fillet_presets"), builder, |ui, _| {
+            close = ui.input(|i| i.viewport().close_requested());
+            egui::CentralPanel::default().show(ui, |ui| {
+                let width = 70.0;
+                ui.heading(self.i18n.t("presets-fillet", "Fillet radiuses"));
+                let mut gone = None;
+                for (i, row) in ed.fillet.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(row).desired_width(width));
+                        if ui.button("\u{2212}").clicked() {
+                            gone = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = gone {
+                    ed.fillet.remove(i);
+                }
+                if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
+                    ed.fillet.push(String::new());
+                }
+                ui.separator();
+                ui.heading(self.i18n.t("presets-chamfer", "Chamfer sizes (the second waits for the geometry)"));
+                let mut gone = None;
+                for (i, (a, b)) in ed.chamfer.iter_mut().enumerate() {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(a).desired_width(width));
+                        ui.label("x");
+                        ui.add(egui::TextEdit::singleline(b).desired_width(width));
+                        if ui.button("\u{2212}").clicked() {
+                            gone = Some(i);
+                        }
+                    });
+                }
+                if let Some(i) = gone {
+                    ed.chamfer.remove(i);
+                }
+                if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
+                    ed.chamfer.push((String::new(), String::new()));
+                }
+                if let Some(e) = &ed.error {
+                    ui.colored_label(egui::Color32::from_rgb(220, 40, 40), e.clone());
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button(self.i18n.t("ok", "OK")).clicked() {
+                        save = true;
+                    }
+                    if ui.button(self.i18n.t("cancel", "Cancel")).clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if save {
+            match ed.parse() {
+                Ok((fillet, chamfer)) => match crate::settings::path().map(|p| crate::settings::save_presets(&p, &fillet, &chamfer)) {
+                    None => ed.error = Some(self.i18n.t("presets-no-file", "The settings file is not found").into()),
+                    Some(Err(e)) => ed.error = Some(e),
+                    Some(Ok(())) => {
+                        self.fillet_presets = fillet;
+                        self.chamfer_presets = chamfer;
+                        if let Some(sk) = &mut self.sketch {
+                            sk.draft.fillet_presets = self.fillet_presets.clone();
+                            sk.draft.chamfer_presets = self.chamfer_presets.clone();
+                        }
+                        close = true;
+                    }
+                },
+                Err(e) => ed.error = Some(e),
+            }
+        }
+        self.fillet_presets_editor = (!close).then_some(ed);
     }
 
     /// The parameters, the materials or the rules of one material in a window of their own
@@ -6418,6 +6515,24 @@ impl Viewer {
             sk.field = None;
             sk.draft.typed = None;
         }
+        // The fillet tool's presets by the arrows (D283): up the next larger, down the next
+        // smaller, around; the chamfers' presets while Tab has turned it to chamfers.
+        if sk.draft.tool == Tool::Fillet && !typing_field && !typing {
+            let mut step = None;
+            for (key, up) in [(egui::Key::ArrowUp, true), (egui::Key::ArrowDown, false)] {
+                if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                    step = Some(up);
+                }
+            }
+            if let Some(up) = step {
+                // D284: a chamfer's pair steps by its first size, the one the geometry uses.
+                let presets: Vec<f64> =
+                    if sk.draft.chamfer { sk.draft.chamfer_presets.iter().map(|(a, _)| *a).collect() } else { sk.draft.fillet_presets.clone() };
+                if let Some(v) = crate::draw::preset_step(&presets, sk.draft.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v), up) {
+                    sk.draft.fillet = Some((json!(v), v));
+                }
+            }
+        }
         // A digit typed while drawing opens the field with it.
         if !typing_field && !typing && sk.draft.takes_value() {
             let first = ui.input(|i| i.events.iter().find_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }));
@@ -7096,6 +7211,9 @@ impl Viewer {
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::ToolTable => self.toggle_table(crate::table::Source::Tools),
+            Act::FilletPresets => {
+                self.fillet_presets_editor = Some(crate::presets::Editor::of(&self.fillet_presets, &self.chamfer_presets));
+            }
             Act::MaterialTable => self.toggle_table(crate::table::Source::Materials),
             Act::RuleTable => self.toggle_table(crate::table::Source::Rules),
             Act::Rename => self.start_rename(),
@@ -7346,6 +7464,7 @@ impl Viewer {
             self.item(ui, Act::MaterialTable, true);
             self.item(ui, Act::RuleTable, true);
             self.item(ui, Act::ToolTable, true);
+            self.item(ui, Act::FilletPresets, true);
             self.item(ui, Act::SmoothEdges, true);
             self.item(ui, Act::Touchpad, true);
             self.item(ui, Act::Perspective, true);
@@ -7734,6 +7853,7 @@ impl Viewer {
         self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
         self.table_window(ui.ctx());
+        self.presets_window(ui.ctx());
         self.settings_said(ui.ctx());
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
@@ -7853,6 +7973,9 @@ mod tests {
             settings: None,
             settings_problems: Vec::new(),
             table_zoom: 1.0,
+            fillet_presets: vec![2.0, 5.0],
+            chamfer_presets: vec![(2.0, None), (4.0, None)],
+            fillet_presets_editor: None,
             shown: 0,
             maximized: false,
             picking: None,
@@ -10043,6 +10166,73 @@ mod tests {
         assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Select);
     }
 
+    /// A viewer with the model open and its sketch `sketch1` being edited, as `sketching` does.
+    fn model_sketch(name: &str) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer(name);
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(name);
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("sketch1".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("sketch1".into());
+        v.sync_sketch();
+        (v, inbox)
+    }
+
+    /// A rectangle fully defined by construction diagonals (the engineer's usual way) still
+    /// fillets: the diagonals are not of the profile, both the region inside and every corner
+    /// offer a plan (issue: `test15.json` gave no preview and no fillet at all).
+    #[test]
+    fn a_rectangle_held_by_construction_diagonals_still_fillets() {
+        let (mut v, _inbox) = model_sketch("rectangle_construction.json");
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.draft.fillet = Some((json!(2), 2.0));
+            sk.draft.chamfer = false;
+        }
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let follow = |v: &mut Viewer, at: [f64; 2]| {
+            let (x, y) = v.sketch.as_ref().unwrap().camera.offset(at, f64::from(rect.height()));
+            rect.center() + egui::vec2(x as f32, y as f32)
+        };
+        // Inside the region, away from every point, so the region is asked, not a corner.
+        let hover = {
+            let sk = v.sketch.as_ref().unwrap();
+            let pts = &sk.placed.as_ref().unwrap().solved.points;
+            let (o, c) = (pts["origin"], pts["p3"]);
+            follow(&mut v, [0.5 * (o.x + c.x), 0.5 * (o.y + c.y)])
+        };
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(hover);
+        h.run();
+        drop(h);
+        assert!(v.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan inside the region");
+        // And at a corner, where a construction diagonal also ends: still a corner.
+        let hover = {
+            let sk = v.sketch.as_ref().unwrap();
+            let q = sk.placed.as_ref().unwrap().solved.points["p1"];
+            follow(&mut v, [q.x, q.y])
+        };
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(hover);
+        h.run();
+        drop(h);
+        assert!(v.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan at a corner with a construction diagonal");
+    }
+
     /// F takes up the fillet tool, Tab turns it into chamfers and back; with the size 5, a click
     /// on the plate's corner `a` rounds it: an arc and a radius sent, the dimension kept.
     #[test]
@@ -10097,6 +10287,44 @@ mod tests {
         assert!(sk.placed.is_ok(), "{:?}", sk.placed.as_ref().err());
         let kept = sk.json["sketch"]["constraints"].as_array().unwrap();
         assert!(kept.iter().any(|c| c["type"] == "horizontal_distance" && c["points"] == json!(["o", "a"])));
+    }
+
+    /// The fillet tool's presets (D283) by the arrows: up the next larger, down the next smaller,
+    /// the value kept as a typed one would be; Tab turned to chamfers, the chamfers' presets.
+    #[test]
+    fn the_arrows_take_a_preset_of_the_fillet_tool() {
+        let (mut v, _inbox) = sketching();
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.draft.fillet_presets = vec![2.0, 5.0];
+            sk.draft.chamfer_presets = vec![(2.0, None), (4.0, None)];
+        }
+        let press = |v: &mut Viewer, key: egui::Key| {
+            let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            });
+            h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+            h.run();
+            drop(h);
+        };
+        let taken = |v: &Viewer| v.sketch.as_ref().unwrap().draft.fillet.as_ref().map(|(j, s)| (j.as_f64(), *s));
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "no value yet: up the smallest");
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(5.0), 5.0)), "up the next larger");
+        press(&mut v, egui::Key::ArrowDown);
+        assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "down the next smaller");
+        press(&mut v, egui::Key::Tab);
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(4.0), 4.0)), "the chamfers' presets: the size 2 stood, the next larger");
+        press(&mut v, egui::Key::ArrowUp);
+        assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "the chamfers' presets: around from the largest");
     }
 
     /// Constraints by hand: the plate is fully defined and its holes 50 apart, so concentric is

@@ -22,6 +22,7 @@ mod offset;
 mod origin;
 mod pattern;
 mod polygon;
+mod presets;
 pub mod render;
 pub mod scene;
 mod select;

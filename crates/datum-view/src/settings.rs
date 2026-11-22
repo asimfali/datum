@@ -17,12 +17,14 @@
 //! is the panels' colours; not given, the system's. Section `table` holds `zoom`, how large
 //! the table editor draws (1 by default, 1.5 half as large again). What cannot be applied is
 //! said, never dropped silently. Section `metadata_presets` (D277) is read by the presets'
-//! command, not here: it only names sets of properties the metadata editor offers.
+//! command, not here: it only names sets of properties the metadata editor offers. Sections
+//! `fillet_presets` and `chamfer_presets` (D283) are the sizes the fillet tool offers: radiuses,
+//! and chamfer sizes (one size, the same both ways, so `2` is the 2x2 bevel).
 
 use std::path::PathBuf;
 
 use egui::{Key, KeyboardShortcut, Modifiers};
-use serde_json::Value as Json;
+use serde_json::{Value as Json, json};
 
 use crate::actions::{ACTIONS, Keys};
 
@@ -49,12 +51,25 @@ pub struct Settings {
     pub theme: Option<egui::ThemePreference>,
     /// The table editor's zoom.
     pub table_zoom: f32,
+    /// The fillet tool's presets (D283): the radiuses, sorted, without repeats; empty: none.
+    pub fillet_presets: Vec<f64>,
+    /// The chamfers' presets of the same tool (D283): the sizes, sorted, without repeats. A pair
+    /// (D284) holds a second size the geometry does not use yet: the first one works.
+    pub chamfer_presets: Vec<(f64, Option<f64>)>,
     pub problems: Vec<String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { keys: Keys::default(), language: None, theme: None, table_zoom: 1.0, problems: Vec::new() }
+        Self {
+            keys: Keys::default(),
+            language: None,
+            theme: None,
+            table_zoom: 1.0,
+            fillet_presets: vec![2.0, 5.0],
+            chamfer_presets: vec![(2.0, None), (4.0, None)],
+            problems: Vec::new(),
+        }
     }
 }
 
@@ -75,7 +90,7 @@ fn parse(text: &str) -> Settings {
     };
     settings.problems = sections
         .keys()
-        .filter(|k| !["keys", "language", "theme", "table", "metadata_presets"].contains(&k.as_str()))
+        .filter(|k| !["keys", "language", "theme", "table", "metadata_presets", "fillet_presets", "chamfer_presets"].contains(&k.as_str()))
         .map(|k| format!("`{k}`: no such section"))
         .collect();
     match sections.get("language").map(|l| l.as_str().filter(|c| crate::i18n::known(c))) {
@@ -93,6 +108,45 @@ fn parse(text: &str) -> Settings {
         Some(Some(zoom)) => settings.table_zoom = zoom as f32,
         Some(None) => settings.problems.push("`table`: `zoom` from 0.5 to 4 (1 stands)".into()),
     }
+    // The fillet tool's presets (D283): positive numbers; what is not one is said, what is, stays.
+    // A chamfer's entry (D284) is a number, or a pair of two (the second waits for the geometry).
+    match sections.get("fillet_presets") {
+        None | Some(Json::Null) => {}
+        Some(Json::Array(v)) => {
+            settings.fillet_presets.clear();
+            for (i, size) in v.iter().enumerate() {
+                match size.as_f64().filter(|r| r.is_finite() && *r > 0.0) {
+                    Some(r) => settings.fillet_presets.push(r),
+                    None => settings.problems.push(format!("`fillet_presets`: positive numbers (the {i}th is not; it stands not)")),
+                }
+            }
+            settings.fillet_presets.sort_by(f64::total_cmp);
+            settings.fillet_presets.dedup();
+        }
+        Some(_) => settings.problems.push("`fillet_presets`: a list of numbers (the defaults stand)".into()),
+    }
+    match sections.get("chamfer_presets") {
+        None | Some(Json::Null) => {}
+        Some(Json::Array(v)) => {
+            settings.chamfer_presets.clear();
+            for (i, size) in v.iter().enumerate() {
+                match chamfer_size(size) {
+                    Some(s) => settings.chamfer_presets.push(s),
+                    None => settings.problems.push(format!("`chamfer_presets`: a number or a pair of two (the {i}th is not; it stands not)")),
+                }
+            }
+            settings.chamfer_presets.sort_by(|a, b| {
+                a.0.total_cmp(&b.0).then_with(|| match (a.1, b.1) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Less,
+                    (Some(_), None) => std::cmp::Ordering::Greater,
+                    (Some(x), Some(y)) => x.total_cmp(&y),
+                })
+            });
+            settings.chamfer_presets.dedup_by(|a, b| a.0.total_cmp(&b.0) == std::cmp::Ordering::Equal && a.1 == b.1);
+        }
+        Some(_) => settings.problems.push("`chamfer_presets`: a list of numbers or pairs (the defaults stand)".into()),
+    }
     let entries = match sections.get("keys") {
         None => &Vec::new(),
         Some(Json::Array(e)) => e,
@@ -107,6 +161,49 @@ fn parse(text: &str) -> Settings {
         }
     }
     settings
+}
+
+/// A chamfer preset's entry (D284): a number, or a pair `[first, second]` of positive numbers.
+fn chamfer_size(size: &Json) -> Option<(f64, Option<f64>)> {
+    let one = |v: &Json| v.as_f64().filter(|r| r.is_finite() && *r > 0.0);
+    if let Some([x, y]) = size.as_array().map(|a| a.as_slice()) {
+        return Some((one(x)?, Some(one(y)?)));
+    }
+    Some((one(size)?, None))
+}
+
+/// Writes the fillet tool's presets (D284) into the settings at `path`: the file read, the two
+/// sections set, the rest kept as it is; the file made when there is none. What could not be read
+/// or written is said, the file stands.
+pub fn save_presets(path: &std::path::Path, fillet: &[f64], chamfer: &[(f64, Option<f64>)]) -> Result<(), String> {
+    let mut json: Json = match std::fs::read_to_string(path).map(|t| serde_json::from_str(&t)) {
+        Ok(Ok(json)) => json,
+        Ok(Err(e)) => return Err(format!("the file is not read, nothing written: {e}")),
+        Err(_) => serde_json::json!({}),
+    };
+    let Some(object) = json.as_object_mut() else {
+        return Err("the file is not a JSON object, nothing written".into());
+    };
+    object.insert("fillet_presets".into(), Json::Array(fillet.iter().map(|r| json!(short_save(*r))).collect()));
+    object.insert(
+        "chamfer_presets".into(),
+        Json::Array(
+            chamfer
+                .iter()
+                .map(|(a, b)| match b {
+                    None => json!(short_save(*a)),
+                    Some(b) => json!([short_save(*a), short_save(*b)]),
+                })
+                .collect(),
+        ),
+    );
+    let text = format!("{}\n", serde_json::to_string_pretty(&json).unwrap_or_default());
+    std::fs::write(path, text).map_err(|e| format!("not written: {e}"))
+}
+
+/// Rounds to the 6th decimal, as the sketch's numbers are kept.
+fn short_save(x: f64) -> f64 {
+    (x * 1e6).round() / 1e6
 }
 
 /// Applies one entry of `keys`; an action losing its key to it is said in `problems`.
@@ -246,6 +343,60 @@ mod tests {
         let Settings { table_zoom, problems, .. } = parse(&json!({"table": {"zoom": 10}}).to_string());
         assert_eq!(table_zoom, 1.0);
         assert!(problems.join("\n").contains("`table`: `zoom` from 0.5 to 4"), "{problems:?}");
+    }
+
+    /// The fillet tool's presets (D283): radiuses and chamfer sizes, positive numbers; sorted and
+    /// without repeats; an empty list stands for none; what is wrong is said, what is right stays.
+    #[test]
+    fn the_fillet_tool_has_its_presets() {
+        let Settings { fillet_presets, chamfer_presets, .. } = parse("{}");
+        assert_eq!(fillet_presets, [2.0, 5.0], "the defaults");
+        assert_eq!(chamfer_presets, [(2.0, None), (4.0, None)], "the defaults");
+        let s = parse(&json!({"fillet_presets": [5, 2, 5, 3], "chamfer_presets": []}).to_string());
+        assert_eq!(s.fillet_presets, [2.0, 3.0, 5.0], "sorted, without repeats");
+        assert!(s.chamfer_presets.is_empty(), "an empty list is none");
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        let s = parse(&json!({"chamfer_presets": [2, [2, 4], 3, 5, 2]}).to_string());
+        assert_eq!(s.chamfer_presets, [(2.0, None), (2.0, Some(4.0)), (3.0, None), (5.0, None)], "pairs and numbers, sorted");
+        assert!(s.problems.is_empty(), "{:?}", s.problems);
+        let Settings { fillet_presets, problems, .. } = parse(&json!({"fillet_presets": [2, "big", -1, 0]}).to_string());
+        assert_eq!(fillet_presets, [2.0], "the one that stands, stands");
+        let said = problems.join("\n");
+        assert!(said.contains("`fillet_presets`: positive numbers"), "{problems:?}");
+        let Settings { fillet_presets, problems, .. } = parse(&json!({"fillet_presets": 2}).to_string());
+        assert_eq!(fillet_presets, [2.0, 5.0], "not a list: the defaults stand");
+        assert!(problems.join("\n").contains("`fillet_presets`: a list of numbers"), "{problems:?}");
+        let Settings { chamfer_presets, problems, .. } = parse(&json!({"chamfer_presets": [[2, 0], [1, 2, 3]]}).to_string());
+        assert!(chamfer_presets.is_empty(), "wrong entries stand not (an empty list stands)");
+        let said = problems.join("\n");
+        assert!(said.contains("`chamfer_presets`: a number or a pair"), "{problems:?}");
+    }
+
+    /// The editor's save (D284): the two sections set into the file, the rest kept; a broken file
+    /// is said, nothing written; no file, one made.
+    #[test]
+    fn the_presets_are_saved_into_the_settings() {
+        let dir = std::env::temp_dir().join(format!("datum-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        // No file: one is made with the two sections.
+        crate::settings::save_presets(&path, &[2.0, 5.0], &[(2.0, None), (2.0, Some(4.0))]).unwrap();
+        let said = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(parse(&said).fillet_presets, [2.0, 5.0]);
+        assert_eq!(parse(&said).chamfer_presets, [(2.0, None), (2.0, Some(4.0))]);
+        // A section of the engineer's stays, the presets change.
+        std::fs::write(&path, r#"{"language": "ru", "fillet_presets": [3]}"#).unwrap();
+        crate::settings::save_presets(&path, &[2.0], &[(4.0, None)]).unwrap();
+        let s = parse(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(s.language.as_deref(), Some("ru"), "the rest kept");
+        assert_eq!(s.fillet_presets, [2.0]);
+        assert_eq!(s.chamfer_presets, [(4.0, None)]);
+        // A broken file: nothing written, said.
+        std::fs::write(&path, "not json").unwrap();
+        let err = crate::settings::save_presets(&path, &[2.0], &[]).unwrap_err();
+        assert!(err.contains("not read"), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "not json", "the file stands");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
