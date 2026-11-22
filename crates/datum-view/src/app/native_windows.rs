@@ -63,7 +63,7 @@ impl NativeWindows {
                 .or_else(|| ctx.input(|i| i.viewport().monitor_size))
                 .unwrap_or(egui::vec2(1280.0, 800.0));
             let limit = egui::vec2(monitor_size.x * 0.9, monitor_size.y * 0.8);
-            let preferred = if valid_size(preferred_size) { preferred_size } else { egui::vec2(800.0, 400.0) };
+            let preferred = sane_size(preferred_size);
             let initial_size = preferred.min(limit);
             let entry = windows
                 .entry(key.into())
@@ -185,8 +185,7 @@ impl WindowGeometry {
     }
 
     fn placement(&self, monitors: &[Monitor], default_size: egui::Vec2) -> Placement {
-        let fallback = if valid_size(default_size) { default_size } else { egui::vec2(800.0, 400.0) };
-        let size = self.size.map(|s| egui::vec2(s[0], s[1])).filter(|s| valid_size(*s)).unwrap_or(fallback);
+        let size = self.size.map(|s| egui::vec2(s[0], s[1])).filter(|s| valid_size(*s)).unwrap_or(sane_size(default_size));
         let point = self.monitor.map(|p| egui::pos2(p[0], p[1])).filter(|p| finite_pos(*p));
         let valid = |m: &&Monitor| valid_rect(m.bounds) && m.pixels_per_point.is_finite() && m.pixels_per_point > 0.0;
         let mut available = monitors.iter().filter(valid);
@@ -213,6 +212,12 @@ impl WindowGeometry {
 
 fn finite_pos(p: egui::Pos2) -> bool {
     p.x.is_finite() && p.y.is_finite()
+}
+
+/// A size that is finite and positive, else the one a detached window starts with: the sane
+/// default lives in one place (D293).
+fn sane_size(s: egui::Vec2) -> egui::Vec2 {
+    if valid_size(s) { s } else { egui::vec2(800.0, 400.0) }
 }
 
 fn valid_size(s: egui::Vec2) -> bool {

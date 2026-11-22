@@ -13,7 +13,7 @@ use serde_json::{Value as Json, json};
 use crate::actions::Act;
 use crate::app::{Request, Viewer, definition, in_rect, sphere};
 use crate::dims::value_of;
-use crate::draw::DRAFT;
+use crate::scene::Scene;
 
 /// What one set holds: single corners, or whole flat caps by themselves.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -132,7 +132,7 @@ pub(in crate::app) struct EdgeFinishForm {
 }
 
 fn parse_id(value: &str) -> Option<TopoId> {
-    u128::from_str_radix(value, 16).ok().map(TopoId)
+    TopoId::parse(value)
 }
 
 impl EdgeFinishForm {
@@ -196,9 +196,15 @@ impl Viewer {
 
     /// The hover and, on a click, the click itself: the lines to light, or none.
     pub(in crate::app) fn edge_finish_picker(&mut self, rect: egui::Rect, response: &egui::Response) -> Option<Vec<[Vec3; 2]>> {
-        let cursor = response.hover_pos().or(response.interact_pointer_pos())?;
-        let hover = self.edge_finish_at(rect, cursor);
+        let cursor = response.hover_pos().or(response.interact_pointer_pos());
+        let hover = cursor.and_then(|c| self.edge_finish_at(rect, c));
         let lines = hover.as_ref().map(EdgeHover::lines);
+        // The cursor left the view: the stale hover would keep the preview of a target that is
+        // no longer under the pointer (a size typed over a side panel would still show it).
+        if hover.is_none() {
+            self.edge_hover = None;
+            return lines;
+        }
         self.edge_hover = hover;
         if response.clicked() {
             self.edge_finish_click();
@@ -210,8 +216,14 @@ impl Viewer {
     /// take the last member's feature away, or make a new set. Nothing without a size typed.
     fn edge_finish_click(&mut self) {
         let Some(hover) = self.edge_hover.clone() else { return };
-        // The edited set: a click toggles the target in it, the preview follows.
+        // The edited set: a click toggles the target in it, the preview follows. A target of
+        // another body or kind does not belong to the set: the window edits one set only.
         if let Some(edit) = self.edge_finish.as_mut().and_then(|f| f.edit.as_mut()) {
+            let body = self.model.as_ref().and_then(|m| m.bodies.get(hover.body())).cloned();
+            let same = body.as_deref() == Some(edit.set.body.as_str()) && edit.set.kind == hover.kind();
+            if !same {
+                return;
+            }
             if let Some(k) = edit.set.targets.iter().position(|&t| t == hover.id()) {
                 edit.set.targets.remove(k);
             } else {
@@ -306,9 +318,6 @@ impl Viewer {
         if self.edge_finish.is_none() {
             return;
         }
-        if let Some(edit) = self.edge_finish.as_mut().and_then(|f| f.edit.as_mut()) {
-            edit.set.size = value_of(&edit.text);
-        }
         let params = self.hover_params();
         let sent = self.edge_finish.as_ref().and_then(|f| f.sent.clone());
         if params != sent {
@@ -331,6 +340,9 @@ impl Viewer {
         let (anchor, radius) = sphere(&m.scene);
         let aspect = f64::from(half.x / half.y);
         let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+        // The bodies without a standing preview: the previewed one has the hovered corner
+        // rounded, and picking it would drop the hover and flicker.
+        let base = self.edge_base.as_ref().unwrap_or(&m.scene.bodies);
         let near = |edge: &crate::scene::FinishEdge| {
             let clips = edge.ends.map(|p| crate::camera::clip(&vp, p - anchor));
             if clips.iter().any(|p| p[3] <= 0.0) {
@@ -360,14 +372,12 @@ impl Viewer {
             let depth = (p - origin).dot(direction);
             // The screen projection rounded its matrix to f32.
             let rounding = 32.0 * f64::from(f32::EPSILON) * radius.max(depth);
-            if m.scene.pick(origin, direction).is_some_and(|hit| hit.distance + rounding < depth) {
+            if Scene::pick_in(base, origin, direction).is_some_and(|hit| hit.distance + rounding < depth) {
                 return None;
             }
             Some((distance, depth))
         };
-        let edge = m
-            .scene
-            .bodies
+        let edge = base
             .iter()
             .enumerate()
             .flat_map(|(body, mesh)| mesh.finish_edges.iter().filter_map(move |&edge| Some((body, edge, near(&edge)?))))
@@ -377,8 +387,8 @@ impl Viewer {
         }
         let at = cursor - rect.center();
         let (origin, direction) = self.camera.ray(f64::from(at.x / half.x), f64::from(-at.y / half.y), aspect, anchor, radius);
-        let hit = m.scene.pick(origin, direction)?;
-        let mesh = m.scene.bodies.get(hit.body)?;
+        let hit = Scene::pick_in(base, origin, direction)?;
+        let mesh = base.get(hit.body)?;
         let corners = mesh.finish_edges_of.get(&hit.face)?;
         Some(EdgeHover::Face { body: hit.body, id: hit.face, edges: corners.iter().map(|&i| mesh.finish_edges[i].ends).collect() })
     }
@@ -476,6 +486,11 @@ impl Viewer {
     /// The window that edits a finished set from the tree: its corners or caps, the size and
     /// the mode, and clicks on the part to take targets in or out.
     fn edge_finish_edit_window(&mut self, ctx: &egui::Context) {
+        // The size follows its text at once, before `before` is taken: a Enter of the same frame
+        // must not stand a size the field has already replaced (D296).
+        if let Some(edit) = self.edge_finish.as_mut().and_then(|f| f.edit.as_mut()) {
+            edit.set.size = value_of(&edit.text);
+        }
         let before = self.edge_finish.as_ref().and_then(|f| f.edit.as_ref()).map(|e| e.set.edit_all_params());
         let preview = before.as_ref().and_then(|p| self.model.as_ref()?.preview.as_ref().filter(|(q, _)| q == p).map(|(_, r)| r));
         let ready = preview.is_some_and(Result::is_ok);
@@ -573,26 +588,7 @@ impl Viewer {
         if f.edit.is_some() || f.field.is_some() {
             return;
         }
-        let text = match (f.size.as_ref().map(|(_, v)| *v), f.chamfer) {
-            (Some(v), false) => self.i18n.f("fillet-radius", "Fillet R{ $v } (Tab: chamfer)", &[("v", &crate::draw::short(v).to_string())]),
-            (Some(v), true) => self.i18n.f("fillet-chamfer", "Chamfer { $v } (Tab: fillet)", &[("v", &crate::draw::short(v).to_string())]),
-            (None, false) => self.i18n.t("fillet-type-radius", "Type the radius").into(),
-            (None, true) => self.i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
-        };
-        painter.text(cursor + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
-        let now = f.size.as_ref().map_or(f64::NAN, |(_, v)| *v);
-        if f.chamfer && !self.chamfer_presets.is_empty() {
-            crate::draw::preset_row(painter, cursor + egui::vec2(12.0, 30.0), now, true, &self.i18n, self.chamfer_presets.iter().copied());
-        } else if !f.chamfer && !self.fillet_presets.is_empty() {
-            crate::draw::preset_row(
-                painter,
-                cursor + egui::vec2(12.0, 30.0),
-                now,
-                false,
-                &self.i18n,
-                self.fillet_presets.iter().copied().map(|r| (r, None)),
-            );
-        }
+        crate::draw::size_hint(&self.i18n, painter, cursor, f.size.as_ref().map(|(_, v)| *v), f.chamfer, &self.chamfer_presets, &self.fillet_presets);
         if let Some(why) = self.model.as_ref().and_then(|m| m.preview.as_ref()).and_then(|(_, r)| r.as_ref().err()) {
             painter.text(cursor + egui::vec2(12.0, 48.0), egui::Align2::LEFT_TOP, why, egui::FontId::proportional(13.0), ui.visuals().error_fg_color);
         }
@@ -682,6 +678,36 @@ mod tests {
         hovering(&mut v, other, [10.0, 10.0, 0.0]);
         v.edge_finish_click();
         assert!(inbox.try_recv().is_err(), "no command without a standing preview");
+    }
+
+    /// The Edge tool picks the model without a standing preview: the previewed body has the
+    /// hovered corner rounded already, so picking it would drop the hover and flicker.
+    #[test]
+    fn the_edge_tool_picks_the_model_without_a_preview() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        let corners = [Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)];
+        let body = datum_brep::prism(TopoId::derive("test-box").finish(), &corners, 0.0, 10.0).unwrap();
+        let base = BodyMesh::new(&body, false);
+        let edge = base.finish_edges.iter().find(|e| e.ends.iter().all(|p| p.x == 10.0 && p.y == 0.0)).unwrap().id;
+        // The displayed scene is the previewed one: the corner is rounded, its edge is gone.
+        let mut shown = BodyMesh::new(&body, false);
+        shown.finish_edges.clear();
+        shown.finish_edges_of.clear();
+        let m = v.model.as_mut().unwrap();
+        m.scene.bodies = vec![Arc::new(shown)];
+        m.scene.bounds = Some((Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)));
+        m.bodies = vec!["box".into()];
+        v.viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
+        v.camera.fit(m.scene.bounds, 1.5);
+        let cursor = {
+            let (anchor, radius) = sphere(&m.scene);
+            let aspect = 300.0 / 200.0;
+            let (vp, _) = v.camera.matrices(anchor, aspect, radius);
+            in_rect(crate::camera::clip(&vp, Vec3::new(10.0, 0.0, 5.0) - anchor), v.viewport)
+        };
+        assert!(v.edge_finish_at(v.viewport, cursor).is_none(), "the previewed body has no corner edge to pick");
+        v.edge_base = Some(vec![Arc::new(base)]);
+        assert_eq!(v.edge_finish_at(v.viewport, cursor).unwrap().id(), edge, "the base body still has it");
     }
 
     #[test]

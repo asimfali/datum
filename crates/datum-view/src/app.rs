@@ -22,7 +22,7 @@ use crate::dims::{Axis, Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
 use crate::icons::Icon;
 use crate::render::{BACKGROUND, Frame, Renderer};
-use crate::scene::{Geometry, MeshCache, Scene};
+use crate::scene::{BodyMesh, Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
@@ -970,6 +970,9 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    /// The bodies of the model without a standing preview, for the Edge tool's picking: the
+    /// previewed body no longer has the hovered corner, so picking it would flicker (D296).
+    edge_base: Option<Vec<Arc<BodyMesh>>>,
     /// Something under the cursor for the Edge tool: an edge, or a flat cap with its corners.
     edge_hover: Option<forms::EdgeHover>,
     edge_finish: Option<EdgeFinishForm>,
@@ -1665,6 +1668,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            edge_base: None,
             edge_hover: None,
             edge_finish: None,
             metadata: None,
@@ -3042,6 +3046,13 @@ impl Viewer {
             if self.part.as_ref().is_some_and(|p| !m.inspect["parts"].as_array().into_iter().flatten().any(|r| r["part"] == *p)) {
                 self.part = None;
             }
+            // The Edge tool picks against the model without a preview: the previewed body has
+            // the hovered corner already rounded, and picking it would flicker (D296).
+            if m.closed {
+                self.edge_base = None;
+            } else if m.preview.is_none() {
+                self.edge_base = Some(m.scene.bodies.clone());
+            }
             self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
         }
@@ -4088,7 +4099,7 @@ impl Viewer {
         if let Some(lines) = edge_hover {
             for [a, b] in lines {
                 if let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect)) {
-                    painter.line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgb(235, 110, 20)));
+                    painter.line_segment([a, b], egui::Stroke::new(3.0, crate::draw::DRAFT));
                 }
             }
         }
@@ -8058,6 +8069,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            edge_base: None,
             edge_hover: None,
             edge_finish: None,
             metadata: None,

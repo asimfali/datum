@@ -16,7 +16,7 @@ pub enum EdgeMode {
 }
 
 /// Replace a corner by tangent points on its incoming and outgoing segments.
-pub fn corner(vertex: Vec2, neighbors: [Vec2; 2], size: f64, mode: EdgeMode) -> Result<([Vec2; 2], Option<ProfileArc>), BrepError> {
+pub(crate) fn corner(vertex: Vec2, neighbors: [Vec2; 2], size: f64, mode: EdgeMode) -> Result<([Vec2; 2], Option<ProfileArc>), BrepError> {
     let bad = || BrepError::Degenerate("edge finish: invalid corner or size does not fit".into());
     if !size.is_finite() || size <= 0.0 || !vertex.x.is_finite() || !vertex.y.is_finite() {
         return Err(bad());
@@ -319,16 +319,13 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
         }
         result.push(selected.id);
     }
-    if result.is_empty() {
-        return Err(bad());
-    }
     Ok(result)
 }
 
 /// The corner edges an `EdgeFinish` selection targets: the single `edge`, the `edges` set,
 /// or every corner of each planar cap in `faces`. Exactly one of the three must be given.
 pub fn edge_finish_targets(body: &Body, edge: &str, edges: &[String], faces: &[String]) -> Result<Vec<TopoId>, BrepError> {
-    let id = |value: &str| u128::from_str_radix(value, 16).map(TopoId).map_err(|_| BrepError::Invalid(format!("`{value}` is not a topology ID")));
+    let id = |value: &str| TopoId::parse(value).ok_or_else(|| BrepError::Invalid(format!("`{value}` is not a topology ID")));
     match (edge.is_empty(), edges.is_empty(), faces.is_empty()) {
         (false, true, true) => Ok(vec![id(edge)?]),
         (true, false, true) => edges.iter().map(|edge| id(edge)).collect(),

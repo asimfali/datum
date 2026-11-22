@@ -248,8 +248,14 @@ impl Scene {
     /// passes through, by Möller–Trumbore, how far along the ray, and the triangle's normal
     /// turned to the eye. A pick on the screen, not a geometric decision.
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
+        Self::pick_in(&self.bodies, origin, dir)
+    }
+
+    /// The same pick over `bodies` of one's choosing: the Edge tool picks the model without a
+    /// standing preview, whose body has the hovered corner still sharp (D296).
+    pub fn pick_in(bodies: &[Arc<BodyMesh>], origin: Vec3, dir: Vec3) -> Option<Hit> {
         let mut best: Option<Hit> = None;
-        for (b, m) in self.bodies.iter().enumerate() {
+        for (b, m) in bodies.iter().enumerate() {
             for (t, &face) in m.triangles.iter().zip(&m.faces) {
                 let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
                 let p = dir.cross(e2);

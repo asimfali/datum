@@ -15,6 +15,11 @@ impl TopoId {
     pub fn derive(tag: &str) -> Origin {
         Origin(SmallVec::new()).tag(tag)
     }
+
+    /// The ID its `Debug` hex names: the inverse of the format, for references stored as text.
+    pub fn parse(hex: &str) -> Option<Self> {
+        u128::from_str_radix(hex, 16).ok().map(Self)
+    }
 }
 
 impl fmt::Debug for TopoId {

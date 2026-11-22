@@ -1189,22 +1189,15 @@ impl Draft {
         // The fillet's radius or the chamfer's size by the cursor, or what to type; the tool's
         // presets (D283) beside, the one the size now is, larger.
         if self.tool == Tool::Fillet && edit.field.is_none() {
-            let text = match (&self.fillet, self.chamfer) {
-                (Some((_, v)), false) => i18n.f("fillet-radius", "Fillet R{ $v } (Tab: chamfer)", &[("v", &short(*v).to_string())]),
-                (Some((_, v)), true) => i18n.f("fillet-chamfer", "Chamfer { $v } (Tab: fillet)", &[("v", &short(*v).to_string())]),
-                (None, false) => i18n.t("fillet-type-radius", "Type the radius").into(),
-                (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
-            };
-            painter.text(screen(spot.at) + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
-            if self.chamfer && !self.chamfer_presets.is_empty() {
-                let at = screen(spot.at) + egui::vec2(12.0, 30.0);
-                let now = self.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v);
-                preset_row(painter, at, now, self.chamfer, i18n, self.chamfer_presets.iter().copied());
-            } else if !self.chamfer && !self.fillet_presets.is_empty() {
-                let at = screen(spot.at) + egui::vec2(12.0, 30.0);
-                let now = self.fillet.as_ref().map_or(f64::NAN, |(_, v)| *v);
-                preset_row(painter, at, now, self.chamfer, i18n, self.fillet_presets.iter().copied().map(|r| (r, None)));
-            }
+            crate::draw::size_hint(
+                i18n,
+                painter,
+                screen(spot.at),
+                self.fillet.as_ref().map(|(_, v)| *v),
+                self.chamfer,
+                &self.chamfer_presets,
+                &self.fillet_presets,
+            );
         }
         // The offset's size by the cursor, or what to type.
         if self.tool == Tool::Offset && edit.field.is_none() {
@@ -1453,6 +1446,33 @@ fn foot(pts: &[[f64; 2]], q: [f64; 2]) -> Option<[f64; 2]> {
 /// A diameter as typed: six decimals at most.
 pub(crate) fn short(x: f64) -> f64 {
     (x * 1e6).round() / 1e6
+}
+
+/// The hint by the cursor and the tool's presets beside it: the one look for the sketch's
+/// fillet (D283) and the Edge tool (D296), so the two cannot drift apart. The `at` is where
+/// the pointer is; the `size` now standing, `chamfer` — the mode.
+pub(crate) fn size_hint(
+    i18n: &I18n,
+    painter: &egui::Painter,
+    at: egui::Pos2,
+    size: Option<f64>,
+    chamfer: bool,
+    chamfer_presets: &[(f64, Option<f64>)],
+    fillet_presets: &[f64],
+) {
+    let text = match (size, chamfer) {
+        (Some(v), false) => i18n.f("fillet-radius", "Fillet R{ $v } (Tab: chamfer)", &[("v", &short(v).to_string())]),
+        (Some(v), true) => i18n.f("fillet-chamfer", "Chamfer { $v } (Tab: fillet)", &[("v", &short(v).to_string())]),
+        (None, false) => i18n.t("fillet-type-radius", "Type the radius").into(),
+        (None, true) => i18n.t("fillet-type-chamfer", "Type the chamfer's size").into(),
+    };
+    painter.text(at + egui::vec2(12.0, 12.0), egui::Align2::LEFT_TOP, text, egui::FontId::proportional(13.0), DRAFT);
+    let now = size.unwrap_or(f64::NAN);
+    if chamfer && !chamfer_presets.is_empty() {
+        preset_row(painter, at + egui::vec2(12.0, 30.0), now, true, i18n, chamfer_presets.iter().copied());
+    } else if !chamfer && !fillet_presets.is_empty() {
+        preset_row(painter, at + egui::vec2(12.0, 30.0), now, false, i18n, fillet_presets.iter().copied().map(|r| (r, None)));
+    }
 }
 
 /// The row of the fillet tool's presets (D283) beside the size hint: a radius `R2`, or a chamfer
