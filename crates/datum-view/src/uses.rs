@@ -118,10 +118,14 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
         }
     }
     match &node.op {
-        Op::EdgeFinish { edge, .. } => {
+        Op::EdgeFinish { edge, edges, face, faces, exclude_edges, .. } => {
             let body = input(0)?.body()?;
-            if let Some(ends) = u128::from_str_radix(edge, 16).ok().and_then(|id| edge_ends(body, TopoId(id))) {
-                u.lines.push(ends);
+            if let Ok(targets) = datum_ops::edge_finish_targets(body, edge, edges, face, faces, exclude_edges) {
+                for id in targets {
+                    if let Some(ends) = edge_ends(body, id) {
+                        u.lines.push(ends);
+                    }
+                }
             }
         }
         Op::Flange { edges, .. } => {
@@ -130,7 +134,7 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
             if node.inputs.first().is_some_and(|&i| sheet_metal(graph, i as usize)) {
                 u.contours = datum_ops::flange_loops(b);
             }
-            u.used_edges = edges.iter().filter_map(|e| u128::from_str_radix(e, 16).ok().map(TopoId)).collect();
+            u.used_edges = edges.iter().filter_map(|e| TopoId::parse(e)).collect();
             for &id in &u.used_edges {
                 if !u.edges.iter().any(|e| e.1 == id)
                     && let Some(ends) = edge_ends(b, id)

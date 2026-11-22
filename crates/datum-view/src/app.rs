@@ -4,6 +4,7 @@
 //! picture, drawn again only when the camera, the model or the view's size changes.
 
 mod forms;
+mod native_windows;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -21,11 +22,12 @@ use crate::dims::{Axis, Entry, Field, Pick2, value_of};
 use crate::draw::Tool;
 use crate::icons::Icon;
 use crate::render::{BACKGROUND, Frame, Renderer};
-use crate::scene::{Geometry, MeshCache, Scene};
+use crate::scene::{BodyMesh, Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
 use forms::{EdgeFinishForm, LoftForm, MetadataForm, RibForm};
+use native_windows::NativeWindows;
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -53,6 +55,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             let kept = |key| cc.storage.and_then(|s| s.get_string(key)).unwrap_or_default();
             let mut viewer = Viewer::new(path, cc.egui_ctx.clone(), adapter);
             viewer.maximized = maximized;
+            viewer.native_windows = NativeWindows::load(cc.storage);
             viewer.recent = serde_json::from_str(&kept(RECENT)).unwrap_or_default();
             viewer.recent_projects = serde_json::from_str(&kept(RECENT_PROJECTS)).unwrap_or_default();
             if let Some(layout) = cc.storage.and_then(|s| s.get_string(LAYOUT)) {
@@ -139,6 +142,8 @@ pub(crate) enum Request {
     /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
     /// model until `None`.
     Preview(Option<(&'static str, Json)>),
+    /// Apply the Edge tool's current preview and clear it in the same rebuild.
+    ApplyEdgeFinish(&'static str, Json),
     /// Remember the model as it is, to come back to by `Back` (a lesson's step shown, D230).
     Mark,
     Back,
@@ -316,6 +321,8 @@ struct Model {
     /// The params of the command previewed and its reply, or why it is refused; the scene shows
     /// its result.
     preview: Option<(Json, Result<Json, String>)>,
+    edge_base: Arc<EdgeBase>,
+    edge_applied: Option<bool>,
     /// The points a work plane may go through (D204): each as a plane's point names it (`of` a
     /// feature, a `vertex` or a `point`; nothing: the origin) and where it is.
     spots: Vec<(Json, datum_math::Vec3)>,
@@ -328,6 +335,39 @@ struct Model {
     uses: Option<crate::uses::Uses>,
     /// The contours of the bodies shown a click on a face takes for a flange, by the body's place.
     contours: Vec<(usize, datum_ops::FlangeLoop)>,
+}
+
+/// The committed bodies and their names share the same indices. A trial has its own picture.
+#[derive(Default)]
+struct EdgeBase {
+    meshes: Vec<Arc<BodyMesh>>,
+    bodies: Vec<String>,
+    inspect: Json,
+    next_name: String,
+    edit: Option<(String, Arc<BodyMesh>)>,
+}
+
+impl EdgeBase {
+    fn new(picture: &Picture, session: &Session, using: Option<&str>, meshes: &mut MeshCache) -> Self {
+        let graph = session.graph();
+        let edit = using.and_then(|name| {
+            let node = &graph.nodes()[graph.find(name)? as usize];
+            if !matches!(node.op, datum_graph::Op::EdgeFinish { .. }) {
+                return None;
+            }
+            let input = *node.inputs.first()? as usize;
+            let value = session.evaluation().results[input].as_ref().ok()?;
+            let mesh = meshes.get(value.body()?, matches!(&**value, datum_graph::Value::Formed(_)));
+            Some((name.to_string(), mesh))
+        });
+        Self {
+            meshes: picture.scene.bodies.clone(),
+            bodies: picture.bodies.clone(),
+            inspect: picture.inspect.clone(),
+            next_name: free_feature_name(&picture.inspect, "edge_finish"),
+            edit,
+        }
+    }
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -422,6 +462,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut editing: Option<String> = None;
     let mut using: Option<String> = None;
     let mut previewing: Option<(&'static str, Json)> = None;
+    let mut edge_base = None;
     let mut mark = None;
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
@@ -429,6 +470,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
         let (mut error, mut opened, mut closed) = (None, false, false);
+        let mut edge_applied = None;
         let mut notes = Vec::new();
         // A body whose shape an edit changed (pieces, through holes): worth a word.
         let mut note = |reply: &Json| {
@@ -443,9 +485,13 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             }
         };
         for r in pending {
+            if !matches!(r, Request::Preview(_) | Request::Mark) {
+                edge_base = None;
+            }
             match r {
                 Request::Open(p) => {
                     latest.clear();
+                    previewing = None;
                     (opened, closed) = (true, false);
                     if let Err(e) = journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
                         error = Some(e);
@@ -456,6 +502,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 }
                 Request::Close => {
                     latest.clear();
+                    previewing = None;
                     session = Session::default();
                     (opened, closed) = (false, true);
                 }
@@ -469,6 +516,22 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 Request::Editing(name) => editing = name,
                 Request::Using(name) => using = name,
                 Request::Preview(p) => previewing = p,
+                Request::ApplyEdgeFinish(command, params) => {
+                    let current = previewing.take().is_some_and(|(c, p)| c == command && p == params);
+                    let result = if current {
+                        session
+                            .trial(command, &params, |_, reply| previewed(reply.clone(), &params["name"]))
+                            .and_then(|trial| trial)
+                            .and_then(|_| journaled(&mut session, command, &params))
+                    } else {
+                        Err("The edge finish preview has changed".into())
+                    };
+                    edge_applied = Some(result.is_ok());
+                    match result {
+                        Ok(reply) => note(&reply),
+                        Err(why) => error = Some(why),
+                    }
+                }
                 Request::Mark => mark = Some(session.checkpoint()),
                 Request::Back => {
                     if let Some(c) = mark.take() {
@@ -487,18 +550,34 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let flats = session.flats();
         let picture = |session: &Session, meshes: &mut MeshCache| picture(session, editing.as_deref(), using.as_deref(), meshes);
+        let mut committed = None;
+        let base = edge_base.get_or_insert_with(|| {
+            let p = picture(&session, &mut meshes);
+            let base = Arc::new(EdgeBase::new(&p, &session, using.as_deref(), &mut meshes));
+            committed = Some(p);
+            base
+        });
+        let committed = |session: &Session, meshes: &mut MeshCache| committed.unwrap_or_else(|| picture(session, meshes));
+        let edge_preview = previewing.as_ref().is_some_and(|(command, params)| {
+            (*command == "add" && params["op"] == "edge_finish")
+                || (*command == "edit" && base.edit.as_ref().is_some_and(|(name, _)| params["name"] == *name))
+        });
         let (picture, preview) = match &previewing {
-            None => (picture(&session, &mut meshes), None),
+            None => (committed(&session, &mut meshes), None),
             Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
-                Ok((p, reply)) => (p, Some((params.clone(), previewed(reply, &params["name"])))),
-                Err(e) => (picture(&session, &mut meshes), Some((params.clone(), Err(e)))),
+                Ok((p, reply)) => {
+                    let reply = previewed(reply, &params["name"]);
+                    let p = if edge_preview && reply.is_err() { committed(&session, &mut meshes) } else { p };
+                    (p, Some((params.clone(), reply)))
+                }
+                Err(e) => (committed(&session, &mut meshes), Some((params.clone(), Err(e)))),
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } = picture;
         if models
             .send(Model {
-                inspect,
+                inspect: if edge_preview { base.inspect.clone() } else { inspect },
                 scene,
                 geometry,
                 error,
@@ -512,6 +591,8 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 flats,
                 editing: context,
                 preview,
+                edge_base: base.clone(),
+                edge_applied,
                 spots,
                 lines,
                 loft_profiles,
@@ -600,6 +681,11 @@ fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
         Some(f) => Err(f["error"].as_str().unwrap_or_default().to_string()),
         None => Ok(reply),
     }
+}
+
+fn free_feature_name(inspect: &Json, prefix: &str) -> String {
+    let features = inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
+    (1..).map(|k| format!("{prefix}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
 }
 
 /// The picture of the model `session` holds, sketch `editing` drawn by the window.
@@ -861,6 +947,7 @@ struct Viewer {
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
     table: Option<(crate::table::Source, crate::table::Editor)>,
+    native_windows: NativeWindows,
     /// The library's materials and rules the tables show, read when one opens and after the
     /// commands it sent were run; the new material's and the new rule's cells as typed so far; and
     /// the material whose rules the rules table shows.
@@ -966,6 +1053,8 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    /// Something under the cursor for the Edge tool: an edge, or a flat cap with its corners.
+    edge_hover: Option<forms::EdgeHover>,
     edge_finish: Option<EdgeFinishForm>,
     /// Properties of the sketch's curves being edited (D276): the F12 editor.
     metadata: Option<MetadataForm>,
@@ -1601,6 +1690,7 @@ impl Viewer {
             new_parameter: Default::default(),
             local_error: None,
             table: None,
+            native_windows: NativeWindows::default(),
             materials: Vec::new(),
             rules: Vec::new(),
             tools: Vec::new(),
@@ -1658,6 +1748,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            edge_hover: None,
             edge_finish: None,
             metadata: None,
             loft: None,
@@ -3034,6 +3125,12 @@ impl Viewer {
             if self.part.as_ref().is_some_and(|p| !m.inspect["parts"].as_array().into_iter().flatten().any(|r| r["part"] == *p)) {
                 self.part = None;
             }
+            if self.model.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.edge_base, &m.edge_base)) {
+                self.edge_hover = None;
+            }
+            if let Some(applied) = m.edge_applied {
+                self.edge_finish_applied(applied);
+            }
             self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
         }
@@ -4077,10 +4174,16 @@ impl Viewer {
         if sketched {
             self.paint_sketch(&painter, rect);
         }
-        if let Some([a, b]) = edge_hover
-            && let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect))
-        {
-            painter.line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgb(235, 110, 20)));
+        let edge_lines =
+            self.edge_finish_selection().into_iter().flatten().map(|line| (line, egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 110, 20))));
+        let hover_lines = edge_hover.into_iter().flatten().map(|line| (line, egui::Stroke::new(3.0, crate::draw::DRAFT)));
+        for ([a, b], stroke) in edge_lines.chain(hover_lines) {
+            if let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect)) {
+                painter.line_segment([a, b], stroke);
+            }
+        }
+        if let Some(cursor) = r.hover_pos().or(r.interact_pointer_pos()) {
+            self.edge_finish_hints(ui, &painter, cursor);
         }
         if self.loft_is_picking() {
             let project = |point| on_screen(&view_projection, point - anchor, rect);
@@ -4163,7 +4266,10 @@ impl Viewer {
                 tint(edge, f.body, 110);
             }
         }
-        if !sketched && let Some(u) = &m.uses {
+        if !sketched
+            && !self.edge_finish_is_picking()
+            && let Some(u) = &m.uses
+        {
             let used = egui::Color32::from_rgb(235, 110, 20);
             let free = egui::Color32::from_rgb(70, 120, 210);
             let draw = |l: &[datum_math::Vec3; 2], stroke: egui::Stroke| {
@@ -4577,13 +4683,11 @@ impl Viewer {
 
     /// The fillet presets' editor in a window of its own (D284): the radiuses and the chamfer
     /// sizes typed in; OK parses them, applies at once and writes them into `settings.json`.
-    fn presets_window(&mut self, ctx: &egui::Context) {
+    fn presets_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         let Some(mut ed) = self.fillet_presets_editor.take() else { return };
         let (mut close, mut save) = (false, false);
-        let builder =
-            egui::ViewportBuilder::default().with_title(self.i18n.t("presets-title", "Fillet presets").to_string()).with_inner_size([360.0, 420.0]);
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("fillet_presets"), builder, |ui, _| {
-            close = ui.input(|i| i.viewport().close_requested());
+        let title = self.i18n.t("presets-title", "Fillet presets");
+        let close_requested = self.native_windows.show(ctx, frame, "fillet_presets", title, egui::vec2(360.0, 420.0), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 let width = 70.0;
                 ui.heading(self.i18n.t("presets-fillet", "Fillet radiuses"));
@@ -4635,6 +4739,7 @@ impl Viewer {
                 });
             });
         });
+        close |= close_requested;
         if save {
             match ed.parse() {
                 Ok((fillet, chamfer)) => match crate::settings::path().map(|p| crate::settings::save_presets(&p, &fillet, &chamfer)) {
@@ -4659,7 +4764,7 @@ impl Viewer {
     /// The parameters, the materials or the rules of one material in a window of their own
     /// (D178): rebuilt every frame, from the model or from the library read last, the edits sent
     /// as the side bar sends them.
-    fn table_window(&mut self, ctx: &egui::Context) {
+    fn table_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use crate::table::{MATERIALS, RULES, Source, TOOLS};
         let Some((source, mut editor)) = self.table.take() else { return };
         // The presets are those of the element being kept; the others are the model's or the library's.
@@ -4691,12 +4796,9 @@ impl Viewer {
             Source::Materials | Source::Rules | Source::Tools => Box::new(crate::table::editable_records),
             Source::Presets => Box::new(crate::table::editable_presets),
         };
-        let (mut out, mut closed, mut picked) = (Default::default(), false, None);
-        // As wide as the table, when it opens.
+        let (mut out, mut picked) = (Default::default(), None);
         let width = datum_table::layout(&table).size()[0] as f32 * crate::table::SCALE * self.table_zoom + 40.0;
-        let builder = egui::ViewportBuilder::default().with_title(title.to_string()).with_inner_size([width, 400.0]);
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("datum_table"), builder, |ui, _| {
-            closed = ui.input(|i| i.viewport().close_requested());
+        let closed = self.native_windows.show(ctx, frame, source.window_key(), title, egui::vec2(width, 400.0), |ui| {
             // The viewport's root draws nothing under its widgets: the theme's panel is its background.
             egui::CentralPanel::default().show(ui, |ui| {
                 if source == Source::Rules {
@@ -4704,7 +4806,7 @@ impl Viewer {
                         ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in the View menu, Materials"));
                         return;
                     }
-                    let rows = 6.0 * ui.spacing().interact_size.y;
+                    let rows = (6.0 * ui.spacing().interact_size.y).min(ui.available_height() * 0.3);
                     egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
                         for name in &materials {
                             if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
@@ -5265,8 +5367,7 @@ impl Viewer {
 
     /// The first free name of `command` + a number: `extrude1`, `plate2`.
     fn feature_name(&self, command: &str) -> String {
-        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
-        (1..).map(|k| format!("{command}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
+        free_feature_name(self.model.as_ref().map_or(&Json::Null, |m| &m.inspect), command)
     }
 
     /// A body clicked while a branch pipe is asked for: the first rolled one is the main pipe, the
@@ -7308,7 +7409,7 @@ impl Viewer {
                 let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
                 self.open_rib(at);
             }
-            Act::EdgeFinish => self.open_edge_finish(ui.input(|i| i.pointer.latest_pos())),
+            Act::EdgeFinish => self.open_edge_finish(),
             Act::Trim => {
                 self.leave();
                 if self.trim_body().is_some() {
@@ -7819,7 +7920,7 @@ impl Viewer {
 
 impl eframe::App for Viewer {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        self.window(ui, frame.wgpu_render_state());
+        self.window(ui, Some(frame));
     }
 
     fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
@@ -7828,6 +7929,7 @@ impl eframe::App for Viewer {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string(MAXIMIZED, self.maximized.to_string());
+        self.native_windows.save(storage);
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
         storage.set_string(TOUCHPAD, self.touchpad.to_string());
@@ -7848,7 +7950,7 @@ impl eframe::App for Viewer {
 
 impl Viewer {
     /// One frame of the whole window; no render state: all but the 3D picture.
-    fn window(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
+    fn window(&mut self, ui: &mut egui::Ui, frame: Option<&eframe::Frame>) {
         let start = std::time::Instant::now();
         if self.shown < 2 {
             self.shown += 1;
@@ -7901,22 +8003,25 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
-        self.edge_finish_window(ui.ctx());
         self.metadata_window(ui.ctx());
         self.loft_pick_hint(ui.ctx());
         self.loft_window(ui.ctx());
         self.mirror_window(ui.ctx());
         self.extrusion_form(ui.ctx());
-        self.table_window(ui.ctx());
-        self.presets_window(ui.ctx());
+        self.table_window(ui.ctx(), frame);
+        self.presets_window(ui.ctx(), frame);
+        self.native_windows.finish_frame();
         self.settings_said(ui.ctx());
+        self.edge_hover = None;
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
             let style = egui_dock::Style::from_egui(ui.style());
+            let rs = frame.and_then(eframe::Frame::wgpu_render_state);
             egui_dock::DockArea::new(&mut dock).style(style).show_add_buttons(false).show_inside(ui, &mut Tabs { v: self, rs });
             self.dock = dock;
         });
+        self.edge_finish_ui(ui.ctx());
         // The flat pattern pane closed on a sketch on the blank finishes the sketch, as Done does.
         if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) && !crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
             self.leave();
@@ -7961,6 +8066,8 @@ mod tests {
                 flats: Vec::new(),
                 editing: None,
                 preview: None,
+                edge_base: Arc::default(),
+                edge_applied: None,
                 spots: Vec::new(),
                 lines: Vec::new(),
                 loft_profiles: Vec::new(),
@@ -7988,6 +8095,7 @@ mod tests {
             tree: TreeRows::default(),
             local_error: None,
             table: None,
+            native_windows: NativeWindows::default(),
             materials: Vec::new(),
             rules: Vec::new(),
             tools: Vec::new(),
@@ -8045,6 +8153,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            edge_hover: None,
             edge_finish: None,
             metadata: None,
             loft: None,
@@ -10565,7 +10674,7 @@ mod tests {
     fn the_parameters_table_sets_a_value() {
         let (mut v, inbox) = viewer("parametric.json");
         v.table = Some(Default::default());
-        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui(|ui| v.table_window(ui.ctx()));
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui(|ui| v.table_window(ui.ctx(), None));
         h.run();
         for key in [egui::Key::ArrowDown, egui::Key::ArrowRight] {
             h.key_press(key);

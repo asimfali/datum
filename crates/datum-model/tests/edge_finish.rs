@@ -38,8 +38,58 @@ fn corner_edge(s: &mut Session, body: &str) -> String {
         .unwrap_or_else(|| panic!("no vertical edge at prism corner in {body}: {edges}"))
 }
 
+fn profile_edges(s: &mut Session, body: &str) -> Vec<String> {
+    let edges = run(s, "query_edges", json!({"name": body}));
+    let mut ids: Vec<String> = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|edge| {
+            let a = &edge["from"]["point"];
+            let b = &edge["to"]["point"];
+            (a[0] == 0.0 && b[0] == 0.0 && a[1] == b[1] && a[2] != b[2]).then(|| edge["id"].as_str().unwrap().to_owned())
+        })
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn feature(s: &mut Session, name: &str) -> Value {
+    run(s, "inspect", json!({}))["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["name"] == name)
+        .unwrap_or_else(|| panic!("no feature {name}"))
+        .clone()
+}
+
 fn volume(s: &mut Session, name: &str) -> f64 {
     run(s, "mass_properties", json!({"name": name}))["volume"].as_f64().unwrap()
+}
+
+/// Two sets on one body build one on the other: the second set's input is the first set's
+/// feature, and both fillets stand in the final body (D296).
+#[test]
+fn edge_finish_chains_on_the_body_it_works_on() {
+    let mut s = session();
+    let first = corner_edge(&mut s, "box");
+    run(&mut s, "add", json!({"name": "finish1", "op": "edge_finish", "inputs": ["box"], "edge": first, "size": 2.0, "mode": "fillet"}));
+    close(volume(&mut s, "finish1"), 2400.0 - (1.0 - std::f64::consts::PI / 4.0) * 4.0 * 10.0);
+    // A second corner of the body after the first fillet still stands straight.
+    let edges = run(&mut s, "query_edges", json!({"name": "finish1"}));
+    let other = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|edge| {
+            let a = &edge["from"]["point"];
+            let b = &edge["to"]["point"];
+            (a[0] == 20.0 && b[0] == 20.0 && a[1] == 0.0 && b[1] == 0.0 && a[2] != b[2]).then(|| edge["id"].as_str().unwrap().to_owned())
+        })
+        .unwrap_or_else(|| panic!("no second corner in {edges}"));
+    run(&mut s, "add", json!({"name": "finish2", "op": "edge_finish", "inputs": ["finish1"], "edge": other, "size": 1.2, "mode": "fillet"}));
+    close(volume(&mut s, "finish2"), 2400.0 - (1.0 - std::f64::consts::PI / 4.0) * (4.0 + 1.44) * 10.0);
 }
 
 fn finish(s: &mut Session, mode: &str, size: f64) {
@@ -112,4 +162,134 @@ fn edge_finish_accepts_a_rotated_prism() {
     let faces = run(&mut s, "query_faces", json!({"name": "turned_finish"}));
     assert!(faces["faces"].as_array().unwrap().iter().any(|face| face.get("cylinder").is_some_and(|c| c["radius"] == 2.0)), "{faces}");
     close(volume(&mut s, "turned_finish"), 2400.0 - 4.0 * (1.0 - std::f64::consts::PI / 4.0) * 10.0);
+}
+
+#[test]
+fn edge_finish_by_cap_rounds_every_eligible_profile_corner() {
+    let mut s = session();
+    let faces = run(&mut s, "query_faces", json!({"name": "box", "normal": [0, 0, 1]}));
+    let face = faces["faces"][0]["id"].as_str().unwrap();
+    run(&mut s, "add", json!({"name": "all_corners", "op": "edge_finish", "inputs": ["box"], "face": face, "size": 2.0, "mode": "fillet"}));
+    let made = feature(&mut s, "all_corners");
+    assert!(made.get("error").is_none(), "{made}");
+    close(volume(&mut s, "all_corners"), 2400.0 - 4.0 * (4.0 - std::f64::consts::PI) * 10.0);
+    let faces = run(&mut s, "query_faces", json!({"name": "all_corners"}));
+    let cylinders = faces["faces"].as_array().unwrap().iter().filter(|f| f.get("cylinder").is_some()).count();
+    assert_eq!(cylinders, 4, "each vertical profile edge receives a fillet: {faces}");
+}
+
+#[test]
+fn edge_finish_cap_set_collapses_to_the_shared_corners() {
+    // The two caps of a prism share their corner edges (the profile corners): a set of both
+    // caps finishes the same four corners as one cap alone, and the hashes agree.
+    let mut s = session();
+    let top = run(&mut s, "query_faces", json!({"name": "box", "normal": [0, 0, 1]}))["faces"][0]["id"].take();
+    let bottom = run(&mut s, "query_faces", json!({"name": "box", "normal": [0, 0, -1]}))["faces"][0]["id"].take();
+    run(&mut s, "add", json!({"name": "both_caps", "op": "edge_finish", "inputs": ["box"], "faces": [top, bottom], "size": 1.0, "mode": "fillet"}));
+    run(&mut s, "add", json!({"name": "one_cap", "op": "edge_finish", "inputs": ["box"], "faces": [top], "size": 1.0, "mode": "fillet"}));
+    let both = feature(&mut s, "both_caps");
+    let one = feature(&mut s, "one_cap");
+    assert!(both.get("error").is_none() && one.get("error").is_none(), "{both} {one}");
+    close(volume(&mut s, "both_caps"), 2400.0 - 4.0 * (1.0 - std::f64::consts::PI / 4.0) * 10.0);
+    let faces = run(&mut s, "query_faces", json!({"name": "both_caps"}));
+    let cylinders = faces["faces"].as_array().unwrap().iter().filter(|f| f.get("cylinder").is_some()).count();
+    assert_eq!(cylinders, 4, "both caps name the same four corners: {faces}");
+}
+
+fn multi_edge_hash(edges: &[String]) -> String {
+    let mut s = session();
+    run(&mut s, "add", json!({"name": "multi", "op": "edge_finish", "inputs": ["box"], "edges": edges, "size": 2.0, "mode": "fillet"}));
+    let made = feature(&mut s, "multi");
+    assert!(made.get("error").is_none(), "{made}");
+    close(volume(&mut s, "multi"), 2400.0 - 2.0 * (4.0 - std::f64::consts::PI) * 10.0);
+    made["status"]["hash"].as_str().unwrap().to_owned()
+}
+
+#[test]
+fn edge_finish_multiple_corners_is_order_independent_and_deduplicated() {
+    let mut s = session();
+    let edges = profile_edges(&mut s, "box");
+    assert_eq!(edges.len(), 2, "the two profile corners at x=0: {edges:?}");
+    let mut reversed = edges.clone();
+    reversed.reverse();
+    let mut duplicated = edges.clone();
+    duplicated.push(edges[0].clone());
+    let expected = multi_edge_hash(&edges);
+    assert_eq!(multi_edge_hash(&reversed), expected, "reversing selection order changed the result");
+    assert_eq!(multi_edge_hash(&duplicated), expected, "a duplicate selection changed the result");
+}
+
+#[test]
+fn edge_finish_multiple_corners_fails_atomically_when_one_does_not_fit() {
+    let mut s = session();
+    let edges = profile_edges(&mut s, "box");
+    run(&mut s, "add", json!({"name": "too_large", "op": "edge_finish", "inputs": ["box"], "edges": edges, "size": 13.0, "mode": "fillet"}));
+    let failed = feature(&mut s, "too_large");
+    assert!(failed.get("error").is_some(), "oversized multi-corner finish unexpectedly succeeded: {failed}");
+    close(volume(&mut s, "box"), 2400.0);
+    let still_valid = run(&mut s, "query_faces", json!({"name": "box"}));
+    assert_eq!(still_valid["faces"].as_array().unwrap().len(), 6, "failed operation changed its input body: {still_valid}");
+}
+
+#[test]
+fn edge_finish_combines_faces_and_edges_then_excludes_corners() {
+    let mut s = session();
+    let face = run(&mut s, "query_faces", json!({"name": "box", "normal": [0, 0, 1]}))["faces"][0]["id"].take();
+    let edges = profile_edges(&mut s, "box");
+    run(
+        &mut s,
+        "add",
+        json!({"name": "mixed", "op": "edge_finish", "inputs": ["box"], "faces": [face], "edges": [edges[0]], "exclude_edges": [edges[1]], "size": 1.0}),
+    );
+    let made = feature(&mut s, "mixed");
+    assert!(made.get("error").is_none(), "{made}");
+    close(volume(&mut s, "mixed"), 2400.0 - 3.0 * (1.0 - std::f64::consts::PI / 4.0) * 10.0);
+    run(
+        &mut s,
+        "add",
+        json!({"name": "empty", "op": "edge_finish", "inputs": ["box"], "edges": [edges[0]], "exclude_edges": [edges[0]], "size": 1.0}),
+    );
+    let empty = feature(&mut s, "empty");
+    assert!(empty.get("error").is_some(), "{empty}");
+}
+
+#[test]
+fn flange_face_finishes_only_free_corners() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/sheet_tray.json")).unwrap();
+    let mut s = Session::default();
+    for feature in &model["features"].as_array().unwrap()[..2] {
+        run(&mut s, "add", feature.clone());
+    }
+    let mut flange = model["features"][2].clone();
+    flange["edges"].as_array_mut().unwrap().truncate(1);
+    run(&mut s, "add", flange);
+    let faces = run(&mut s, "query_faces", json!({"name": "tray"}));
+    let face =
+        faces["faces"].as_array().unwrap().iter().find(|f| f["offset"].as_f64().is_some_and(|v| (v + 2.0).abs() < 1e-9)).unwrap()["id"].clone();
+    let bend_ids: Vec<_> = faces["faces"].as_array().unwrap().iter().filter(|f| f.get("cylinder").is_some()).map(|f| f["id"].clone()).collect();
+    assert_eq!(bend_ids.len(), 2);
+    let edges = run(&mut s, "query_edges", json!({"name": "tray"}));
+    let free: Vec<_> = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            let a = &e["from"]["point"];
+            let b = &e["to"]["point"];
+            a[0] == b[0] && a[2] == 20.0 && b[2] == 20.0 && a[1] != b[1]
+        })
+        .map(|e| e["id"].clone())
+        .collect();
+    assert_eq!(free.len(), 2);
+    run(&mut s, "add", json!({"name": "by_face", "op": "edge_finish", "inputs": ["tray"], "faces": [face], "size": 1.0}));
+    let built = feature(&mut s, "by_face");
+    assert!(built.get("error").is_none(), "{built}");
+    run(&mut s, "add", json!({"name": "by_edges", "op": "edge_finish", "inputs": ["tray"], "edges": free, "size": 1.0}));
+    let built = feature(&mut s, "by_edges");
+    assert!(built.get("error").is_none(), "{built}");
+    close(volume(&mut s, "by_face"), volume(&mut s, "by_edges"));
+    let finished = run(&mut s, "query_faces", json!({"name": "by_face"}));
+    for bend in bend_ids {
+        assert!(finished["faces"].as_array().unwrap().iter().any(|f| f["id"] == bend && f.get("cylinder").is_some()), "bend {bend} lost: {finished}");
+    }
 }

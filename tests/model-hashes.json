@@ -54,10 +54,18 @@
     "window": "5d1cb8a12e7dea0dbf3f1fef3abfa507d11179d9c611704d7cc11b153e01130b",
     "with_boss": "051f9dbd296e3c6ecae5641b3b2f1447951338b1d082d642d7f482f784c486a6"
   },
+  "edge-finish-set.json": {
+    "box": "bff338a990352f5f54eded919c6a63dbf3958d6e13d65db76e181decefad3a98",
+    "by_cap": "f1792eabd642927f6f7d2e1a1e07258fdece2cb1d2687eef2c9d801bf5d5f2f7",
+    "outline": "9abf4f329182c4c4f346df40e1fb43e535bff8423f68fe3d7411b515157f7ccb",
+    "plate_box": "535c9125484810a429fcc0b6c053bd8995afc3169a49cd9db5f3cc1982f0fa97"
+  },
   "edge-finish.json": {
     "box": "bff338a990352f5f54eded919c6a63dbf3958d6e13d65db76e181decefad3a98",
     "chamfer": "f3aa93494c1c2622c0eb248b30f66f8000984509d47cae0dcc24fbbd4a8dab60",
     "chamfer_box": "535c9125484810a429fcc0b6c053bd8995afc3169a49cd9db5f3cc1982f0fa97",
+    "face_box": "e3510eb2795fa6d2dfb1bd32e867d984275dd81fdaa166435b5f076d25079c55",
+    "face_finish": "4c327b1af23caca67c095b39756a626006c03803f5c6ba20176ed8485ef92c19",
     "fillet": "057640db7437d53f47e82c69fb6b216910880c3bf3a198fba54fff5c86905757",
     "outline": "9abf4f329182c4c4f346df40e1fb43e535bff8423f68fe3d7411b515157f7ccb"
   },

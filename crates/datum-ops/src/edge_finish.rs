@@ -252,3 +252,205 @@ pub(crate) fn finish(feature: TopoId, body: &Body, edge: TopoId, size: f64, mode
     crate::validated(&result)?;
     Ok(result)
 }
+
+/// Return the straight corner edges normal to a planar face, in its outer boundary order.
+/// The cap must be a single outer loop (holes are refused). Vertices on curved runs and
+/// cylinder seams are skipped, so the face can select the remaining corners of a flange.
+pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepError> {
+    let bad = || BrepError::Unsupported("edge finish: expected an unambiguous planar face with straight convex corners".into());
+    let cap = body.faces().iter().find(|f| f.id == face).ok_or_else(bad)?;
+    let normal = cap.surface.plane().ok_or_else(bad)?.normal;
+    if cap.loop_count != 1 {
+        return Err(bad());
+    }
+    let boundary: Vec<_> = body.loop_half_edges(cap.first_loop).collect();
+    if boundary.len() < 3 {
+        return Err(bad());
+    }
+    let mut result = Vec::with_capacity(boundary.len());
+    for (at, &h) in boundary.iter().enumerate() {
+        let half = body.half_edges()[h as usize];
+        let vertex = half.origin;
+        // A fillet arc and the straight seam of a sheet bend both leave these vertices
+        // without a planar corner to finish through the thickness (D296).
+        let around = [(at + boundary.len() - 1) % boundary.len(), at];
+        let at_curve = around.into_iter().any(|i| {
+            let h = body.half_edges()[boundary[i] as usize];
+            let twin = body.half_edges()[h.twin as usize];
+            let adjacent = body.loops()[twin.loop_ix as usize].face as usize;
+            body.edge_curve(&body.edges()[h.edge as usize]).is_some() || matches!(body.faces()[adjacent].surface, Surface::Cylinder(_))
+        });
+        if at_curve {
+            continue;
+        }
+        let candidates: Vec<_> = body
+            .edges()
+            .iter()
+            .filter(|edge| {
+                if body.edge_curve(edge).is_some() {
+                    return false;
+                }
+                let a = body.half_edges()[edge.half as usize].origin;
+                let b = body.half_edges()[body.half_edges()[edge.half as usize].twin as usize].origin;
+                let other = if a == vertex {
+                    b
+                } else if b == vertex {
+                    a
+                } else {
+                    return false;
+                };
+                let d = body.point(other) - body.point(vertex);
+                d.dot(d) > 0.0 && nearly_parallel(d, normal)
+            })
+            .collect();
+        if candidates.len() != 1 {
+            return Err(bad());
+        }
+        let selected = candidates[0];
+        let half = body.half_edges()[selected.half as usize];
+        let twin = body.half_edges()[half.twin as usize];
+        let side = [half, twin].map(|h| body.loops()[h.loop_ix as usize].face as usize);
+        if side[0] == side[1] || side.iter().any(|&i| body.faces()[i].surface.plane().is_none()) {
+            return Err(bad());
+        }
+        let previous = body.half_edges()[boundary[(at + boundary.len() - 1) % boundary.len()] as usize].origin;
+        let following = body.half_edges()[body.next(h) as usize].origin;
+        let directions = [body.point(previous) - body.point(vertex), body.point(following) - body.point(vertex)];
+        for f in side {
+            let normal = body.faces()[f].surface.plane().ok_or_else(bad)?.normal;
+            let normal_len = libm::sqrt(normal.dot(normal));
+            let dots = directions.map(|d| (d.dot(normal), libm::sqrt(d.dot(d)) * normal_len));
+            if dots.iter().filter(|&&(v, scale)| within_rounding(v, scale)).count() != 1
+                || dots.iter().any(|&(v, scale)| v > 0.0 && !within_rounding(v, scale))
+            {
+                return Err(bad());
+            }
+        }
+        result.push(selected.id);
+    }
+    if result.is_empty() {
+        return Err(BrepError::Unsupported("edge finish: the face has no straight corners left".into()));
+    }
+    Ok(result)
+}
+
+/// The planar caps the `faces` form of an `EdgeFinish` may take, each with its corner edges:
+/// the caps that pass the `edge_finish_face` rule. The scene lights a cap by this, so what is
+/// lit is what will build; a cap partly rounded is offered with its remaining corners, a cap
+/// with none is not offered at all (D296).
+pub fn edge_finish_caps(body: &Body) -> Vec<(TopoId, Vec<TopoId>)> {
+    body.faces().iter().filter_map(|f| edge_finish_face(body, f.id).ok().map(|corners| (f.id, corners))).collect()
+}
+
+/// Resolve the union of selected edges and face corners, minus excluded edge IDs.
+pub fn edge_finish_targets(
+    body: &Body,
+    edge: &str,
+    edges: &[String],
+    face: &str,
+    faces: &[String],
+    exclude_edges: &[String],
+) -> Result<Vec<TopoId>, BrepError> {
+    let id = |value: &str| TopoId::parse(value).ok_or_else(|| BrepError::Invalid(format!("`{value}` is not a topology ID")));
+    let mut result = Vec::new();
+    if !edge.is_empty() {
+        result.push(id(edge)?);
+    }
+    for edge in edges {
+        result.push(id(edge)?);
+    }
+    for face in std::iter::once(face).filter(|face| !face.is_empty()).chain(faces.iter().map(String::as_str)) {
+        result.extend(edge_finish_face(body, id(face)?)?);
+    }
+    let excluded = exclude_edges.iter().map(|edge| id(edge)).collect::<Result<Vec<_>, _>>()?;
+    result.retain(|edge| !excluded.contains(edge));
+    result.sort_unstable();
+    result.dedup();
+    if result.is_empty() {
+        return Err(BrepError::Invalid("edge finish: no edges selected".into()));
+    }
+    Ok(result)
+}
+
+/// Finish a set atomically. A one-edge operation keeps the historical topology IDs;
+/// multiple edges get stable namespaces derived from their original edge IDs.
+pub(crate) fn finish_many(feature: TopoId, body: &Body, edges: &[TopoId], size: f64, mode: EdgeMode) -> Result<Body, BrepError> {
+    let mut edges = edges.to_vec();
+    edges.sort_unstable();
+    edges.dedup();
+    if edges.is_empty() {
+        return Err(BrepError::Invalid("edge finish: no edges selected".into()));
+    }
+    if edges.len() == 1 {
+        return finish(feature, body, edges[0], size, mode);
+    }
+    let mut result = body.clone();
+    for edge in edges {
+        let scoped = TopoId::derive("edge_finish.selection").id(feature).id(edge).finish();
+        result = finish(scoped, &result, edge, size, mode)?;
+    }
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use datum_brep::cuboid;
+
+    #[test]
+    fn face_selection_and_atomic_multiple_finish() {
+        let id = TopoId::derive("edge_finish.test").finish();
+        let body = cuboid(id, Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 8.0, 2.0)).unwrap();
+        let face = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
+        let edges = edge_finish_face(&body, face).unwrap();
+        assert_eq!(edges.len(), 4);
+        for mode in [EdgeMode::Fillet, EdgeMode::Chamfer] {
+            let result = finish_many(id, &body, &edges, 1.0, mode).unwrap();
+            result.validate().unwrap();
+            let mut reversed = edges.clone();
+            reversed.reverse();
+            reversed.push(edges[0]);
+            assert_eq!(result.hash(), finish_many(id, &body, &reversed, 1.0, mode).unwrap().hash());
+            assert_eq!(
+                finish(id, &body, edges[0], 1.0, mode).unwrap().hash(),
+                finish_many(id, &body, &[edges[0], edges[0]], 1.0, mode).unwrap().hash()
+            );
+            assert!(finish_many(id, &body, &edges, 5.0, mode).is_err());
+        }
+    }
+
+    /// A cap a finish already rounded has curves in its boundary and is not offered again:
+    /// the scene lights a cap by `edge_finish_caps`, and a click on it must not break the body.
+    #[test]
+    fn a_rounded_cap_is_not_offered_again() {
+        let id = TopoId::derive("edge_finish.test").finish();
+        let body = cuboid(id, Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 8.0, 2.0)).unwrap();
+        let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
+        let caps: Vec<_> = edge_finish_caps(&body).iter().map(|(id, _)| *id).collect();
+        assert!(caps.contains(&top), "an untouched cap is offered");
+        let rounded = finish_many(id, &body, &edge_finish_face(&body, top).unwrap(), 1.2, EdgeMode::Fillet).unwrap();
+        let caps: Vec<_> = edge_finish_caps(&rounded).iter().map(|(id, _)| *id).collect();
+        assert!(!caps.contains(&top), "a cap with no corners left is not offered");
+        assert!(edge_finish_face(&rounded, top).is_err(), "and does not pass the rule itself");
+    }
+
+    /// A cap partly rounded is offered with its remaining corners: one corner finished by hand
+    /// does not block the face (D296).
+    #[test]
+    fn a_partly_rounded_cap_finishes_its_remaining_corners() {
+        let id = TopoId::derive("edge_finish.test").finish();
+        let body = cuboid(id, Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 8.0, 2.0)).unwrap();
+        let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
+        let corners = edge_finish_face(&body, top).unwrap();
+        assert_eq!(corners.len(), 4);
+        // One corner edge removes one corner from the top cap.
+        let partly = finish_many(id, &body, &corners[..1], 1.2, EdgeMode::Fillet).unwrap();
+        let left = edge_finish_face(&partly, top).unwrap();
+        assert_eq!(left.len(), 3, "the cap is offered with its remaining corners");
+        let caps: Vec<_> = edge_finish_caps(&partly).iter().map(|(id, _)| *id).collect();
+        assert!(caps.contains(&top), "the partly rounded cap is offered");
+        let again = finish_many(id, &partly, &left, 1.2, EdgeMode::Fillet).unwrap();
+        assert!(edge_finish_face(&again, top).is_err(), "the last corners gone, the cap is refused");
+    }
+}

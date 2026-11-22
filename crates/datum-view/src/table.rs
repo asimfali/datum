@@ -113,7 +113,8 @@ impl Editor {
         let moved = self.editing.is_none() && ui.input(|i| i.viewport().focused != Some(false)) && self.keys(ui, table, editable, &mut out);
         let error = ui.visuals().error_fg_color;
         let line = ui.spacing().interact_size.y + ui.spacing().item_spacing.y;
-        egui::ScrollArea::both().auto_shrink([false, false]).max_height(ui.available_height() - line).show(ui, |ui| {
+        let area = egui::ScrollArea::both().auto_shrink([false, false]).max_width(ui.available_width());
+        area.max_height((ui.available_height() - line).max(0.0)).show(ui, |ui| {
             let size = lay.size();
             let (rect, resp) = ui.allocate_exact_size(Vec2::new(size[0] as f32, size[1] as f32) * self.scale, Sense::click_and_drag());
             let scale = self.scale;
@@ -650,6 +651,19 @@ pub enum Source {
     Tools,
     /// The presets of the element being kept in the library.
     Presets,
+}
+
+impl Source {
+    /// The persisted window identity, independent of its translated title.
+    pub(crate) fn window_key(self) -> &'static str {
+        match self {
+            Self::Parameters => "table.parameters",
+            Self::Materials => "table.materials",
+            Self::Rules => "table.rules",
+            Self::Tools => "table.tools",
+            Self::Presets => "table.presets",
+        }
+    }
 }
 
 /// A library level shown as a table: its `keys` are the columns, `widths` in millimetres.
@@ -1449,6 +1463,29 @@ mod tests {
     fn rules_are_removed_by_name() {
         let got = remove_record_requests(&RULES, &rules(), &[0, 2, 7]);
         same(&got, &[Request::Command("remove_library", json!({"level": "rule", "name": "Деталь"}))]);
+    }
+
+    #[test]
+    fn small_viewport_scrolls_to_new_rule() {
+        let entries = rules().into_iter().cycle().take(30).collect::<Vec<_>>();
+        let table = records(&RULES, &entries, &Pending::default(), &I18n::default());
+        let last = (table.rows().len() - 1, table.columns().len() - 1);
+        let editor = Editor { cursor: (last.0 - 1, last.1 - 1), ..Editor::default() };
+        let mut h = egui_kittest::Harness::builder().with_size([300.0, 140.0]).build_ui_state(
+            |ui, (editor, table, id): &mut (Editor, Table, Option<egui::Id>)| {
+                *id = Some(ui.make_persistent_id(egui::IdSalt::new("scroll_area")));
+                editor.show(ui, table, &editable_records, 1.0, &I18n::default());
+            },
+            (editor, table, None),
+        );
+        h.run();
+        for key in [Key::ArrowRight, Key::ArrowDown] {
+            h.event(Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+            h.run();
+        }
+        assert_eq!(h.state().0.cursor, last);
+        let scroll = egui::scroll_area::State::load(&h.ctx, h.state().2.unwrap()).unwrap();
+        assert!(scroll.offset.x > 0.0 && scroll.offset.y > 0.0, "{scroll:?}");
     }
 
     /// The editor as the window shows it: a material's fraction drawn, its under line edited by

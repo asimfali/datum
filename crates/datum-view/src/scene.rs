@@ -3,7 +3,7 @@
 //! before rounding to `f32` (D24): a site ten thousand kilometres from the origin draws as
 //! steadily as a bolt.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
 use std::sync::Arc;
 
@@ -31,6 +31,9 @@ pub struct BodyMesh {
     pub edges: Vec<[Vec3; 2]>,
     /// Straight visible corners between planar faces, with their B-rep IDs for the Edge tool.
     pub(crate) finish_edges: Vec<FinishEdge>,
+    /// The corners of each flat face, as indices into `finish_edges`: a flat end picked by its
+    /// outline.
+    pub(crate) finish_edges_of: BTreeMap<TopoId, Vec<usize>>,
     /// What can become the outline of a sphere or a torus on screen.
     pub contours: Vec<Contour>,
 }
@@ -110,7 +113,8 @@ impl BodyMesh {
         // its outline is the foot, where a flat face meets a curved one. Between nearly coplanar
         // faces (a terrain's cells, a split face) or along the seams of a cylinder an edge says
         // nothing either. A display threshold; the model never sees it.
-        let surface = |h: Ix| &body.faces()[body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize].surface;
+        let face = |h: Ix| body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize;
+        let surface = |h: Ix| &body.faces()[face(h)].surface;
         let flat = |s: &Surface| matches!(s, Surface::Plane(_));
         let round = |s: &Surface| matches!(s, Surface::Torus(_));
         for (e, edge) in body.edges().iter().enumerate() {
@@ -121,9 +125,21 @@ impl BodyMesh {
             if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || normals[0].dot(normals[1]) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
                 if flat(a) && flat(b) && body.edge_curve(edge).is_none() {
-                    mesh.finish_edges.push(FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals });
+                    let line = FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals };
+                    mesh.finish_edges.push(line);
                 }
             }
+        }
+        // The kernel supplies the corners the tool lights for each cap (D296), including
+        // the free corners of a flange and the remaining corners of a partly rounded cap.
+        for (cap, corners) in datum_ops::edge_finish_caps(body) {
+            let mut ixs = Vec::with_capacity(corners.len());
+            for id in corners {
+                if let Some(ix) = mesh.finish_edges.iter().position(|f| f.id == id) {
+                    ixs.push(ix);
+                }
+            }
+            mesh.finish_edges_of.insert(cap, ixs);
         }
         mesh
     }
@@ -234,8 +250,14 @@ impl Scene {
     /// passes through, by Möller–Trumbore, how far along the ray, and the triangle's normal
     /// turned to the eye. A pick on the screen, not a geometric decision.
     pub fn pick(&self, origin: Vec3, dir: Vec3) -> Option<Hit> {
+        Self::pick_in(&self.bodies, origin, dir)
+    }
+
+    /// The same pick over `bodies` of one's choosing: the Edge tool picks the model without a
+    /// standing preview, whose body has the hovered corner still sharp (D296).
+    pub fn pick_in(bodies: &[Arc<BodyMesh>], origin: Vec3, dir: Vec3) -> Option<Hit> {
         let mut best: Option<Hit> = None;
-        for (b, m) in self.bodies.iter().enumerate() {
+        for (b, m) in bodies.iter().enumerate() {
             for (t, &face) in m.triangles.iter().zip(&m.faces) {
                 let (e1, e2) = (t[1] - t[0], t[2] - t[0]);
                 let p = dir.cross(e2);
@@ -442,5 +464,54 @@ impl Geometry {
             })
         });
         Self { triangles, lines, contours }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use datum_brep::cuboid;
+
+    use super::*;
+
+    fn cube() -> Body {
+        cuboid(TopoId::derive("scene-test-cube").finish(), Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)).unwrap()
+    }
+
+    /// The four corners of the top of a cube, and only flat faces in the map.
+    #[test]
+    fn a_flat_end_lists_its_corners() {
+        let body = cube();
+        let mesh = BodyMesh::new(&body, false);
+        let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal == Vec3::new(0.0, 0.0, 1.0))).unwrap().id;
+        let corners = mesh.finish_edges_of.get(&top).unwrap();
+        let kernel = datum_ops::edge_finish_face(&body, top).unwrap();
+        assert_eq!(corners.len(), kernel.len(), "a cube's top has four corners");
+        for &i in corners {
+            assert!(kernel.contains(&mesh.finish_edges[i].id), "the lit corner is one the kernel would finish");
+        }
+        for id in mesh.finish_edges_of.keys() {
+            let face = body.faces().iter().find(|f| f.id == *id).unwrap();
+            assert!(face.surface.plane().is_some(), "only flat ends are listed");
+        }
+    }
+
+    /// A face that is not flat, or not there, has no corners to pick.
+    #[test]
+    fn a_curved_or_absent_face_has_no_corners() {
+        let body = cube();
+        let mesh = BodyMesh::new(&body, false);
+        let absent = TopoId::derive("scene-test-cube").tag("nowhere").finish();
+        assert!(!mesh.finish_edges_of.contains_key(&absent));
+        assert_eq!(mesh.finish_edges_of.len(), 6, "all six faces of the cube are flat and listed");
+    }
+
+    /// The same body meshed twice gives the same map, whatever order the work ran in.
+    #[test]
+    fn two_meshes_of_one_body_agree() {
+        let body = cube();
+        let (a, b) = (BodyMesh::new(&body, false), BodyMesh::new(&body, false));
+        assert_eq!(a.finish_edges_of, b.finish_edges_of);
+        assert_eq!(a.finish_edges.iter().map(|e| e.id).collect::<Vec<_>>(), b.finish_edges.iter().map(|e| e.id).collect::<Vec<_>>());
     }
 }

@@ -35,7 +35,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
-pub use edge_finish::EdgeMode;
+pub use edge_finish::{EdgeMode, edge_finish_caps, edge_finish_face, edge_finish_targets};
 pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
@@ -74,9 +74,19 @@ pub enum Op {
     },
     /// A polygon in the XY plane extruded from `z0` to `z1`. No inputs.
     Prism { polygon: Vec<Vec2>, z0: Num, z1: Num },
-    /// Round or bevel a straight edge normal to the part's cross-section. One body input.
+    /// Round or bevel selected corners of a part's cross-section. Face selections add their
+    /// corners; `exclude_edges` removes corners from the combined selection.
     EdgeFinish {
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         edge: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        edges: Vec<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        faces: Vec<String>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        face: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        exclude_edges: Vec<String>,
         size: Num,
         #[serde(default)]
         mode: EdgeMode,
@@ -797,7 +807,15 @@ impl Op {
                 symmetric: *symmetric,
                 profiles: profiles.clone(),
             },
-            Self::EdgeFinish { edge, size, mode } => Self::EdgeFinish { edge: edge.clone(), size: r(size, "size")?, mode: *mode },
+            Self::EdgeFinish { edge, edges, faces, face, exclude_edges, size, mode } => Self::EdgeFinish {
+                edge: edge.clone(),
+                edges: edges.clone(),
+                faces: faces.clone(),
+                face: face.clone(),
+                exclude_edges: exclude_edges.clone(),
+                size: r(size, "size")?,
+                mode: *mode,
+            },
             Self::Sheet { thickness, radius, side, z0, z1, path, start } => Self::Sheet {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
@@ -1056,9 +1074,9 @@ impl Op {
         };
         let body = match self {
             Self::Prism { polygon, z0, z1 } => prism(feature, polygon, num(z0)?, num(z1)?)?,
-            Self::EdgeFinish { edge, size, mode } => {
-                let id = u128::from_str_radix(edge, 16).map(TopoId).map_err(|_| BrepError::Invalid(format!("`{edge}` is not an edge ID")))?;
-                edge_finish::finish(feature, inputs[0], id, num(size)?, *mode)?
+            Self::EdgeFinish { edge, edges, faces, face, exclude_edges, size, mode } => {
+                let targets = edge_finish::edge_finish_targets(inputs[0], edge, edges, face, faces, exclude_edges)?;
+                edge_finish::finish_many(feature, inputs[0], &targets, num(size)?, *mode)?
             }
             Self::Transform { translate, axis, angle_deg } => {
                 let angle = num(angle_deg)?;
