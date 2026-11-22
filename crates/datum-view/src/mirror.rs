@@ -37,7 +37,7 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
     };
     // What is copied: the sketch's own curves picked, their points, and points picked.
     let own = |key: &str, n: &str| json[key].get(n).is_some();
-    let curves: Vec<(&str, String)> = picks
+    let mut curves: Vec<(&str, String)> = picks
         .iter()
         .filter_map(|k| if let Pick::Curve(n) = k { Some(n) } else { None })
         .filter(|n| n.as_str() != axis)
@@ -52,6 +52,50 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
             }
         }
     }
+    // A pattern taken (its badge, or a copy of it) comes with what it is of (D285): the curves
+    // and points of its cell and of every curve or group it names are mirrored with it.
+    let members = |n: &str| json["groups"][n].as_array().map(|a| a.iter().filter_map(Json::as_str).map(String::from).collect::<Vec<String>>());
+    let mut taken: Vec<String> = picks
+        .iter()
+        .filter_map(|k| match k {
+            Pick::Pattern(n) | Pick::Copy(n, _) => Some(n.clone()),
+            _ => None,
+        })
+        .collect();
+    taken.sort();
+    taken.dedup();
+    for t in &taken {
+        let pattern = json["patterns"][t].as_object()?;
+        let refs: Vec<String> = serde_json::from_value::<datum_sketch::Pattern>(Json::Object(pattern.clone()))
+            .ok()
+            .map(|p| p.references().into_iter().map(String::from).collect())
+            .unwrap_or_else(|| vec![pattern["of"].as_str().unwrap_or_default().to_string()]);
+        for r in refs {
+            if let Some(ms) = members(&r) {
+                for m in ms {
+                    if let Some(k) = ["lines", "arcs", "circles"].into_iter().find(|k| own(k, &m)) {
+                        curves.push((k, m));
+                    } else if own("points", &m) {
+                        points.insert(m);
+                    }
+                }
+            } else if let Some(k) = ["lines", "arcs", "circles"].into_iter().find(|k| own(k, &r)) {
+                curves.push((k, r.clone()));
+            } else if own("points", &r) {
+                points.insert(r);
+            }
+        }
+    }
+    // The ends of what the patterns brought in are mirrored points like the rest.
+    for (key, n) in &curves {
+        for f in ["from", "to", "center"] {
+            if let Some(e) = json[*key][n][f].as_str() {
+                points.insert(e.to_string());
+            }
+        }
+    }
+    curves.sort();
+    curves.dedup();
     if curves.is_empty() && points.is_empty() {
         return None;
     }
@@ -206,12 +250,53 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
         }
         patch.constrain(copy);
     }
+    // The patterns taken (D285): of the mirrored cell a mirrored group is made (a single curve
+    // needs none), and the pattern goes to it. Kept, the original stays and a mirrored one is
+    // made; moved, the original pattern is re-pointed to the mirrored cell, for its own is gone.
+    let rename = |n: &str| map.get(n).cloned().unwrap_or_else(|| n.to_string());
+    let mut moved_groups: Vec<String> = Vec::new();
+    for t in &taken {
+        let mut copy = json["patterns"][t].clone();
+        for key in ["of", "fill"] {
+            if let Some(n) = copy[key].as_str().map(String::from)
+                && json["groups"].get(n.as_str()).is_some()
+            {
+                let members: Vec<String> =
+                    json["groups"][n.as_str()].as_array().map(|a| a.iter().filter_map(Json::as_str).map(&rename).collect()).unwrap_or_default();
+                let new = patch.claim_free(&n);
+                patch.set("groups", &new, json!(members));
+                copy[key] = json!(new);
+                moved_groups.push(n);
+            } else if let Some(n) = copy[key].as_str() {
+                copy[key] = json!(rename(n));
+            }
+        }
+        let ways = [("offset", ["start", "end"].as_slice()), ("along", ["path"].as_slice()), ("around", ["center"].as_slice())];
+        for (section, keys) in ways {
+            if let Some(o) = copy.get_mut(section).and_then(Json::as_object_mut) {
+                for key in keys {
+                    if let Some(n) = o.get(*key).and_then(Json::as_str) {
+                        o.insert((*key).into(), json!(rename(n)));
+                    }
+                }
+            }
+        }
+        if keep {
+            let new = patch.claim_free(t);
+            patch.set("patterns", &new, copy);
+        } else {
+            patch.set("patterns", t, copy);
+        }
+    }
     if !keep {
         for (key, n) in &curves {
             patch.set(key, n, Json::Null);
         }
         for q in removed {
             patch.set("points", q, Json::Null);
+        }
+        for g in moved_groups {
+            patch.set("groups", &g, Json::Null);
         }
     }
     Some(Plan { patch: patch.done()?, gone, added })
@@ -222,6 +307,7 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
 mod tests {
     use serde_json::{Value as Json, json};
 
+    use super::plan;
     use crate::draw::Tool;
     use crate::draw::tests::{click_at, editor};
     use crate::sketch::{Pick, SketchEdit};
@@ -255,6 +341,44 @@ mod tests {
 
     fn pick(e: &mut SketchEdit, names: &[&str]) {
         e.selected = names.iter().map(|n| Pick::Curve((*n).into())).collect();
+    }
+
+    /// A pattern mirrored across an axis: kept, a mirrored group and a second pattern of it are
+    /// made and the original stands; moved, the original pattern is re-pointed to the mirrored
+    /// cell and its own curves and group go (D285).
+    #[test]
+    fn a_pattern_is_mirrored() {
+        let sketch = json!({
+            "points": {"a": [0, -20], "b": [0, 20], "p1": [10, 0], "p2": [14, 0], "p3": [14, 4], "p4": [10, 4]},
+            "lines": {"axis": {"from": "a", "to": "b", "construction": true},
+                      "l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}, "l3": {"from": "p3", "to": "p4"}, "l4": {"from": "p4", "to": "p1"}},
+            "groups": {"cell": ["l1", "l2", "l3", "l4"]},
+            "patterns": {"holes": {"of": "cell", "step": [[10, 0], [0, 10]], "count": [2, 1]}},
+            "constraints": []
+        });
+        let kept = {
+            let e = editor(sketch.clone(), false);
+            plan(&e, &[Pick::Pattern("holes".into())], "axis", true).unwrap().patch
+        };
+        let kept = serde_json::Value::Object(kept);
+        let (group, members) = kept["groups"].as_object().unwrap().iter().next().unwrap();
+        assert_eq!(members, &json!(["l5", "l6", "l7", "l8"]), "the mirrored cell's curves: {kept}");
+        assert!(group != "cell", "a fresh name");
+        let (pattern, def) = kept["patterns"].as_object().unwrap().iter().next().unwrap();
+        assert_eq!(def["of"], json!(group), "the mirrored pattern is of the mirrored group");
+        assert!(pattern != "holes", "a fresh name");
+        assert_eq!(def["step"], json!([[10, 0], [0, 10]]), "the pattern's own definition comes along");
+        // Moved: the original pattern re-pointed, its curves and group gone.
+        let moved = {
+            let e = editor(sketch, false);
+            plan(&e, &[Pick::Copy("holes".into(), [1, 0])], "axis", false).unwrap().patch
+        };
+        let moved = serde_json::Value::Object(moved);
+        let pattern = &moved["patterns"]["holes"];
+        assert_eq!(pattern["of"], json!("cell (2)"), "{moved}");
+        assert_eq!(moved["groups"]["cell (2)"], json!(["l5", "l6", "l7", "l8"]), "the cell moved: {moved}");
+        assert!(moved["groups"].as_object().unwrap().iter().any(|(_, v)| v.is_null()), "the original group gone");
+        assert_eq!(moved["lines"].as_object().unwrap().values().filter(|v| v.is_null()).count(), 4, "the original curves gone");
     }
 
     /// Half a profile drawn from a vertical axis, mirrored across it: the other half appears

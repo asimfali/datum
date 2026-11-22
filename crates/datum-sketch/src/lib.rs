@@ -131,6 +131,34 @@ pub struct Pattern {
     pub shift: BTreeMap<String, [Num; 2]>,
 }
 
+impl Pattern {
+    /// The curves and groups the pattern is of: its cell (`of`), the region it fills, the ways
+    /// (`along`'s path, `around`'s centre, `offset`'s stops), without repeats. They must be of
+    /// the sketch the pattern is in (D285).
+    pub fn references(&self) -> Vec<&str> {
+        let mut out = vec![self.of.as_str()];
+        if let Some(f) = &self.fill {
+            out.push(f);
+        }
+        if let Some(o) = &self.offset {
+            if let Some(s) = &o.start {
+                out.push(s);
+            }
+            if let Some(e) = &o.end {
+                out.push(e);
+            }
+        }
+        if let Some(a) = &self.along {
+            out.push(a.path.as_str());
+        }
+        if let Some(a) = &self.around {
+            out.push(a.center.as_str());
+        }
+        out.dedup();
+        out
+    }
+}
+
 /// `count` copies of open chains (D253), the cell the first of them, each `step` further to the
 /// left of the way the group's first curve is drawn (negative: to the right): lines parallel,
 /// arcs about the same centres. Each end of each copy stops at the first curve of `start` or

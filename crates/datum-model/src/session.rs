@@ -564,14 +564,17 @@ const COMMANDS: &[Command] = &[
                 p.get("select").and_then(Value::as_array).into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
             let sketch = &feature["sketch"];
             let curve = |n: &String| ["lines", "arcs", "circles"].iter().any(|k| sketch[*k].get(n.as_str()).is_some());
-            if let Some(n) = select.iter().find(|n| !curve(n) && sketch["points"].get(n.as_str()).is_none()) {
-                return Err(format!("`select`: `{name}` has no point or curve `{n}` of its own"));
+            let of = |n: &String, section: &str| sketch[section].get(n.as_str()).is_some();
+            if let Some(n) = select.iter().find(|n| !curve(n) && !of(n, "points") && !of(n, "groups") && !of(n, "patterns")) {
+                return Err(format!("`select`: `{name}` has no point, curve, group or pattern `{n}` of its own"));
             }
-            let (curves, points): (Vec<String>, Vec<String>) = select.into_iter().partition(curve);
+            let (rest, groups): (Vec<String>, Vec<String>) = select.into_iter().partition(|n| !of(n, "groups"));
+            let (rest, patterns): (Vec<String>, Vec<String>) = rest.into_iter().partition(|n| !of(n, "patterns"));
+            let (curves, points): (Vec<String>, Vec<String>) = rest.into_iter().partition(curve);
             let params: BTreeMap<String, f64> =
                 parameter_values(s.graph.parameters()).into_iter().filter_map(|(n, v)| v.ok().map(|v| (n, v))).collect();
-            let mut element =
-                library::extract(&feature, &placed.solved.points, &curves, &points, element_name, Some(&params)).ok_or("nothing to keep")?;
+            let taken = library::Selection { curves: &curves, points: &points, groups: &groups, patterns: &patterns };
+            let mut element = library::extract(&feature, &placed.solved.points, taken, element_name, Some(&params)).ok_or("nothing to keep")?;
             for (label, n) in p.get("ask").and_then(Value::as_object).into_iter().flatten() {
                 library::parametrize(&mut element, label, n.as_str().ok_or("`ask`: parameter names")?)?;
             }

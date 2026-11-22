@@ -127,20 +127,24 @@ pub fn place(
 
 impl SketchEdit {
     /// The selection as an element named `name`: the curves picked with their points, the
-    /// points picked, and the constraints and reference dimensions among them (see
-    /// [`library::extract`]). With `params`, the model's parameters its dimensions name become
-    /// the element's (to keep in the library); without, a copy to paste.
+    /// points picked, the groups and patterns picked with what they are of, and the constraints
+    /// and reference dimensions among them (see [`library::extract`]). With `params`, the
+    /// model's parameters its dimensions name become the element's (to keep in the library);
+    /// without, a copy to paste.
     pub fn extract(&self, name: &str, params: Option<&BTreeMap<String, f64>>) -> Option<Json> {
         let p = self.placed.as_ref().ok()?;
-        let (mut curves, mut points) = (Vec::new(), Vec::new());
+        let (mut curves, mut points, mut groups, mut patterns) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for pick in &self.selected {
             match pick {
                 Pick::Curve(n) => curves.push(n.clone()),
                 Pick::Point(n) => points.push(n.clone()),
+                Pick::Group(g) => groups.push(g.clone()),
+                Pick::Pattern(t) | Pick::Copy(t, _) => patterns.push(t.clone()),
                 _ => {}
             }
         }
-        library::extract(&self.json, &p.solved.points, &curves, &points, name, params)
+        let taken = library::Selection { curves: &curves, points: &points, groups: &groups, patterns: &patterns };
+        library::extract(&self.json, &p.solved.points, taken, name, params)
     }
 
     /// The selection as an element to paste (Ctrl+C), its dimensions as they are.
