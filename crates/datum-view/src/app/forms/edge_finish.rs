@@ -135,6 +135,17 @@ fn parse_id(value: &str) -> Option<TopoId> {
     TopoId::parse(value)
 }
 
+/// The params without their `name`: the name a preview carries is one ahead of what the name
+/// computed now would be, for the previewed model's inspect already holds the previewed
+/// feature (D296). Everything else computes the same way both times.
+fn unnamed(v: &Json) -> Json {
+    let mut v = v.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("name");
+    }
+    v
+}
+
 impl EdgeFinishForm {
     pub(in crate::app) fn editing(name: String, feature: &Json) -> Self {
         let (kind, targets) = if let Some(edges) = feature["edges"].as_array().filter(|e| !e.is_empty()) {
@@ -298,14 +309,7 @@ impl Viewer {
         if !reply.is_ok() {
             return None;
         }
-        let named = |v: &Json| {
-            let mut v = v.clone();
-            if let Some(o) = v.as_object_mut() {
-                o.remove("name");
-            }
-            v
-        };
-        (named(standing) == named(computed)).then(|| standing.clone())
+        (unnamed(standing) == unnamed(computed)).then(|| standing.clone())
     }
 
     /// What a click would send now: the edit of the set being edited, or the extension,
@@ -349,7 +353,14 @@ impl Viewer {
         }
         let params = self.hover_params();
         let sent = self.edge_finish.as_ref().and_then(|f| f.sent.clone());
-        if params != sent {
+        // The name left out of the comparison: the standing preview's name is one ahead of a
+        // name computed now (the previewed model's inspect holds the previewed feature), and
+        // recomputing it would resend the preview every frame — it would flicker (D296).
+        let same = match (&sent, &params) {
+            (Some((sa, sp)), Some((pa, pp))) => sa == pa && unnamed(sp) == unnamed(pp),
+            _ => sent == params,
+        };
+        if !same {
             if let Some(form) = self.edge_finish.as_mut() {
                 form.sent = params.clone();
             }
@@ -747,6 +758,11 @@ mod tests {
             "the input is the last feature of the body, not the first one's"
         );
         v.model.as_mut().unwrap().preview = Some((add.clone(), Ok(json!({}))));
+        // The previewed model's inspect carries the previewed feature: the name computed now
+        // is one ahead, but the preview must not be resent for that — it would flicker.
+        v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(json!({"name": "edge_finish2", "op": "edge_finish"}));
+        v.edge_finish_preview();
+        assert!(inbox.try_recv().is_err(), "the standing preview is not resent for its own name");
         v.edge_finish_click();
         assert!(matches!(inbox.try_recv().unwrap(), Request::Command("add", p) if p == add));
 
