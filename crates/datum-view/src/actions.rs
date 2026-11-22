@@ -47,6 +47,7 @@ pub enum Act {
     WorkPlane,
     Flange,
     Loft,
+    EdgeFinish,
     Rib,
     ToolTable,
     FilletPresets,
@@ -113,7 +114,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 62] = [
+pub const ACTIONS: [Action; 63] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -283,6 +284,14 @@ pub const ACTIONS: [Action; 62] = [
     ),
     action(Act::Loft, "sheet.loft", "Loft flange", "A sheet metal transition between two sketch profiles", plain(Key::L), Model),
     action(
+        Act::EdgeFinish,
+        "model.edge_finish",
+        "Edge",
+        "Pick a straight edge and enter the size. Tab switches between fillet and chamfer. Up and Down select a preset",
+        plain(Key::F),
+        Model,
+    ),
+    action(
         Act::Rib,
         "sheet.rib",
         "Rib",
@@ -302,7 +311,7 @@ pub const ACTIONS: [Action; 62] = [
         Act::FilletPresets,
         "view.fillet_presets",
         "Fillet presets",
-        "The radiuses and the chamfer sizes the sketch's fillet tool offers by the arrows; they are kept in settings.json (D283, D284)",
+        "The fillet radii and chamfer sizes offered by the arrow keys, stored in settings.json (D283, D284)",
         None,
         Anywhere,
     ),
@@ -543,6 +552,14 @@ mod tests {
         assert_eq!(keys.with(&key), [Act::Line, Act::Loft]);
         assert_eq!(Act::Loft.action().context, Context::Model);
         assert_eq!(Act::Line.action().context, Context::Sketch);
+    }
+
+    #[test]
+    fn f_finishes_part_edges_and_sketch_corners() {
+        let key = KeyboardShortcut::new(Modifiers::NONE, Key::F);
+        assert_eq!(Keys::default().with(&key), [Act::Fillet, Act::EdgeFinish]);
+        assert_eq!(Act::EdgeFinish.action().context, Context::Model);
+        assert_eq!(Act::Fillet.action().context, Context::Sketch);
     }
 
     /// A key given to one action is taken from another it would run with, not from one in

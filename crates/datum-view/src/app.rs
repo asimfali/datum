@@ -25,7 +25,7 @@ use crate::scene::{Geometry, MeshCache, Scene};
 use crate::sketch::{Context, SketchEdit};
 use crate::sketch::{Pick, SelectFrame};
 
-use forms::{LoftForm, MetadataForm, RibForm};
+use forms::{EdgeFinishForm, LoftForm, MetadataForm, RibForm};
 
 /// Opens the viewer window, on the model at `path` if given; models open from the window too.
 pub fn run(path: Option<PathBuf>) -> Result<(), String> {
@@ -966,6 +966,7 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
+    edge_finish: Option<EdgeFinishForm>,
     /// Properties of the sketch's curves being edited (D276): the F12 editor.
     metadata: Option<MetadataForm>,
     loft: Option<LoftForm>,
@@ -1657,6 +1658,7 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
+            edge_finish: None,
             metadata: None,
             loft: None,
             mirror: None,
@@ -2174,6 +2176,7 @@ impl Viewer {
             self.close_revolve();
             self.close_trim();
             self.close_rib();
+            self.close_edge_finish();
             self.close_loft();
             self.close_mirror();
         } else {
@@ -2709,6 +2712,7 @@ impl Viewer {
     /// Starts editing sketch feature `name`, once the model brings its context.
     fn enter(&mut self, name: String) {
         self.close_extrusion();
+        self.close_edge_finish();
         self.close_loft();
         self.picking = None;
         self.metadata = None;
@@ -2722,6 +2726,7 @@ impl Viewer {
         self.close_revolve();
         self.close_trim();
         self.close_rib();
+        self.close_edge_finish();
         self.close_loft();
         self.close_mirror();
         self.metadata = None;
@@ -2754,6 +2759,7 @@ impl Viewer {
 
     /// Starts picking a plane or a face for `purpose`, or stops if already picking for it.
     fn pick(&mut self, purpose: Purpose) {
+        self.close_edge_finish();
         self.picking = if self.picking == Some(purpose) { None } else { Some(purpose) };
         self.under = None;
     }
@@ -2849,6 +2855,7 @@ impl Viewer {
                 (Act::Extrude, Icon::Extrude),
                 (Act::Revolve, Icon::Revolve),
                 (Act::Loft, Icon::Loft),
+                (Act::EdgeFinish, Icon::Fillet),
                 (Act::MirrorPart, Icon::Mirror),
                 (Act::FlatPane, Icon::Flat),
                 (Act::WorkPlane, Icon::WorkPlane),
@@ -3765,9 +3772,14 @@ impl Viewer {
                         });
                     }
                     // Changed in the form it was made in, its values in it.
-                    None if matches!(op, "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange" | "loft") => {
+                    None if matches!(
+                        op,
+                        "revolve" | "rolled" | "trim" | "mirror" | "extrude" | "sheet" | "plate" | "flange" | "loft" | "edge_finish"
+                    ) =>
+                    {
                         ui.horizontal(|ui| {
-                            tree.label(ui, &self.i18n, f, Icon::Done, op);
+                            let tail = if op == "edge_finish" { self.i18n.label(Act::EdgeFinish) } else { op };
+                            tree.label(ui, &self.i18n, f, Icon::Done, tail);
                             let hint = self.i18n.t("edit-feature", "Change it");
                             if crate::icons::button(ui, crate::icons::Icon::Edit, hint, hint, true).clicked() {
                                 reedit = Some(bare.to_string());
@@ -3982,17 +3994,19 @@ impl Viewer {
         } else {
             self.view_input(ui, rect, &r);
         }
-        let loft_hover = if self.loft_is_picking() {
+        let (loft_hover, edge_hover) = if self.loft_is_picking() {
             let hover = r.hover_pos().or(r.interact_pointer_pos()).and_then(|cursor| self.loft_profile_at(rect, cursor));
             if r.clicked()
                 && let Some(name) = hover.and_then(|i| self.model.as_ref()?.loft_profiles.get(i)).map(|p| p.name.clone())
             {
                 self.pick_loft_profile(&name);
             }
-            hover
+            (hover, None)
+        } else if self.edge_finish_is_picking() {
+            (None, self.edge_finish_picker(rect, &r))
         } else {
             self.pick_input(ui, rect, &r, offset);
-            None
+            (None, None)
         };
         let Some(m) = &self.model else { return };
         let (lo, hi) = crate::origin::held(m.scene.bounds);
@@ -4062,6 +4076,11 @@ impl Viewer {
         let painter = ui.painter().with_clip_rect(rect);
         if sketched {
             self.paint_sketch(&painter, rect);
+        }
+        if let Some([a, b]) = edge_hover
+            && let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect))
+        {
+            painter.line_segment([a, b], egui::Stroke::new(3.0, egui::Color32::from_rgb(235, 110, 20)));
         }
         if self.loft_is_picking() {
             let project = |point| on_screen(&view_projection, point - anchor, rect);
@@ -4937,6 +4956,7 @@ impl Viewer {
             Some("rib") => {
                 self.rib = Some(RibForm::editing(name.to_string(), input(0), input(1), f["tool"].as_str().map(String::from), f["flip"] == true));
             }
+            Some("edge_finish") => self.edge_finish = Some(EdgeFinishForm::editing(name.to_string(), &f)),
             Some("loft") => {
                 self.clear_loft_selection();
                 self.part = Some(name.to_string());
@@ -5027,7 +5047,14 @@ impl Viewer {
         let trim = self.trim.as_ref().filter(|f| f.editing).map(|f| &f.name).or(self.rib.as_ref().and_then(RibForm::edited));
         let mirror = self.mirror.as_ref().filter(|f| f.editing).map(|f| &f.name);
         let extrusion = self.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        flange.or(revolve).or(trim).or(mirror).or(extrusion).or(self.loft.as_ref().and_then(LoftForm::edited)).cloned()
+        flange
+            .or(revolve)
+            .or(trim)
+            .or(mirror)
+            .or(extrusion)
+            .or(self.loft.as_ref().and_then(LoftForm::edited))
+            .or(self.edge_finish.as_ref().and_then(EdgeFinishForm::edited))
+            .cloned()
     }
 
     /// With a form changing a feature, Shift or Ctrl held: what is under the cursor of what the
@@ -7143,6 +7170,9 @@ impl Viewer {
             | Act::ToolTable
             | Act::Rib
             | Act::Loft => self.model.is_some(),
+            Act::EdgeFinish => {
+                self.edge_finish.is_some() || self.model.as_ref().is_some_and(|m| m.scene.bodies.iter().any(|b| !b.finish_edges.is_empty()))
+            }
             Act::CloseProject => self.project.is_some(),
             Act::Extrude | Act::Revolve => {
                 self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
@@ -7198,6 +7228,7 @@ impl Viewer {
             Act::ParameterTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
             Act::Rib => self.rib.is_some(),
             Act::Loft => self.loft.is_some(),
+            Act::EdgeFinish => self.edge_finish.is_some(),
             Act::ToolTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Tools),
             Act::MaterialTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
             Act::RuleTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Rules),
@@ -7277,6 +7308,7 @@ impl Viewer {
                 let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
                 self.open_rib(at);
             }
+            Act::EdgeFinish => self.open_edge_finish(ui.input(|i| i.pointer.latest_pos())),
             Act::Trim => {
                 self.leave();
                 if self.trim_body().is_some() {
@@ -7523,6 +7555,7 @@ impl Viewer {
             self.item(ui, Act::Revolve, true);
             self.item(ui, Act::Flange, true);
             self.item(ui, Act::Loft, true);
+            self.item(ui, Act::EdgeFinish, true);
             self.item(ui, Act::Trim, true);
             self.item(ui, Act::Rib, true);
             self.item(ui, Act::MirrorPart, true);
@@ -7868,6 +7901,7 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
+        self.edge_finish_window(ui.ctx());
         self.metadata_window(ui.ctx());
         self.loft_pick_hint(ui.ctx());
         self.loft_window(ui.ctx());
@@ -8011,6 +8045,7 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
+            edge_finish: None,
             metadata: None,
             loft: None,
             mirror: None,

@@ -29,8 +29,17 @@ pub struct BodyMesh {
     pub faces: Vec<TopoId>,
     /// B-rep edges (not triangle edges), arcs as chords: what an engineer reads a part by.
     pub edges: Vec<[Vec3; 2]>,
+    /// Straight visible corners between planar faces, with their B-rep IDs for the Edge tool.
+    pub(crate) finish_edges: Vec<FinishEdge>,
     /// What can become the outline of a sphere or a torus on screen.
     pub contours: Vec<Contour>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct FinishEdge {
+    pub id: TopoId,
+    pub ends: [Vec3; 2],
+    pub normals: [Vec3; 2],
 }
 
 /// An edge of the triangles of spheres and tori: drawn only while one of its two triangles faces
@@ -108,8 +117,12 @@ impl BodyMesh {
             let pts = edge_points(body, e as Ix, chord);
             let p = pts[0];
             let (a, b) = (surface(edge.half), surface(body.half_edges()[edge.half as usize].twin));
-            if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || a.normal_at(p).dot(b.normal_at(p)) < SHARP {
+            let normals = [a.normal_at(p), b.normal_at(p)];
+            if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || normals[0].dot(normals[1]) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
+                if flat(a) && flat(b) && body.edge_curve(edge).is_none() {
+                    mesh.finish_edges.push(FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals });
+                }
             }
         }
         mesh

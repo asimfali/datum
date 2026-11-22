@@ -9,6 +9,7 @@ mod branch;
 mod component;
 mod copies;
 mod cut;
+mod edge_finish;
 mod flange;
 mod loft;
 mod mirror;
@@ -34,6 +35,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
+pub use edge_finish::EdgeMode;
 pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
@@ -72,6 +74,13 @@ pub enum Op {
     },
     /// A polygon in the XY plane extruded from `z0` to `z1`. No inputs.
     Prism { polygon: Vec<Vec2>, z0: Num, z1: Num },
+    /// Round or bevel a straight edge normal to the part's cross-section. One body input.
+    EdgeFinish {
+        edge: String,
+        size: Num,
+        #[serde(default)]
+        mode: EdgeMode,
+    },
     /// Rotation by `angle_deg` about `axis` through the origin, then translation. One input.
     /// Defaults: no translation, Z axis, no rotation.
     Transform {
@@ -650,6 +659,7 @@ impl Op {
         match self {
             Self::Mirror { .. } => "mirror",
             Self::Prism { .. } => "prism",
+            Self::EdgeFinish { .. } => "edge_finish",
             Self::Transform { .. } => "transform",
             Self::Boolean { .. } => "boolean",
             Self::PatternGrid { .. } => "pattern_grid",
@@ -691,6 +701,7 @@ impl Op {
             Self::Extrude { .. } => 1..=3,
             Self::Mirror { .. } => 1..=2,
             Self::Transform { .. }
+            | Self::EdgeFinish { .. }
             | Self::PatternGrid { .. }
             | Self::Unfold { .. }
             | Self::Sheet { .. }
@@ -786,6 +797,7 @@ impl Op {
                 symmetric: *symmetric,
                 profiles: profiles.clone(),
             },
+            Self::EdgeFinish { edge, size, mode } => Self::EdgeFinish { edge: edge.clone(), size: r(size, "size")?, mode: *mode },
             Self::Sheet { thickness, radius, side, z0, z1, path, start } => Self::Sheet {
                 thickness: thickness.as_ref().map(|n| r(n, "thickness")).transpose()?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
@@ -917,6 +929,7 @@ impl Op {
             }
             // `Debug` spells every field exactly, as for a sketch.
             Self::Mirror { .. }
+            | Self::EdgeFinish { .. }
             | Self::Sheet { .. }
             | Self::Loft { .. }
             | Self::Plate { .. }
@@ -1043,6 +1056,10 @@ impl Op {
         };
         let body = match self {
             Self::Prism { polygon, z0, z1 } => prism(feature, polygon, num(z0)?, num(z1)?)?,
+            Self::EdgeFinish { edge, size, mode } => {
+                let id = u128::from_str_radix(edge, 16).map(TopoId).map_err(|_| BrepError::Invalid(format!("`{edge}` is not an edge ID")))?;
+                edge_finish::finish(feature, inputs[0], id, num(size)?, *mode)?
+            }
             Self::Transform { translate, axis, angle_deg } => {
                 let angle = num(angle_deg)?;
                 let rot = if angle == 0.0 {

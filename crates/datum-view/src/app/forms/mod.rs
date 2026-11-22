@@ -1,9 +1,11 @@
 //! The forms of the model's operations: each its own module, state, window and tests (D255).
 
+mod edge_finish;
 mod loft;
 mod metadata;
 mod rib;
 
+pub(in crate::app) use edge_finish::EdgeFinishForm;
 pub(in crate::app) use loft::LoftForm;
 pub(in crate::app) use metadata::MetadataForm;
 #[cfg(test)]

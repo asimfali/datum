@@ -123,6 +123,7 @@ mod tests {
         let sources = [
             ("actions.rs", include_str!("actions.rs")),
             ("app.rs", include_str!("app.rs")),
+            ("app/forms/edge_finish.rs", include_str!("app/forms/edge_finish.rs")),
             ("app/forms/loft.rs", include_str!("app/forms/loft.rs")),
             ("app/forms/metadata.rs", include_str!("app/forms/metadata.rs")),
             ("camera.rs", include_str!("camera.rs")),
@@ -185,6 +186,7 @@ mod tests {
     fn the_catalog_and_the_code_agree() {
         let sources = [
             include_str!("app.rs"),
+            include_str!("app/forms/edge_finish.rs"),
             include_str!("app/forms/metadata.rs"),
             include_str!("app/forms/rib.rs"),
             include_str!("app/forms/loft.rs"),
