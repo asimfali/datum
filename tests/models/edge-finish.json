@@ -17,6 +17,8 @@
     {"name": "box", "op": "extrude", "inputs": ["outline"], "mode": "new", "z0": 0, "z1": 10},
     {"name": "fillet", "op": "edge_finish", "inputs": ["box"], "edge": "e27635c2b2168747154a215d0fb9a503", "size": 2, "mode": "fillet"},
     {"name": "chamfer_box", "op": "transform", "inputs": ["box"], "translate": [30, 0, 0]},
-    {"name": "chamfer", "op": "edge_finish", "inputs": ["chamfer_box"], "edge": "e27635c2b2168747154a215d0fb9a503", "size": 2, "mode": "chamfer"}
+    {"name": "chamfer", "op": "edge_finish", "inputs": ["chamfer_box"], "edge": "e27635c2b2168747154a215d0fb9a503", "size": 2, "mode": "chamfer"},
+    {"name": "face_box", "op": "transform", "inputs": ["box"], "translate": [60, 0, 0]},
+    {"name": "face_finish", "op": "edge_finish", "inputs": ["face_box"], "face": "3489b6d341f906db2d035424c61bbbe4", "size": 1.5, "mode": "fillet"}
   ]
 }

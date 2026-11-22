@@ -142,6 +142,8 @@ pub(crate) enum Request {
     /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
     /// model until `None`.
     Preview(Option<(&'static str, Json)>),
+    /// Apply the Edge tool's current preview and clear it in the same rebuild.
+    ApplyEdgeFinish(&'static str, Json),
     /// Remember the model as it is, to come back to by `Back` (a lesson's step shown, D230).
     Mark,
     Back,
@@ -319,6 +321,8 @@ struct Model {
     /// The params of the command previewed and its reply, or why it is refused; the scene shows
     /// its result.
     preview: Option<(Json, Result<Json, String>)>,
+    edge_base: Arc<EdgeBase>,
+    edge_applied: Option<bool>,
     /// The points a work plane may go through (D204): each as a plane's point names it (`of` a
     /// feature, a `vertex` or a `point`; nothing: the origin) and where it is.
     spots: Vec<(Json, datum_math::Vec3)>,
@@ -331,6 +335,39 @@ struct Model {
     uses: Option<crate::uses::Uses>,
     /// The contours of the bodies shown a click on a face takes for a flange, by the body's place.
     contours: Vec<(usize, datum_ops::FlangeLoop)>,
+}
+
+/// The committed bodies and their names share the same indices. A trial has its own picture.
+#[derive(Default)]
+struct EdgeBase {
+    meshes: Vec<Arc<BodyMesh>>,
+    bodies: Vec<String>,
+    inspect: Json,
+    next_name: String,
+    edit: Option<(String, Arc<BodyMesh>)>,
+}
+
+impl EdgeBase {
+    fn new(picture: &Picture, session: &Session, using: Option<&str>, meshes: &mut MeshCache) -> Self {
+        let graph = session.graph();
+        let edit = using.and_then(|name| {
+            let node = &graph.nodes()[graph.find(name)? as usize];
+            if !matches!(node.op, datum_graph::Op::EdgeFinish { .. }) {
+                return None;
+            }
+            let input = *node.inputs.first()? as usize;
+            let value = session.evaluation().results[input].as_ref().ok()?;
+            let mesh = meshes.get(value.body()?, matches!(&**value, datum_graph::Value::Formed(_)));
+            Some((name.to_string(), mesh))
+        });
+        Self {
+            meshes: picture.scene.bodies.clone(),
+            bodies: picture.bodies.clone(),
+            inspect: picture.inspect.clone(),
+            next_name: free_feature_name(&picture.inspect, "edge_finish"),
+            edit,
+        }
+    }
 }
 
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
@@ -425,6 +462,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut editing: Option<String> = None;
     let mut using: Option<String> = None;
     let mut previewing: Option<(&'static str, Json)> = None;
+    let mut edge_base = None;
     let mut mark = None;
     while let Ok(first) = requests.recv() {
         let mut pending = vec![first];
@@ -432,6 +470,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
         let (mut error, mut opened, mut closed) = (None, false, false);
+        let mut edge_applied = None;
         let mut notes = Vec::new();
         // A body whose shape an edit changed (pieces, through holes): worth a word.
         let mut note = |reply: &Json| {
@@ -446,9 +485,13 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             }
         };
         for r in pending {
+            if !matches!(r, Request::Preview(_) | Request::Mark) {
+                edge_base = None;
+            }
             match r {
                 Request::Open(p) => {
                     latest.clear();
+                    previewing = None;
                     (opened, closed) = (true, false);
                     if let Err(e) = journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
                         error = Some(e);
@@ -459,6 +502,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 }
                 Request::Close => {
                     latest.clear();
+                    previewing = None;
                     session = Session::default();
                     (opened, closed) = (false, true);
                 }
@@ -472,6 +516,22 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 Request::Editing(name) => editing = name,
                 Request::Using(name) => using = name,
                 Request::Preview(p) => previewing = p,
+                Request::ApplyEdgeFinish(command, params) => {
+                    let current = previewing.take().is_some_and(|(c, p)| c == command && p == params);
+                    let result = if current {
+                        session
+                            .trial(command, &params, |_, reply| previewed(reply.clone(), &params["name"]))
+                            .and_then(|trial| trial)
+                            .and_then(|_| journaled(&mut session, command, &params))
+                    } else {
+                        Err("The edge finish preview has changed".into())
+                    };
+                    edge_applied = Some(result.is_ok());
+                    match result {
+                        Ok(reply) => note(&reply),
+                        Err(why) => error = Some(why),
+                    }
+                }
                 Request::Mark => mark = Some(session.checkpoint()),
                 Request::Back => {
                     if let Some(c) = mark.take() {
@@ -490,18 +550,34 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let flats = session.flats();
         let picture = |session: &Session, meshes: &mut MeshCache| picture(session, editing.as_deref(), using.as_deref(), meshes);
+        let mut committed = None;
+        let base = edge_base.get_or_insert_with(|| {
+            let p = picture(&session, &mut meshes);
+            let base = Arc::new(EdgeBase::new(&p, &session, using.as_deref(), &mut meshes));
+            committed = Some(p);
+            base
+        });
+        let committed = |session: &Session, meshes: &mut MeshCache| committed.unwrap_or_else(|| picture(session, meshes));
+        let edge_preview = previewing.as_ref().is_some_and(|(command, params)| {
+            (*command == "add" && params["op"] == "edge_finish")
+                || (*command == "edit" && base.edit.as_ref().is_some_and(|(name, _)| params["name"] == *name))
+        });
         let (picture, preview) = match &previewing {
-            None => (picture(&session, &mut meshes), None),
+            None => (committed(&session, &mut meshes), None),
             Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
-                Ok((p, reply)) => (p, Some((params.clone(), previewed(reply, &params["name"])))),
-                Err(e) => (picture(&session, &mut meshes), Some((params.clone(), Err(e)))),
+                Ok((p, reply)) => {
+                    let reply = previewed(reply, &params["name"]);
+                    let p = if edge_preview && reply.is_err() { committed(&session, &mut meshes) } else { p };
+                    (p, Some((params.clone(), reply)))
+                }
+                Err(e) => (committed(&session, &mut meshes), Some((params.clone(), Err(e)))),
             },
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } = picture;
         if models
             .send(Model {
-                inspect,
+                inspect: if edge_preview { base.inspect.clone() } else { inspect },
                 scene,
                 geometry,
                 error,
@@ -515,6 +591,8 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 flats,
                 editing: context,
                 preview,
+                edge_base: base.clone(),
+                edge_applied,
                 spots,
                 lines,
                 loft_profiles,
@@ -603,6 +681,11 @@ fn previewed(reply: Json, name: &Json) -> Result<Json, String> {
         Some(f) => Err(f["error"].as_str().unwrap_or_default().to_string()),
         None => Ok(reply),
     }
+}
+
+fn free_feature_name(inspect: &Json, prefix: &str) -> String {
+    let features = inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
+    (1..).map(|k| format!("{prefix}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
 }
 
 /// The picture of the model `session` holds, sketch `editing` drawn by the window.
@@ -970,9 +1053,6 @@ struct Viewer {
     /// A trim of rolled sheet metal being asked for: its form.
     trim: Option<TrimForm>,
     rib: Option<RibForm>,
-    /// The bodies of the model without a standing preview, for the Edge tool's picking: the
-    /// previewed body no longer has the hovered corner, so picking it would flicker (D296).
-    edge_base: Option<Vec<Arc<BodyMesh>>>,
     /// Something under the cursor for the Edge tool: an edge, or a flat cap with its corners.
     edge_hover: Option<forms::EdgeHover>,
     edge_finish: Option<EdgeFinishForm>,
@@ -1668,7 +1748,6 @@ impl Viewer {
             revolve: None,
             trim: None,
             rib: None,
-            edge_base: None,
             edge_hover: None,
             edge_finish: None,
             metadata: None,
@@ -3046,12 +3125,11 @@ impl Viewer {
             if self.part.as_ref().is_some_and(|p| !m.inspect["parts"].as_array().into_iter().flatten().any(|r| r["part"] == *p)) {
                 self.part = None;
             }
-            // The Edge tool picks against the model without a preview: the previewed body has
-            // the hovered corner already rounded, and picking it would flicker (D296).
-            if m.closed {
-                self.edge_base = None;
-            } else if m.preview.is_none() {
-                self.edge_base = Some(m.scene.bodies.clone());
+            if self.model.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.edge_base, &m.edge_base)) {
+                self.edge_hover = None;
+            }
+            if let Some(applied) = m.edge_applied {
+                self.edge_finish_applied(applied);
             }
             self.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
@@ -4096,11 +4174,12 @@ impl Viewer {
         if sketched {
             self.paint_sketch(&painter, rect);
         }
-        if let Some(lines) = edge_hover {
-            for [a, b] in lines {
-                if let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect)) {
-                    painter.line_segment([a, b], egui::Stroke::new(3.0, crate::draw::DRAFT));
-                }
+        let edge_lines =
+            self.edge_finish_selection().into_iter().flatten().map(|line| (line, egui::Stroke::new(2.0, egui::Color32::from_rgb(235, 110, 20))));
+        let hover_lines = edge_hover.into_iter().flatten().map(|line| (line, egui::Stroke::new(3.0, crate::draw::DRAFT)));
+        for ([a, b], stroke) in edge_lines.chain(hover_lines) {
+            if let (Some(a), Some(b)) = (on_screen(&view_projection, a - anchor, rect), on_screen(&view_projection, b - anchor, rect)) {
+                painter.line_segment([a, b], stroke);
             }
         }
         if let Some(cursor) = r.hover_pos().or(r.interact_pointer_pos()) {
@@ -4187,7 +4266,10 @@ impl Viewer {
                 tint(edge, f.body, 110);
             }
         }
-        if !sketched && let Some(u) = &m.uses {
+        if !sketched
+            && !self.edge_finish_is_picking()
+            && let Some(u) = &m.uses
+        {
             let used = egui::Color32::from_rgb(235, 110, 20);
             let free = egui::Color32::from_rgb(70, 120, 210);
             let draw = |l: &[datum_math::Vec3; 2], stroke: egui::Stroke| {
@@ -5285,8 +5367,7 @@ impl Viewer {
 
     /// The first free name of `command` + a number: `extrude1`, `plate2`.
     fn feature_name(&self, command: &str) -> String {
-        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
-        (1..).map(|k| format!("{command}{k}")).find(|n| !features.iter().any(|f| f["name"].as_str() == Some(n.as_str()))).unwrap_or_default()
+        free_feature_name(self.model.as_ref().map_or(&Json::Null, |m| &m.inspect), command)
     }
 
     /// A body clicked while a branch pipe is asked for: the first rolled one is the main pipe, the
@@ -7922,7 +8003,6 @@ impl Viewer {
         self.revolve_window(ui.ctx());
         self.trim_window(ui.ctx());
         self.rib_window(ui.ctx());
-        self.edge_finish_ui(ui.ctx());
         self.metadata_window(ui.ctx());
         self.loft_pick_hint(ui.ctx());
         self.loft_window(ui.ctx());
@@ -7932,6 +8012,7 @@ impl Viewer {
         self.presets_window(ui.ctx(), frame);
         self.native_windows.finish_frame();
         self.settings_said(ui.ctx());
+        self.edge_hover = None;
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
@@ -7940,6 +8021,7 @@ impl Viewer {
             egui_dock::DockArea::new(&mut dock).style(style).show_add_buttons(false).show_inside(ui, &mut Tabs { v: self, rs });
             self.dock = dock;
         });
+        self.edge_finish_ui(ui.ctx());
         // The flat pattern pane closed on a sketch on the blank finishes the sketch, as Done does.
         if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) && !crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
             self.leave();
@@ -7984,6 +8066,8 @@ mod tests {
                 flats: Vec::new(),
                 editing: None,
                 preview: None,
+                edge_base: Arc::default(),
+                edge_applied: None,
                 spots: Vec::new(),
                 lines: Vec::new(),
                 loft_profiles: Vec::new(),
@@ -8069,7 +8153,6 @@ mod tests {
             revolve: None,
             trim: None,
             rib: None,
-            edge_base: None,
             edge_hover: None,
             edge_finish: None,
             metadata: None,

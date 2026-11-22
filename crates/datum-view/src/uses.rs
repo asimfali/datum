@@ -118,9 +118,9 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
         }
     }
     match &node.op {
-        Op::EdgeFinish { edge, edges, faces, .. } => {
+        Op::EdgeFinish { edge, edges, face, faces, exclude_edges, .. } => {
             let body = input(0)?.body()?;
-            if let Ok(targets) = datum_ops::edge_finish_targets(body, edge, edges, faces) {
+            if let Ok(targets) = datum_ops::edge_finish_targets(body, edge, edges, face, faces, exclude_edges) {
                 for id in targets {
                     if let Some(ends) = edge_ends(body, id) {
                         u.lines.push(ends);

@@ -274,10 +274,8 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
         // A corner has both boundary edges at the vertex straight. A vertex on a curve, or
         // where a straight run meets one — a run an earlier finish left — is not a corner and
         // is skipped: a cap partly rounded finishes its remaining corners (D296).
-        let around = [(at + boundary.len() - 1) % boundary.len(), (at + 1) % boundary.len()];
-        let curved = std::iter::once(at)
-            .chain(around)
-            .any(|i| body.edge_curve(&body.edges()[body.half_edges()[boundary[i] as usize].edge as usize]).is_some());
+        let around = [(at + boundary.len() - 1) % boundary.len(), at];
+        let curved = around.into_iter().any(|i| body.edge_curve(&body.edges()[body.half_edges()[boundary[i] as usize].edge as usize]).is_some());
         if curved {
             continue;
         }
@@ -340,16 +338,34 @@ pub fn edge_finish_caps(body: &Body) -> Vec<(TopoId, Vec<TopoId>)> {
     body.faces().iter().filter_map(|f| edge_finish_face(body, f.id).ok().map(|corners| (f.id, corners))).collect()
 }
 
-/// The corner edges an `EdgeFinish` selection targets: the single `edge`, the `edges` set,
-/// or every corner of each planar cap in `faces`. Exactly one of the three must be given.
-pub fn edge_finish_targets(body: &Body, edge: &str, edges: &[String], faces: &[String]) -> Result<Vec<TopoId>, BrepError> {
+/// Resolve the union of selected edges and face corners, minus excluded edge IDs.
+pub fn edge_finish_targets(
+    body: &Body,
+    edge: &str,
+    edges: &[String],
+    face: &str,
+    faces: &[String],
+    exclude_edges: &[String],
+) -> Result<Vec<TopoId>, BrepError> {
     let id = |value: &str| TopoId::parse(value).ok_or_else(|| BrepError::Invalid(format!("`{value}` is not a topology ID")));
-    match (edge.is_empty(), edges.is_empty(), faces.is_empty()) {
-        (false, true, true) => Ok(vec![id(edge)?]),
-        (true, false, true) => edges.iter().map(|edge| id(edge)).collect(),
-        (true, true, false) => faces.iter().map(|face| edge_finish_face(body, id(face)?)).collect::<Result<Vec<_>, _>>().map(|sets| sets.concat()),
-        _ => Err(BrepError::Invalid("edge_finish takes exactly one of edge, edges, or faces".into())),
+    let mut result = Vec::new();
+    if !edge.is_empty() {
+        result.push(id(edge)?);
     }
+    for edge in edges {
+        result.push(id(edge)?);
+    }
+    for face in std::iter::once(face).filter(|face| !face.is_empty()).chain(faces.iter().map(String::as_str)) {
+        result.extend(edge_finish_face(body, id(face)?)?);
+    }
+    let excluded = exclude_edges.iter().map(|edge| id(edge)).collect::<Result<Vec<_>, _>>()?;
+    result.retain(|edge| !excluded.contains(edge));
+    result.sort_unstable();
+    result.dedup();
+    if result.is_empty() {
+        return Err(BrepError::Invalid("edge finish: no edges selected".into()));
+    }
+    Ok(result)
 }
 
 /// Finish a set atomically. A one-edge operation keeps the historical topology IDs;
@@ -424,10 +440,10 @@ mod tests {
         let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
         let corners = edge_finish_face(&body, top).unwrap();
         assert_eq!(corners.len(), 4);
-        // One corner edge rounds both its ends: two corners of the top are gone, two stand.
+        // One corner edge removes one corner from the top cap.
         let partly = finish_many(id, &body, &corners[..1], 1.2, EdgeMode::Fillet).unwrap();
         let left = edge_finish_face(&partly, top).unwrap();
-        assert_eq!(left.len(), 2, "the cap is offered with its remaining corners");
+        assert_eq!(left.len(), 3, "the cap is offered with its remaining corners");
         let caps: Vec<_> = edge_finish_caps(&partly).iter().map(|(id, _)| *id).collect();
         assert!(caps.contains(&top), "the partly rounded cap is offered");
         let again = finish_many(id, &partly, &left, 1.2, EdgeMode::Fillet).unwrap();

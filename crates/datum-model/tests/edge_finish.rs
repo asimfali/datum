@@ -169,7 +169,7 @@ fn edge_finish_by_cap_rounds_every_eligible_profile_corner() {
     let mut s = session();
     let faces = run(&mut s, "query_faces", json!({"name": "box", "normal": [0, 0, 1]}));
     let face = faces["faces"][0]["id"].as_str().unwrap();
-    run(&mut s, "add", json!({"name": "all_corners", "op": "edge_finish", "inputs": ["box"], "faces": [face], "size": 2.0, "mode": "fillet"}));
+    run(&mut s, "add", json!({"name": "all_corners", "op": "edge_finish", "inputs": ["box"], "face": face, "size": 2.0, "mode": "fillet"}));
     let made = feature(&mut s, "all_corners");
     assert!(made.get("error").is_none(), "{made}");
     close(volume(&mut s, "all_corners"), 2400.0 - 4.0 * (4.0 - std::f64::consts::PI) * 10.0);
@@ -229,4 +229,26 @@ fn edge_finish_multiple_corners_fails_atomically_when_one_does_not_fit() {
     close(volume(&mut s, "box"), 2400.0);
     let still_valid = run(&mut s, "query_faces", json!({"name": "box"}));
     assert_eq!(still_valid["faces"].as_array().unwrap().len(), 6, "failed operation changed its input body: {still_valid}");
+}
+
+#[test]
+fn edge_finish_combines_faces_and_edges_then_excludes_corners() {
+    let mut s = session();
+    let face = run(&mut s, "query_faces", json!({"name": "box", "normal": [0, 0, 1]}))["faces"][0]["id"].take();
+    let edges = profile_edges(&mut s, "box");
+    run(
+        &mut s,
+        "add",
+        json!({"name": "mixed", "op": "edge_finish", "inputs": ["box"], "faces": [face], "edges": [edges[0]], "exclude_edges": [edges[1]], "size": 1.0}),
+    );
+    let made = feature(&mut s, "mixed");
+    assert!(made.get("error").is_none(), "{made}");
+    close(volume(&mut s, "mixed"), 2400.0 - 3.0 * (1.0 - std::f64::consts::PI / 4.0) * 10.0);
+    run(
+        &mut s,
+        "add",
+        json!({"name": "empty", "op": "edge_finish", "inputs": ["box"], "edges": [edges[0]], "exclude_edges": [edges[0]], "size": 1.0}),
+    );
+    let empty = feature(&mut s, "empty");
+    assert!(empty.get("error").is_some(), "{empty}");
 }
