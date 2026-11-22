@@ -10073,6 +10073,73 @@ mod tests {
         assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Select);
     }
 
+    /// A viewer with the model open and its sketch `sketch1` being edited, as `sketching` does.
+    fn model_sketch(name: &str) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+        let (mut v, inbox) = viewer(name);
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(name);
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("sketch1".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("sketch1".into());
+        v.sync_sketch();
+        (v, inbox)
+    }
+
+    /// A rectangle fully defined by construction diagonals (the engineer's usual way) still
+    /// fillets: the diagonals are not of the profile, both the region inside and every corner
+    /// offer a plan (issue: `test15.json` gave no preview and no fillet at all).
+    #[test]
+    fn a_rectangle_held_by_construction_diagonals_still_fillets() {
+        let (mut v, _inbox) = model_sketch("rectangle_construction.json");
+        let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
+        h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+        h.run();
+        drop(h);
+        {
+            let sk = v.sketch.as_mut().unwrap();
+            sk.draft.fillet = Some((json!(2), 2.0));
+            sk.draft.chamfer = false;
+        }
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
+        let follow = |v: &mut Viewer, at: [f64; 2]| {
+            let (x, y) = v.sketch.as_ref().unwrap().camera.offset(at, f64::from(rect.height()));
+            rect.center() + egui::vec2(x as f32, y as f32)
+        };
+        // Inside the region, away from every point, so the region is asked, not a corner.
+        let hover = {
+            let sk = v.sketch.as_ref().unwrap();
+            let pts = &sk.placed.as_ref().unwrap().solved.points;
+            let (o, c) = (pts["origin"], pts["p3"]);
+            follow(&mut v, [0.5 * (o.x + c.x), 0.5 * (o.y + c.y)])
+        };
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(hover);
+        h.run();
+        drop(h);
+        assert!(v.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan inside the region");
+        // And at a corner, where a construction diagonal also ends: still a corner.
+        let hover = {
+            let sk = v.sketch.as_ref().unwrap();
+            let q = sk.placed.as_ref().unwrap().solved.points["p1"];
+            follow(&mut v, [q.x, q.y])
+        };
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
+            let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+            let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+            v.sketch_input(ui, rect, &r, offset);
+        });
+        h.hover_at(hover);
+        h.run();
+        drop(h);
+        assert!(v.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan at a corner with a construction diagonal");
+    }
+
     /// F takes up the fillet tool, Tab turns it into chamfers and back; with the size 5, a click
     /// on the plate's corner `a` rounds it: an arc and a radius sent, the dimension kept.
     #[test]

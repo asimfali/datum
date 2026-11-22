@@ -54,12 +54,16 @@ struct Corner {
     ends: [End; 2],
 }
 
-/// The own lines and arcs that end at point `v` (or at one coincident with it).
+/// The own profile lines and arcs that end at point `v` (or at one coincident with it);
+/// construction curves are not of the profile, a corner of theirs is none (D283).
 fn ends_at(sk: &Sketch, v: &str) -> Vec<End> {
     let json = sk.json();
     let mut out = Vec::new();
     for key in ["lines", "arcs"] {
         for (n, c) in json[key].as_object().into_iter().flatten() {
+            if c["construction"] == true {
+                continue;
+            }
             for end in ["from", "to"] {
                 if c[end].as_str().is_some_and(|e| sk.same(e, v)) {
                     out.push(End { curve: n.clone(), key, end });

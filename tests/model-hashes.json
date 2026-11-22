@@ -209,6 +209,10 @@
     "skeleton": "bafd636c6d1f7988669c81295a78b05cc47d8d9ad19d806067bf1e501aad6180",
     "wp": "8c9ee53cd7da9930ae5ae1da42d4d1fef5605965be9965bf1a7eefa5706a97cf"
   },
+  "rectangle_construction.json": {
+    "part": "31bafaecf86a00841704b0493f5263f53f98711b75fa2450e75f1d9edb96e1fd",
+    "sketch1": "969d194a234fcd097b367e569c66a0f43f5f837e3f57a551e7c657e6ecc8889e"
+  },
   "revolve.json": {
     "bushing": "7a1c8b4b77e244c6ed10dc2a6cecbe9def4db2d9bd173f97fd560dbfc8020f0d",
     "profile": "fb06260e4a036138e19068561887eb7546dbc79bb849105fa50c7f67a8fa42b2"
