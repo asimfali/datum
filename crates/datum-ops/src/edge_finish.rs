@@ -254,8 +254,8 @@ pub(crate) fn finish(feature: TopoId, body: &Body, edge: TopoId, size: f64, mode
 }
 
 /// Return the straight corner edges normal to a planar face, in its outer boundary order.
-/// The first implementation only accepts a single, straight-edged outer loop; holes and
-/// curved corners need a different selection rule and are rejected.
+/// The cap must be a single outer loop (holes are refused); curved runs skip their vertices:
+/// a partly rounded cap finishes its remaining corners, a cap with none of them is refused.
 pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepError> {
     let bad = || BrepError::Unsupported("edge finish: expected an unambiguous planar face with straight convex corners".into());
     let cap = body.faces().iter().find(|f| f.id == face).ok_or_else(bad)?;
@@ -270,20 +270,16 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
     let mut result = Vec::with_capacity(boundary.len());
     for (at, &h) in boundary.iter().enumerate() {
         let half = body.half_edges()[h as usize];
-        if body.edge_curve(&body.edges()[half.edge as usize]).is_some() {
-            return Err(bad());
-        }
         let vertex = half.origin;
-        // Both boundary edges at the vertex must be straight: a corner of the cap has two of
-        // them. Where a straight run meets a curve — a cap a previous finish already rounded —
-        // there is no corner to take (D296).
+        // A corner has both boundary edges at the vertex straight. A vertex on a curve, or
+        // where a straight run meets one — a run an earlier finish left — is not a corner and
+        // is skipped: a cap partly rounded finishes its remaining corners (D296).
         let around = [(at + boundary.len() - 1) % boundary.len(), (at + 1) % boundary.len()];
-        let curved = around.iter().any(|&i| {
-            let n = body.half_edges()[boundary[i] as usize];
-            body.edge_curve(&body.edges()[n.edge as usize]).is_some()
-        });
+        let curved = std::iter::once(at)
+            .chain(around)
+            .any(|i| body.edge_curve(&body.edges()[body.half_edges()[boundary[i] as usize].edge as usize]).is_some());
         if curved {
-            return Err(bad());
+            continue;
         }
         let candidates: Vec<_> = body
             .edges()
@@ -330,13 +326,16 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
         }
         result.push(selected.id);
     }
+    if result.is_empty() {
+        return Err(BrepError::Unsupported("edge finish: the face has no straight corners left".into()));
+    }
     Ok(result)
 }
 
 /// The planar caps the `faces` form of an `EdgeFinish` may take, each with its corner edges:
 /// the caps that pass the `edge_finish_face` rule. The scene lights a cap by this, so what is
-/// lit is what will build; a cap a finish already rounded has curves in its boundary and is
-/// not offered again (D296).
+/// lit is what will build; a cap partly rounded is offered with its remaining corners, a cap
+/// with none is not offered at all (D296).
 pub fn edge_finish_caps(body: &Body) -> Vec<(TopoId, Vec<TopoId>)> {
     body.faces().iter().filter_map(|f| edge_finish_face(body, f.id).ok().map(|corners| (f.id, corners))).collect()
 }
@@ -412,7 +411,26 @@ mod tests {
         assert!(caps.contains(&top), "an untouched cap is offered");
         let rounded = finish_many(id, &body, &edge_finish_face(&body, top).unwrap(), 1.2, EdgeMode::Fillet).unwrap();
         let caps: Vec<_> = edge_finish_caps(&rounded).iter().map(|(id, _)| *id).collect();
-        assert!(!caps.contains(&top), "a cap with curves in its boundary is not offered");
+        assert!(!caps.contains(&top), "a cap with no corners left is not offered");
         assert!(edge_finish_face(&rounded, top).is_err(), "and does not pass the rule itself");
+    }
+
+    /// A cap partly rounded is offered with its remaining corners: one corner finished by hand
+    /// does not block the face (D296).
+    #[test]
+    fn a_partly_rounded_cap_finishes_its_remaining_corners() {
+        let id = TopoId::derive("edge_finish.test").finish();
+        let body = cuboid(id, Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 8.0, 2.0)).unwrap();
+        let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
+        let corners = edge_finish_face(&body, top).unwrap();
+        assert_eq!(corners.len(), 4);
+        // One corner edge rounds both its ends: two corners of the top are gone, two stand.
+        let partly = finish_many(id, &body, &corners[..1], 1.2, EdgeMode::Fillet).unwrap();
+        let left = edge_finish_face(&partly, top).unwrap();
+        assert_eq!(left.len(), 2, "the cap is offered with its remaining corners");
+        let caps: Vec<_> = edge_finish_caps(&partly).iter().map(|(id, _)| *id).collect();
+        assert!(caps.contains(&top), "the partly rounded cap is offered");
+        let again = finish_many(id, &partly, &left, 1.2, EdgeMode::Fillet).unwrap();
+        assert!(edge_finish_face(&again, top).is_err(), "the last corners gone, the cap is refused");
     }
 }
