@@ -258,31 +258,52 @@ impl Viewer {
                 return;
             }
             let params = open.edit_params(&targets);
-            if self.ready(&params) {
+            if let Some(standing) = self.standing(&params) {
                 if let Some(form) = self.edge_finish.as_mut() {
                     form.sent = None;
                     if let Some(open) = &mut form.open {
                         open.targets = targets;
                     }
                 }
-                self.send(Request::Command("edit", params));
+                self.send(Request::Command("edit", standing));
             }
         } else {
             let set = Set { feature: self.feature_name("edge_finish"), body, kind: hover.kind(), targets: vec![hover.id()], size, mode };
             let params = set.add_params();
-            if self.ready(&params) {
+            if let Some(standing) = self.standing(&params) {
+                // The set is what the preview built: its name from the standing params, not
+                // the one computed now (the previewed inspect already holds the feature).
+                let mut set = set;
+                if let Some(name) = standing["name"].as_str() {
+                    set.feature = name.to_string();
+                }
                 if let Some(form) = self.edge_finish.as_mut() {
                     form.open = Some(set);
                     form.sent = None;
                 }
-                self.send(Request::Command("add", params));
+                self.send(Request::Command("add", standing));
             }
         }
     }
 
-    /// The preview of the hovered click matches the would-be command and stands.
-    fn ready(&self, params: &Json) -> bool {
-        self.model.as_ref().and_then(|m| m.preview.as_ref()).is_some_and(|(p, r)| p == params && r.is_ok())
+    /// The standing preview's params, when they are what a click would do now and it built.
+    /// The click sends these, not the ones computed again: the previewed model's inspect already
+    /// holds the previewed feature, so its name computed now would be one ahead. Everything
+    /// else (the body, the targets, the size, the mode) is computed the same way both times,
+    /// so the two compare with the name left out.
+    fn standing(&self, computed: &Json) -> Option<Json> {
+        let (standing, reply) = self.model.as_ref()?.preview.as_ref()?;
+        if !reply.is_ok() {
+            return None;
+        }
+        let named = |v: &Json| {
+            let mut v = v.clone();
+            if let Some(o) = v.as_object_mut() {
+                o.remove("name");
+            }
+            v
+        };
+        (named(standing) == named(computed)).then(|| standing.clone())
     }
 
     /// What a click would send now: the edit of the set being edited, or the extension,
@@ -436,9 +457,10 @@ impl Viewer {
         }
         // The keys, only with no field open and no text edit of another window focused.
         if self.edge_finish.as_ref().is_some_and(|f| f.field.is_none()) && !typing {
-            let (escape, tab, up, down) = ctx.input_mut(|i| {
+            let (escape, enter, tab, up, down) = ctx.input_mut(|i| {
                 (
                     i.key_pressed(egui::Key::Escape),
+                    i.key_pressed(egui::Key::Enter),
                     i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp),
                     i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown),
@@ -446,6 +468,10 @@ impl Viewer {
             });
             if escape {
                 close = true;
+            }
+            // Enter finishes what the standing preview shows: the hovered click.
+            if enter {
+                self.edge_finish_click();
             }
             if tab && let Some(form) = self.edge_finish.as_mut() {
                 form.chamfer = !form.chamfer;
@@ -639,6 +665,9 @@ mod tests {
             json!({"name": "edge_finish1", "op": "edge_finish", "inputs": ["box"], "edges": [format!("{edge:?}")], "size": 2.0, "mode": "fillet"});
         assert!(matches!(inbox.try_recv().unwrap(), Request::Preview(Some(("add", p))) if p == add));
         v.model.as_mut().unwrap().preview = Some((add.clone(), Ok(json!({}))));
+        // The previewed model's inspect already holds the previewed feature: the click sends
+        // the standing params, not ones computed again (a name now would be one ahead).
+        v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(json!({"name": "edge_finish1", "op": "edge_finish"}));
         v.edge_finish_click();
         assert!(matches!(inbox.try_recv().unwrap(), Request::Command("add", p) if p == add));
 
