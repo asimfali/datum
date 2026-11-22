@@ -1,0 +1,10 @@
+{
+  "cut": {
+    "label": {"en": "Cut", "ru": "Рез"},
+    "set": {"stamp.role": "cut"}
+  },
+  "transition": {
+    "label": {"en": "Transition", "ru": "Переход"},
+    "set": {"stamp.role": "transition"}
+  }
+}

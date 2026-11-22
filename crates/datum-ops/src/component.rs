@@ -192,6 +192,8 @@ impl PartDef {
             if !f.op.arity().contains(&f.inputs.len()) {
                 return Err(format!("`{}` takes {} input(s), got {}", f.name, describe_arity(f.op.arity()), f.inputs.len()));
             }
+            let mut op = f.op.clone();
+            op.normalize_metadata().map_err(|e| format!("feature `{}`: {e}", f.name))?;
         }
         for (role, name) in [("cut", &self.roles.cut), ("form", &self.roles.form), ("hinge", &self.roles.hinge)] {
             if let Some(n) = name

@@ -21,6 +21,7 @@ use datum_math::expr::Num;
 pub mod levels;
 pub mod library;
 mod patch;
+pub mod presets;
 mod session;
 pub mod workspace;
 
@@ -177,7 +178,8 @@ pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<Node
     if let Some(other) = g.nodes().iter().find(|n| n.title.as_deref() == Some(&name)) {
         return Err(format!("`{name}`: the key is the title of feature `{}`", other.name));
     }
-    let op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| format!("`{name}`: {e}"))?;
+    let mut op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| format!("`{name}`: {e}"))?;
+    op.normalize_metadata().map_err(|e| format!("`{name}`: {e}"))?;
     let ix = g.add(&name, op, &inputs).map_err(|e| e.to_string())?;
     if let Some(e) = enabled {
         g.set_enabled(ix, e);

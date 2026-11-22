@@ -146,6 +146,13 @@ pub fn plan(edit: &SketchEdit, picks: &[Pick], axis: &str, keep: bool) -> Option
             _ => "c",
         });
         patch.set(key, &copied, copy);
+        // The curve's properties go with it whole (D276): the mirror keeps every mark, not one
+        // key it knows; the axis is not copied and its properties stay on it.
+        if matches!(*key, "lines" | "arcs")
+            && let Some(props) = edit.json["sketch"]["metadata"][n].as_object().filter(|p| !p.is_empty())
+        {
+            patch.set("metadata", &copied, Json::Object(props.clone()));
+        }
         copies.push((*key, n.clone(), copied));
         added.push(shape.polyline(0.0, 1.0));
         if !keep {
@@ -323,6 +330,40 @@ mod tests {
         assert_eq!(got, [[-10.0, 0.0], [-10.0, 10.0]]);
         // Nothing left to tie the copy to.
         assert!(cons(&e, "symmetric").is_empty() && cons(&e, "equal").is_empty());
+    }
+
+    /// The copy keeps its curve's whole property map (D276), in both modes: kept or replacing
+    /// the original; the axis keeps its own and none of it goes to a copy.
+    #[test]
+    fn a_copy_keeps_the_properties_of_its_curve() {
+        for keep in [true, false] {
+            let mut sk = half_profile();
+            sk["metadata"] = json!({"ab": {"stamp.role": "cut", "note": {"x": null}}, "axis": {"stamp.role": "transition"}});
+            let mut e = editor(sk, false);
+            pick(&mut e, &["ab", "bc", "cd"]);
+            e.start_mirror();
+            e.draft.mirror_moves = !keep;
+            click_at(&mut e, [0.0, 7.0], false).unwrap();
+            assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+            let sk = &e.json["sketch"];
+            let copies = fresh(&e, "lines", &["axis", "ab", "bc", "cd"]);
+            assert_eq!(copies.len(), 3, "keep = {keep}: {copies:?}");
+            let marked = copies.iter().filter(|l| sk["metadata"][l.as_str()] == json!({"stamp.role": "cut", "note": {"x": null}})).count();
+            assert_eq!(marked, 1, "one copy carries the marked line's properties, keep = {keep}: {sk:?}");
+            assert!(
+                copies
+                    .iter()
+                    .all(|l| sk["metadata"].get(l.as_str()).is_none()
+                        || sk["metadata"][l.as_str()] == json!({"stamp.role": "cut", "note": {"x": null}})),
+                "the axis's properties are on no copy: {sk:?}"
+            );
+            assert_eq!(sk["metadata"]["axis"], json!({"stamp.role": "transition"}), "the axis keeps its own");
+            if keep {
+                assert_eq!(sk["metadata"]["ab"], json!({"stamp.role": "cut", "note": {"x": null}}));
+            } else {
+                assert!(sk["metadata"].get("ab").is_none(), "the original went with its mark");
+            }
+        }
     }
 
     #[test]

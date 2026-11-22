@@ -447,3 +447,287 @@ fn a_part_with_two_ends_is_listed_once() {
     seen.dedup();
     assert_eq!(seen.len(), many, "{seen:?}");
 }
+
+/// The properties `elements` of sketch `name` in `level` (null: the root) say now.
+fn marked(s: &mut Session, level: Value, elements: &[&str]) -> Value {
+    run(s, "query_metadata", json!({"name": "outline", "elements": elements, "level": level}))["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["properties"].clone())
+        .collect()
+}
+
+/// A level's metadata is a merge patch like any other (D276, D277): a property set to JSON null
+/// stays a value, a parent's key is taken away, a property named `constraints` is a value and is
+/// kept whole. The parent keeps its own marks; the file holds only the difference.
+#[test]
+fn a_level_changes_metadata_as_values() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(
+        &mut s,
+        "edit_metadata",
+        json!({"name": "outline", "elements": ["bottom"],
+               "set": {"note": {"deep": null}, "constraints": {"add": [1]}, "stamp.role": "cut", "who": "bottom"}}),
+    );
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    // A null value, not a removal; the whole map of the curve is written.
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": null}, "level": "long"}));
+    let child = marked(&mut s, json!("long"), &["bottom"]);
+    assert_eq!(child, json!([{"note": null, "constraints": {"add": [1]}, "stamp.role": "cut", "who": "bottom"}]));
+    assert_eq!(
+        marked(&mut s, Value::Null, &["bottom"]),
+        json!([{"note": {"deep": null}, "constraints": {"add": [1]}, "stamp.role": "cut", "who": "bottom"}]),
+        "the root keeps its own"
+    );
+    // A parent's key taken away in the level; a property named `constraints`, with a nested null.
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "remove": ["stamp.role"], "level": "long"}));
+    run(
+        &mut s,
+        "edit_metadata",
+        json!({"name": "outline", "elements": ["bottom"], "set": {"constraints": {"add": [2]}, "deep": {"x": null}}, "level": "long"}),
+    );
+    assert_eq!(
+        marked(&mut s, json!("long"), &["bottom"]),
+        json!([{"note": null, "constraints": {"add": [2]}, "who": "bottom", "deep": {"x": null}}])
+    );
+    assert_eq!(marked(&mut s, Value::Null, &["bottom"])[0]["stamp.role"], "cut", "the root's key stands");
+    // Saved: the level holds the one curve's changes, not its whole map and not the frame's lines.
+    let dir = std::env::temp_dir().join(format!("datum-level-marks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("long.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        file["levels"]["long"]["features"][0]["sketch"]["metadata"]["bottom"],
+        json!({"set": {"note": null, "constraints": {"add": [2]}, "deep": {"x": null}}, "remove": ["stamp.role"]}),
+        "{file}"
+    );
+    assert_eq!(
+        file["features"][0]["sketch"]["metadata"]["bottom"],
+        json!({"note": {"deep": null}, "constraints": {"add": [1]}, "stamp.role": "cut", "who": "bottom"}),
+        "the frame keeps its whole map: {file}"
+    );
+    assert!(file["levels"]["long"]["features"][0]["sketch"]["lines"].is_null(), "{file}");
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    assert_eq!(marked(&mut t, json!("long"), &["bottom"])[0]["note"], Value::Null);
+    assert_eq!(marked(&mut t, Value::Null, &["bottom"])[0]["note"], json!({"deep": null}));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A marked curve removed in a level and given the same name again there comes back unmarked: the
+/// level keeps taking the mark away from its parent, and the parent keeps its own.
+#[test]
+fn a_level_curve_given_again_is_unmarked() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "activate", json!({"level": "long"}));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": null}}));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": {"from": "c", "to": "d"}}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{}]), "given again, unmarked");
+    assert_eq!(marked(&mut s, Value::Null, &["bottom"]), json!([{"stamp.role": "cut"}]), "the root's mark stands");
+    // A point removed in the level takes the properties of the curves on it, as in the root.
+    run(&mut s, "edit_sketch", json!({"name": "outline", "points": {"d": null}}));
+    let all = run(&mut s, "query_metadata", json!({"name": "outline", "level": "long"}));
+    assert_eq!(all["elements"], json!([]), "no marked curve left in the level");
+}
+
+/// A rename in the frame carries the keys of its properties into the levels below, the ones the
+/// level set too, and leaves the values alone even when one spells the old curve (D276).
+#[test]
+fn a_rename_reaches_metadata_in_levels() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut", "who": "bottom"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "child"}, "level": "long"}));
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "bottom", "to": "base"}));
+    let child = marked(&mut s, json!("long"), &["base"]);
+    assert_eq!(child, json!([{"stamp.role": "cut", "who": "bottom", "note": "child"}]));
+    assert_eq!(marked(&mut s, Value::Null, &["base"]), json!([{"stamp.role": "cut", "who": "bottom"}]), "the level's own key went along");
+}
+
+/// A level changes one property of a curve, not its whole map (D152): the parent's other
+/// properties stay live, its later ones arrive, and a property the level took away stays away.
+#[test]
+fn a_level_changes_one_property_not_the_whole_map() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut", "note": "parent"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "child"}, "level": "long"}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"stamp.role": "cut", "note": "child"}]));
+    // The parent changes an unrelated property: the level follows it.
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "transition", "later": 1}}));
+    assert_eq!(
+        marked(&mut s, json!("long"), &["bottom"]),
+        json!([{"stamp.role": "transition", "note": "child", "later": 1}]),
+        "the level's own property and the parent's both live"
+    );
+    // The level takes a property away; the parent changing it again does not bring it back.
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "remove": ["stamp.role"], "level": "long"}));
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut"}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"note": "child", "later": 1}]));
+    assert_eq!(marked(&mut s, Value::Null, &["bottom"]), json!([{"stamp.role": "cut", "note": "parent", "later": 1}]));
+}
+
+/// A curve deleted in the parent takes the level patches' changes of it with it (D276): no ghost
+/// on a later curve of the same name, at any depth; a curve a level gives itself keeps its own.
+#[test]
+fn a_parent_curve_deleted_leaves_no_ghost_in_levels() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "old"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "child"}, "level": "long"}));
+    run(&mut s, "add_level", json!({"name": "longer", "parent": "long"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "grandchild"}, "level": "longer"}));
+    // The parent deletes the curve: the level patches keep no change of it.
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": null}}));
+    let levels = run(&mut s, "levels", json!({}));
+    assert!(
+        levels["levels"].as_array().unwrap().iter().all(|l| l["features"].as_array().is_none_or(Vec::is_empty)),
+        "the patches left nothing: {levels}"
+    );
+    // The same name given again in the parent is a new curve: no old property comes back.
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": {"from": "a", "to": "b"}}}));
+    run(&mut s, "activate", json!({"level": "long"}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{}]), "no ghost");
+    run(&mut s, "activate", json!({"level": "longer"}));
+    assert_eq!(marked(&mut s, json!("longer"), &["bottom"]), json!([{}]), "no ghost deeper");
+    // A new mark of the parent is inherited, the old values are not.
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut"}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"stamp.role": "cut"}]));
+    // A curve a level gives itself is its own: its properties stay when the parent's line goes.
+    run(&mut s, "activate", json!({"level": "long"}));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": {"from": "c", "to": "d"}}}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"own": true}, "level": "long"}));
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": null}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"own": true}]), "the level's own curve keeps its properties");
+}
+
+/// A level's patch names only the curve and the properties it changes (D276): `set` and `remove`
+/// are property payload, whichever names they spell; a JSON null inside `set` is a value.
+#[test]
+fn a_level_patch_keeps_properties_named_set_and_remove() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"set": {"a": 1}, "remove": [2], "note": "parent"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(
+        &mut s,
+        "edit_metadata",
+        json!({"name": "outline", "elements": ["bottom"], "set": {"note": "child", "extra": null, "set": {"child": 1}, "remove": [3]}, "level": "long"}),
+    );
+    let child = json!({"set": {"child": 1}, "remove": [3], "note": "child", "extra": null});
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([child]));
+    run(&mut s, "activate", json!({"level": null}));
+    assert_eq!(marked(&mut s, Value::Null, &["bottom"]), json!([{"set": {"a": 1}, "remove": [2], "note": "parent"}]));
+    // Saved and opened, the payload survives as it was written.
+    let dir = std::env::temp_dir().join(format!("datum-level-payload-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("payload.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        file["levels"]["long"]["features"][0]["sketch"]["metadata"]["bottom"],
+        json!({"set": {"note": "child", "extra": null, "set": {"child": 1}, "remove": [3]}}),
+        "{file}"
+    );
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    assert_eq!(marked(&mut t, json!("long"), &["bottom"]), json!([child]));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A level patch that only overrides an inherited line's `construction` is no curve of its own:
+/// when the parent deletes the curve, the level's properties go too, not onto a later name.
+#[test]
+fn a_construction_override_is_no_curve_of_its_own() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "old"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "child"}, "level": "long"}));
+    // The level only makes the inherited line construction in its patch.
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": {"from": "a", "to": "b", "construction": true}}, "level": "long"}));
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": null}}));
+    let levels = run(&mut s, "levels", json!({}));
+    let long = levels["levels"].as_array().unwrap().iter().find(|l| l["name"] == "long").unwrap();
+    assert!(long["features"].as_array().is_none_or(|f| f.iter().all(|f| f["sketch"]["metadata"].is_null())), "{long}");
+    // The parent's same name again: still no properties of the old curve.
+    run(&mut s, "edit_sketch", json!({"name": "outline", "lines": {"bottom": {"from": "a", "to": "b"}}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{}]));
+}
+
+/// The first properties a level gives a curve, while the parent has none, are a scoped change:
+/// the parent's later properties still arrive, and the file and a reopen keep both (D152, D276).
+#[test]
+fn the_first_metadata_of_a_level_is_a_scoped_change() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "child"}, "level": "long"}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"note": "child"}]));
+    // The stored patch is scoped, not a bare property map.
+    let dir = std::env::temp_dir().join(format!("datum-level-first-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("first.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        file["levels"]["long"]["features"][0]["sketch"]["metadata"],
+        json!({"bottom": {"set": {"note": "child"}}}),
+        "not a bare property map: {file}"
+    );
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"stamp.role": "cut"}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"note": "child", "stamp.role": "cut"}]));
+    // Saved and opened, both stay.
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    assert_eq!(marked(&mut t, json!("long"), &["bottom"]), json!([{"note": "child", "stamp.role": "cut"}]));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A level taking away the parent's last property is a per-property removal: a property the
+/// parent adds later is still inherited, not hidden by a whole-record removal (D152, D276).
+#[test]
+fn the_last_property_removed_leaves_the_parent_live() {
+    let mut s = Session::default();
+    frame(&mut s);
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"note": "parent"}}));
+    run(&mut s, "add_level", json!({"name": "long", "part": "plate"}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "remove": ["note"], "level": "long"}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{}]));
+    // The stored patch removes the property, not the whole metadata of the sketch.
+    let dir = std::env::temp_dir().join(format!("datum-level-last-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("last.json");
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(file["levels"]["long"]["features"][0]["sketch"]["metadata"], json!({"bottom": {"remove": ["note"]}}), "not `metadata: null`: {file}");
+    // The parent's next property arrives in the level; the removed one does not come back.
+    run(&mut s, "activate", json!({"level": null}));
+    run(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "set": {"later": 1}}));
+    assert_eq!(marked(&mut s, json!("long"), &["bottom"]), json!([{"later": 1}]));
+    assert_eq!(marked(&mut s, Value::Null, &["bottom"]), json!([{"note": "parent", "later": 1}]));
+    // Saved and opened.
+    run(&mut s, "save", json!({"path": path.display().to_string()}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    assert_eq!(marked(&mut t, json!("long"), &["bottom"]), json!([{"later": 1}]));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

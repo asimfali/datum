@@ -899,6 +899,22 @@ impl Op {
         }
     }
 
+    /// Keeps each sketch's `metadata` about its own lines and arcs (D276): a curve's map goes
+    /// once the curve does, and maps of no properties go; an empty property name is an error. A
+    /// component's part holds sketches too, so they are checked as well.
+    pub fn normalize_metadata(&mut self) -> Result<(), String> {
+        match self {
+            Self::Sketch { sketch, .. } => sketch.normalize_metadata(),
+            Self::Component { part, .. } => {
+                for feature in &mut part.features {
+                    feature.op.normalize_metadata().map_err(|e| format!("feature `{}`: {e}", feature.name))?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Evaluates the operation for the feature with ID `feature`. In debug builds the result is
     /// validated here, once for every operation.
     pub fn eval(&self, feature: TopoId, values: &[&Value]) -> Result<Value, BrepError> {

@@ -124,6 +124,60 @@ fn rectangle() -> Value {
                         {"type": "horizontal", "line": "top"}, {"type": "vertical", "line": "left"}]}})
 }
 
+/// Properties of a sketch's own curves (D276) go through the common registry: an agent marks a
+/// line, reads it back, and a bad target or an empty property name writes nothing.
+#[test]
+fn metadata_of_a_sketch_is_read_and_written_through_execute() {
+    let mut s = Server::default();
+    execute(&mut s, "add", rectangle());
+    let commands = tool(&mut s, "list_commands", json!({})).1;
+    let names: Vec<&str> = commands["commands"].as_array().unwrap().iter().filter_map(|c| c["name"].as_str()).collect();
+    for name in ["query_metadata", "edit_metadata", "list_metadata_presets"] {
+        assert!(names.contains(&name), "`{name}` is not listed");
+    }
+    let presets = execute(&mut s, "list_metadata_presets", json!({}));
+    assert!(presets["presets"].is_array() && presets["diagnostics"].is_array(), "{presets}");
+    // Two curves, one role and a free property with a nested JSON value (a null is a value).
+    let r = execute(
+        &mut s,
+        "edit_metadata",
+        json!({"name": "outline", "elements": ["bottom", "right"],
+               "set": {"stamp.role": "cut", "note": {"depth": 2, "goes": null}}}),
+    );
+    assert_eq!(r["computed"], json!(0), "no geometry is computed again: {r}");
+    let queried = execute(&mut s, "query_metadata", json!({"name": "outline", "elements": ["bottom"]}));
+    assert_eq!(queried["elements"][0]["element"], "bottom");
+    assert_eq!(queried["elements"][0]["properties"]["stamp.role"], "cut");
+    assert_eq!(queried["elements"][0]["properties"]["note"], json!({"depth": 2, "goes": null}));
+    // Without `elements`: every marked curve, sorted by name; one with no data is not an error.
+    let all = execute(&mut s, "query_metadata", json!({"name": "outline"}));
+    let marked: Vec<&str> = all["elements"].as_array().unwrap().iter().map(|e| e["element"].as_str().unwrap()).collect();
+    assert_eq!(marked, ["bottom", "right"]);
+    let none = execute(&mut s, "query_metadata", json!({"name": "outline", "elements": ["top"]}));
+    assert_eq!(none["elements"], json!([{"element": "top", "properties": {}}]));
+    // A mark taken off one curve leaves the other; an unknown target or an empty key writes nothing.
+    let before = tool(&mut s, "inspect_model", json!({})).1["features"][0].clone();
+    for (params, said) in [
+        (json!({"name": "outline", "elements": ["bottom"], "set": {"": 1}}), "empty property name"),
+        (json!({"name": "outline", "elements": ["bottom", "nothing"], "set": {"x": 1}}), "no line or arc"),
+        (json!({"name": "outline", "elements": ["bottom"], "set": 3}), "`set` is an object"),
+    ] {
+        let (err, text) = tool(&mut s, "execute", json!({"command": "edit_metadata", "params": params}));
+        assert!(err, "{}: {text}", params["elements"]);
+        assert!(text.to_string().contains(said), "{said}: {text}");
+    }
+    assert_eq!(tool(&mut s, "inspect_model", json!({})).1["features"][0], before, "nothing was written");
+    execute(&mut s, "edit_metadata", json!({"name": "outline", "elements": ["bottom"], "remove": ["stamp.role"]}));
+    let all = execute(&mut s, "query_metadata", json!({"name": "outline"}));
+    assert_eq!(
+        all["elements"],
+        json!([
+            {"element": "bottom", "properties": {"note": {"depth": 2, "goes": null}}},
+            {"element": "right", "properties": {"note": {"depth": 2, "goes": null}, "stamp.role": "cut"}}
+        ])
+    );
+}
+
 /// An agent changes a sketch piece by piece, and sees what is still free.
 #[test]
 fn edit_a_sketch_piece_by_piece() {

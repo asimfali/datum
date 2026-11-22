@@ -538,3 +538,31 @@ fn an_oval_sized_between_the_arcs_middles() {
         assert_eq!(r.dof, 0, "{:?}", r.free);
     }
 }
+
+/// Properties of a sketch's curves (D276) are read and written as any JSON value, and are not
+/// geometry: the sketch's `Debug` — an operation's cache key (D27) — is the same with or without
+/// them, and an empty section is not written.
+#[test]
+fn metadata_is_data_outside_geometry() {
+    let mut s = sketch(
+        r#"{"points": {"a": [0, 0], "b": [10, 0]},
+        "lines": {"l": {"from": "a", "to": "b"}},
+        "metadata": {"l": {"stamp.role": "cut", "goes": null, "nested": {"a": [1]}}}}"#,
+    );
+    assert_eq!(
+        s.metadata["l"],
+        BTreeMap::from([
+            ("stamp.role".to_string(), serde_json::json!("cut")),
+            ("goes".to_string(), serde_json::Value::Null),
+            ("nested".to_string(), serde_json::json!({"a": [1]})),
+        ])
+    );
+    let plain = sketch(r#"{"points": {"a": [0, 0], "b": [10, 0]}, "lines": {"l": {"from": "a", "to": "b"}}}"#);
+    assert_eq!(format!("{plain:?}"), format!("{s:?}"), "the cache key knows no properties");
+    let text = serde_json::to_string(&plain).unwrap();
+    assert!(!text.contains("metadata"), "empty maps are not written: {text}");
+    let text = serde_json::to_string(&s).unwrap();
+    assert!(text.contains(r#""metadata":{"l":{"goes":null"#), "{text}");
+    s.metadata.clear();
+    assert!(!serde_json::to_string(&s).unwrap().contains("metadata"));
+}

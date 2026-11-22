@@ -108,3 +108,46 @@ fn a_placement_is_checked_when_it_is_added() {
         add(&mut s, &format!("yes{k}"), placements).unwrap();
     }
 }
+
+/// The properties of a sketch embedded in a part (D276) are data, not geometry: a tool whose
+/// sketch is marked builds the same body, its hash unchanged, and the marks stay in the part in
+/// the file when it is saved and opened.
+#[test]
+fn metadata_in_an_embedded_part_changes_no_hash() {
+    let punch = |marked: bool| {
+        let mut s = model();
+        let mut p = part();
+        // A construction line of the profile: metadata is kept on lines and arcs, not circles.
+        p["features"][0]["op"]["sketch"]["points"]["e"] = json!([1, 0]);
+        p["features"][0]["op"]["sketch"]["lines"] = json!({"l": {"from": "h", "to": "e", "construction": true}});
+        if marked {
+            p["features"][0]["op"]["sketch"]["metadata"] = json!({"l": {"stamp.role": "cut", "note": {"a": null}}});
+        }
+        run(
+            &mut s,
+            "add",
+            json!({"name": "punch", "op": "component", "inputs": ["sheet", "placements"], "part": p,
+                "placements": [{"placement": "point", "input": 1, "point": "p"}]}),
+        );
+        s
+    };
+    let plain = feature(&mut punch(false), "punch");
+    let marked_session = punch(true);
+    let mut marked_session = marked_session;
+    let marked = feature(&mut marked_session, "punch");
+    assert!(marked.get("error").is_none(), "{marked}");
+    assert_eq!(marked["status"]["hash"], plain["status"]["hash"], "the tool's body is the same");
+    // Saved and opened, the properties are in the part written into the model.
+    let dir = std::env::temp_dir().join(format!("datum-component-marks-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("punch.json");
+    run(&mut marked_session, "save", json!({"path": path.display().to_string()}));
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let written = file["features"].as_array().unwrap().iter().find(|f| f["name"] == "punch").unwrap();
+    assert_eq!(written["part"]["features"][0]["op"]["sketch"]["metadata"], json!({"l": {"stamp.role": "cut", "note": {"a": null}}}));
+    let mut t = Session::default();
+    run(&mut t, "open", json!({"path": path.display().to_string()}));
+    let again = feature(&mut t, "punch");
+    assert_eq!(again["status"]["hash"], plain["status"]["hash"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

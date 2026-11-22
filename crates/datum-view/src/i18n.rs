@@ -27,6 +27,8 @@ pub fn codes() -> String {
 
 #[derive(Default)]
 pub struct I18n {
+    /// The language's code, as its catalog says it (`en` for none).
+    code: String,
     texts: BTreeMap<String, String>,
 }
 
@@ -45,7 +47,12 @@ impl I18n {
     pub fn of(locale: &str) -> Self {
         let code = locale.split(['-', '_', '.']).next().unwrap_or_default().to_ascii_lowercase();
         let text = CATALOGS.iter().find(|(c, ..)| *c == code).map_or("", |(.., t)| t);
-        Self { texts: parse(text) }
+        Self { code: if text.is_empty() { "en".into() } else { code }, texts: parse(text) }
+    }
+
+    /// The language's code: the catalog's, or `en` without one.
+    pub fn code(&self) -> &str {
+        &self.code
     }
 
     /// The text for `key` in this language, else `english`.
@@ -117,6 +124,7 @@ mod tests {
             ("actions.rs", include_str!("actions.rs")),
             ("app.rs", include_str!("app.rs")),
             ("app/forms/loft.rs", include_str!("app/forms/loft.rs")),
+            ("app/forms/metadata.rs", include_str!("app/forms/metadata.rs")),
             ("camera.rs", include_str!("camera.rs")),
             ("capture.rs", include_str!("capture.rs")),
             ("constrain.rs", include_str!("constrain.rs")),
@@ -177,6 +185,7 @@ mod tests {
     fn the_catalog_and_the_code_agree() {
         let sources = [
             include_str!("app.rs"),
+            include_str!("app/forms/metadata.rs"),
             include_str!("app/forms/rib.rs"),
             include_str!("app/forms/loft.rs"),
             include_str!("sidebar.rs"),

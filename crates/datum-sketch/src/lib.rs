@@ -31,7 +31,7 @@ use equations::{Equations, Group};
 /// `{"points": {"a": [0, 0], …}, "lines": {"bottom": {"from": "a", "to": "b"}, …},
 ///   "arcs": {"end": {"center": "c", "from": "b", "to": "d"}}, "circles": {"hole": {"center": "h", "diameter": 5}},
 ///   "constraints": [{"type": "horizontal", "line": "bottom"}, …]}`.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Sketch {
     /// Points by name, at the coordinates they were drawn at: the solver starts from here.
@@ -60,6 +60,13 @@ pub struct Sketch {
     /// Patterns by name: copies of a group's profiles (or of one curve's).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patterns: BTreeMap<String, Pattern>,
+    /// Properties of the sketch's own lines and arcs, by the curve's name, then the property's
+    /// (D275, D276): `{"<line>": {"stamp.role": "cut", "note": [1, 2]}}`. Any property name and
+    /// any JSON value; what one means is for whoever reads it — a preset names `stamp.role`, the
+    /// stamping will read it when it starts to (D277). Not geometry: a sketch hashes and computes
+    /// as it did without them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, BTreeMap<String, serde_json::Value>>,
     /// Only where the points go, from points drawn next to a solution: a conflict is not named
     /// (naming it solves the sketch again without each constraint in turn), a placement not found
     /// in a few iterations is none, and no freedom is counted (`dof` 0, `free` empty: half the
@@ -67,6 +74,26 @@ pub struct Sketch {
     /// in the file.
     #[serde(skip)]
     pub quick: bool,
+}
+
+/// The sketch as it was before metadata: geometry only. `Op`'s cache key is its `Debug` (D27),
+/// so `metadata` must not reach it: a mark changes no hash and recomputes no geometry (D276).
+impl fmt::Debug for Sketch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Destructured whole, so a field added later is not left out of the key without a word.
+        let Sketch { points, lines, arcs, circles, constraints, measures, groups, patterns, metadata: _, quick } = self;
+        f.debug_struct("Sketch")
+            .field("points", points)
+            .field("lines", lines)
+            .field("arcs", arcs)
+            .field("circles", circles)
+            .field("constraints", constraints)
+            .field("measures", measures)
+            .field("groups", groups)
+            .field("patterns", patterns)
+            .field("quick", quick)
+            .finish()
+    }
 }
 
 /// Copies of the closed profiles of `of` (a group or a curve): on a grid, along a path or around a
@@ -338,6 +365,25 @@ pub enum Measure {
     Radius { arc: String },
     ArcLength { arc: String },
     ArcAngle { arc: String },
+}
+
+impl Sketch {
+    /// Whether `n` is one of the sketch's own lines or arcs, the curves properties can be of (D276).
+    pub fn has_metadata_curve(&self, n: &str) -> bool {
+        self.lines.contains_key(n) || self.arcs.contains_key(n)
+    }
+
+    /// Keeps `metadata` properties of the sketch's own lines and arcs (D276): drops a curve's
+    /// map once its line or arc is gone and maps with no properties, so a name given again later
+    /// is new and unmarked. An empty property name is an error: it names nothing.
+    pub fn normalize_metadata(&mut self) -> Result<(), String> {
+        if let Some((curve, _)) = self.metadata.iter().find(|(_, props)| props.keys().any(String::is_empty)) {
+            return Err(format!("metadata of `{curve}`: an empty property name"));
+        }
+        let (lines, arcs) = (&self.lines, &self.arcs);
+        self.metadata.retain(|n, props| !props.is_empty() && (lines.contains_key(n) || arcs.contains_key(n)));
+        Ok(())
+    }
 }
 
 impl Sketch {
