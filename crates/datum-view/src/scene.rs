@@ -43,8 +43,6 @@ pub(crate) struct FinishEdge {
     pub id: TopoId,
     pub ends: [Vec3; 2],
     pub normals: [Vec3; 2],
-    /// The two flat faces this corner lies between.
-    pub faces: [TopoId; 2],
 }
 
 /// An edge of the triangles of spheres and tori: drawn only while one of its two triangles faces
@@ -127,17 +125,23 @@ impl BodyMesh {
             if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || normals[0].dot(normals[1]) < SHARP {
                 mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
                 if flat(a) && flat(b) && body.edge_curve(edge).is_none() {
-                    let sides = [face(edge.half), face(body.half_edges()[edge.half as usize].twin)];
-                    let line = FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals, faces: sides.map(|f| body.faces()[f].id) };
-                    let ix = mesh.finish_edges.len();
-                    for (k, s) in [a, b].iter().enumerate() {
-                        if s.plane().is_some() {
-                            mesh.finish_edges_of.entry(line.faces[k]).or_default().push(ix);
-                        }
-                    }
+                    let line = FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals };
                     mesh.finish_edges.push(line);
                 }
             }
+        }
+        // The caps a set of faces may take: by the kernel's rule (`edge_finish_caps`), so what
+        // is lit is what will build (D296). A cap a finish already rounded has curves in its
+        // boundary and is not offered again; the straight runs of such a boundary stay corner
+        // edges above, so a click on an edge still works on them.
+        for (cap, corners) in datum_ops::edge_finish_caps(body) {
+            let mut ixs = Vec::with_capacity(corners.len());
+            for id in corners {
+                if let Some(ix) = mesh.finish_edges.iter().position(|f| f.id == id) {
+                    ixs.push(ix);
+                }
+            }
+            mesh.finish_edges_of.insert(cap, ixs);
         }
         mesh
     }
@@ -483,9 +487,10 @@ mod tests {
         let mesh = BodyMesh::new(&body, false);
         let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal == Vec3::new(0.0, 0.0, 1.0))).unwrap().id;
         let corners = mesh.finish_edges_of.get(&top).unwrap();
-        assert_eq!(corners.len(), 4, "a cube's top has four corners");
+        let kernel = datum_ops::edge_finish_face(&body, top).unwrap();
+        assert_eq!(corners.len(), kernel.len(), "a cube's top has four corners");
         for &i in corners {
-            assert!(mesh.finish_edges[i].faces.contains(&top), "the corner must name the face it outlines");
+            assert!(kernel.contains(&mesh.finish_edges[i].id), "the lit corner is one the kernel would finish");
         }
         for id in mesh.finish_edges_of.keys() {
             let face = body.faces().iter().find(|f| f.id == *id).unwrap();
@@ -509,6 +514,6 @@ mod tests {
         let body = cube();
         let (a, b) = (BodyMesh::new(&body, false), BodyMesh::new(&body, false));
         assert_eq!(a.finish_edges_of, b.finish_edges_of);
-        assert_eq!(a.finish_edges.iter().map(|e| e.faces).collect::<Vec<_>>(), b.finish_edges.iter().map(|e| e.faces).collect::<Vec<_>>());
+        assert_eq!(a.finish_edges.iter().map(|e| e.id).collect::<Vec<_>>(), b.finish_edges.iter().map(|e| e.id).collect::<Vec<_>>());
     }
 }

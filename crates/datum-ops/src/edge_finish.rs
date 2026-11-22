@@ -274,6 +274,17 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
             return Err(bad());
         }
         let vertex = half.origin;
+        // Both boundary edges at the vertex must be straight: a corner of the cap has two of
+        // them. Where a straight run meets a curve — a cap a previous finish already rounded —
+        // there is no corner to take (D296).
+        let around = [(at + boundary.len() - 1) % boundary.len(), (at + 1) % boundary.len()];
+        let curved = around.iter().any(|&i| {
+            let n = body.half_edges()[boundary[i] as usize];
+            body.edge_curve(&body.edges()[n.edge as usize]).is_some()
+        });
+        if curved {
+            return Err(bad());
+        }
         let candidates: Vec<_> = body
             .edges()
             .iter()
@@ -320,6 +331,14 @@ pub fn edge_finish_face(body: &Body, face: TopoId) -> Result<Vec<TopoId>, BrepEr
         result.push(selected.id);
     }
     Ok(result)
+}
+
+/// The planar caps the `faces` form of an `EdgeFinish` may take, each with its corner edges:
+/// the caps that pass the `edge_finish_face` rule. The scene lights a cap by this, so what is
+/// lit is what will build; a cap a finish already rounded has curves in its boundary and is
+/// not offered again (D296).
+pub fn edge_finish_caps(body: &Body) -> Vec<(TopoId, Vec<TopoId>)> {
+    body.faces().iter().filter_map(|f| edge_finish_face(body, f.id).ok().map(|corners| (f.id, corners))).collect()
 }
 
 /// The corner edges an `EdgeFinish` selection targets: the single `edge`, the `edges` set,
@@ -380,5 +399,20 @@ mod tests {
             );
             assert!(finish_many(id, &body, &edges, 5.0, mode).is_err());
         }
+    }
+
+    /// A cap a finish already rounded has curves in its boundary and is not offered again:
+    /// the scene lights a cap by `edge_finish_caps`, and a click on it must not break the body.
+    #[test]
+    fn a_rounded_cap_is_not_offered_again() {
+        let id = TopoId::derive("edge_finish.test").finish();
+        let body = cuboid(id, Vec3::new(0.0, 0.0, 0.0), Vec3::new(10.0, 8.0, 2.0)).unwrap();
+        let top = body.faces().iter().find(|f| f.surface.plane().is_some_and(|p| p.normal.z > 0.0)).unwrap().id;
+        let caps: Vec<_> = edge_finish_caps(&body).iter().map(|(id, _)| *id).collect();
+        assert!(caps.contains(&top), "an untouched cap is offered");
+        let rounded = finish_many(id, &body, &edge_finish_face(&body, top).unwrap(), 1.2, EdgeMode::Fillet).unwrap();
+        let caps: Vec<_> = edge_finish_caps(&rounded).iter().map(|(id, _)| *id).collect();
+        assert!(!caps.contains(&top), "a cap with curves in its boundary is not offered");
+        assert!(edge_finish_face(&rounded, top).is_err(), "and does not pass the rule itself");
     }
 }

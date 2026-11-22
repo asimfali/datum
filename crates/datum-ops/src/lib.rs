@@ -35,7 +35,7 @@ use cut::{Reach, from_face, through_walls};
 use datum_brep::{Body, BrepError, Grid, TopoId, prism, terrain};
 use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
-pub use edge_finish::{EdgeMode, edge_finish_face, edge_finish_targets};
+pub use edge_finish::{EdgeMode, edge_finish_caps, edge_finish_face, edge_finish_targets};
 pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
     flanges,
