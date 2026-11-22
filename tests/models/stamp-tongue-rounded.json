@@ -1,0 +1,310 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            200,
+            0
+          ],
+          "c": [
+            200,
+            100
+          ],
+          "d": [
+            0,
+            100
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "plate",
+      "op": "plate",
+      "inputs": [
+        "outline"
+      ],
+      "thickness": 1
+    },
+    {
+      "name": "places",
+      "op": "sketch",
+      "inputs": [
+        "plate"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "sketch": {
+        "points": {
+          "p1": [
+            40,
+            30
+          ]
+        }
+      }
+    },
+    {
+      "name": "stamp",
+      "op": "component",
+      "inputs": [
+        "plate",
+        "places"
+      ],
+      "part": {
+        "name": "Rounded tongue",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "section",
+          "boundary": "boundary",
+          "round_section": true
+        },
+        "parameters": [
+          {
+            "name": "nose_length",
+            "value": 5
+          }
+        ],
+        "features": [
+          {
+            "name": "section",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "origin": [
+                  0,
+                  0,
+                  0
+                ],
+                "x_axis": [
+                  1,
+                  0,
+                  0
+                ],
+                "normal": [
+                  0,
+                  -1,
+                  0
+                ]
+              },
+              "sketch": {
+                "points": {
+                  "root": [
+                    0,
+                    0
+                  ],
+                  "root_top": [
+                    0,
+                    3
+                  ],
+                  "shoulder": [
+                    5,
+                    3
+                  ],
+                  "nose_tip": [
+                    9.82962913144534,
+                    4.294095225512604
+                  ]
+                },
+                "lines": {
+                  "root_wall": {
+                    "from": "root",
+                    "to": "root_top"
+                  },
+                  "shelf": {
+                    "from": "root_top",
+                    "to": "shoulder"
+                  },
+                  "nose": {
+                    "from": "shoulder",
+                    "to": "nose_tip"
+                  }
+                },
+                "constraints": [
+                  {
+                    "type": "fix",
+                    "point": "root"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "root_top"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "shoulder"
+                  },
+                  {
+                    "type": "length",
+                    "line": "nose",
+                    "value": "nose_length"
+                  },
+                  {
+                    "type": "angle",
+                    "lines": [
+                      "shelf",
+                      "nose"
+                    ],
+                    "degrees": 15
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "boundary",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "origin": [
+                  0,
+                  0,
+                  0
+                ],
+                "x_axis": [
+                  1,
+                  0,
+                  0
+                ],
+                "normal": [
+                  0,
+                  0,
+                  1
+                ]
+              },
+              "sketch": {
+                "points": {
+                  "root_left": [
+                    0,
+                    -5
+                  ],
+                  "root_right": [
+                    0,
+                    5
+                  ],
+                  "tip_right": [
+                    9.82962913144534,
+                    5
+                  ],
+                  "tip_left": [
+                    9.82962913144534,
+                    -5
+                  ]
+                },
+                "lines": {
+                  "root": {
+                    "from": "root_left",
+                    "to": "root_right"
+                  },
+                  "side_right": {
+                    "from": "root_right",
+                    "to": "tip_right"
+                  },
+                  "tip": {
+                    "from": "tip_right",
+                    "to": "tip_left"
+                  },
+                  "side_left": {
+                    "from": "tip_left",
+                    "to": "root_left"
+                  }
+                },
+                "metadata": {
+                  "root": {
+                    "stamp.role": "transition"
+                  },
+                  "side_right": {
+                    "stamp.role": "cut"
+                  },
+                  "tip": {
+                    "stamp.role": "cut"
+                  },
+                  "side_left": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "constraints": [
+                  {
+                    "type": "fix",
+                    "point": "root_left"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "root_right"
+                  },
+                  {
+                    "type": "horizontal",
+                    "line": "side_left"
+                  },
+                  {
+                    "type": "horizontal",
+                    "line": "side_right"
+                  },
+                  {
+                    "type": "vertical",
+                    "line": "tip"
+                  },
+                  {
+                    "type": "horizontal_distance",
+                    "points": [
+                      "root_right",
+                      "tip_right"
+                    ],
+                    "value": "5 + nose_length * cos(15)"
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "p1"
+        }
+      ],
+      "thickness": 1,
+      "radius": 0.4,
+      "k_factor": 0.5
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "inputs": ["stamp"],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "k_factor": 0.5
+    }
+  ]
+}

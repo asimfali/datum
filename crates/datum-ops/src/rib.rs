@@ -40,13 +40,14 @@ pub struct Imprint {
     flip: bool,
 }
 
-/// A sheet with ribs: the body as it looks, the body without them (what its blank, flanges and
-/// cuts are made from), and the ribs to lay again on a changed one.
+/// A sheet with local forming: the formed body, the body that is laid flat, and the local
+/// geometry that must survive blank generation or replay.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Formed {
     pub body: Body,
     pub blank: Body,
     pub imprints: Vec<Imprint>,
+    pub(crate) stamp: Option<crate::unfold::StampCut>,
 }
 
 fn unsupported(m: &str) -> BrepError {

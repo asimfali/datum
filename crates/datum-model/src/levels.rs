@@ -456,7 +456,12 @@ impl Doc {
                     *k_factor = Some(k_of(&ks, ix as NodeIx));
                 }
                 // A placed part forms the sheet by the rule's thickness and bend radius (D261).
-                Op::Component { thickness, radius, .. } => (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r))),
+                Op::Component { part, thickness, radius, k_factor, .. } => {
+                    (*thickness, *radius) = (Some(Num::Value(t)), Some(Num::Value(r)));
+                    if part.forming.as_ref().is_some_and(|f| f.round_section) {
+                        *k_factor = Some(k_of(&ks, ix as NodeIx));
+                    }
+                }
                 Op::Extrude { kerf, .. } => *kerf = crate::library::of_thickness(&rule.element["kerf"], t).ok().map(Num::Value).or(kerf.take()),
                 Op::Flange { radius, relief_diameter, k_factor, corner_gap, bend_relief_width, bend_relief_depth, .. } => {
                     *radius = Some(Num::Value(r));

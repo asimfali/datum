@@ -1530,6 +1530,7 @@ impl Session {
                 Op::Flange { k_factor: Some(k), .. }
                 | Op::Trim { k_factor: Some(k), .. }
                 | Op::Saddle { k_factor: Some(k) }
+                | Op::Component { k_factor: Some(k), .. }
                 | Op::BranchHole { k_factor: Some(k) } => k.resolve(lookup).ok(),
                 _ => None,
             })
@@ -1573,6 +1574,9 @@ impl Session {
                 blank_only.push((&node.name, node.id, &node.op, sketch));
             }
         }
+        if value.has_stamp() && !blank_only.is_empty() {
+            return Err(format!("`{name}` has a tongue and cuts on its blank only: their combined blank cannot be made yet"));
+        }
         let mut h = blake3::Hasher::new();
         h.update(&value.hash());
         h.update(&[u8::from(settings.back)]);
@@ -1599,7 +1603,11 @@ impl Session {
                     Err(e) => return Arc::new(Err(format!("`{name}` on the blank: {e}"))),
                 }
             }
-            Arc::new(datum_ops::unfold_side(&cut, settings.back, k).map(|f| f.with_lines_closed(&closed)).map_err(|e| e.to_string()))
+            Arc::new(
+                datum_ops::unfold_side(&cut, settings.back, k)
+                    .and_then(|f| value.with_stamp_cut(f.with_lines_closed(&closed)))
+                    .map_err(|e| e.to_string()),
+            )
         });
         match made.as_ref() {
             Ok(f) => Ok(Arc::new(f.clone())),

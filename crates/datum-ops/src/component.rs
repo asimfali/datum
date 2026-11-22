@@ -17,6 +17,13 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::sketch::{Placed, nearly_parallel, open_chains_named, within_rounding};
 use crate::{LineOf, Placement, Value, describe_arity, input_sketch, line_ends, num, sketch_point};
 
+mod section;
+mod stitch;
+mod tongue;
+
+pub(crate) use tongue::form as form_tongue;
+pub(crate) const STAMP_ROLE: &str = "stamp.role";
+
 /// A part of the library (D256, D260), written into the model: its `kind` (`stamp` so far), the
 /// `features` that build its body (the model's operations, by name), the `roles` of that body
 /// (`cut`, `form`, optional `hinge`), the `anchor` where it is put in its local frame, an optional
@@ -40,6 +47,9 @@ pub struct PartDef {
     /// The features that build the tool's body, each after the ones it takes.
     pub features: Vec<PartFeature>,
     pub roles: Roles,
+    /// The two sketches of a formed stamp (D279), independent of the legacy tool body roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forming: Option<Box<Forming>>,
     /// Where it is put in its local frame, as a point `[x, y, z]`.
     pub anchor: [Num; 3],
     /// The direction the tool points in its local frame, `[x, y, z]`: a line placement turns it
@@ -53,6 +63,34 @@ pub struct PartDef {
     /// The sheet thicknesses it stamps, `[min, max]` in mm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thickness: Option<[Num; 2]>,
+}
+
+/// The named sketches that define a formed stamp.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Forming {
+    pub section: String,
+    pub boundary: String,
+    #[serde(default, skip_serializing_if = "SectionSide::is_outer")]
+    pub section_side: SectionSide,
+    /// Apply the sheet rule's bend radius to the entire section, including the root (D294).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub round_section: bool,
+}
+
+/// Which side of the sheet is drawn by the entire section (D280).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SectionSide {
+    #[default]
+    Outer,
+    Inner,
+}
+
+impl SectionSide {
+    fn is_outer(&self) -> bool {
+        *self == Self::Outer
+    }
 }
 
 /// A parameter of a part's size series: its `name` and its `value`, a number or an expression of
@@ -202,7 +240,22 @@ impl PartDef {
                 return Err(format!("a part's role `{role}`: no feature `{n}`"));
             }
         }
-        if self.roles.cut.is_none() && self.roles.form.is_none() {
+        if let Some(f) = &self.forming {
+            if self.roles != Roles::default() {
+                return Err("a part's `forming` and body `roles` cannot be combined".into());
+            }
+            if f.section == f.boundary {
+                return Err(format!("a part's section and boundary need distinct sketches, both name `{}`", f.section));
+            }
+            for (label, name) in [("section", &f.section), ("boundary", &f.boundary)] {
+                let Some(op) = self.features.iter().find(|feature| feature.name == *name).map(|feature| &feature.op) else {
+                    return Err(format!("a part's `{label}`: no feature `{name}`"));
+                };
+                if !matches!(op, crate::Op::Sketch { .. }) {
+                    return Err(format!("a part's `{label}`: feature `{name}` must be a sketch"));
+                }
+            }
+        } else if self.roles.cut.is_none() && self.roles.form.is_none() {
             return Err("a part's `roles`: `cut` or `form`".into());
         }
         Ok(())
@@ -249,6 +302,27 @@ pub struct Tool {
 /// (none: its own). Element IDs derive from the occurrence `feature` and the feature's place in
 /// the definition (§4.2): every placement of the same definition and parameters shares them.
 pub fn tool(def: &PartDef, feature: TopoId, params: &BTreeMap<String, Num>) -> Result<Tool, BrepError> {
+    let made = evaluate_features(def, feature, params)?;
+    let body_of = |name: &str| {
+        let k = def
+            .features
+            .iter()
+            .position(|f| f.name == name)
+            .ok_or_else(|| BrepError::Invalid(format!("component: no feature `{name}` in part `{}`", def.name)))?;
+        made[k].body().cloned().ok_or_else(|| BrepError::Invalid(format!("component: feature `{name}` of part `{}` is no body", def.name)))
+    };
+    let role = |name: &Option<String>| name.as_deref().map(body_of).transpose();
+    let last = made
+        .last()
+        .and_then(Value::body)
+        .cloned()
+        .ok_or_else(|| BrepError::Invalid(format!("component: the last feature of part `{}` is no body", def.name)))?;
+    let cut_sketch = def.roles.cut.as_deref().map(|name| profile(def, name, &made, "cut")).transpose()?;
+    let form_sketch = def.roles.form.as_deref().map(|name| profile(def, name, &made, "form")).transpose()?;
+    Ok(Tool { body: last, cut: role(&def.roles.cut)?, form: role(&def.roles.form)?, hinge: role(&def.roles.hinge)?, cut_sketch, form_sketch })
+}
+
+fn evaluate_features(def: &PartDef, feature: TopoId, params: &BTreeMap<String, Num>) -> Result<Vec<Value>, BrepError> {
     let values = parameters(def, params)?;
     let evaluated = parameter_values(&values);
     let lookup = |name: &str| evaluated.get(name).cloned().unwrap_or_else(|| Err(ExprError::Unknown(name.to_string())));
@@ -268,23 +342,7 @@ pub fn tool(def: &PartDef, feature: TopoId, params: &BTreeMap<String, Num>) -> R
         let value = op.eval_named(id, &inputs, &names).map_err(|e| BrepError::Invalid(format!("component: feature `{}`: {e}", f.name)))?;
         made.push(value);
     }
-    let body_of = |name: &str| {
-        let k = def
-            .features
-            .iter()
-            .position(|f| f.name == name)
-            .ok_or_else(|| BrepError::Invalid(format!("component: no feature `{name}` in part `{}`", def.name)))?;
-        made[k].body().cloned().ok_or_else(|| BrepError::Invalid(format!("component: feature `{name}` of part `{}` is no body", def.name)))
-    };
-    let role = |name: &Option<String>| name.as_deref().map(body_of).transpose();
-    let last = made
-        .last()
-        .and_then(Value::body)
-        .cloned()
-        .ok_or_else(|| BrepError::Invalid(format!("component: the last feature of part `{}` is no body", def.name)))?;
-    let cut_sketch = def.roles.cut.as_deref().map(|name| profile(def, name, &made, "cut")).transpose()?;
-    let form_sketch = def.roles.form.as_deref().map(|name| profile(def, name, &made, "form")).transpose()?;
-    Ok(Tool { body: last, cut: role(&def.roles.cut)?, form: role(&def.roles.form)?, hinge: role(&def.roles.hinge)?, cut_sketch, form_sketch })
+    Ok(made)
 }
 
 /// The sketch the role `role` works with: the first input of its extrusion, a sketch feature of
@@ -380,26 +438,26 @@ fn laid(def: &PartDef, profile: &Placed, rigid: Rigid, placement: &Placement, va
     let on = input_sketch(values, k, "a component's placement")?;
     placed.face = on.face;
     placed.k_factor = on.k_factor;
-    on_wall(def, target, &placed)?;
+    on_wall(def, target, &placed, "cut")?;
     Ok(placed)
 }
 
-/// Whether the cut profile `placed` lies in the plane of the face of `target` its placement names:
+/// Whether `placed` lies in the plane of the face of `target` its placement names:
 /// its origin on that plane and its normal along the face's, out of the sheet, to the bits a turn
 /// leaves (D229). A part whose profile is not laid on the wall cannot cut it.
-fn on_wall(def: &PartDef, target: &Body, placed: &Placed) -> Result<(), BrepError> {
+fn on_wall(def: &PartDef, target: &Body, placed: &Placed, kind: &str) -> Result<(), BrepError> {
     let wrong = || {
         BrepError::Invalid(format!(
-            "component: the cut of part `{}` is not in the plane of its anchor, facing out of the sheet: its profile is off the face the placement names",
+            "component: the {kind} of part `{}` is not in the plane of its anchor, facing out of the sheet: its profile is off the face the placement names",
             def.name
         ))
     };
     let id = placed.face.ok_or_else(|| {
-        BrepError::Invalid(format!("component: a cut takes a sketch placed on a face of the sheet: part `{}` is placed on none", def.name))
+        BrepError::Invalid(format!("component: a {kind} takes a sketch placed on a face of the sheet: part `{}` is placed on none", def.name))
     })?;
     let f = target.faces().binary_search_by_key(&id, |g| g.id).map_err(|_| BrepError::LostReference(format!("face {id:?} is not in the body")))?;
     let Surface::Plane(plane) = target.faces()[f].surface else {
-        return Err(BrepError::Unsupported(format!("component: a cut of part `{}` on a face that is not plane comes later", def.name)));
+        return Err(BrepError::Unsupported(format!("component: a {kind} of part `{}` on a face that is not plane comes later", def.name)));
     };
     let n = unit(plane.normal);
     let [o, _, _, z] = placed.frame;

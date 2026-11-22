@@ -26,7 +26,7 @@ pub use profile::{Box2, ProfileArc, ProfileLoop, overlap, overlapping};
 pub use revolve::{Axis, revolve};
 pub use step::{DEVIATION, Step, inexact_faces, step};
 pub use terrain::{Grid, terrain};
-pub use tess::{FaceMesh, Mesh, Triangles, edge_points, face_mesh, tessellate, triangulate_face};
+pub use tess::{FaceMesh, Mesh, Triangles, edge_points, face_mesh, segments_touch, tessellate, triangulate_face};
 
 /// Results of a parallel stage in input order, or the first error in input order: the outcome,
 /// error message included, does not depend on the thread count (C4).

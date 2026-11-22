@@ -862,7 +862,7 @@ impl<'a> Polygon<'a> {
 }
 
 /// Closed segments `ab` and `cd` share at least one point (exact).
-pub(crate) fn segments_touch(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
+pub fn segments_touch(a: Vec2, b: Vec2, c: Vec2, d: Vec2) -> bool {
     let (d1, d2) = (orient2d(a, b, c), orient2d(a, b, d));
     let (d3, d4) = (orient2d(c, d, a), orient2d(c, d, b));
     if [d1, d2, d3, d4].iter().all(|s| *s == Sign::Zero) {

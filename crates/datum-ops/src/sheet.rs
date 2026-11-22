@@ -124,11 +124,11 @@ pub fn sheet(
     sweep_sheet(feature, s.frame, path, sheet, [z0, z1], &tangent)
 }
 
-struct SheetPath<'a> {
-    p: &'a [Vec2],
-    names: &'a [&'a str],
-    lines: &'a [&'a str],
-    arcs: &'a [Option<(Vec2, bool)>],
+pub(crate) struct SheetPath<'a> {
+    pub p: &'a [Vec2],
+    pub names: &'a [&'a str],
+    pub lines: &'a [&'a str],
+    pub arcs: &'a [Option<(Vec2, bool)>],
 }
 
 /// Sweep a loft's chord path, using the same solid and bend geometry as an authored sheet path.
@@ -157,9 +157,22 @@ fn sweep_sheet(
     depth: [f64; 2],
     tangent: &dyn Fn(&str, &str) -> bool,
 ) -> Result<Body, BrepError> {
+    let ring = bend_profile(feature, path, sheet, tangent)?;
+    let caps = ["sheet.cap_start", "sheet.cap_end"].map(|tag| TopoId::derive(tag).id(feature).finish());
+    let [o, x, y, z] = frame;
+    let [z0, z1] = depth;
+    Ok(extrude(&[Region { outer: ring, holes: Vec::new(), caps }], z0, z1)?.transformed(&Rigid::frame(o, x, y, z)))
+}
+
+/// The closed section, beginning on the right of the path and returning on its left.
+pub(crate) fn bend_profile(
+    feature: TopoId,
+    path: SheetPath<'_>,
+    sheet: Sheet,
+    tangent: &dyn Fn(&str, &str) -> bool,
+) -> Result<ProfileLoop, BrepError> {
     let SheetPath { p, names, lines, arcs } = path;
     let n = lines.len();
-    let [z0, z1] = depth;
     let Sheet { thickness: t, radius: r, side } = sheet;
     if !(t > 0.0 && r > 0.0 && t.is_finite() && r.is_finite()) {
         return Err(BrepError::Degenerate(format!("sheet metal needs a positive thickness and bend radius, got {t} and {r}")));
@@ -376,9 +389,7 @@ fn sweep_sheet(
             push(off(start(k), d1), vertex(names[0], 1, 3), id("sheet.edge", "start", 0), None);
         }
     }
-    let caps = ["sheet.cap_start", "sheet.cap_end"].map(|tag| TopoId::derive(tag).id(feature).finish());
-    let [o, x, y, z] = frame;
-    Ok(extrude(&[Region { outer: ring, holes: Vec::new(), caps }], z0, z1)?.transformed(&Rigid::frame(o, x, y, z)))
+    Ok(ring)
 }
 
 /// A curve of a path offset to one side: a line through a point along a unit direction, or a
