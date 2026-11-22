@@ -219,7 +219,10 @@ impl Viewer {
         // The edited set: a click toggles the target in it, the preview follows. A target of
         // another body or kind does not belong to the set: the window edits one set only.
         if let Some(edit) = self.edge_finish.as_mut().and_then(|f| f.edit.as_mut()) {
-            let body = self.model.as_ref().and_then(|m| m.bodies.get(hover.body())).cloned();
+            // The body the clicks work in: the feature that began it, not the last feature on
+            // it — after one set is applied the body belongs to that set's feature, and an
+            // input named so would not resolve (D296).
+            let body = self.model.as_ref().and_then(|m| m.begun.get(hover.body())).cloned();
             let same = body.as_deref() == Some(edit.set.body.as_str()) && edit.set.kind == hover.kind();
             if !same {
                 return;
@@ -235,7 +238,7 @@ impl Viewer {
         let Some(f) = self.edge_finish.as_ref() else { return };
         let mode = if f.chamfer { EdgeMode::Chamfer } else { EdgeMode::Fillet };
         let Some(m) = self.model.as_ref() else { return };
-        let Some(body) = m.bodies.get(hover.body()).cloned() else { return };
+        let Some(body) = m.begun.get(hover.body()).cloned() else { return };
         let open = f.open.as_ref().filter(|o| o.continues(&body, hover.kind(), &size, mode));
         if let Some(open) = open {
             let mut targets = open.targets.clone();
@@ -293,7 +296,9 @@ impl Viewer {
         let (size, _) = f.size.as_ref()?;
         let mode = if f.chamfer { EdgeMode::Chamfer } else { EdgeMode::Fillet };
         let m = self.model.as_ref()?;
-        let body = m.bodies.get(hover.body())?.clone();
+        // The body the set works in: the feature that began it, not the last feature on it
+        // (an input named as the last feature would not resolve) — see `edge_finish_click`.
+        let body = m.begun.get(hover.body())?.clone();
         let open = f.open.as_ref().filter(|o| o.continues(&body, hover.kind(), size, mode));
         if let Some(open) = open {
             let mut targets = open.targets.clone();
@@ -622,6 +627,7 @@ mod tests {
         m.scene.bodies = vec![Arc::new(mesh)];
         m.scene.bounds = Some((Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)));
         m.bodies = vec!["box".into()];
+        m.begun = vec!["box".into()];
         v.open_edge_finish();
         assert!(inbox.try_recv().is_err(), "nothing is sent while the tool opens");
         v.edge_finish.as_mut().unwrap().size = Some((json!(2.0), 2.0));
@@ -680,6 +686,46 @@ mod tests {
         assert!(inbox.try_recv().is_err(), "no command without a standing preview");
     }
 
+    /// The body the sets work in is the feature the part began with: after a set is applied,
+    /// the scene body belongs to that set's feature, and an input named so would not resolve —
+    /// the clicks would refuse with `unknown input` at every hover.
+    #[test]
+    fn the_sets_work_in_the_body_the_part_began_with() {
+        let (mut v, inbox) = viewer("parametric.json");
+        let corners = [Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)];
+        let body = datum_brep::prism(TopoId::derive("test-box").finish(), &corners, 0.0, 10.0).unwrap();
+        let mesh = BodyMesh::new(&body, false);
+        let edge = mesh.finish_edges.iter().find(|e| e.ends.iter().all(|p| p.x == 10.0 && p.y == 0.0)).unwrap().id;
+        let other = mesh.finish_edges.iter().find(|e| e.ends.iter().all(|p| p.x == 10.0 && p.y == 10.0)).unwrap().id;
+        let m = v.model.as_mut().unwrap();
+        m.scene.bodies = vec![Arc::new(mesh)];
+        m.scene.bounds = Some((Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)));
+        // One set applied: the body now belongs to its feature.
+        m.bodies = vec!["edge_finish1".into()];
+        m.begun = vec!["box".into()];
+        m.inspect["features"] = json!([{"name": "edge_finish1", "op": "edge_finish"}]);
+        v.open_edge_finish();
+        v.edge_finish.as_mut().unwrap().size = Some((json!(2.0), 2.0));
+
+        hovering(&mut v, edge, [10.0, 0.0, 0.0]);
+        v.edge_finish_preview();
+        let add =
+            json!({"name": "edge_finish2", "op": "edge_finish", "inputs": ["box"], "edges": [format!("{edge:?}")], "size": 2.0, "mode": "fillet"});
+        assert!(
+            matches!(inbox.try_recv().unwrap(), Request::Preview(Some(("add", p))) if p == add),
+            "the input is the part's first feature, not the last one's"
+        );
+        v.model.as_mut().unwrap().preview = Some((add.clone(), Ok(json!({}))));
+        v.edge_finish_click();
+        assert!(matches!(inbox.try_recv().unwrap(), Request::Command("add", p) if p == add));
+
+        // The second click of the same size and mode extends the set.
+        hovering(&mut v, other, [10.0, 10.0, 0.0]);
+        v.edge_finish_preview();
+        let extend = json!({"name": "edge_finish2", "edge": "", "edges": [format!("{edge:?}"), format!("{other:?}")], "faces": []});
+        assert!(matches!(inbox.try_recv().unwrap(), Request::Preview(Some(("edit", p))) if p == extend), "the open set is extended, not begun again");
+    }
+
     /// The Edge tool picks the model without a standing preview: the previewed body has the
     /// hovered corner rounded already, so picking it would drop the hover and flicker.
     #[test]
@@ -697,6 +743,7 @@ mod tests {
         m.scene.bodies = vec![Arc::new(shown)];
         m.scene.bounds = Some((Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)));
         m.bodies = vec!["box".into()];
+        m.begun = vec!["box".into()];
         v.viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
         v.camera.fit(m.scene.bounds, 1.5);
         let cursor = {
@@ -722,6 +769,7 @@ mod tests {
         m.scene.bodies = vec![Arc::new(mesh)];
         m.scene.bounds = Some((Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)));
         m.bodies = vec!["box".into()];
+        m.begun = vec!["box".into()];
         let feature =
             json!({"name": "edge_finish1", "op": "edge_finish", "inputs": ["box"], "edges": [format!("{edge:?}")], "size": 4.0, "mode": "chamfer"});
         v.edge_finish = Some(EdgeFinishForm::editing("edge_finish1".into(), &feature));
