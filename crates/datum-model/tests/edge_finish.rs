@@ -68,6 +68,30 @@ fn volume(s: &mut Session, name: &str) -> f64 {
     run(s, "mass_properties", json!({"name": name}))["volume"].as_f64().unwrap()
 }
 
+/// Two sets on one body build one on the other: the second set's input is the first set's
+/// feature, and both fillets stand in the final body (D296).
+#[test]
+fn edge_finish_chains_on_the_body_it_works_on() {
+    let mut s = session();
+    let first = corner_edge(&mut s, "box");
+    run(&mut s, "add", json!({"name": "finish1", "op": "edge_finish", "inputs": ["box"], "edge": first, "size": 2.0, "mode": "fillet"}));
+    close(volume(&mut s, "finish1"), 2400.0 - (1.0 - std::f64::consts::PI / 4.0) * 4.0 * 10.0);
+    // A second corner of the body after the first fillet still stands straight.
+    let edges = run(&mut s, "query_edges", json!({"name": "finish1"}));
+    let other = edges["edges"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find_map(|edge| {
+            let a = &edge["from"]["point"];
+            let b = &edge["to"]["point"];
+            (a[0] == 20.0 && b[0] == 20.0 && a[1] == 0.0 && b[1] == 0.0 && a[2] != b[2]).then(|| edge["id"].as_str().unwrap().to_owned())
+        })
+        .unwrap_or_else(|| panic!("no second corner in {edges}"));
+    run(&mut s, "add", json!({"name": "finish2", "op": "edge_finish", "inputs": ["finish1"], "edge": other, "size": 1.2, "mode": "fillet"}));
+    close(volume(&mut s, "finish2"), 2400.0 - (1.0 - std::f64::consts::PI / 4.0) * (4.0 + 1.44) * 10.0);
+}
+
 fn finish(s: &mut Session, mode: &str, size: f64) {
     let edge = corner_edge(s, "box");
     run(s, "add", json!({"name": "finish", "op": "edge_finish", "inputs": ["box"], "edge": edge, "size": size, "mode": mode}));

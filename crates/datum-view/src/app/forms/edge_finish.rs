@@ -238,7 +238,9 @@ impl Viewer {
         let Some(f) = self.edge_finish.as_ref() else { return };
         let mode = if f.chamfer { EdgeMode::Chamfer } else { EdgeMode::Fillet };
         let Some(m) = self.model.as_ref() else { return };
-        let Some(body) = m.begun.get(hover.body()).cloned() else { return };
+        // The body the clicks work in is the last feature of its chain: the next set builds on
+        // the previous one, not from before it (D296).
+        let Some(body) = m.bodies.get(hover.body()).cloned() else { return };
         let open = f.open.as_ref().filter(|o| o.continues(&body, hover.kind(), &size, mode));
         if let Some(open) = open {
             let mut targets = open.targets.clone();
@@ -317,9 +319,10 @@ impl Viewer {
         let (size, _) = f.size.as_ref()?;
         let mode = if f.chamfer { EdgeMode::Chamfer } else { EdgeMode::Fillet };
         let m = self.model.as_ref()?;
-        // The body the set works in: the feature that began it, not the last feature on it
-        // (an input named as the last feature would not resolve) — see `edge_finish_click`.
-        let body = m.begun.get(hover.body())?.clone();
+        // The body the set works in is the last feature of its chain: an earlier set on the
+        // same body must stay under this one — an input of the part's first feature would
+        // rebuild from before it and drop the earlier sets (D296).
+        let body = m.bodies.get(hover.body())?.clone();
         let open = f.open.as_ref().filter(|o| o.continues(&body, hover.kind(), size, mode));
         if let Some(open) = open {
             let mut targets = open.targets.clone();
@@ -715,11 +718,11 @@ mod tests {
         assert!(inbox.try_recv().is_err(), "no command without a standing preview");
     }
 
-    /// The body the sets work in is the feature the part began with: after a set is applied,
-    /// the scene body belongs to that set's feature, and an input named so would not resolve —
-    /// the clicks would refuse with `unknown input` at every hover.
+    /// The body the sets work in is the last feature of its chain: after a set is applied,
+    /// the next set builds on it, not from before it — an input of the part's first feature
+    /// would drop the earlier sets' work.
     #[test]
-    fn the_sets_work_in_the_body_the_part_began_with() {
+    fn the_sets_build_on_the_last_feature_of_the_body() {
         let (mut v, inbox) = viewer("parametric.json");
         let corners = [Vec2::new(0.0, 0.0), Vec2::new(10.0, 0.0), Vec2::new(10.0, 10.0), Vec2::new(0.0, 10.0)];
         let body = datum_brep::prism(TopoId::derive("test-box").finish(), &corners, 0.0, 10.0).unwrap();
@@ -729,20 +732,19 @@ mod tests {
         let m = v.model.as_mut().unwrap();
         m.scene.bodies = vec![Arc::new(mesh)];
         m.scene.bounds = Some((Vec3::ZERO, Vec3::new(10.0, 10.0, 10.0)));
-        // One set applied: the body now belongs to its feature.
+        // One set applied: the body of the scene now belongs to its feature.
         m.bodies = vec!["edge_finish1".into()];
-        m.begun = vec!["box".into()];
-        m.inspect["features"] = json!([{"name": "edge_finish1", "op": "edge_finish"}]);
+        m.begun = vec!["plate1".into()];
+        m.inspect["features"] = json!([{"name": "plate1", "op": "plate"}, {"name": "edge_finish1", "op": "edge_finish"}]);
         v.open_edge_finish();
         v.edge_finish.as_mut().unwrap().size = Some((json!(2.0), 2.0));
 
         hovering(&mut v, edge, [10.0, 0.0, 0.0]);
         v.edge_finish_preview();
-        let add =
-            json!({"name": "edge_finish2", "op": "edge_finish", "inputs": ["box"], "edges": [format!("{edge:?}")], "size": 2.0, "mode": "fillet"});
+        let add = json!({"name": "edge_finish2", "op": "edge_finish", "inputs": ["edge_finish1"], "edges": [format!("{edge:?}")], "size": 2.0, "mode": "fillet"});
         assert!(
             matches!(inbox.try_recv().unwrap(), Request::Preview(Some(("add", p))) if p == add),
-            "the input is the part's first feature, not the last one's"
+            "the input is the last feature of the body, not the first one's"
         );
         v.model.as_mut().unwrap().preview = Some((add.clone(), Ok(json!({}))));
         v.edge_finish_click();
