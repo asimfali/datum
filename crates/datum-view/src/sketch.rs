@@ -292,6 +292,9 @@ pub(crate) fn paint_glyph(painter: &egui::Painter, c: egui::Pos2, g: Glyph, colo
 
 /// Pixels within which the cursor is on a point, and on a curve or a label.
 const NEAR_POINT: f64 = 8.0;
+/// How far around a label's text its hit reaches (D287): the size's line is thin, the text alone
+/// is a small target.
+const NEAR_LABEL: f64 = 7.0;
 const NEAR_CURVE: f64 = 6.0;
 
 const DEFINED: egui::Color32 = egui::Color32::from_rgb(24, 26, 30);
@@ -1443,16 +1446,18 @@ impl SketchEdit {
     /// What is under pixel offset `(dx, dy)` from the middle of a picture `height` tall: a point
     /// first, then a constraint's badge, then a label, then a curve.
     pub fn hit(&self, dx: f64, dy: f64, height: f64, label_size: impl Fn(&str) -> (f64, f64)) -> Option<Pick> {
-        if let Some(n) = self.point_at(dx, dy, height) {
-            return Some(self.projection_of(&n).map_or(Pick::Point(n), Pick::Projection));
-        }
         if let Some(b) = self.badges(height).into_iter().find(|b| (dx - b.at.0).abs() <= BADGE * 0.5 && (dy - b.at.1).abs() <= BADGE * 0.5) {
             return Some(b.pick);
         }
+        // Labels over points: a dimension's text stands by a point, and the point's grab (its
+        // own name's label on it) would take the click out of the digits (D287).
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
-            if (dx - x).abs() <= w * 0.5 && (dy - y).abs() <= h * 0.5 {
+            if (dx - x).abs() <= w * 0.5 + NEAR_LABEL && (dy - y).abs() <= h * 0.5 + NEAR_LABEL {
                 return Some(l.pick);
             }
+        }
+        if let Some(n) = self.point_at(dx, dy, height) {
+            return Some(self.projection_of(&n).map_or(Pick::Point(n), Pick::Projection));
         }
         self.curve_at(dx, dy, height)
             .map(|n| self.projection_of(&n).map_or(Pick::Curve(n), Pick::Projection))
@@ -1521,6 +1526,37 @@ impl SketchEdit {
             };
             if taken {
                 out.push(Pick::Curve(n.clone()));
+            }
+        }
+        // A frame takes a pattern's copies the way a click on its badge takes them (D285): each
+        // copy's curves are the cell's, placed; crossing takes what it touches, inside what is
+        // fully in. The source copy is the cell's own curves, taken above.
+        for c in &p.patterns {
+            let cell: Vec<Vec<[f64; 2]>> = c.cell.iter().filter_map(|n| Self::curve_points(p, n)).collect();
+            if cell.is_empty() {
+                continue;
+            }
+            for (k, place) in &c.at {
+                if c.source && *k == [0, 0] {
+                    continue;
+                }
+                let screen: Vec<(f64, f64)> = cell
+                    .iter()
+                    .flat_map(|pts| {
+                        pts.iter().map(|q| {
+                            let m = place.apply(datum_math::Vec2::new(q[0], q[1]));
+                            self.camera.offset([m.x, m.y], height)
+                        })
+                    })
+                    .collect();
+                let taken = if crossing {
+                    screen.iter().any(|q| inside(*q)) || screen.windows(2).any(|w| segment_meets_box(w[0], w[1], lo, hi))
+                } else {
+                    screen.iter().all(|q| inside(*q))
+                };
+                if taken {
+                    out.push(Pick::Copy(c.name.clone(), *k));
+                }
             }
         }
         for (l, (x, y), (w, h)) in self.laid_out(height, label_size) {
@@ -2345,6 +2381,36 @@ mod tests {
         }
     }
 
+    /// A dimension's label standing by a point (a point_line's between the point and its foot):
+    /// the click between its digits takes the label, not the point whose grab reaches under
+    /// the text (D287).
+    #[test]
+    fn a_label_stands_over_its_point() {
+        let json = json!({"name": "outline", "op": "sketch", "inputs": [], "sketch": {
+            "points": {"a": [0, 0], "b": [20, 0], "q": [5, 1]},
+            "lines": {"ab": {"from": "a", "to": "b"}},
+            "constraints": [{"type": "fix", "point": "a"}, {"type": "horizontal", "line": "ab"},
+                            {"type": "fix", "point": "q", "at": [5, 0.5]},
+                            {"type": "point_line", "point": "q", "line": "ab", "value": 0.5}]}});
+        let id = TopoId::derive("feature").tag("outline").finish();
+        let e = SketchEdit::new("outline".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None);
+        let size = |_: &str| (100.0, 18.0);
+        let (k, (x, y), _) =
+            e.laid_out(600.0, size).into_iter().find(|(l, _, _)| matches!(l.pick, Pick::Constraint(_))).expect("the distance's label");
+        let _ = k;
+        // Between the digits: inside the label, and the point's grab reaches here too.
+        let (dx, dy) = (x + 3.0, y);
+        // The point's grab reaches under the text.
+        assert!(e.point_at(dx, dy, 600.0).is_some(), "the point is under the label's text: {:?}", e.point_at(dx, dy, 600.0));
+        assert!(
+            matches!(e.hit(dx, dy, 600.0, size), Some(Pick::Constraint(_))),
+            "the label takes it, not the point: {:?}",
+            e.hit(dx, dy, 600.0, size)
+        );
+        // Off the label, the line still takes.
+        assert!(e.hit(x + 120.0, y, 600.0, size).is_some(), "nearby still takes");
+    }
+
     /// The plate of `symmetric_plate.json`: no two labels cover each other, even the two between
     /// the same points. `DATUM_PLATE_SHOT=file.png` saves a picture.
     #[test]
@@ -2413,6 +2479,43 @@ mod tests {
         assert!(e.framed(frame(b, a), 600.0, size).iter().all(|p| matches!(p, Pick::Constraint(_) | Pick::Measure(_))));
         // The dimension tool's frame takes what it touches either way.
         assert_eq!(e.framed(SelectFrame { ends: [b, a], touching: true }, 600.0, size), e.framed(frame(a, b), 600.0, size));
+    }
+
+    /// A frame takes a pattern's copies the way a click on its badge does (D285): inside what
+    /// lies wholly in, crossing what it touches; the cell's own curves stay plain curves.
+    #[test]
+    fn frames_take_a_patterns_copies() {
+        let e = sketch_of(json!({
+            "points": {"a": [0, 0], "b": [4, 0], "c": [4, 2], "d": [0, 2]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}, "cd": {"from": "c", "to": "d"}, "da": {"from": "d", "to": "a"}},
+            "constraints": [
+                {"type": "fix", "point": "a", "at": [0, 0]}, {"type": "fix", "point": "b", "at": [4, 0]},
+                {"type": "fix", "point": "c", "at": [4, 2]}, {"type": "fix", "point": "d", "at": [0, 2]},
+            ],
+            "groups": {"cell": ["ab", "bc", "cd", "da"]},
+            "patterns": {"holes": {"of": "cell", "step": [[6, 0], [0, 0]], "count": [3, 1]}}
+        }));
+        if let Err(err) = &e.placed {
+            panic!("not solved: {err:?}");
+        }
+        let at = |q: [f64; 2]| e.camera.offset(q, 600.0);
+        let size = |_: &str| (0.0, 0.0);
+        let frame = |a, b| SelectFrame { ends: [a, b], touching: false };
+        // Around the copy at x = 12: only that copy; the cell at 0 stays out.
+        let got = e.framed(frame(at([11.0, -1.0]), at([17.0, 3.0])), 600.0, size);
+        assert_eq!(got, [Pick::Copy("holes".into(), [2, 0])], "{got:?}");
+        // Around the cell itself: the curves and points, no copy for the source.
+        let got = e.framed(frame(at([-1.0, -1.0]), at([5.0, 3.0])), 600.0, size);
+        assert!(got.contains(&Pick::Curve("ab".into())) && !got.iter().any(|p| matches!(p, Pick::Copy(..))), "{got:?}");
+        // Both copies the frame covers, in one go.
+        let got = e.framed(frame(at([5.0, -1.0]), at([17.0, 3.0])), 600.0, size);
+        assert_eq!(got, [Pick::Copy("holes".into(), [1, 0]), Pick::Copy("holes".into(), [2, 0])], "{got:?}");
+        // A crossing frame takes the copy it touches.
+        let (a, b) = (at([13.0, 0.0]), at([15.0, 5.0]));
+        let got = e.framed(SelectFrame { ends: [a, b], touching: true }, 600.0, size);
+        assert_eq!(got, [Pick::Copy("holes".into(), [2, 0])], "{got:?}");
+        // Nothing where the frame is: no copy.
+        assert!(e.framed(frame(at([20.0, -1.0]), at([24.0, 3.0])), 600.0, size).is_empty());
     }
 
     /// An angle's label stands inside the angle, by the point where its lines meet.

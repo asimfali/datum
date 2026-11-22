@@ -6474,6 +6474,9 @@ impl Viewer {
                     }
                 });
                 let Some(mut out) = out else { return };
+                // A click anywhere but the field leaves a dimension's or a circle's size field
+                // (D286): the size stands as it was, the command as it ran. A field of drawing
+                // or an element's parameters waits for Enter or Esc.
                 // A dimension's or a parameter's value comes selected, to be typed over; a value
                 // typed while drawing goes on from its first digit.
                 if fresh && f.entry != Entry::Draw {
@@ -6487,6 +6490,12 @@ impl Viewer {
                     out.response.request_focus();
                 }
                 field_done = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                // A click anywhere but the field leaves a dimension's or a circle's size field
+                // (D286): the size stands as it was, the command as it ran. A field of drawing
+                // or an element's parameters waits for Enter or Esc.
+                if !f.entry.drawing() && out.response.clicked_elsewhere() {
+                    field_done.1 = true;
+                }
                 if let (Some(k), Some((next, back))) = (asking, tab)
                     && (next || back)
                 {
@@ -6514,6 +6523,11 @@ impl Viewer {
         if field_done.1 {
             sk.field = None;
             sk.draft.typed = None;
+            // A circle placed for its diameter's field (D286): Esc takes the size back, the
+            // circle stays as drawn, and the command ends, as Esc always does.
+            if sk.draft.sized.take().is_some() {
+                sk.draft.escape();
+            }
         }
         // The fillet tool's presets by the arrows (D283): up the next larger, down the next
         // smaller, around; the chamfers' presets while Tab has turned it to chamfers.
@@ -6660,6 +6674,12 @@ impl Viewer {
                 }
             } else if placing && let Some(patch) = draft.click(sk) {
                 sent.push(Request::Command("edit_sketch", sk.apply(patch)));
+                // A circle placed untyped: its diameter's field opens at the click, the value
+                // selected (D286); Esc keeps the circle unsized, digits give the real size. The
+                // draft is taken out of `sk` while the click runs, so it comes from the local one.
+                if let Some((n, at)) = &draft.sized {
+                    sk.edit_label(&crate::sketch::Pick::Curve(n.clone()), *at);
+                }
                 if field_done.0 || typing_field {
                     sk.field = None;
                 }
@@ -6677,6 +6697,7 @@ impl Viewer {
                 && let Some(p) = sk.commit_field()
             {
                 sent.push(Request::Command("edit_sketch", p));
+                draft.sized = None;
             }
             // The dimension the picks made is in (or its field gone): the next pick starts anew.
             if draft.asked.is_some() && sk.field.is_none() {
@@ -6728,7 +6749,7 @@ impl Viewer {
         }
         // A dimension changes on a double click.
         if r.double_clicked()
-            && let (Some(p @ (Pick::Constraint(_) | Pick::Curve(_))), Some((x, y))) = (sk.hover.clone(), offset)
+            && let (Some(p @ (Pick::Constraint(_) | Pick::Curve(_) | Pick::Copy(..))), Some((x, y))) = (sk.hover.clone(), offset)
         {
             sk.edit_label(&p, sk.camera.at(x, y, h));
         }
@@ -8791,6 +8812,105 @@ mod tests {
         h.run();
         let sk = h.state().sketch.as_ref().unwrap();
         assert!(sk.camera.center != before.0 && sk.frame.is_none() && sk.selected.is_empty(), "{:?} → {:?}", before.0, sk.camera.center);
+    }
+
+    /// A circle placed untyped opens its diameter's field; Esc and a click elsewhere close it
+    /// and end the command, the circle stays (D286).
+    #[test]
+    fn a_placed_circles_field_leaves_on_esc_or_a_click() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        v.sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        let click = |h: &mut egui_kittest::Harness<'_, Viewer>, at: egui::Pos2| {
+            h.hover_at(at);
+            h.step();
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE });
+            h.step();
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+            h.step();
+        };
+        click(&mut h, egui::pos2(40.0, 40.0));
+        click(&mut h, egui::pos2(60.0, 40.0));
+        let sk = h.state().sketch.as_ref().unwrap();
+        assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle placed");
+        let f = sk.field.as_ref().expect("the diameter's field opened");
+        assert!(matches!(f.entry, crate::dims::Entry::Diameter(_)), "{f:?}");
+        let _ = inbox.try_iter().count(); // the placement's own command
+        // Esc: the size edit goes, the circle stays, the command ends.
+        h.key_press(egui::Key::Escape);
+        h.run();
+        let sk = h.state().sketch.as_ref().unwrap();
+        assert!(sk.field.is_none(), "the field gone");
+        assert_eq!(sk.draft.tool, Tool::Select, "the command ended");
+        assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle stays");
+        assert!(inbox.try_iter().next().is_none(), "nothing sent: the circle was not re-edited");
+        // A click elsewhere leaves the same way.
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        if let Some(m) = &mut v.model {
+            m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
+        }
+        v.entering = Some("outline".into());
+        v.sync_sketch();
+        v.sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.sketch_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        click(&mut h, egui::pos2(40.0, 40.0));
+        click(&mut h, egui::pos2(60.0, 40.0));
+        assert!(h.state().sketch.as_ref().unwrap().field.is_some(), "the field opened again");
+        h.hover_at(egui::pos2(300.0, 300.0));
+        h.step();
+        h.event(egui::Event::PointerButton {
+            pos: egui::pos2(300.0, 300.0),
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        eprintln!(
+            "DBG after press: field={:?}",
+            h.state()
+                .sketch
+                .as_ref()
+                .unwrap()
+                .field
+                .as_ref()
+                .map(|f| (&f.text, std::mem::discriminant(&f.entry) == std::mem::discriminant(&crate::dims::Entry::Draw)))
+        );
+        h.event(egui::Event::PointerButton {
+            pos: egui::pos2(300.0, 300.0),
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        eprintln!("DBG after release: field={:?}", h.state().sketch.as_ref().unwrap().field.as_ref().map(|f| &f.text));
+        let sk = h.state().sketch.as_ref().unwrap();
+        assert!(sk.field.is_none(), "a click leaves the field");
+        assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle stays");
     }
 
     /// A right click held still opens the menu (D155) and repeats nothing: the point selected

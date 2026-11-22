@@ -14,7 +14,7 @@
 //! the answers go into the values (a number, or an expression of the model's parameters in
 //! parentheses), new names are given, and nothing remembers the element.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use datum_math::Vec2;
@@ -227,6 +227,18 @@ pub fn check(level: &str, e: &Value) -> Result<(), String> {
         }
         if !l["kind"].as_str().is_some_and(|k| KINDS.contains(&k)) {
             return Err(format!("link `{label}`: `kind` is one of {KINDS:?}"));
+        }
+    }
+    let own =
+        |n: &str| sketch.points.contains_key(n) || sketch.lines.contains_key(n) || sketch.arcs.contains_key(n) || sketch.circles.contains_key(n);
+    for (g, members) in &sketch.groups {
+        if let Some(m) = members.iter().find(|m| !own(m)) {
+            return Err(format!("group `{g}`: no own point or curve `{m}`"));
+        }
+    }
+    for (p, def) in &sketch.patterns {
+        if let Some(n) = def.references().into_iter().find(|n| !own(n) && !sketch.groups.contains_key(*n)) {
+            return Err(format!("pattern `{p}`: no own curve or group `{n}`"));
         }
     }
     let names = parameter_names(e)?;
@@ -691,6 +703,39 @@ pub fn place(
         let group = patch.claim_free(group);
         patch.set("groups", &group, json!(members));
     }
+    // The element's own groups and patterns (D285), their members renamed with everything else.
+    let mut groups: BTreeMap<String, String> = BTreeMap::new();
+    for (g, members) in sketch["groups"].as_object().into_iter().flatten() {
+        let new = patch.claim_free(g);
+        let members: Vec<String> = members
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_str).map(|m| renamed.get(m).cloned().unwrap_or_else(|| m.to_string())).collect())
+            .unwrap_or_default();
+        groups.insert(g.clone(), new.clone());
+        patch.set("groups", &new, json!(members));
+    }
+    for (p, def) in sketch["patterns"].as_object().into_iter().flatten() {
+        let new = patch.claim_free(p);
+        let mut def = def.clone();
+        // Only the element names are renamed: the sizes are expressions of the parameters.
+        for key in ["of", "fill"] {
+            if let Some(n) = def[key].as_str() {
+                let renamed = renamed.get(n).cloned().or_else(|| groups.get(n).cloned()).unwrap_or_else(|| n.to_string());
+                def[key] = json!(renamed);
+            }
+        }
+        let ways = [("offset", ["start", "end"].as_slice()), ("along", ["path"].as_slice()), ("around", ["center"].as_slice())];
+        for (section, keys) in ways {
+            if let Some(o) = def.get_mut(section).and_then(Value::as_object_mut) {
+                for key in keys {
+                    if let Some(n) = o.get(*key).and_then(Value::as_str) {
+                        o.insert((*key).into(), json!(renamed.get(n).cloned().unwrap_or_else(|| n.to_string())));
+                    }
+                }
+            }
+        }
+        patch.set("patterns", &new, def);
+    }
     Ok(renamed)
 }
 
@@ -699,8 +744,9 @@ pub fn place(
 /// Its points' x are reflected, an arc's ends swap (it runs counterclockwise from `from` to
 /// `to`), an angle's two lines swap, and a fix's `at` is reflected. Lengths, radii, distances,
 /// tangencies and symmetry about a vertical stay as they are. `links` stay untouched: they name
-/// the side outside the element, and their labels must read the same wherever it is put.
-/// Patterns are not supported: they would need their own reflection.
+/// the side outside the element, and their labels must read the same wherever it is put. A
+/// pattern comes along (D285): its copies follow the reflected curves it is of, its names are
+/// the element's own (a pattern of the side outside is refused).
 pub fn mirrored(e: &Value) -> Result<Value, String> {
     let mut out = e.clone();
     let ax = {
@@ -709,10 +755,31 @@ pub fn mirrored(e: &Value) -> Result<Value, String> {
         let p = p.as_array().filter(|p| p.len() == 2 && p.iter().all(Value::is_number)).ok_or("a point is not [x, y]")?;
         p[0].as_f64().ok_or("a point is not [x, y]")?
     };
-    let sketch = out["sketch"].as_object_mut().ok_or("the element has no `sketch`")?;
-    if sketch.get("patterns").and_then(Value::as_object).is_some_and(|p| !p.is_empty()) {
-        return Err("mirroring an element with patterns is not supported".into());
+    // A pattern comes only if what it is of is mirrored too (D285): its own curves, points and
+    // groups. On JSON, so the check does not depend on the sketch parsing.
+    let sk = &e["sketch"];
+    let own = |n: &str| ["points", "lines", "arcs", "circles", "groups"].iter().any(|k| sk[k].get(n).is_some());
+    let refs = |p: &Value| {
+        let mut out = vec![p["of"].as_str().unwrap_or_default()];
+        if let Some(n) = p["fill"].as_str() {
+            out.push(n);
+        }
+        for (section, keys) in [("offset", &["start", "end"][..]), ("along", &["path"]), ("around", &["center"])] {
+            if let Some(o) = p[section].as_object() {
+                for key in keys {
+                    if let Some(n) = o.get(*key).and_then(Value::as_str) {
+                        out.push(n);
+                    }
+                }
+            }
+        }
+        out.into_iter().filter(|n| !n.is_empty()).map(String::from).collect::<Vec<String>>()
+    };
+    let off = sk["patterns"].as_object().into_iter().flatten().flat_map(|(_, p)| refs(p)).find(|n| !own(n));
+    if let Some(n) = off {
+        return Err(format!("a pattern is of `{n}`, no own curve or group: mirroring would leave it behind"));
     }
+    let sketch = out["sketch"].as_object_mut().ok_or("the element has no `sketch`")?;
     if let Some(points) = sketch.get_mut("points").and_then(Value::as_object_mut) {
         for p in points.values_mut() {
             *p = mirror_point(p, ax)?;
@@ -862,19 +929,84 @@ pub fn links(e: &Value, values: &BTreeMap<String, Value>, renamed: &BTreeMap<Str
 /// values), the model's parameters its dimensions name become the element's (D98: named
 /// dimensions become parameters), with their values now, asked in the order the dimensions name
 /// them; without, the dimensions stay as they are (a copy to paste in the same model).
+/// What is taken from a sketch into an element: the curves and the points picked, and the
+/// groups and patterns picked, each with what it is of (D285).
+pub struct Selection<'a> {
+    pub curves: &'a [String],
+    pub points: &'a [String],
+    pub groups: &'a [String],
+    pub patterns: &'a [String],
+}
+
 pub fn extract(
     feature: &Value,
     points: &BTreeMap<String, Vec2>,
-    curves: &[String],
-    picked: &[String],
+    taken: Selection<'_>,
     name: &str,
     params: Option<&BTreeMap<String, f64>>,
 ) -> Option<Value> {
     let sketch = &feature["sketch"];
     let own = |n: &str| sketch["points"].get(n).is_some();
+    let curve = |n: &str| ["lines", "arcs", "circles"].iter().any(|k| sketch[*k].get(n).is_some());
+    let group = |n: &str| sketch["groups"].get(n).and_then(Value::as_array);
+    // A group or a pattern comes with what it is of: the group's members, a pattern's cell (its
+    // group, or the one curve), become part of the element (D285).
+    let mut curves: Vec<String> = taken.curves.to_vec();
+    let mut picked: Vec<String> = taken.points.to_vec();
+    let mut taken_groups: BTreeSet<String> = taken.groups.iter().cloned().collect();
+    let taken_patterns: BTreeSet<String> = taken.patterns.iter().cloned().collect();
+    let mut more: Vec<(bool, String)> = Vec::new(); // (is a curve, name)
+    fn as_list(v: &[Value]) -> Vec<&str> {
+        v.iter().filter_map(Value::as_str).collect()
+    }
+    for g in taken.groups {
+        let members = group(g)?;
+        for m in as_list(members) {
+            more.push((curve(m), m.to_string()));
+        }
+    }
+    for p in taken.patterns {
+        let of = sketch["patterns"][p]["of"].as_str()?;
+        if let Some(members) = group(of) {
+            taken_groups.insert(of.to_string());
+            for m in as_list(members) {
+                more.push((curve(m), m.to_string()));
+            }
+        } else {
+            more.push((curve(of), of.to_string()));
+        }
+    }
+    let mut grew = true;
+    while grew {
+        grew = false;
+        for (is_curve, n) in &more {
+            if *is_curve {
+                if !curves.contains(n) {
+                    curves.push(n.clone());
+                    grew = true;
+                }
+            } else if !picked.contains(n) {
+                picked.push(n.clone());
+                grew = true;
+            }
+        }
+        for g in taken_groups.clone() {
+            if let Some(members) = group(&g) {
+                for m in as_list(members) {
+                    if curve(m) && !curves.iter().any(|c| c == m) {
+                        curves.push(m.to_string());
+                        grew = true;
+                    } else if own(m) && !picked.iter().any(|c| c == m) {
+                        picked.push(m.to_string());
+                        grew = true;
+                    }
+                }
+            }
+        }
+    }
     let mut names: Vec<String> = picked.iter().filter(|n| own(n)).cloned().collect();
     let mut out = Map::new();
-    for n in curves {
+    for n in &curves {
         for key in ["lines", "arcs", "circles"] {
             if let Some(v) = sketch[key].get(n) {
                 let mut v = v.clone();
@@ -954,6 +1086,23 @@ pub fn extract(
     out.insert("constraints".into(), json!(constraints));
     if !measures.is_empty() {
         out.insert("measures".into(), Value::Object(measures));
+    }
+    let take = |section: &str, taken: &BTreeSet<String>| {
+        sketch[section]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter(|(n, _)| taken.contains(n.as_str()))
+            .map(|(n, v)| (n.clone(), v.clone()))
+            .collect::<Map<String, Value>>()
+    };
+    let groups: Map<String, Value> = take("groups", &taken_groups);
+    if !groups.is_empty() {
+        out.insert("groups".into(), Value::Object(groups));
+    }
+    let patterns: Map<String, Value> = take("patterns", &taken_patterns);
+    if !patterns.is_empty() {
+        out.insert("patterns".into(), Value::Object(patterns));
     }
     element["sketch"] = Value::Object(out);
     Some(element)
@@ -1262,6 +1411,88 @@ mod tests {
                                           {"type": "distance", "points": ["a", "m"], "value": "half"}]}})
     }
 
+    /// A sketch with a group of two curves and a pattern of it (D285): what copying, pasting and
+    /// mirroring a pattern work with.
+    fn patterned() -> Value {
+        json!({"name": "s", "op": "sketch",
+               "sketch": {
+                   "points": {"p1": [0, 0], "p2": [4, 0], "p3": [4, 2], "p4": [0, 2]},
+                   "lines": {"l1": {"from": "p1", "to": "p2"}, "l2": {"from": "p2", "to": "p3"}, "l3": {"from": "p3", "to": "p4"}, "l4": {"from": "p4", "to": "p1"}},
+                   "groups": {"cell": ["l1", "l2", "l3", "l4"]},
+                   "patterns": {"holes": {"of": "cell", "step": [[6, 0], [0, 6]], "count": [3, 2]}},
+                   "constraints": [{"type": "length", "line": "l1", "value": 4}, {"type": "vertical", "line": "l2"}]}})
+    }
+
+    /// Copying a pattern takes its cell's curves, the group and the pattern itself; pasting makes
+    /// its own names for everything; the pattern's own references renamed with them (D285).
+    #[test]
+    fn a_pattern_is_copied_and_pasted() {
+        let feature = patterned();
+        let at = |n: &str| {
+            let q = feature["sketch"]["points"][n].as_array().unwrap();
+            Vec2::new(q[0].as_f64().unwrap(), q[1].as_f64().unwrap())
+        };
+        let points: BTreeMap<String, Vec2> = ["p1", "p2", "p3", "p4"].iter().map(|n| (n.to_string(), at(n))).collect();
+        let e = extract(&feature, &points, Selection { curves: &[], points: &[], groups: &[], patterns: &["holes".to_string()] }, "Cluster", None)
+            .unwrap();
+        let sk = &e["sketch"];
+        assert_eq!(sk["patterns"]["holes"]["of"], json!("cell"), "the pattern taken");
+        assert_eq!(sk["groups"]["cell"], json!(["l1", "l2", "l3", "l4"]), "its group with it");
+        assert!(sk["lines"].as_object().unwrap().len() == 4 && sk["points"].as_object().unwrap().len() == 4, "the cell's curves and points");
+        assert!(check("sketch", &e).is_ok(), "the element is a valid one: {:?}", check("sketch", &e));
+        // Pasting puts a fresh-named group and pattern, the `of` renamed to the new group.
+        let mut patch = crate::SketchPatch::new(&feature);
+        let renamed = place(
+            &mut patch,
+            &e,
+            &BTreeMap::new(),
+            &[Anchor { at: [20.0, 10.0], point: None }],
+            &BTreeMap::new(),
+            Put { construction: false, group: None },
+            &none,
+        )
+        .unwrap();
+        let done = serde_json::Value::Object(patch.done().unwrap());
+        // The copy's group and pattern, their names fresh, the `of` renamed to the new group.
+        assert_eq!(done["groups"].as_object().map(|m| m.len()), Some(1), "{done}");
+        let (group, members) = done["groups"].as_object().unwrap().iter().next().unwrap();
+        assert_eq!(members, &json!(["l5", "l6", "l7", "l8"]), "the cell's curves, renamed: {done}");
+        assert_eq!(done["patterns"].as_object().map(|m| m.len()), Some(1), "{done}");
+        let (_, def) = done["patterns"].as_object().unwrap().iter().next().unwrap();
+        assert_eq!(def["of"], json!(group), "the copy is of the copy's group");
+        assert_eq!(def["count"], json!([3, 2]), "the pattern's own definition comes along");
+        assert_eq!(renamed.len(), 8, "the four points and four curves renamed");
+        // A pattern of what is not in the element is refused.
+        let bad = json!({"name": "s", "anchors": ["p1"], "op": "sketch",
+                         "sketch": {"points": {"p1": [0, 0]}, "lines": {"l1": {"from": "p1", "to": "p1"}},
+                                    "patterns": {"holes": {"of": "cell"}}}});
+        assert!(check("sketch", &bad).unwrap_err().contains("no own curve or group"));
+    }
+
+    /// A pattern comes along a mirrored element, its copies following the reflected curves; one
+    /// of what is not the element's own is refused (D285).
+    #[test]
+    fn a_pattern_is_mirrored_with_the_element() {
+        let feature = patterned();
+        let at = |n: &str| {
+            let q = feature["sketch"]["points"][n].as_array().unwrap();
+            Vec2::new(q[0].as_f64().unwrap(), q[1].as_f64().unwrap())
+        };
+        let points: BTreeMap<String, Vec2> = ["p1", "p2", "p3", "p4"].iter().map(|n| (n.to_string(), at(n))).collect();
+        let e = extract(&feature, &points, Selection { curves: &[], points: &[], groups: &[], patterns: &["holes".to_string()] }, "Cluster", None)
+            .unwrap();
+        let out = mirrored(&e).unwrap();
+        let placed: Sketch = serde_json::from_value(out["sketch"].clone()).unwrap();
+        assert_eq!(placed.patterns.len(), 1, "the pattern rides");
+        assert_eq!(placed.groups.len(), 1, "its group with it");
+        // A pattern of the side outside stays behind: refused.
+        let mut bad = e.clone();
+        bad["sketch"]["patterns"]["holes"]["fill"] = json!("elsewhere");
+        let said = mirrored(&bad).unwrap_err();
+        assert!(said.contains("no own curve or group"), "{said}");
+        assert!(check("sketch", &bad).unwrap_err().contains("no own curve or group"), "check says the same");
+    }
+
     #[test]
     fn the_built_ins_are_elements() {
         let lib = load("sketch", None);
@@ -1540,13 +1771,18 @@ mod tests {
         assert_eq!(q("a"), [10.0, 10.0], "the anchor where clicked: {p}");
         assert_eq!(q("b"), [6.0, 10.0], "left of the anchor, not right: {p}");
         assert_eq!(q("c"), [6.0, 12.0], "{p}");
-        // A point that is not a pair of numbers, and patterns, are refused.
+        // A point that is not a pair of numbers is refused.
         let mut bad = e.clone();
         bad["sketch"]["points"]["b"] = json!([4]);
         assert!(mirrored(&bad).unwrap_err().contains("not [x, y]"));
+        // A pattern of the element's own curve rides the mirror (D285), its `of` renamed.
         let mut patterned = e.clone();
         patterned["sketch"]["patterns"] = json!({"grid": {"of": "bottom", "count": 2, "step": [5, 0]}});
-        assert!(mirrored(&patterned).unwrap_err().contains("patterns"));
+        let out = mirrored(&patterned).unwrap();
+        assert_eq!(out["sketch"]["patterns"]["grid"]["of"], json!("bottom"), "the cell is `bottom` mirrored to itself: {out}");
+        // A pattern of a curve outside the element is refused.
+        patterned["sketch"]["patterns"] = json!({"grid": {"of": "elsewhere", "count": 2}});
+        assert!(mirrored(&patterned).unwrap_err().contains("no own curve or group"));
     }
 
     /// An empty project of the test: its own folder, so the files do not mix.

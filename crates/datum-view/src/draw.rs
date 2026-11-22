@@ -256,6 +256,10 @@ pub struct Draft {
     pub midline: bool,
     pub wall: Option<String>,
     pub under: Option<String>,
+    /// A circle placed by the last click and not typed: its name and where the click was, to
+    /// open its diameter's field with the value selected (D286). Esc closes the field and ends
+    /// the command, the circle stays; Enter takes the value, typed or as drawn.
+    pub sized: Option<(String, [f64; 2])>,
     /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
     /// sizes. Arrow up takes the next larger, down the next smaller; empty: the arrows stand idle.
     pub fillet_presets: Vec<f64>,
@@ -290,6 +294,7 @@ impl Default for Draft {
             projectable: Vec::new(),
             projectable_on: None,
             plan: None,
+            sized: None,
             fillet: None,
             chamfer: false,
             fillet_presets: Vec::new(),
@@ -962,9 +967,14 @@ impl Draft {
                 }
                 let c = patch.point(&centre);
                 let name = patch.fresh("c");
-                let diameter = self.typed.take().map_or(json!(short(2.0 * r)), |t| t.0);
+                let typed = self.typed.take();
+                let diameter = typed.clone().map_or(json!(short(2.0 * r)), |t| t.0);
                 patch.add("circles", &name, json!({"center": c, "diameter": diameter}), self.construction);
                 self.clicks.clear();
+                // No size typed: the click's value waits to be retyped in its field (D286).
+                if typed.is_none() {
+                    self.sized = Some((name, spot.at));
+                }
             }
             Tool::Arc => {
                 // The start, then the end, then a point on the arc; a typed radius fixes it.
@@ -1984,6 +1994,28 @@ pub(crate) mod tests {
         assert!(click_at(&mut e, [2.0, 2.0], true).is_none());
         let p = click_at(&mut e, [5.0, 6.0], true).unwrap();
         assert_eq!(p["circles"]["c1"], json!({"center": "p1", "diameter": 10.0, "construction": true}));
+    }
+
+    /// A circle placed untyped opens its diameter's field, the drawn value in it to retype
+    /// (D286); one placed with a size typed keeps none.
+    #[test]
+    fn a_placed_circle_asks_its_diameter() {
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Circle;
+        assert!(click_at(&mut e, [2.0, 2.0], true).is_none());
+        assert!(click_at(&mut e, [5.0, 6.0], true).is_some());
+        let (n, at) = e.draft.sized.take().unwrap();
+        e.edit_label(&crate::sketch::Pick::Curve(n), at);
+        let f = e.field.as_ref().unwrap();
+        assert_eq!(f.entry, crate::dims::Entry::Diameter("c1".into()), "{f:?}");
+        assert_eq!(f.text, "10");
+        // Typed while drawing: the size stands, no field.
+        let mut e = editor(json!({"points": {}}), false);
+        e.draft.tool = Tool::Circle;
+        assert!(click_at(&mut e, [2.0, 2.0], true).is_none());
+        e.draft.typed = Some((json!(8.0), 8.0));
+        assert!(click_at(&mut e, [5.0, 6.0], true).is_some());
+        assert!(e.field.is_none() && e.draft.sized.is_none());
     }
 
     /// The face's corner and edges are no snaps of a drawing tool (no projection behind the
