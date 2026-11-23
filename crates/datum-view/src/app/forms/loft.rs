@@ -76,12 +76,12 @@ impl LoftForm {
 impl Viewer {
     pub(in crate::app) fn open_loft(&mut self, at: egui::Pos2) {
         self.clear_loft_selection();
-        self.contour_hint = None;
+        self.docs[self.active].contour_hint = None;
         let Some(rule) = self.loft_toolbar_rule() else {
-            self.contour_hint = Some((at, std::time::Instant::now(), Act::Loft));
+            self.docs[self.active].contour_hint = Some((at, std::time::Instant::now(), Act::Loft));
             return;
         };
-        self.loft = Some(LoftForm {
+        self.docs[self.active].loft = Some(LoftForm {
             name: self.feature_name("loft"),
             first: String::new(),
             second: String::new(),
@@ -96,16 +96,16 @@ impl Viewer {
     }
 
     pub(in crate::app) fn loft_is_picking(&self) -> bool {
-        self.loft.as_ref().is_some_and(|f| f.picking.is_some())
+        self.docs[self.active].loft.as_ref().is_some_and(|f| f.picking.is_some())
     }
 
     pub(in crate::app) fn loft_can_pick(&self, name: &str) -> bool {
-        let Some(f) = &self.loft else { return false };
+        let Some(f) = &self.docs[self.active].loft else { return false };
         let Some(which) = f.picking else { return false };
         if name == if which == ProfilePick::First { &f.second } else { &f.first } {
             return false;
         }
-        self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).is_some_and(|features| {
+        self.docs[self.active].model.as_ref().and_then(|m| m.inspect["features"].as_array()).is_some_and(|features| {
             features.iter().take_while(|g| !f.editing || g["name"] != f.name.as_str()).any(|g| g["op"] == "sketch" && g["name"] == name)
         })
     }
@@ -114,7 +114,8 @@ impl Viewer {
         if !self.loft_can_pick(name) {
             return;
         }
-        let Some(f) = &mut self.loft else { return };
+        let d = &mut self.docs[self.active];
+        let Some(f) = &mut d.loft else { return };
         match f.picking {
             Some(ProfilePick::First) => {
                 f.first = name.into();
@@ -136,14 +137,14 @@ impl Viewer {
             self.close_loft();
             return;
         }
-        if self.loft.as_ref().is_some_and(|f| !f.editing) && self.loft_toolbar_rule().is_none() {
+        if self.docs[self.active].loft.as_ref().is_some_and(|f| !f.editing) && self.loft_toolbar_rule().is_none() {
             let at = ctx.pointer_hover_pos().unwrap_or(egui::Pos2::ZERO);
             self.close_loft();
-            self.contour_hint = Some((at, std::time::Instant::now(), Act::Loft));
+            self.docs[self.active].contour_hint = Some((at, std::time::Instant::now(), Act::Loft));
             return;
         }
         let Some(at) = ctx.pointer_hover_pos() else { return };
-        let first = self.loft.as_ref().is_some_and(|f| f.picking == Some(ProfilePick::First));
+        let first = self.docs[self.active].loft.as_ref().is_some_and(|f| f.picking == Some(ProfilePick::First));
         let label = if first {
             self.i18n.t("loft-pick-first", "Select the first profile")
         } else {
@@ -160,19 +161,19 @@ impl Viewer {
     }
 
     pub(in crate::app) fn clear_loft_selection(&mut self) {
-        if self.flange.take().is_some() {
+        if self.docs[self.active].flange.take().is_some() {
             self.send(Request::Preview(None));
         }
-        self.flange_edges.clear();
-        self.picking = None;
-        self.under = None;
-        if let Some(m) = &mut self.model {
+        self.docs[self.active].flange_edges.clear();
+        self.docs[self.active].picking = None;
+        self.docs[self.active].under = None;
+        if let Some(m) = &mut self.docs[self.active].model {
             m.preview = None;
         }
     }
 
     pub(in crate::app) fn close_loft(&mut self) {
-        if let Some(f) = self.loft.take()
+        if let Some(f) = self.docs[self.active].loft.take()
             && f.sent.is_some()
         {
             self.send(Request::Preview(None));
@@ -181,7 +182,7 @@ impl Viewer {
 
     /// Offer a seam for a circle and a four-line sketch. Geometry validation is in the preview.
     fn loft_uses_gap(&self, f: &LoftForm) -> bool {
-        let Some(model) = &self.model else { return false };
+        let Some(model) = &self.docs[self.active].model else { return false };
         let shape = |name: &str| {
             if let Some(sketch) = model.loft_profiles.iter().find(|p| p.name == name).and_then(|p| p.value.sketch()) {
                 return (sketch.circles.values().filter(|c| !c.construction).count(), sketch.lines.values().filter(|l| !l.construction).count());
@@ -196,17 +197,18 @@ impl Viewer {
     }
 
     pub(in crate::app) fn loft_window(&mut self, ctx: &egui::Context) {
-        if self.loft.is_none() {
+        if self.docs[self.active].loft.is_none() {
             return;
         }
         let rule = self.loft_toolbar_rule();
-        if self.loft.as_ref().is_some_and(|f| !f.editing) && rule.is_none() {
+        if self.docs[self.active].loft.as_ref().is_some_and(|f| !f.editing) && rule.is_none() {
             self.close_loft();
-            self.contour_hint = Some((ctx.pointer_hover_pos().unwrap_or(egui::Pos2::ZERO), std::time::Instant::now(), Act::Loft));
+            self.docs[self.active].contour_hint = Some((ctx.pointer_hover_pos().unwrap_or(egui::Pos2::ZERO), std::time::Instant::now(), Act::Loft));
             return;
         }
-        let uses_gap = self.loft.as_ref().is_some_and(|f| self.loft_uses_gap(f));
-        let Some(f) = &mut self.loft else { return };
+        let uses_gap = self.docs[self.active].loft.as_ref().is_some_and(|f| self.loft_uses_gap(f));
+        let d = &mut self.docs[self.active];
+        let Some(f) = &mut d.loft else { return };
         if !f.editing {
             f.rule = rule;
         }
@@ -217,8 +219,7 @@ impl Viewer {
             f.gap.get_or_insert_with(|| datum_ops::DEFAULT_LOFT_GAP.to_string());
         }
         let before = f.params(uses_gap);
-        let preview =
-            self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| Some(p) == before.as_ref().map(|(_, p)| p)).map(|(_, r)| r);
+        let preview = d.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| Some(p) == before.as_ref().map(|(_, p)| p)).map(|(_, r)| r);
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::Loft))
             .collapsible(false)
@@ -280,7 +281,7 @@ impl Viewer {
             self.close_loft();
             if let Some((command, params)) = params {
                 if command == "loft" {
-                    self.part = params["name"].as_str().map(String::from);
+                    self.docs[self.active].part = params["name"].as_str().map(String::from);
                 }
                 self.send(Request::Command(command, params));
             }
@@ -291,13 +292,13 @@ impl Viewer {
         } else if let Some((command, params)) = params {
             if f.sent.as_ref() != Some(&params) {
                 f.sent = Some(params.clone());
-                if let Some(m) = &mut self.model {
+                if let Some(m) = &mut d.model {
                     m.preview = None;
                 }
                 self.send(Request::Preview(Some((command, params))));
             }
         } else if f.sent.take().is_some() {
-            if let Some(m) = &mut self.model {
+            if let Some(m) = &mut self.docs[self.active].model {
                 m.preview = None;
             }
             self.send(Request::Preview(None));
@@ -323,18 +324,18 @@ mod tests {
     fn loft_without_toolbar_rule_does_not_start_picking() {
         let (mut v, _) = viewer("loft-01-line.json");
         v.rules.clear();
-        v.next_rule = None;
+        v.docs[v.active].next_rule = None;
         v.open_loft(egui::pos2(10.0, 20.0));
-        assert!(v.loft.is_none());
+        assert!(v.docs[v.active].loft.is_none());
         assert!(!v.loft_is_picking());
-        assert!(v.contour_hint.is_some_and(|(_, _, action)| action == crate::actions::Act::Loft));
+        assert!(v.docs[v.active].contour_hint.is_some_and(|(_, _, action)| action == crate::actions::Act::Loft));
     }
 
     #[test]
     fn only_the_current_successful_preview_can_make_a_loft() {
         let (mut v, inbox) = viewer("loft-01-line.json");
         v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
-        v.next_rule = Some("Sheet".into());
+        v.docs[v.active].next_rule = Some("Sheet".into());
         v.open_loft(egui::Pos2::ZERO);
         assert!(v.loft_is_picking());
         v.pick_loft_profile("profile_a");
@@ -344,28 +345,28 @@ mod tests {
         frame(&mut v, None);
         let sent: Vec<_> = inbox.try_iter().collect();
         let [Request::Preview(Some(("loft", initial)))] = sent.as_slice() else { panic!("preview: {sent:?}") };
-        v.model.as_mut().unwrap().preview = Some((initial.clone(), Ok(json!({}))));
-        v.loft.as_mut().unwrap().tolerance = "0.25".into();
+        v.docs[v.active].model.as_mut().unwrap().preview = Some((initial.clone(), Ok(json!({}))));
+        v.docs[v.active].loft.as_mut().unwrap().tolerance = "0.25".into();
         frame(&mut v, Some(egui::Key::Enter));
         let sent: Vec<_> = inbox.try_iter().collect();
         let [Request::Preview(Some(("loft", fresh)))] = sent.as_slice() else { panic!("new preview: {sent:?}") };
         assert_eq!(fresh["tolerance"], 0.25);
-        v.model.as_mut().unwrap().preview = Some((fresh.clone(), Ok(json!({}))));
+        v.docs[v.active].model.as_mut().unwrap().preview = Some((fresh.clone(), Ok(json!({}))));
         frame(&mut v, Some(egui::Key::Enter));
         let sent: Vec<_> = inbox.try_iter().collect();
         assert!(matches!(sent.as_slice(), [Request::Preview(None), Request::Command("loft", params)] if params == fresh), "{sent:?}");
-        assert!(v.loft.is_none());
+        assert!(v.docs[v.active].loft.is_none());
     }
 
     #[test]
     fn closed_loft_preview_sets_and_edits_the_seam_gap() {
         let (mut v, inbox) = viewer("loft-01-line.json");
-        v.model.as_mut().unwrap().inspect["features"] = json!([
+        v.docs[v.active].model.as_mut().unwrap().inspect["features"] = json!([
             {"name": "circle", "op": "sketch", "sketch": {"circles": {"c": {"diameter": 80}}}},
             {"name": "rectangle", "op": "sketch", "sketch": {"lines": {"a": {}, "b": {}, "c": {}, "d": {}, "diagonal": {"construction": true}}}},
         ]);
         v.rules = vec![json!({"name": "Sheet", "kind": "sheet"})];
-        v.next_rule = Some("Sheet".into());
+        v.docs[v.active].next_rule = Some("Sheet".into());
         v.open_loft(egui::Pos2::ZERO);
         v.pick_loft_profile("rectangle");
         v.pick_loft_profile("circle");
@@ -373,7 +374,7 @@ mod tests {
         let Request::Preview(Some(("loft", params))) = inbox.try_recv().unwrap() else { panic!("expected loft preview") };
         assert_eq!(params["gap"], datum_ops::DEFAULT_LOFT_GAP);
 
-        v.loft = Some(LoftForm::editing("loft".into(), &json!({"inputs": ["circle", "rectangle"], "gap": "pitch / 2"})));
+        v.docs[v.active].loft = Some(LoftForm::editing("loft".into(), &json!({"inputs": ["circle", "rectangle"], "gap": "pitch / 2"})));
         frame(&mut v, None);
         let Request::Preview(Some(("edit", params))) = inbox.try_recv().unwrap() else { panic!("expected edit preview") };
         assert_eq!(params["gap"], "pitch / 2");

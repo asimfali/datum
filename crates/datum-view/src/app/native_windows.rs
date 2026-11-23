@@ -8,10 +8,18 @@ use serde::{Deserialize, Serialize};
 const STORAGE: &str = "datum_native_windows";
 const LEGACY: &str = "datum_rules_window";
 
+/// The window's own viewport, and the key its placement is remembered by (the same for every
+/// tab, D134).
+#[derive(Clone, Copy)]
+pub(super) struct Target {
+    pub id: egui::ViewportId,
+    pub key: &'static str,
+}
+
 #[derive(Default)]
 pub(super) struct NativeWindows {
     windows: BTreeMap<String, WindowGeometry>,
-    opening: BTreeMap<&'static str, Opening>,
+    opening: BTreeMap<egui::ViewportId, Opening>,
 }
 
 #[derive(Default)]
@@ -45,12 +53,12 @@ impl NativeWindows {
         &mut self,
         ctx: &egui::Context,
         frame: Option<&eframe::Frame>,
-        key: &'static str,
+        target: Target,
         title: &str,
         preferred_size: egui::Vec2,
         mut contents: impl FnMut(&mut egui::Ui),
     ) -> bool {
-        let opening = self.opening.entry(key).or_default();
+        let opening = self.opening.entry(target.id).or_default();
         opening.seen = true;
         // Freeze the placement for this opening. Later frames observe user moves and resize
         // events without issuing another move or continually enumerating displays.
@@ -66,7 +74,7 @@ impl NativeWindows {
             let preferred = sane_size(preferred_size);
             let initial_size = preferred.min(limit);
             let entry = windows
-                .entry(key.into())
+                .entry(target.key.into())
                 .or_insert_with(|| WindowGeometry { maximized: preferred.x > limit.x || preferred.y > limit.y, ..Default::default() });
             entry.placement(&monitors, initial_size)
         });
@@ -75,7 +83,7 @@ impl NativeWindows {
             builder = builder.with_inner_size(placement.size);
         }
         let mut closed = false;
-        ctx.show_viewport_immediate(egui::ViewportId::from_hash_of(key), builder, |ui, class| {
+        ctx.show_viewport_immediate(target.id, builder, |ui, class| {
             closed = ui.input(|i| i.viewport().close_requested());
             if class == egui::ViewportClass::Immediate {
                 if opening.frames < 3 && !closed {
@@ -94,7 +102,7 @@ impl NativeWindows {
                     opening.frames += 1;
                     ui.ctx().request_repaint();
                 } else if opening.frames == 3
-                    && let Some(entry) = windows.get_mut(key)
+                    && let Some(entry) = windows.get_mut(target.key)
                 {
                     let pixels_per_point = ui.ctx().pixels_per_point();
                     ui.input(|input| entry.remember(input.viewport(), pixels_per_point));
@@ -103,13 +111,18 @@ impl NativeWindows {
             contents(ui);
         });
         if closed {
-            self.opening.remove(key);
+            self.opening.remove(&target.id);
         }
         closed
     }
 
     pub(super) fn finish_frame(&mut self) {
         self.opening.retain(|_, opening| std::mem::take(&mut opening.seen));
+    }
+
+    #[cfg(test)]
+    pub(super) fn openings(&self) -> usize {
+        self.opening.len()
     }
 }
 
@@ -269,14 +282,14 @@ mod tests {
     #[test]
     fn absent_window_starts_opening_again() {
         let mut all = NativeWindows::default();
-        all.opening.insert("a", Opening { frames: 3, seen: true, ..Default::default() });
-        all.opening.insert("b", Opening { frames: 2, seen: true, ..Default::default() });
+        all.opening.insert(egui::ViewportId::from_hash_of("a"), Opening { frames: 3, seen: true, ..Default::default() });
+        all.opening.insert(egui::ViewportId::from_hash_of("b"), Opening { frames: 2, seen: true, ..Default::default() });
         all.finish_frame();
-        all.opening.get_mut("b").unwrap().seen = true;
+        all.opening.get_mut(&egui::ViewportId::from_hash_of("b")).unwrap().seen = true;
         all.finish_frame();
-        assert!(!all.opening.contains_key("a"));
-        assert_eq!(all.opening["b"].frames, 2);
-        assert_eq!(all.opening.entry("a").or_default().frames, 0);
+        assert!(!all.opening.contains_key(&egui::ViewportId::from_hash_of("a")));
+        assert_eq!(all.opening[&egui::ViewportId::from_hash_of("b")].frames, 2);
+        assert_eq!(all.opening.entry(egui::ViewportId::from_hash_of("a")).or_default().frames, 0);
     }
 
     fn monitor(min: [f32; 2], size: [f32; 2], scale: f32) -> Monitor {

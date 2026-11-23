@@ -155,32 +155,33 @@ impl EdgeFinishForm {
 
 impl Viewer {
     pub(in crate::app) fn open_edge_finish(&mut self) {
-        if self.edge_finish.is_some() {
+        if self.docs[self.active].edge_finish.is_some() {
             self.close_edge_finish();
             return;
         }
         self.leave();
-        self.flange = None;
-        self.flange_edges.clear();
-        self.picking = None;
-        self.under = None;
-        self.plane_draft = None;
-        self.edge_hover = None;
-        self.edge_finish = Some(EdgeFinishForm { selection: None, size: None, chamfer: false, field: None, edit: None, sent: None, applying: false });
+        self.docs[self.active].flange = None;
+        self.docs[self.active].flange_edges.clear();
+        self.docs[self.active].picking = None;
+        self.docs[self.active].under = None;
+        self.docs[self.active].plane_draft = None;
+        self.docs[self.active].edge_hover = None;
+        self.docs[self.active].edge_finish =
+            Some(EdgeFinishForm { selection: None, size: None, chamfer: false, field: None, edit: None, sent: None, applying: false });
     }
 
     pub(in crate::app) fn close_edge_finish(&mut self) {
-        if self.edge_finish.take().is_some() {
-            self.edge_hover = None;
+        if self.docs[self.active].edge_finish.take().is_some() {
+            self.docs[self.active].edge_hover = None;
             self.send(Request::Preview(None));
         }
     }
 
     pub(in crate::app) fn edge_finish_applied(&mut self, applied: bool) {
-        let Some(f) = self.edge_finish.as_mut().filter(|f| f.applying) else { return };
+        let Some(f) = self.docs[self.active].edge_finish.as_mut().filter(|f| f.applying) else { return };
         if applied && f.edit.is_some() {
-            self.edge_finish = None;
-            self.edge_hover = None;
+            self.docs[self.active].edge_finish = None;
+            self.docs[self.active].edge_hover = None;
         } else {
             f.applying = false;
             f.sent = None;
@@ -191,13 +192,13 @@ impl Viewer {
     }
 
     pub(in crate::app) fn edge_finish_is_picking(&self) -> bool {
-        self.edge_finish.is_some()
+        self.docs[self.active].edge_finish.is_some()
     }
 
     /// The edit picks its own input, even if later operations removed some of its edges.
     fn edge_finish_meshes(&self) -> Option<&[Arc<BodyMesh>]> {
-        let base = &self.model.as_ref()?.edge_base;
-        if let Some(edit) = self.edge_finish.as_ref()?.edit.as_ref() {
+        let base = &self.docs[self.active].model.as_ref()?.edge_base;
+        if let Some(edit) = self.docs[self.active].edge_finish.as_ref()?.edit.as_ref() {
             let (name, mesh) = base.edit.as_ref()?;
             (name == &edit.feature).then(|| std::slice::from_ref(mesh))
         } else {
@@ -207,25 +208,28 @@ impl Viewer {
 
     /// The hover and, on a click, the change to the draft selection.
     pub(in crate::app) fn edge_finish_picker(&mut self, rect: egui::Rect, response: &egui::Response) -> Option<Vec<[Vec3; 2]>> {
-        self.edge_hover = response.hover_pos().or(response.interact_pointer_pos()).and_then(|cursor| self.edge_finish_at(rect, cursor));
+        self.docs[self.active].edge_hover =
+            response.hover_pos().or(response.interact_pointer_pos()).and_then(|cursor| self.edge_finish_at(rect, cursor));
         if response.clicked() {
             let adding = response.ctx.input(|i| crate::select::adding(&i.modifiers));
             self.edge_finish_click(adding);
         }
-        self.edge_hover.as_ref().map(EdgeHover::lines)
+        self.docs[self.active].edge_hover.as_ref().map(EdgeHover::lines)
     }
 
     fn edge_finish_click(&mut self, adding: bool) {
-        let Some(hover) = &self.edge_hover else { return };
-        let Some(mesh) = self.edge_finish_meshes().and_then(|meshes| meshes.get(hover.body())).cloned() else { return };
-        let Some(f) = self.edge_finish.as_mut().filter(|f| !f.applying) else { return };
+        let Some(body) = self.docs[self.active].edge_hover.as_ref().map(EdgeHover::body) else { return };
+        let Some(mesh) = self.edge_finish_meshes().and_then(|meshes| meshes.get(body)).cloned() else { return };
+        let d = &mut self.docs[self.active];
+        let Some(hover) = &d.edge_hover else { return };
+        let Some(f) = d.edge_finish.as_mut().filter(|f| !f.applying) else { return };
         if let Some(edit) = &mut f.edit {
             if adding {
                 edit.selection.targets.click(hover, &mesh, true);
             }
             return;
         }
-        let Some(body) = self.model.as_ref().and_then(|m| m.edge_base.bodies.get(hover.body())) else { return };
+        let Some(body) = d.model.as_ref().and_then(|m| m.edge_base.bodies.get(hover.body())) else { return };
         if let Some(selection) = &mut f.selection {
             if &selection.body == body {
                 selection.targets.click(hover, &mesh, adding);
@@ -241,12 +245,12 @@ impl Viewer {
     }
 
     pub(in crate::app) fn edge_finish_selection(&self) -> Option<Vec<[Vec3; 2]>> {
-        let f = self.edge_finish.as_ref()?;
+        let f = self.docs[self.active].edge_finish.as_ref()?;
         let (mesh, targets) = if let Some(edit) = &f.edit {
             (self.edge_finish_meshes()?.first()?, &edit.selection.targets)
         } else {
             let selection = f.selection.as_ref()?;
-            let base = &self.model.as_ref()?.edge_base;
+            let base = &self.docs[self.active].model.as_ref()?.edge_base;
             let ix = base.bodies.iter().position(|body| body == &selection.body)?;
             (base.meshes.get(ix)?, &selection.targets)
         };
@@ -255,12 +259,12 @@ impl Viewer {
     }
 
     fn preview_params(&self) -> Option<(&'static str, Json)> {
-        let f = self.edge_finish.as_ref()?;
+        let f = self.docs[self.active].edge_finish.as_ref()?;
         if let Some(edit) = &f.edit {
             return Some(("edit", edit.params()));
         }
         let (size, _) = f.size.as_ref()?;
-        let base = &self.model.as_ref()?.edge_base;
+        let base = &self.docs[self.active].model.as_ref()?.edge_base;
         let hovered;
         let selection = if let Some(selection) = &f.selection {
             let ix = base.bodies.iter().position(|name| name == &selection.body)?;
@@ -269,7 +273,7 @@ impl Viewer {
             }
             selection
         } else {
-            let hover = self.edge_hover.as_ref()?;
+            let hover = self.docs[self.active].edge_hover.as_ref()?;
             let mesh = base.meshes.get(hover.body())?;
             let mut targets = Targets::default();
             targets.click(hover, mesh, false);
@@ -286,7 +290,7 @@ impl Viewer {
     }
 
     fn edge_finish_apply(&mut self, command: &'static str, params: Json) {
-        if let Some(f) = self.edge_finish.as_mut().filter(|f| !f.applying)
+        if let Some(f) = self.docs[self.active].edge_finish.as_mut().filter(|f| !f.applying)
             && f.sent.as_ref().is_some_and(|(c, p)| *c == command && *p == params)
         {
             f.applying = true;
@@ -295,11 +299,11 @@ impl Viewer {
     }
 
     fn edge_finish_preview(&mut self) {
-        if self.edge_finish.as_ref().is_none_or(|f| f.applying) {
+        if self.docs[self.active].edge_finish.as_ref().is_none_or(|f| f.applying) {
             return;
         }
         let params = self.preview_params();
-        if let Some(f) = &mut self.edge_finish
+        if let Some(f) = &mut self.docs[self.active].edge_finish
             && f.sent != params
         {
             f.sent.clone_from(&params);
@@ -311,14 +315,14 @@ impl Viewer {
     /// nearest point on the edge so a back edge crossing a visible face cannot take the click.
     /// Else the flat cap under the cursor, by its corners.
     fn edge_finish_at(&self, rect: egui::Rect, cursor: egui::Pos2) -> Option<EdgeHover> {
-        let m = self.model.as_ref()?;
+        let m = self.docs[self.active].model.as_ref()?;
         let half = rect.size() * 0.5;
         if half.x <= 0.0 || half.y <= 0.0 {
             return None;
         }
         let (anchor, radius) = sphere(&m.scene);
         let aspect = f64::from(half.x / half.y);
-        let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+        let (vp, _) = self.docs[self.active].camera.matrices(anchor, aspect, radius);
         // The bodies without a standing preview: the previewed one has the hovered corner
         // rounded, and picking it would drop the hover and flicker.
         let base = self.edge_finish_meshes()?;
@@ -340,7 +344,7 @@ impl Viewer {
                 return None;
             }
             let at = point - rect.center();
-            let (origin, direction) = self.camera.ray(f64::from(at.x / half.x), f64::from(-at.y / half.y), aspect, anchor, radius);
+            let (origin, direction) = self.docs[self.active].camera.ray(f64::from(at.x / half.x), f64::from(-at.y / half.y), aspect, anchor, radius);
             if edge.normals.iter().all(|n| n.dot(direction) >= 0.0) {
                 return None;
             }
@@ -365,7 +369,7 @@ impl Viewer {
             return Some(EdgeHover::Edge { body, id: edge.id, ends: edge.ends });
         }
         let at = cursor - rect.center();
-        let (origin, direction) = self.camera.ray(f64::from(at.x / half.x), f64::from(-at.y / half.y), aspect, anchor, radius);
+        let (origin, direction) = self.docs[self.active].camera.ray(f64::from(at.x / half.x), f64::from(-at.y / half.y), aspect, anchor, radius);
         let hit = Scene::pick_in(base, origin, direction)?;
         let mesh = base.get(hit.body)?;
         let corners = mesh.finish_edges_of.get(&hit.face).filter(|corners| !corners.is_empty())?;
@@ -374,19 +378,19 @@ impl Viewer {
 
     /// The tool's frame: the edited set's window, else the field by the cursor and the keys.
     pub(in crate::app) fn edge_finish_ui(&mut self, ctx: &egui::Context) {
-        if self.edge_finish.as_ref().is_none_or(|f| f.applying) {
+        if self.docs[self.active].edge_finish.as_ref().is_none_or(|f| f.applying) {
             return;
         }
-        if self.edge_finish.as_ref().is_some_and(|f| f.edit.is_some()) {
+        if self.docs[self.active].edge_finish.as_ref().is_some_and(|f| f.edit.is_some()) {
             self.edge_finish_edit_window(ctx);
             self.edge_finish_preview();
             return;
         }
         let typing = ctx.text_edit_focused();
-        let had_field = self.edge_finish.as_ref().is_some_and(|f| f.field.is_some());
+        let had_field = self.docs[self.active].edge_finish.as_ref().is_some_and(|f| f.field.is_some());
         let mut close = false;
         // Enter keeps the typed size, Escape closes its field.
-        if let Some(text) = self.edge_finish.as_mut().and_then(|f| f.field.as_mut()) {
+        if let Some(text) = self.docs[self.active].edge_finish.as_mut().and_then(|f| f.field.as_mut()) {
             let mut done = (false, false);
             egui::Area::new(egui::Id::new("datum_edge_finish_field"))
                 .fixed_pos(ctx.input(|i| i.pointer.latest_pos().unwrap_or_default()) + egui::vec2(14.0, 14.0))
@@ -398,11 +402,11 @@ impl Viewer {
                 });
             let (enter, escape) = done;
             if enter || escape {
-                let text = self.edge_finish.as_mut().and_then(|f| f.field.take()).unwrap_or_default();
+                let text = self.docs[self.active].edge_finish.as_mut().and_then(|f| f.field.take()).unwrap_or_default();
                 if enter && !text.trim().is_empty() {
                     let value = value_of(&text);
                     let size = self.resolved(&value);
-                    if let Some(form) = self.edge_finish.as_mut() {
+                    if let Some(form) = self.docs[self.active].edge_finish.as_mut() {
                         form.size = Some((value, size));
                     }
                 }
@@ -422,23 +426,23 @@ impl Viewer {
             if escape {
                 close = true;
             }
-            if tab && let Some(form) = self.edge_finish.as_mut() {
+            if tab && let Some(form) = self.docs[self.active].edge_finish.as_mut() {
                 form.chamfer = !form.chamfer;
             }
             if up || down {
-                let current = self.edge_finish.as_ref().and_then(|f| f.size.as_ref()).map_or(f64::NAN, |(_, v)| *v);
-                let chamfer = self.edge_finish.as_ref().is_some_and(|f| f.chamfer);
+                let current = self.docs[self.active].edge_finish.as_ref().and_then(|f| f.size.as_ref()).map_or(f64::NAN, |(_, v)| *v);
+                let chamfer = self.docs[self.active].edge_finish.as_ref().is_some_and(|f| f.chamfer);
                 let chamfers: Vec<f64> = self.chamfer_presets.iter().map(|&(a, _)| a).collect();
                 let presets = if chamfer { &chamfers } else { &self.fillet_presets };
                 if let Some(size) = crate::draw::preset_step(presets, current, up)
-                    && let Some(form) = self.edge_finish.as_mut()
+                    && let Some(form) = self.docs[self.active].edge_finish.as_mut()
                 {
                     form.size = Some((json!(size), size));
                 }
             }
             let first = ctx.input(|i| i.events.iter().find_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }));
             if let Some(t) = first.filter(|t| t.starts_with(|c: char| c.is_ascii_digit() || c == '.' || c == '-'))
-                && let Some(form) = self.edge_finish.as_mut()
+                && let Some(form) = self.docs[self.active].edge_finish.as_mut()
             {
                 form.field = Some(t);
             } else if enter
@@ -462,7 +466,11 @@ impl Viewer {
             .ok()
             .and_then(|n| {
                 n.resolve(&|name: &str| {
-                    self.model.as_ref().and_then(|m| m.inspect["parameters"][name]["value"].as_f64()).ok_or_else(|| ExprError::Unknown(name.into()))
+                    self.docs[self.active]
+                        .model
+                        .as_ref()
+                        .and_then(|m| m.inspect["parameters"][name]["value"].as_f64())
+                        .ok_or_else(|| ExprError::Unknown(name.into()))
                 })
                 .ok()
             })
@@ -474,12 +482,13 @@ impl Viewer {
     fn edge_finish_edit_window(&mut self, ctx: &egui::Context) {
         let selected = self.edge_finish_selection().map_or(0, |lines| lines.len());
         let before = self.preview_params().map(|(_, params)| params);
-        let preview = before.as_ref().and_then(|p| self.model.as_ref()?.preview.as_ref().filter(|(q, _)| q == p).map(|(_, r)| r));
+        let d = &mut self.docs[self.active];
+        let preview = before.as_ref().and_then(|p| d.model.as_ref()?.preview.as_ref().filter(|(q, _)| q == p).map(|(_, r)| r));
         let ready = preview.is_some_and(Result::is_ok);
         let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
         let mut accept = false;
         let mut cancel = false;
-        if let Some(f) = &mut self.edge_finish {
+        if let Some(f) = &mut d.edge_finish {
             let Some(edit) = &mut f.edit else { return };
             let tab = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab));
             if tab {
@@ -497,7 +506,7 @@ impl Viewer {
             });
             if up || down {
                 let lookup = |name: &str| {
-                    self.model.as_ref().and_then(|m| m.inspect["parameters"][name]["value"].as_f64()).ok_or_else(|| ExprError::Unknown(name.into()))
+                    d.model.as_ref().and_then(|m| m.inspect["parameters"][name]["value"].as_f64()).ok_or_else(|| ExprError::Unknown(name.into()))
                 };
                 let current = serde_json::from_value::<Num>(value_of(&edit.text)).ok().and_then(|n| n.resolve(&lookup).ok()).unwrap_or(f64::NAN);
                 let chamfers: Vec<f64> = self.chamfer_presets.iter().map(|&(a, _)| a).collect();
@@ -558,12 +567,12 @@ impl Viewer {
 
     /// The hint by the cursor, the presets beside it, and a preview that refused, under them.
     pub(in crate::app) fn edge_finish_hints(&self, ui: &egui::Ui, painter: &egui::Painter, cursor: egui::Pos2) {
-        let Some(f) = self.edge_finish.as_ref() else { return };
+        let Some(f) = self.docs[self.active].edge_finish.as_ref() else { return };
         if f.edit.is_some() || f.field.is_some() {
             return;
         }
         crate::draw::size_hint(&self.i18n, painter, cursor, f.size.as_ref().map(|(_, v)| *v), f.chamfer, &self.chamfer_presets, &self.fillet_presets);
-        if let Some(why) = self.model.as_ref().and_then(|m| m.preview.as_ref()).and_then(|(_, r)| r.as_ref().err()) {
+        if let Some(why) = self.docs[self.active].model.as_ref().and_then(|m| m.preview.as_ref()).and_then(|(_, r)| r.as_ref().err()) {
             painter.text(cursor + egui::vec2(12.0, 48.0), egui::Align2::LEFT_TOP, why, egui::FontId::proportional(13.0), ui.visuals().error_fg_color);
         }
     }
@@ -582,15 +591,15 @@ mod tests {
         let (mut v, _) = viewer("parametric.json");
         let (requests, inbox) = channel();
         let (outbox, models) = channel();
-        v.requests = requests;
-        v.models = models;
-        v.model = None;
+        v.docs[v.active].requests = requests;
+        v.docs[v.active].models = models;
+        v.docs[v.active].model = None;
         std::thread::spawn(move || crate::app::worker(inbox, outbox, egui::Context::default()));
         let model: Json = serde_json::from_str(include_str!("../../../../../tests/models/edge-finish-set.json")).unwrap();
         for feature in &model["features"].as_array().unwrap()[..2] {
             v.send(Request::Command("add", feature.clone()));
         }
-        wait_for(&mut v, |v| v.model.as_ref().is_some_and(|m| m.bodies == ["box"]));
+        wait_for(&mut v, |v| v.docs[v.active].model.as_ref().is_some_and(|m| m.bodies == ["box"]));
         v
     }
 
@@ -609,14 +618,14 @@ mod tests {
     fn hover_corner(v: &mut Viewer, x: f64, y: f64) -> TopoId {
         let mesh = &v.edge_finish_meshes().unwrap()[0];
         let edge = *mesh.finish_edges.iter().find(|e| e.ends.iter().all(|p| p.x == x && p.y == y)).unwrap();
-        v.edge_hover = Some(EdgeHover::Edge { body: 0, id: edge.id, ends: edge.ends });
+        v.docs[v.active].edge_hover = Some(EdgeHover::Edge { body: 0, id: edge.id, ends: edge.ends });
         edge.id
     }
 
     fn preview(v: &mut Viewer) -> Json {
         let (_, params) = v.preview_params().unwrap();
         v.edge_finish_preview();
-        wait_for(v, |v| v.model.as_ref().and_then(|m| m.preview.as_ref()).is_some_and(|(p, result)| p == &params && result.is_ok()));
+        wait_for(v, |v| v.docs[v.active].model.as_ref().and_then(|m| m.preview.as_ref()).is_some_and(|(p, result)| p == &params && result.is_ok()));
         params
     }
 
@@ -643,30 +652,33 @@ mod tests {
         v = type_size(v, "1.2");
         let first = hover_corner(&mut v, 20.0, 0.0);
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(600.0, 400.0));
-        v.camera.fit(v.model.as_ref().unwrap().scene.bounds, 1.5);
+        {
+            let d = &mut v.docs[v.active];
+            d.camera.fit(d.model.as_ref().unwrap().scene.bounds, 1.5);
+        }
         let cursor = {
-            let (anchor, radius) = sphere(&v.model.as_ref().unwrap().scene);
-            let (vp, _) = v.camera.matrices(anchor, 1.5, radius);
+            let (anchor, radius) = sphere(&v.docs[v.active].model.as_ref().unwrap().scene);
+            let (vp, _) = v.docs[v.active].camera.matrices(anchor, 1.5, radius);
             in_rect(crate::camera::clip(&vp, Vec3::new(20.0, 0.0, 5.0) - anchor), rect)
         };
-        v.edge_hover = v.edge_finish_at(rect, cursor);
-        assert!(matches!(v.edge_hover, Some(EdgeHover::Edge { id, .. }) if id == first));
+        v.docs[v.active].edge_hover = v.edge_finish_at(rect, cursor);
+        assert!(matches!(v.docs[v.active].edge_hover, Some(EdgeHover::Edge { id, .. }) if id == first));
         let add = preview(&mut v);
-        let model = v.model.as_ref().unwrap();
+        let model = v.docs[v.active].model.as_ref().unwrap();
         assert_eq!(model.bodies, ["edge_finish1"]);
         assert_eq!(model.edge_base.bodies, ["box"]);
         assert!(!model.inspect["features"].as_array().unwrap().iter().any(|f| f["name"] == "edge_finish1"));
         assert!(!model.scene.bodies[0].finish_edges.iter().any(|e| e.id == first));
-        v.edge_hover = v.edge_finish_at(rect, cursor);
-        assert!(matches!(v.edge_hover, Some(EdgeHover::Edge { id, .. }) if id == first));
+        v.docs[v.active].edge_hover = v.edge_finish_at(rect, cursor);
+        assert!(matches!(v.docs[v.active].edge_hover, Some(EdgeHover::Edge { id, .. }) if id == first));
         for _ in 0..3 {
             assert_eq!(v.preview_params(), Some(("add", add.clone())));
             v.edge_finish_preview();
-            assert!(!v.busy);
+            assert!(!v.docs[v.active].busy);
         }
         v = press_enter(v);
-        wait_for(&mut v, |v| v.model.as_ref().is_some_and(|m| m.edge_base.bodies == ["edge_finish1"]));
-        assert!(v.model.as_ref().unwrap().preview.is_none());
+        wait_for(&mut v, |v| v.docs[v.active].model.as_ref().is_some_and(|m| m.edge_base.bodies == ["edge_finish1"]));
+        assert!(v.docs[v.active].model.as_ref().unwrap().preview.is_none());
 
         v = type_size(v, "2");
         let other = hover_corner(&mut v, 0.0, 0.0);
@@ -675,8 +687,8 @@ mod tests {
         assert_eq!(add["inputs"], json!(["edge_finish1"]));
         assert_eq!(add["name"], "edge_finish2");
         v = press_enter(v);
-        wait_for(&mut v, |v| v.model.as_ref().is_some_and(|m| m.edge_base.bodies == ["edge_finish2"]));
-        let model = v.model.as_ref().unwrap();
+        wait_for(&mut v, |v| v.docs[v.active].model.as_ref().is_some_and(|m| m.edge_base.bodies == ["edge_finish2"]));
+        let model = v.docs[v.active].model.as_ref().unwrap();
         assert_eq!(model.scene.bodies.len(), 1);
         assert!(model.preview.is_none());
         let features = model.inspect["features"].as_array().unwrap();
@@ -685,7 +697,7 @@ mod tests {
         assert!(!model.scene.bodies[0].finish_edges.iter().any(|e| e.id == other || e.id == first));
 
         let name = "edge_finish2".to_string();
-        v.edge_finish = Some(EdgeFinishForm::editing(name.clone(), features.last().unwrap()));
+        v.docs[v.active].edge_finish = Some(EdgeFinishForm::editing(name.clone(), features.last().unwrap()));
         v.send(Request::Using(Some(name)));
         wait_for(&mut v, |v| v.edge_finish_meshes().is_some());
         assert_eq!(hover_corner(&mut v, 0.0, 0.0), other, "editing keeps the second feature's actual input");
@@ -695,7 +707,7 @@ mod tests {
     fn a_face_selection_can_drop_one_corner_and_restore_it_in_edit() {
         let mut v = worker_viewer();
         v.open_edge_finish();
-        v.edge_finish.as_mut().unwrap().size = Some((json!(1.2), 1.2));
+        v.docs[v.active].edge_finish.as_mut().unwrap().size = Some((json!(1.2), 1.2));
         let mesh = &v.edge_finish_meshes().unwrap()[0];
         let (face, corners) = mesh
             .finish_edges_of
@@ -708,23 +720,24 @@ mod tests {
                     })
             })
             .unwrap();
-        v.edge_hover = Some(EdgeHover::Face { body: 0, id: *face, edges: corners.iter().map(|&ix| mesh.finish_edges[ix].ends).collect() });
+        v.docs[v.active].edge_hover =
+            Some(EdgeHover::Face { body: 0, id: *face, edges: corners.iter().map(|&ix| mesh.finish_edges[ix].ends).collect() });
         v.edge_finish_click(false);
         assert_eq!(v.edge_finish_selection().unwrap().len(), 4);
         let excluded = hover_corner(&mut v, 0.0, 0.0);
         v.edge_finish_click(true);
         assert_eq!(v.edge_finish_selection().unwrap().len(), 3);
-        v.edge_hover = None;
+        v.docs[v.active].edge_hover = None;
         let params = preview(&mut v);
         assert_eq!(params["exclude_edges"], json!([format!("{excluded:?}")]));
         assert_eq!(params["faces"].as_array().unwrap().len(), 1);
-        assert!(v.model.as_ref().unwrap().inspect["features"].as_array().unwrap().iter().all(|f| f["op"] != "edge_finish"));
+        assert!(v.docs[v.active].model.as_ref().unwrap().inspect["features"].as_array().unwrap().iter().all(|f| f["op"] != "edge_finish"));
         v = press_enter(v);
-        wait_for(&mut v, |v| v.model.as_ref().is_some_and(|m| m.edge_base.bodies == ["edge_finish1"]));
+        wait_for(&mut v, |v| v.docs[v.active].model.as_ref().is_some_and(|m| m.edge_base.bodies == ["edge_finish1"]));
 
         let name = "edge_finish1".to_string();
-        let feature = v.model.as_ref().unwrap().inspect["features"].as_array().unwrap().last().unwrap();
-        v.edge_finish = Some(EdgeFinishForm::editing(name.clone(), feature));
+        let feature = v.docs[v.active].model.as_ref().unwrap().inspect["features"].as_array().unwrap().last().unwrap();
+        v.docs[v.active].edge_finish = Some(EdgeFinishForm::editing(name.clone(), feature));
         v.send(Request::Using(Some(name.clone())));
         wait_for(&mut v, |v| v.edge_finish_meshes().is_some());
         assert_eq!(v.edge_finish_selection().unwrap().len(), 3);
@@ -736,8 +749,8 @@ mod tests {
         let edit = preview(&mut v);
         assert_eq!(edit["exclude_edges"], json!([]));
         v = press_enter(v);
-        wait_for(&mut v, |v| v.edge_finish.is_none());
-        assert!(v.model.as_ref().unwrap().preview.is_none());
-        assert_eq!(v.model.as_ref().unwrap().bodies, [name]);
+        wait_for(&mut v, |v| v.docs[v.active].edge_finish.is_none());
+        assert!(v.docs[v.active].model.as_ref().unwrap().preview.is_none());
+        assert_eq!(v.docs[v.active].model.as_ref().unwrap().bodies, [name]);
     }
 }
