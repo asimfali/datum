@@ -846,8 +846,9 @@ fn uses_note(ui: &mut egui::Ui, note: Option<&(String, Option<String>)>) {
     ui.separator();
 }
 
-/// Geometry version, view-projection matrix, eye, and picture width, height and whether smooth.
-type Drawn = (u64, [f32; 16], [f32; 4], [u32; 3]);
+/// Identity of the loaded geometry (its `Arc`'s address), view-projection matrix, eye, and
+/// picture width, height and whether smooth.
+type Drawn = (usize, [f32; 16], [f32; 4], [u32; 3]);
 
 /// A feature's title being typed in its row.
 struct Renaming {
@@ -938,9 +939,8 @@ struct Document {
     fitted: bool,
     /// The view turning to where the navigation cube or the home view asked.
     turn: Option<crate::cube::Turn>,
-    /// GPU vertices of the current scene, their version, and the anchor they are relative to.
+    /// GPU vertices of the current scene and the anchor they are relative to.
     geometry: Arc<Geometry>,
-    version: u64,
     /// Parameter definitions as typed, by name; a new one's name and definition.
     edits: BTreeMap<String, String>,
     new_parameter: crate::table::Pending,
@@ -1034,7 +1034,8 @@ struct Viewer {
     renderer: Option<Renderer>,
     /// The picture as an egui texture, and the size it was registered with.
     texture: Option<(egui::TextureId, [u32; 2])>,
-    /// What the picture shows: geometry version, camera matrices, size and samples.
+    /// What the picture shows: identity of the geometry, camera matrices, size and samples.
+    /// The renderer holds that same Arc, so resetting the renderer must reset this too.
     drawn: Option<Drawn>,
     /// Smoothed time between frames, and of the window's own work in a frame, milliseconds.
     frame_ms: f64,
@@ -1694,7 +1695,6 @@ impl Document {
             fitted: false,
             turn: None,
             geometry,
-            version: 0,
             edits: BTreeMap::new(),
             offsets: BTreeMap::new(),
             tree: TreeRows::default(),
@@ -2319,7 +2319,8 @@ impl Viewer {
     }
 
     /// The tab strip: a click shows a tab, its × or a middle click closes it, the changed ones
-    /// marked with a dot.
+    /// marked with a dot. The × is a button, always shown and reached by Tab, so a tab can be
+    /// closed from the keyboard.
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut activate = None;
         let mut close = None;
@@ -2329,7 +2330,7 @@ impl Viewer {
                 for i in 0..self.docs.len() {
                     let name = self.tab_name(i);
                     let label = if self.dirty(i) { format!("• {name}") } else { name };
-                    let tab = ui.horizontal(|ui| {
+                    ui.horizontal(|ui| {
                         let r = ui.selectable_label(i == self.active, label);
                         if r.clicked() {
                             activate = Some(i);
@@ -2337,22 +2338,15 @@ impl Viewer {
                         if r.middle_clicked() {
                             close = Some(i);
                         }
-                        ui.add_space(16.0);
-                    });
-                    let rect = tab.response.rect;
-                    if tab.response.contains_pointer() {
-                        let at = egui::pos2(rect.right() - 8.0, rect.center().y);
-                        let x = ui.interact(
-                            egui::Rect::from_center_size(at, egui::vec2(16.0, rect.height())),
-                            ui.id().with(("datum_tab_close", i)),
-                            egui::Sense::click(),
-                        );
-                        let x = x.on_hover_text(self.i18n.t("tab-close", "Close the tab"));
-                        ui.painter().text(at, egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), ui.visuals().text_color());
-                        if x.clicked() {
+                        let x = ui.add(egui::Button::new(egui::RichText::new("×").size(14.0)).frame(false).min_size(egui::vec2(12.0, 0.0)));
+                        // No frame while inactive: an outline is the only sign of keyboard focus.
+                        if x.has_focus() {
+                            ui.painter().rect_stroke(x.rect, 2.0, ui.visuals().selection.stroke, egui::StrokeKind::Inside);
+                        }
+                        if x.on_hover_text(self.i18n.t("tab-close", "Close the tab")).clicked() {
                             close = Some(i);
                         }
-                    }
+                    });
                 }
             });
         });
@@ -3485,7 +3479,6 @@ impl Viewer {
             let empty = |m: &Model| m.scene.bounds.is_none();
             d.fitted &= !m.opened && d.model.as_ref().map(empty) == Some(empty(&m));
             d.geometry = m.geometry.clone();
-            d.version += 1;
             if let Some(p) = m.inspect["parameters"].as_object() {
                 d.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
@@ -4547,13 +4540,13 @@ impl Viewer {
         // GPU; once it stops, the view is drawn smooth again.
         let moving = self.drawn.is_some_and(|d| (d.1, d.2) != (view_projection, eye));
         let smooth_now = self.smooth && !moving;
-        let drawn = (self.docs[self.active].version, view_projection, eye, [w, h, u32::from(smooth_now)]);
+        let drawn = (Arc::as_ptr(&self.docs[self.active].geometry) as usize, view_projection, eye, [w, h, u32::from(smooth_now)]);
         // No GPU (the lessons' test on a machine without one): all but the picture works.
         if self.drawn != Some(drawn)
             && let Some(rs) = rs
         {
             let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&rs.device));
-            let frame = Frame { version: self.docs[self.active].version, geometry: self.docs[self.active].geometry.clone(), view_projection, eye };
+            let frame = Frame { geometry: self.docs[self.active].geometry.clone(), view_projection, eye };
             let encoder = renderer.draw(&rs.device, &rs.queue, &frame, w, h, smooth_now);
             // Submitted before egui's own commands of this frame, which show the picture.
             rs.queue.submit([encoder.finish()]);
@@ -8574,7 +8567,6 @@ mod tests {
             fitted: true,
             turn: None,
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
-            version: 0,
             edits,
             new_parameter: Default::default(),
             offsets: planes,

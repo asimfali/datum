@@ -50,12 +50,11 @@ if [ "$mode" = mirror ]; then
   git -C "$WSL" archive "$branch" | tar -x -C "$tmp"
   # git archive stamps files with the commit date; without this cargo may see every
   # source as older than its last build and silently skip the rebuild. Symlinks are
-  # left alone: one that points outside the tree (git archive keeps it) is dangling
-  # here, and touching it would fail.
+  # skipped: touch would follow one and write at its target, even outside the tree.
   find "$tmp" ! -type l -exec touch {} +
-  # --safe-links, not -L: a symlink outside the tree has no referent in the mirror
-  # source, and following it would abort the sync (rsync exits 23 on a dangling link).
-  rsync -rt --safe-links --delete --exclude target/ "$tmp"/ "$WIN"/
+  # No -l: links are not copied at all — one pointing outside the tree has no referent
+  # here, and its file is missing from the mirror rather than dangling.
+  rsync -rt --delete --exclude target/ "$tmp"/ "$WIN"/
   sha=$(git -C "$WSL" rev-parse --short "$branch")
   profile="cargo build -q -p datum-cli --release"
 else
