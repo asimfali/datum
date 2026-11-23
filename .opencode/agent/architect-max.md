@@ -1,7 +1,7 @@
 ---
 description: Архитектор для сложных задач (glm max) — архитектура, спорные решения, разбор причин ошибок.
 mode: primary
-model: cliproxy/glm-5.3-flash#max
+model: cliproxy/glm-5.3#max
 permission:
   edit: allow
   bash: allow
