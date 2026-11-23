@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
+use std::time::SystemTime;
 
 use datum_math::{Sign, Vec2, orient2d};
 use datum_model::Session;
@@ -935,6 +936,10 @@ struct Document {
     table: Option<(crate::table::Source, crate::table::Editor)>,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
+    /// The file's modification time and size when the tab last opened or saved it; and the file
+    /// a command now in flight writes, its state recorded when that command's model comes back.
+    file_state: Option<(SystemTime, u64)>,
+    pending_file: Option<PathBuf>,
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
@@ -1051,6 +1056,8 @@ struct Viewer {
     dock: egui_dock::DockState<crate::dock::Pane>,
     /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
     quitting: Option<bool>,
+    /// The unsaved tabs dialog is showing: the close waited for the engineer's choice.
+    quitting_dialog: bool,
     /// The folder of the model last opened or saved: where the next one is opened from.
     worked_in: Option<PathBuf>,
     recent: Vec<PathBuf>,
@@ -1680,6 +1687,8 @@ impl Document {
             local_error: None,
             table: None,
             path: None,
+            file_state: None,
+            pending_file: path.map(Path::to_path_buf),
             sketch: None,
             entering: None,
             menu: None,
@@ -1719,6 +1728,48 @@ impl Document {
         }
         doc
     }
+}
+
+/// What a second Open of a path does (D134).
+#[derive(Debug, PartialEq, Eq)]
+enum Reopen {
+    /// No tab shows it: a new one.
+    New,
+    /// The tab showing it is up to date: show it.
+    Focus,
+    /// The file changed and the tab is clean: reload it there.
+    FocusAndReload,
+    /// The file changed and the tab has unsaved changes: ask first.
+    FocusAndAsk,
+}
+
+/// The rule of a second Open of a path, from whether a tab shows it, the file's state on disk,
+/// the state the tab recorded, and whether the tab has unsaved changes. Nothing to compare (the
+/// file cannot be read, or the tab recorded none): the tab is shown as it is.
+fn reopen(found: bool, disk: Option<(SystemTime, u64)>, known: Option<(SystemTime, u64)>, dirty: bool) -> Reopen {
+    if !found {
+        return Reopen::New;
+    }
+    match (disk, known) {
+        (Some(disk), Some(known)) if disk == known => Reopen::Focus,
+        (Some(_), Some(_)) if dirty => Reopen::FocusAndAsk,
+        (Some(_), Some(_)) => Reopen::FocusAndReload,
+        _ => Reopen::Focus,
+    }
+}
+
+/// A file's modification time and size, when it can be read.
+fn file_stamp(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// The unsaved tabs dialog's choice: save every changed tab and leave, leave dropping them, or stay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Quit {
+    SaveAll,
+    Discard,
+    Cancel,
 }
 
 impl Viewer {
@@ -1768,6 +1819,7 @@ impl Viewer {
             modes: crate::sketch::Modes::default(),
             dock: crate::dock::default_layout(),
             quitting: None,
+            quitting_dialog: false,
             worked_in: None,
             recent: Vec::new(),
             project: None,
@@ -1803,6 +1855,7 @@ impl Viewer {
     fn open(&mut self, path: PathBuf) {
         self.leave();
         self.set_path(Some(path.clone()));
+        self.docs[self.active].pending_file = Some(path.clone());
         self.send(Request::Open(path));
     }
 
@@ -1977,20 +2030,18 @@ impl Viewer {
         self.docs[self.active].path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf).or_else(|| self.worked_in.clone())
     }
 
-    /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
-    fn open_by_dialog(&mut self) {
-        if !self.may_leave() {
-            return;
-        }
+    /// Opens a model chosen in the file dialog (Open…, Ctrl+O): the tab that shows it, the
+    /// active intact one, or a new one (D134).
+    fn open_by_dialog(&mut self, ctx: &egui::Context) {
         if let Some(p) = self.where_working().pick_file() {
-            self.open(p);
+            self.open_path(ctx, p);
         }
     }
 
-    /// A recent model chosen: opened once what is not saved is asked about.
-    fn open_recent(&mut self, path: PathBuf) {
-        if still_there(&self.i18n, &mut self.recent, &path, path.exists(), self.i18n.t("menu-open-recent", "Open recent")) && self.may_leave() {
-            self.open(path);
+    /// A recent model chosen: shown, or opened as Open… does.
+    fn open_recent(&mut self, ctx: &egui::Context, path: PathBuf) {
+        if still_there(&self.i18n, &mut self.recent, &path, path.exists(), self.i18n.t("menu-open-recent", "Open recent")) {
+            self.open_path(ctx, path);
         }
     }
 
@@ -2047,6 +2098,7 @@ impl Viewer {
             (None, _) => self.parts().set_file_name("model.json").save_file(),
         };
         let Some(p) = path else { return false };
+        self.docs[self.active].pending_file = Some(p.clone());
         self.send(Request::Command("save", json!({"path": p.display().to_string()})));
         self.set_path(Some(p));
         true
@@ -2054,7 +2106,225 @@ impl Viewer {
 
     /// Whether the model is changed since it was opened or saved.
     fn modified(&self) -> bool {
-        self.docs[self.active].model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
+        self.dirty(self.active)
+    }
+
+    /// Whether the tab at `i` is changed since it was opened or saved.
+    fn dirty(&self, i: usize) -> bool {
+        self.docs[i].model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
+    }
+
+    /// A tab opened but not touched: no file, no change, nothing in flight, no feature made.
+    fn pristine(&self, i: usize) -> bool {
+        let d = &self.docs[i];
+        d.path.is_none()
+            && !d.busy
+            && d.model.as_ref().is_none_or(|m| m.inspect["modified"] != true && m.inspect["features"].as_array().is_none_or(Vec::is_empty))
+    }
+
+    /// Shows tab `i`: the window's picture is drawn again, the title follows its file.
+    fn activate(&mut self, i: usize) {
+        if i != self.active {
+            self.active = i;
+            self.drawn = None;
+        }
+    }
+
+    /// A new empty tab, activated: its own thread and channels.
+    fn new_tab(&mut self, ctx: &egui::Context) {
+        self.docs.push(Document::spawn(None, ctx));
+        self.active = self.docs.len() - 1;
+        self.drawn = None;
+    }
+
+    /// The tab's name: its file's, else "Untitled".
+    fn tab_name(&self, i: usize) -> String {
+        self.docs[i]
+            .path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .map_or_else(|| self.i18n.t("tab-untitled", "Untitled").to_string(), |s| s.to_string_lossy().to_string())
+    }
+
+    /// Shows the tab `step` away, round: Ctrl+Tab and Ctrl+Shift+Tab.
+    fn cycle_tab(&mut self, step: isize) {
+        let n = self.docs.len() as isize;
+        self.activate((self.active as isize + step).rem_euclid(n) as usize);
+    }
+
+    /// Opens `path` (D134): the tab that already shows it, the active tab while it is intact, or
+    /// a new one; a changed file is reloaded there, asked about if the tab is dirty.
+    fn open_path(&mut self, ctx: &egui::Context, path: PathBuf) {
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let found =
+            self.docs.iter().position(|d| d.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == canonical));
+        let decision = match found {
+            Some(i) => reopen(true, file_stamp(&path), self.docs[i].file_state, self.dirty(i)),
+            None => reopen(false, file_stamp(&path), None, false),
+        };
+        match decision {
+            Reopen::New => {
+                if self.pristine(self.active) {
+                    self.open(path);
+                } else {
+                    self.new_tab(ctx);
+                    self.open(path);
+                }
+            }
+            Reopen::Focus => {
+                if let Some(i) = found {
+                    self.activate(i);
+                }
+            }
+            Reopen::FocusAndReload => {
+                if let Some(i) = found {
+                    self.activate(i);
+                }
+                self.open(path);
+            }
+            Reopen::FocusAndAsk => {
+                let i = found.unwrap_or(self.active);
+                self.activate(i);
+                let file =
+                    self.docs[i].path.as_ref().and_then(|p| p.file_name()).map_or_else(|| self.tab_name(i), |n| n.to_string_lossy().to_string());
+                let answer = rfd::MessageDialog::new()
+                    .set_title("Datum")
+                    .set_description(self.i18n.f(
+                        "file-changed",
+                        "The file { $file } changed on disk. Reload it and lose the tab's unsaved changes?",
+                        &[("file", &file)],
+                    ))
+                    .set_buttons(rfd::MessageButtons::YesNo)
+                    .show();
+                if answer == rfd::MessageDialogResult::Yes {
+                    self.open(path);
+                }
+            }
+        }
+    }
+
+    /// Closes tab `i` (×, middle click, Ctrl+W): its changes asked about, then it goes; the last
+    /// tab is emptied the way Close always did.
+    fn close_tab(&mut self, i: usize) {
+        self.activate(i);
+        if self.docs.len() == 1 {
+            self.close();
+            return;
+        }
+        if !self.may_leave() {
+            return;
+        }
+        self.docs.remove(i);
+        if self.active >= self.docs.len() {
+            self.active = self.docs.len() - 1;
+        }
+        self.drawn = None;
+    }
+
+    /// Applies the unsaved tabs dialog's choice: save every changed tab and leave once they are
+    /// written, leave dropping them, or stay.
+    fn quit(&mut self, choice: Quit) {
+        self.quitting_dialog = false;
+        match choice {
+            Quit::SaveAll => {
+                if self.save_all() {
+                    self.quitting = Some(true);
+                }
+            }
+            Quit::Discard => self.quitting = Some(false),
+            Quit::Cancel => self.quitting = None,
+        }
+    }
+
+    /// Saves every changed tab to its file (asking where a new one goes); false if the engineer
+    /// cancelled.
+    fn save_all(&mut self) -> bool {
+        let mut saved = true;
+        for i in 0..self.docs.len() {
+            if !self.dirty(i) {
+                continue;
+            }
+            self.activate(i);
+            if !self.save(false) {
+                saved = false;
+            }
+        }
+        saved
+    }
+
+    /// The one dialog for leaving with changes (D134): every changed tab, one choice.
+    fn unsaved_tabs(&mut self, ctx: &egui::Context) {
+        if !self.quitting_dialog {
+            return;
+        }
+        let changed: Vec<String> = (0..self.docs.len()).filter(|&i| self.dirty(i)).map(|i| self.tab_name(i)).collect();
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("datum_unsaved_tabs")).show(ctx, |ui| {
+            ui.set_min_width(320.0);
+            ui.heading(self.i18n.t("unsaved-tabs-title", "Unsaved models"));
+            for name in &changed {
+                ui.label(name);
+            }
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui.button(self.i18n.t("unsaved-tabs-save-all", "Save all")).clicked() {
+                    choice = Some(Quit::SaveAll);
+                }
+                if ui.button(self.i18n.t("unsaved-tabs-discard", "Discard")).clicked() {
+                    choice = Some(Quit::Discard);
+                }
+                if ui.button(self.i18n.t("unsaved-tabs-cancel", "Cancel")).clicked() {
+                    choice = Some(Quit::Cancel);
+                }
+            });
+        });
+        if let Some(choice) = choice {
+            self.quit(choice);
+        }
+    }
+
+    /// The tab strip: a click shows a tab, its × or a middle click closes it, the changed ones
+    /// marked with a dot.
+    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+        let mut activate = None;
+        let mut close = None;
+        ui.horizontal_centered(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for i in 0..self.docs.len() {
+                let name = self.tab_name(i);
+                let label = if self.dirty(i) { format!("• {name}") } else { name };
+                let tab = ui.horizontal(|ui| {
+                    let r = ui.selectable_label(i == self.active, label);
+                    if r.clicked() {
+                        activate = Some(i);
+                    }
+                    if r.middle_clicked() {
+                        close = Some(i);
+                    }
+                    ui.add_space(16.0);
+                });
+                let rect = tab.response.rect;
+                if tab.response.contains_pointer() {
+                    let at = egui::pos2(rect.right() - 8.0, rect.center().y);
+                    let x = ui.interact(
+                        egui::Rect::from_center_size(at, egui::vec2(16.0, rect.height())),
+                        ui.id().with(("datum_tab_close", i)),
+                        egui::Sense::click(),
+                    );
+                    let x = x.on_hover_text(self.i18n.t("tab-close", "Close the tab"));
+                    ui.painter().text(at, egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), ui.visuals().text_color());
+                    if x.clicked() {
+                        close = Some(i);
+                    }
+                }
+            }
+        });
+        if let Some(i) = activate {
+            self.activate(i);
+        }
+        if let Some(i) = close {
+            self.close_tab(i);
+        }
     }
 
     /// Whether the model may be left (closed, replaced): asked first if it has changes not saved
@@ -2083,13 +2353,14 @@ impl Viewer {
         }
     }
 
-    /// An empty model (New, Ctrl+N), once what is not saved is asked about.
-    fn new_model(&mut self) {
-        if !self.may_leave() {
-            return;
+    /// An empty model (New, Ctrl+N): the active tab while it is intact, else a new one (D134).
+    fn new_model(&mut self, ctx: &egui::Context) {
+        if self.pristine(self.active) {
+            self.leave();
+            self.set_path(None);
+        } else {
+            self.new_tab(ctx);
         }
-        self.leave();
-        self.set_path(None);
         let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
         self.send(Request::Command("new", params));
     }
@@ -3012,7 +3283,7 @@ impl Viewer {
         });
         let dropped = ui.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.extension().is_some_and(|e| e == "json")));
         if let Some(p) = dropped {
-            self.open(p);
+            self.open_path(ui.ctx(), p);
         }
     }
 
@@ -3167,7 +3438,7 @@ impl Viewer {
             d.offsets = offsets(&m.inspect);
         }
         // A save that failed while closing the window: it stays open, the error shown.
-        if active && self.quitting == Some(true) && m.error.is_some() {
+        if self.quitting == Some(true) && m.error.is_some() {
             self.quitting = None;
         }
         if active && std::mem::take(&mut self.library_due) {
@@ -3190,6 +3461,12 @@ impl Viewer {
         }
         if active && let Some(applied) = m.edge_applied {
             self.edge_finish_applied(applied);
+        }
+        // The file a command in flight wrote or read: its state now, for the next Open to compare.
+        if m.error.is_none()
+            && let Some(p) = self.docs[i].pending_file.take()
+        {
+            self.docs[i].file_state = file_stamp(&p);
         }
         self.docs[i].model = if m.closed { None } else { Some(m) };
         if active {
@@ -7374,7 +7651,6 @@ impl Viewer {
         here && match a.act {
             Act::Save
             | Act::SaveAs
-            | Act::Close
             | Act::NewSketch
             | Act::ExportStep
             | Act::Home
@@ -7460,17 +7736,17 @@ impl Viewer {
 
     fn run(&mut self, ui: &egui::Ui, act: Act) {
         match act {
-            Act::New => self.new_model(),
-            Act::Open => self.open_by_dialog(),
+            Act::New => self.new_model(ui.ctx()),
+            Act::Open => self.open_by_dialog(ui.ctx()),
             Act::Save => {
                 self.save(false);
             }
             Act::SaveAs => {
                 self.save(true);
             }
-            Act::Close => {
-                self.close();
-            }
+            Act::Close => self.close_tab(self.active),
+            Act::NextTab => self.cycle_tab(1),
+            Act::PreviousTab => self.cycle_tab(-1),
             Act::ExportStep => self.export_step(),
             Act::Exit => ui.send_viewport_cmd(egui::ViewportCommand::Close),
             Act::NewProject => self.project_by_dialog(true),
@@ -7700,7 +7976,7 @@ impl Viewer {
             ui.add_enabled_ui(!self.recent.is_empty(), |ui| {
                 ui.menu_button(self.i18n.t("menu-open-recent", "Open recent").to_string(), |ui| {
                     if let Some(p) = recent_menu(ui, &self.recent, std::path::Path::exists) {
-                        self.open_recent(p);
+                        self.open_recent(ui.ctx(), p);
                     }
                 });
             });
@@ -7748,6 +8024,9 @@ impl Viewer {
                 self.item(ui, act, true);
             }
             self.item(ui, Act::ResetLayout, true);
+            ui.separator();
+            self.item(ui, Act::NextTab, true);
+            self.item(ui, Act::PreviousTab, true);
             ui.menu_button(self.i18n.t("menu-language", "Language").to_string(), |ui| {
                 for (code, name) in crate::i18n::languages() {
                     let name = name.unwrap_or_else(|| self.i18n.t("language-system", "System"));
@@ -8093,24 +8372,31 @@ impl Viewer {
         }
         self.receive();
         self.spots.clear();
-        let t = title(self.project.as_deref(), self.docs[self.active].path.as_deref());
-        if t != self.titled {
-            ui.send_viewport_cmd(egui::ViewportCommand::Title(t.clone()));
-            self.titled = t;
-        }
-        // The window closed with changes not saved: asked first; saved, it closes once the
-        // background thread has written the file.
-        if ui.input(|i| i.viewport().close_requested()) && self.quitting.is_none() && self.modified() {
+        // The window closed with unsaved changes: one dialog for all of them (D134); a repeated
+        // close while they are saved waits rather than dropping them.
+        let changed = (0..self.docs.len()).any(|i| self.dirty(i));
+        if ui.input(|i| i.viewport().close_requested()) && (changed || self.quitting_dialog) {
             ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.quitting = self.ask_to_save();
+            if changed && self.quitting.is_none() && !self.quitting_dialog {
+                self.quitting_dialog = true;
+            }
         }
+        // Saved, it closes once every tab is written; dropped, at once.
         if let Some(saving) = self.quitting
-            && (!saving || (!self.docs[self.active].busy && !self.modified()))
+            && (!saving || (0..self.docs.len()).all(|i| !self.docs[i].busy && !self.dirty(i)))
         {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
+        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE).exact_size(28.0).show(ui, |ui| self.tab_bar(ui));
+        // The title follows the active tab, once a click on the strip has chosen it.
+        let t = title(self.project.as_deref(), self.docs[self.active].path.as_deref());
+        if t != self.titled {
+            ui.send_viewport_cmd(egui::ViewportCommand::Title(t.clone()));
+            self.titled = t;
+        }
+        self.unsaved_tabs(ui.ctx());
         // The activity bar at the edge, the side bar beside it (D162).
         let (activity, side) = if self.side_bar.right {
             (egui::Panel::right("datum_activity"), egui::Panel::right("datum_side"))
@@ -8168,7 +8454,7 @@ mod tests {
     use super::*;
 
     /// A viewer showing reference model `model`, and the requests it sends.
-    pub(super) fn viewer(model: &str) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+    pub(super) fn document(model: &str) -> (Document, std::sync::mpsc::Receiver<Request>) {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
@@ -8217,6 +8503,8 @@ mod tests {
             local_error: None,
             table: None,
             path: None,
+            file_state: None,
+            pending_file: None,
             sketch: None,
             entering: None,
             menu: None,
@@ -8251,6 +8539,12 @@ mod tests {
             sketch_rect: egui::Rect::ZERO,
             blank_fitted: false,
         };
+        (doc, inbox)
+    }
+
+    /// A viewer showing reference model `model`, and the requests it sends.
+    pub(super) fn viewer(model: &str) -> (Viewer, std::sync::mpsc::Receiver<Request>) {
+        let (doc, inbox) = document(model);
         let v = Viewer {
             docs: vec![doc],
             active: 0,
@@ -8281,6 +8575,7 @@ mod tests {
             modes: crate::sketch::Modes::default(),
             dock: crate::dock::default_layout(),
             quitting: None,
+            quitting_dialog: false,
             worked_in: None,
             recent: Vec::new(),
             project: None,
@@ -8717,14 +9012,22 @@ mod tests {
     #[test]
     fn the_session_is_told_the_project() {
         let (mut v, inbox) = viewer("parametric.json");
-        v.new_model();
+        // New in an intact tab reuses it: a model with nothing made in it.
+        {
+            let m = v.docs[v.active].model.as_mut().unwrap();
+            m.inspect["features"] = json!([]);
+            m.inspect["modified"] = json!(false);
+        }
+        let ctx = egui::Context::default();
+        v.new_model(&ctx);
         let cmds = sent(&inbox);
         assert_eq!(cmds.len(), 1, "{cmds:?}");
         assert_eq!(cmds[0].0, "new");
         assert!(cmds[0].1.get("project").is_none(), "{:?}", cmds[0].1);
         let root = project_root("viewer_told_project");
         v.project = Some(root.clone());
-        v.new_model();
+        v.docs[v.active].busy = false;
+        v.new_model(&ctx);
         let cmds = sent(&inbox);
         assert_eq!((cmds[0].0, &cmds[0].1["project"]), ("new", &json!(root)));
         v.set_project(Some(root.clone()));
@@ -9338,7 +9641,7 @@ mod tests {
     fn the_theme_menu_switches_at_once() {
         let (v, _inbox) = viewer("parametric.json");
         assert!(!v.theme_chosen, "nothing chosen yet: the settings file's word stands");
-        let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui_state(
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 600.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 egui::Panel::top("menu").show(ui, |ui| egui::MenuBar::new().ui(ui, |ui| v.menu(ui)));
             },
@@ -11006,6 +11309,9 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Close)), "closed");
         assert!(!sent.iter().any(|r| matches!(r, Request::Command("new", _))), "typing: not a new model");
+        // The worker's empty model has come: the tab holds nothing.
+        v.docs[v.active].model = None;
+        v.docs[v.active].busy = false;
         let mut h = egui_kittest::Harness::builder().with_size([400.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(ctrl(egui::Key::N));
         h.run();
@@ -12520,5 +12826,147 @@ mod tests {
         h.run();
         assert!(h.state().docs[h.state().active].contour_hint.is_some() && h.state().docs[h.state().active].extrusion.is_none());
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(_))));
+    }
+
+    fn reference_model(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(name)
+    }
+
+    /// A tab with nothing made in it and nothing in flight.
+    fn make_pristine(v: &mut Viewer) {
+        v.docs[v.active].path = None;
+        v.docs[v.active].busy = false;
+        if let Some(m) = v.docs[v.active].model.as_mut() {
+            m.inspect["features"] = json!([]);
+            m.inspect["modified"] = json!(false);
+        }
+    }
+
+    /// The rule of a second Open of the same path (D134): a new tab, the tab shown, reloaded, or
+    /// a question; nothing to compare, the tab is shown as it is.
+    #[test]
+    fn a_second_open_follows_the_file_on_disk() {
+        let before = (SystemTime::now(), 1);
+        let after = (SystemTime::now(), 2);
+        assert_eq!(reopen(false, None, None, true), Reopen::New);
+        assert_eq!(reopen(true, Some(after), Some(after), true), Reopen::Focus);
+        assert_eq!(reopen(true, Some(after), Some(before), false), Reopen::FocusAndReload);
+        assert_eq!(reopen(true, Some(after), Some(before), true), Reopen::FocusAndAsk);
+        assert_eq!(reopen(true, None, Some(before), true), Reopen::Focus);
+        assert_eq!(reopen(true, Some(after), None, true), Reopen::Focus);
+    }
+
+    /// Opening the file a tab shows chooses that tab, and reloads it there when the file changed
+    /// while the tab is clean.
+    #[test]
+    fn opening_the_same_file_shows_its_tab() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let path = reference_model("symmetric_plate.json");
+        v.docs[0].path = Some(path.clone());
+        assert_eq!(v.tab_name(0), "symmetric_plate");
+        let ctx = egui::Context::default();
+        v.open_path(&ctx, path.clone());
+        assert_eq!((v.docs.len(), v.active), (1, 0), "the tab that has it is shown");
+        v.docs[0].file_state = Some((SystemTime::now(), 0));
+        v.open_path(&ctx, path);
+        assert_eq!((v.docs.len(), v.active), (1, 0));
+        assert!(v.docs[0].busy, "reloaded in place");
+    }
+
+    /// Opening another file while the active tab has something in it opens a tab; an intact tab
+    /// is used instead, by Open and by New.
+    #[test]
+    fn opening_another_file_opens_a_tab() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let ctx = egui::Context::default();
+        v.open_path(&ctx, reference_model("parametric.json"));
+        assert_eq!((v.docs.len(), v.active), (2, 1));
+        assert_eq!(v.docs[1].path.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().to_string()).as_deref(), Some("parametric.json"));
+        make_pristine(&mut v);
+        v.open_path(&ctx, reference_model("symmetric_plate.json"));
+        assert_eq!(v.docs.len(), 2, "the intact tab is used");
+        make_pristine(&mut v);
+        v.new_model(&ctx);
+        assert_eq!(v.docs.len(), 2, "New keeps the intact tab");
+    }
+
+    /// The strip's keys: Ctrl+Tab and Ctrl+Shift+Tab go round the tabs.
+    #[test]
+    fn the_tabs_go_round() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.docs.push(document("parametric.json").0);
+        v.active = 0;
+        v.cycle_tab(1);
+        assert_eq!(v.active, 1);
+        v.cycle_tab(1);
+        assert_eq!(v.active, 0, "round");
+        v.cycle_tab(-1);
+        assert_eq!(v.active, 1, "back round");
+    }
+
+    /// A model that comes back records the state of the file its command read or wrote.
+    #[test]
+    fn a_model_records_its_files_state() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let path = reference_model("symmetric_plate.json");
+        v.docs[0].pending_file = Some(path.clone());
+        let m = v.docs[0].model.take().unwrap();
+        v.took(0, m);
+        assert_eq!(v.docs[0].file_state, file_stamp(&path));
+        assert!(v.docs[0].pending_file.is_none());
+    }
+
+    /// The strip shows every tab and a click on one shows it.
+    #[test]
+    fn the_tab_strip_shows_and_chooses_tabs() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.docs.push(document("parametric.json").0);
+        v.docs[0].path = Some(reference_model("symmetric_plate.json"));
+        v.docs[1].path = Some(reference_model("parametric.json"));
+        v.active = 0;
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 600.0]).build_ui_state(|ui, v: &mut Viewer| v.window(ui, None), v);
+        h.run();
+        h.get_by_label("parametric").click();
+        h.run();
+        assert_eq!(h.state().active, 1);
+    }
+
+    /// A clean tab goes when closed; the last tab is emptied the way Close always did, and the
+    /// vector is never empty.
+    #[test]
+    fn closing_a_clean_tab_leaves_one_and_the_last_is_emptied() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.docs.push(document("parametric.json").0);
+        v.active = 0;
+        v.close_tab(1);
+        assert_eq!((v.docs.len(), v.active), (1, 0), "the neighbour, its index and the tab vector kept");
+        v.close_tab(0);
+        assert_eq!(v.docs.len(), 1);
+        assert!(v.docs[0].path.is_none(), "unnamed");
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)), "the model asked to close");
+    }
+
+    /// The unsaved tabs dialog's choices: leave at once dropping the changes, stay, or save every
+    /// changed tab and leave once it is written.
+    #[test]
+    fn leaving_with_changes_takes_one_choice() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.docs[0].model.as_mut().unwrap().inspect["modified"] = json!(true);
+        v.quitting_dialog = true;
+        v.quit(Quit::Discard);
+        assert!(!v.quitting_dialog);
+        assert_eq!(v.quitting, Some(false));
+        v.quitting = None;
+        v.quitting_dialog = true;
+        v.quit(Quit::Cancel);
+        assert!(!v.quitting_dialog);
+        assert_eq!(v.quitting, None, "the window stays");
+        v.quitting_dialog = true;
+        v.docs[0].path = Some(std::env::temp_dir().join(format!("datum-tab-save-{}.json", std::process::id())));
+        v.quit(Quit::SaveAll);
+        assert!(!v.quitting_dialog);
+        assert_eq!(v.quitting, Some(true));
+        assert!(v.docs[0].pending_file.is_some(), "the save's file is recorded");
+        assert!(sent(&inbox).iter().any(|(c, _)| *c == "save"));
     }
 }

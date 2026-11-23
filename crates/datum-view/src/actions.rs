@@ -71,6 +71,8 @@ pub enum Act {
     Rename,
     Construction,
     Metadata,
+    NextTab,
+    PreviousTab,
 }
 
 /// Where an action's key works: anywhere, in the model (no sketch edited), in a sketch.
@@ -114,7 +116,7 @@ const fn plain(key: Key) -> Option<KeyboardShortcut> {
 
 use Context::{Anywhere, Model, Sketch};
 
-pub const ACTIONS: [Action; 63] = [
+pub const ACTIONS: [Action; 65] = [
     action(Act::New, "file.new", "New", "An empty model", ctrl(Key::N), Anywhere),
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
@@ -449,6 +451,15 @@ pub const ACTIONS: [Action; 63] = [
         "Properties of the selected lines and arcs, and of the marks on the sketch's curves without a selection; a preset fills them in, the values are saved in the model",
         plain(Key::F12),
         Sketch,
+    ),
+    action(Act::NextTab, "view.next_tab", "Next tab", "The tab after this one: the window shows it", ctrl(Key::Tab), Anywhere),
+    action(
+        Act::PreviousTab,
+        "view.previous_tab",
+        "Previous tab",
+        "The tab before this one: the window shows it",
+        Some(KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Tab)),
+        Anywhere,
     ),
 ];
 

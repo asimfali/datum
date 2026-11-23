@@ -619,3 +619,16 @@ uses-hint = Shift или Ctrl и щелчок: добавить или убра�
 flange-pick = Щёлкните кромки листа для фланцев или грань: возьмётся весь её контур · Shift или Ctrl: добавить или убрать · Enter: фланец · Esc: отмена
 table-kerf = Ширина реза, мм или от t
 table-rule-kerf = Ширина реза: число в мм больше нуля или формула от толщины t
+
+# Вкладки документов (D134).
+act-view-next-tab = Следующая вкладка
+act-view-next-tab-about = Вкладка после этой: окно показывает её
+act-view-previous-tab = Предыдущая вкладка
+act-view-previous-tab-about = Вкладка перед этой: окно показывает её
+tab-untitled = Без имени
+tab-close = Закрыть вкладку
+unsaved-tabs-title = Несохранённые модели
+unsaved-tabs-save-all = Сохранить все
+unsaved-tabs-discard = Выйти без сохранения
+unsaved-tabs-cancel = Отмена
+file-changed = Файл { $file } изменился на диске. Перезагрузить его и потерять несохранённые изменения вкладки?
