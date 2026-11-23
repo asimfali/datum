@@ -53,17 +53,17 @@ impl Offscreen {
     }
 
     /// The camera's frame of `geometry` (relative to the scene's anchor).
-    fn frame(&self, scene: &Scene, geometry: &Arc<Geometry>, version: u64, camera: &Camera) -> Frame {
+    fn frame(&self, scene: &Scene, geometry: &Arc<Geometry>, camera: &Camera) -> Frame {
         let radius = scene.bounds.map_or(1.0, |(lo, hi)| (hi - lo).dot(hi - lo).sqrt() * 0.5);
         let (view_projection, eye) = camera.matrices(scene.anchor(), f64::from(self.width) / f64::from(self.height), radius);
-        Frame { version, geometry: geometry.clone(), view_projection, eye }
+        Frame { geometry: geometry.clone(), view_projection, eye }
     }
 }
 
 /// RGBA pixels, `width × height`, of `scene` seen by `camera`.
 pub fn picture(scene: &Scene, camera: &Camera, width: u32, height: u32) -> Result<Vec<u8>, String> {
     let mut o = Offscreen::new(width, height)?;
-    let frame = o.frame(scene, &Arc::new(Geometry::new(scene, scene.anchor())), 1, camera);
+    let frame = o.frame(scene, &Arc::new(Geometry::new(scene, scene.anchor())), camera);
     let mut encoder = o.draw(&frame, true);
     let row = width * 4;
     let padded = row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -111,14 +111,14 @@ pub fn frame_times(scene: &Scene, full: Geometry, width: u32, height: u32, frame
     for smooth in [true, false] {
         let samples = if smooth { SAMPLES } else { 1 };
         for (distance, closeness) in [("whole", 1.0), ("close", 0.15), ("closer", 0.05)] {
-            for (version, (content, geometry)) in contents.iter().enumerate() {
+            for (content, geometry) in contents.iter() {
                 let mut times = Vec::with_capacity(frames as usize);
                 for k in 0..=frames {
                     let mut camera = fitted;
                     camera.distance *= closeness;
                     camera.spin(std::f64::consts::TAU * f64::from(k) / f64::from(frames.max(1)));
                     let start = std::time::Instant::now();
-                    let frame = o.frame(scene, geometry, version as u64 + 1, &camera);
+                    let frame = o.frame(scene, geometry, &camera);
                     let encoder = o.draw(&frame, smooth);
                     let submission = o.queue.submit([encoder.finish()]);
                     o.wait(submission)?;

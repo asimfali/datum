@@ -80,10 +80,10 @@ const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 /// The viewport's background.
 pub const BACKGROUND: [f64; 3] = [0.93, 0.94, 0.96];
 
-/// What one frame draws: the geometry (re-uploaded only when `version` changes) and the camera.
+/// What one frame draws: the geometry (re-uploaded when it is not the one already loaded, by
+/// identity) and the camera.
 #[derive(Clone)]
 pub struct Frame {
-    pub version: u64,
     pub geometry: Arc<Geometry>,
     /// View-projection matrix, column-major, for vertices relative to the anchor.
     pub view_projection: [f32; 16],
@@ -100,8 +100,8 @@ pub struct Renderer {
     pipelines: [[wgpu::RenderPipeline; 3]; 2],
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
-    /// The uploaded geometry: its version, triangles and lines.
-    buffers: Option<(u64, [Vertices; 3])>,
+    /// The uploaded geometry: what it is, triangles and lines.
+    buffers: Option<(Arc<Geometry>, [Vertices; 3])>,
     /// Index ranges of triangles and lines in view in the frame being drawn.
     visible: [Vec<Range<u32>>; 3],
     target: Option<Target>,
@@ -297,7 +297,11 @@ impl Renderer {
 
     /// Uploads the frame's geometry when it is new, and its camera.
     fn prepare(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, frame: &Frame) {
-        if self.buffers.as_ref().is_none_or(|b| b.0 != frame.version) {
+        // The key is the geometry's identity, not a number: tabs hold their own models and
+        // have no counter in common, so equal numbers would keep a tab showing another's
+        // geometry. The identity holds because a rebuilt model is a new Arc: Geometry is
+        // never changed in place (no interior mutability, no Arc::make_mut on it).
+        if self.buffers.as_ref().is_none_or(|(g, _)| !Arc::ptr_eq(g, &frame.geometry)) {
             let buffer = |bytes: &[u8], usage| {
                 let b = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("datum_view_geometry"),
@@ -327,7 +331,7 @@ impl Renderer {
             };
             let g = &frame.geometry;
             self.buffers =
-                Some((frame.version, [part(&g.triangles, TRIANGLE_VERTEX), part(&g.lines, LINE_VERTEX), part(&g.contours, CONTOUR_VERTEX)]));
+                Some((frame.geometry.clone(), [part(&g.triangles, TRIANGLE_VERTEX), part(&g.lines, LINE_VERTEX), part(&g.contours, CONTOUR_VERTEX)]));
         }
         self.visible = [&frame.geometry.triangles, &frame.geometry.lines, &frame.geometry.contours].map(|p| visible(p, &frame.view_projection));
         let mut u = Vec::with_capacity(80);
