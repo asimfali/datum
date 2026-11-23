@@ -121,7 +121,7 @@ pub const ACTIONS: [Action; 65] = [
     action(Act::Open, "file.open", "Open…", "A model from a file; a .json dropped on the window opens too", ctrl(Key::O), Anywhere),
     action(Act::Save, "file.save", "Save", "", ctrl(Key::S), Anywhere),
     action(Act::SaveAs, "file.save_as", "Save as…", "", Some(KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::S)), Anywhere),
-    action(Act::Close, "file.close", "Close", "Close the model", ctrl(Key::W), Anywhere),
+    action(Act::Close, "file.close", "Close tab", "Close the tab: its model goes, an empty one stays", ctrl(Key::W), Anywhere),
     action(Act::Exit, "file.exit", "Exit", "", None, Anywhere),
     action(Act::Undo, "edit.undo", "Undo", "", ctrl(Key::Z), Anywhere),
     action(Act::Redo, "edit.redo", "Redo", "", ctrl(Key::Y), Anywhere),

@@ -310,6 +310,10 @@ struct Model {
     opened: bool,
     /// Closed: the window shows no model.
     closed: bool,
+    /// The file this rebuild opened or saved, when its command succeeded: the tab stamps it.
+    wrote: Option<PathBuf>,
+    /// Library records were changed in this rebuild: the tables read them again.
+    records: bool,
     /// Milliseconds the rebuild and the scene (meshes, vertices) took.
     rebuild_ms: f64,
     scene_ms: f64,
@@ -472,6 +476,8 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         let start = std::time::Instant::now();
         let mut latest: BTreeMap<String, Json> = BTreeMap::new();
         let (mut error, mut opened, mut closed) = (None, false, false);
+        let mut wrote: Option<PathBuf> = None;
+        let mut records = false;
         let mut edge_applied = None;
         let mut notes = Vec::new();
         // A body whose shape an edit changed (pieces, through holes): worth a word.
@@ -495,8 +501,9 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                     latest.clear();
                     previewing = None;
                     (opened, closed) = (true, false);
-                    if let Err(e) = journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
-                        error = Some(e);
+                    match journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
+                        Ok(_) => wrote = Some(p),
+                        Err(e) => error = Some(e),
                     }
                 }
                 Request::SetParameter(name, value) => {
@@ -509,7 +516,13 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                     (opened, closed) = (false, true);
                 }
                 Request::Command(command, params) => match journaled(&mut session, command, &params) {
-                    Ok(reply) => note(&reply),
+                    Ok(reply) => {
+                        note(&reply);
+                        if command == "save" {
+                            wrote = params["path"].as_str().map(PathBuf::from);
+                        }
+                        records |= matches!(command, "put_library" | "remove_library");
+                    }
                     Err(e) => {
                         crate::log::write(&format!("{command} refused: {e}"));
                         error = Some(e);
@@ -586,6 +599,8 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 notes,
                 opened,
                 closed,
+                wrote,
+                records,
                 rebuild_ms,
                 scene_ms,
                 bodies,
@@ -937,14 +952,10 @@ struct Document {
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
     table: Option<(crate::table::Source, crate::table::Editor)>,
-    /// A library command this document's table sent: its answer brings the records again.
-    library_due: bool,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
-    /// The file's modification time and size when the tab last opened or saved it; and the file
-    /// a command now in flight writes, its state recorded when that command's model comes back.
+    /// The file's modification time and size when the tab last opened or saved it.
     file_state: Option<(SystemTime, u64)>,
-    pending_file: Option<PathBuf>,
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
@@ -1667,7 +1678,7 @@ fn mode_name<'a>(i18n: &'a crate::i18n::I18n, mode: &'a str) -> &'a str {
 impl Document {
     /// A document on its own thread: its session's channels, its worker, and the model at `path`
     /// asked for once the thread runs.
-    fn spawn(path: Option<&Path>, ctx: &egui::Context) -> Self {
+    fn spawn(path: Option<&Path>, perspective: bool, ctx: &egui::Context) -> Self {
         let (requests, inbox) = channel();
         let (outbox, models) = channel();
         let ctx = ctx.clone();
@@ -1679,7 +1690,7 @@ impl Document {
             models,
             model: None,
             busy: path.is_some(),
-            camera: Camera::default(),
+            camera: Camera { perspective, ..Camera::default() },
             fitted: false,
             turn: None,
             geometry,
@@ -1690,10 +1701,8 @@ impl Document {
             new_parameter: Default::default(),
             local_error: None,
             table: None,
-            library_due: false,
             path: None,
             file_state: None,
-            pending_file: path.map(Path::to_path_buf),
             sketch: None,
             entering: None,
             menu: None,
@@ -1786,7 +1795,7 @@ enum Quit {
 
 impl Viewer {
     fn new(path: Option<PathBuf>, ctx: egui::Context, adapter: String) -> Self {
-        let doc = Document::spawn(path.as_deref(), &ctx);
+        let doc = Document::spawn(path.as_deref(), false, &ctx);
         let settings = crate::settings::path();
         let crate::settings::Settings { keys, language, theme, table_zoom, fillet_presets, chamfer_presets, problems: settings_problems } =
             crate::settings::load(settings.as_deref());
@@ -1866,7 +1875,7 @@ impl Viewer {
     fn open(&mut self, path: PathBuf) {
         self.leave();
         self.set_path(Some(path.clone()));
-        self.docs[self.active].pending_file = Some(path.clone());
+        self.docs[self.active].file_state = None;
         self.send(Request::Open(path));
     }
 
@@ -1879,6 +1888,9 @@ impl Viewer {
             self.worked_in = Some(d.to_path_buf());
         }
         self.docs[self.active].path = path;
+        if self.docs[self.active].path.is_none() {
+            self.docs[self.active].file_state = None;
+        }
         self.reload_library();
     }
 
@@ -1924,6 +1936,8 @@ impl Viewer {
         } else {
             self.docs[self.active].table = Some((source, Default::default()));
             self.new_preset.clear();
+            // The records are files the window reads itself; a write in flight is read again by
+            // the model that carries it (`Model::records`).
             self.reload_library_records();
         }
     }
@@ -2109,7 +2123,6 @@ impl Viewer {
             (None, _) => self.parts().set_file_name("model.json").save_file(),
         };
         let Some(p) = path else { return false };
-        self.docs[self.active].pending_file = Some(p.clone());
         self.send(Request::Command("save", json!({"path": p.display().to_string()})));
         self.set_path(Some(p));
         true
@@ -2120,9 +2133,10 @@ impl Viewer {
         self.dirty(self.active)
     }
 
-    /// Whether the tab at `i` is changed since it was opened or saved.
+    /// Whether the tab at `i` is changed since it was opened or saved; a preview's trial is not
+    /// a change of the model.
     fn dirty(&self, i: usize) -> bool {
-        self.docs[i].model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
+        self.docs[i].model.as_ref().is_some_and(|m| m.preview.is_none() && m.inspect["modified"] == true)
     }
 
     /// A tab opened but not touched: no file, no change, nothing in flight, no feature made.
@@ -2140,12 +2154,14 @@ impl Viewer {
             self.playing = None;
             self.active = i;
             self.drawn = None;
+            // Its model may have brought the sketch while another tab was shown.
+            self.sync_sketch(i);
         }
     }
 
     /// A new empty tab, activated: its own thread and channels.
     fn new_tab(&mut self, ctx: &egui::Context) {
-        self.docs.push(Document::spawn(None, ctx));
+        self.docs.push(Document::spawn(None, self.docs[self.active].camera.perspective, ctx));
         self.activate(self.docs.len() - 1);
     }
 
@@ -2218,12 +2234,17 @@ impl Viewer {
     /// Closes tab `i` (×, middle click, Ctrl+W): its changes asked about, then it goes; the last
     /// tab is emptied the way Close always did.
     fn close_tab(&mut self, i: usize) {
+        let was = self.active;
+        let lesson = self.playing.take();
         self.activate(i);
         if self.docs.len() == 1 {
+            self.playing = lesson;
             self.close();
             return;
         }
         if !self.may_leave() {
+            self.activate(was);
+            self.playing = lesson;
             return;
         }
         self.docs.remove(i);
@@ -2302,36 +2323,38 @@ impl Viewer {
     fn tab_bar(&mut self, ui: &mut egui::Ui) {
         let mut activate = None;
         let mut close = None;
-        ui.horizontal_centered(|ui| {
-            ui.spacing_mut().item_spacing.x = 4.0;
-            for i in 0..self.docs.len() {
-                let name = self.tab_name(i);
-                let label = if self.dirty(i) { format!("• {name}") } else { name };
-                let tab = ui.horizontal(|ui| {
-                    let r = ui.selectable_label(i == self.active, label);
-                    if r.clicked() {
-                        activate = Some(i);
-                    }
-                    if r.middle_clicked() {
-                        close = Some(i);
-                    }
-                    ui.add_space(16.0);
-                });
-                let rect = tab.response.rect;
-                if tab.response.contains_pointer() {
-                    let at = egui::pos2(rect.right() - 8.0, rect.center().y);
-                    let x = ui.interact(
-                        egui::Rect::from_center_size(at, egui::vec2(16.0, rect.height())),
-                        ui.id().with(("datum_tab_close", i)),
-                        egui::Sense::click(),
-                    );
-                    let x = x.on_hover_text(self.i18n.t("tab-close", "Close the tab"));
-                    ui.painter().text(at, egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), ui.visuals().text_color());
-                    if x.clicked() {
-                        close = Some(i);
+        egui::ScrollArea::horizontal().id_salt("datum_tabs_scroll").show(ui, |ui| {
+            ui.horizontal_centered(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for i in 0..self.docs.len() {
+                    let name = self.tab_name(i);
+                    let label = if self.dirty(i) { format!("• {name}") } else { name };
+                    let tab = ui.horizontal(|ui| {
+                        let r = ui.selectable_label(i == self.active, label);
+                        if r.clicked() {
+                            activate = Some(i);
+                        }
+                        if r.middle_clicked() {
+                            close = Some(i);
+                        }
+                        ui.add_space(16.0);
+                    });
+                    let rect = tab.response.rect;
+                    if tab.response.contains_pointer() {
+                        let at = egui::pos2(rect.right() - 8.0, rect.center().y);
+                        let x = ui.interact(
+                            egui::Rect::from_center_size(at, egui::vec2(16.0, rect.height())),
+                            ui.id().with(("datum_tab_close", i)),
+                            egui::Sense::click(),
+                        );
+                        let x = x.on_hover_text(self.i18n.t("tab-close", "Close the tab"));
+                        ui.painter().text(at, egui::Align2::CENTER_CENTER, "×", egui::FontId::proportional(14.0), ui.visuals().text_color());
+                        if x.clicked() {
+                            close = Some(i);
+                        }
                     }
                 }
-            }
+            });
         });
         if let Some(i) = activate {
             self.activate(i);
@@ -2561,7 +2584,6 @@ impl Viewer {
         match tick {
             Tick::Going => {}
             Tick::Put(level, element) => {
-                self.docs[self.active].library_due = true;
                 self.send(Request::Command("put_library", json!({"level": level, "element": element})));
             }
             Tick::Finished => return self.end_hand(ctx, showing, None),
@@ -3202,8 +3224,9 @@ impl Viewer {
     }
 
     /// Brings the sketch being edited up to the model just received, or starts one asked for.
-    fn sync_sketch(&mut self) {
-        let d = &mut self.docs[self.active];
+    fn sync_sketch(&mut self, i: usize) {
+        let active = i == self.active;
+        let d = &mut self.docs[i];
         let Some(m) = &d.model else { return };
         let params: BTreeMap<String, f64> = m.inspect["parameters"]
             .as_object()
@@ -3227,20 +3250,32 @@ impl Viewer {
                     if sk.on_blank() {
                         d.flat.chosen = sk.json["inputs"][0].as_str().map(String::from);
                         d.blank_fitted = false;
-                        crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+                        if active {
+                            crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
+                        }
                     }
                     sk.draft.fillet_presets = self.fillet_presets.clone();
                     sk.draft.chamfer_presets = self.chamfer_presets.clone();
                     d.sketch = Some(sk);
-                    // Its section under the part's, the library beside the 3D view (D163).
-                    self.side_bar.visible = true;
-                    crate::dock::open(&mut self.dock, crate::dock::Pane::Library);
+                    if active {
+                        // Its section under the part's, the library beside the 3D view (D163).
+                        self.side_bar.visible = true;
+                        crate::dock::open(&mut self.dock, crate::dock::Pane::Library);
+                    }
                     d.entering = None;
                 }
             },
             // Still on its way, or gone (undone, or the model replaced).
             (_, Some(_)) if d.sketch.is_none() => {}
-            _ => self.leave(),
+            _ => {
+                if active {
+                    self.leave();
+                } else {
+                    // The tab is not shown: its own sketch goes, the window's forms are left alone.
+                    d.sketch = None;
+                    d.entering = None;
+                }
+            }
         }
     }
 
@@ -3460,8 +3495,8 @@ impl Viewer {
         if self.quitting == Some(true) && m.error.is_some() {
             self.quitting = None;
         }
-        // A library command this document's table sent: its answer brings the records again.
-        if std::mem::take(&mut self.docs[i].library_due) {
+        // Library records were written in this rebuild: the tables read them again.
+        if m.records {
             self.reload_library_records();
             if let (Some((_, editor)), Some(why)) = (&mut self.docs[i].table, &m.error) {
                 editor.error = Some(why.clone());
@@ -3482,16 +3517,12 @@ impl Viewer {
         if active && let Some(applied) = m.edge_applied {
             self.edge_finish_applied(applied);
         }
-        // The file a command in flight wrote or read: its state now, for the next Open to compare.
-        if m.error.is_none()
-            && let Some(p) = self.docs[i].pending_file.take()
-        {
-            self.docs[i].file_state = file_stamp(&p);
+        // The file this rebuild opened or saved: its state now, for the next Open to compare.
+        if let Some(p) = &m.wrote {
+            self.docs[i].file_state = file_stamp(p);
         }
         self.docs[i].model = if m.closed { None } else { Some(m) };
-        if active {
-            self.sync_sketch();
-        }
+        self.sync_sketch(i);
     }
 
     /// The base and its parts (D152, D169): the root makes every part; each part a list of the
@@ -5146,18 +5177,18 @@ impl Viewer {
         self.fillet_presets_editor = (!close).then_some(ed);
     }
 
-    /// The parameters, the materials or the rules of one material in a window of their own
-    /// (D178): rebuilt every frame, from the model or from the library read last, the edits sent
-    /// as the side bar sends them.
-    /// The table of every document, each in its own window (D134): the tab that opened it need
-    /// not be the active one, and its editor works on its own model.
+    /// The parameters, the materials or the rules of one material in a window of its own (D178,
+    /// D134): rebuilt every frame from the model or the library read last, the edits sent as the
+    /// side bar sends them. Every document's window is shown, the active tab or not, and its
+    /// editor works on its own model.
     fn table_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         for i in 0..self.docs.len() {
             self.table_of(i, ctx, frame);
         }
     }
 
-    /// The table window of document `i`, while it has one open.
+    /// The table window of document `i`, while it has one open. A table whose model is gone (or
+    /// whose presets' element is not kept any more) closes: it is not put back.
     fn table_of(&mut self, i: usize, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use crate::table::{MATERIALS, RULES, Source, TOOLS};
         let doc_id = self.docs[i].id;
@@ -5254,7 +5285,6 @@ impl Viewer {
         if !out.edits.is_empty() {
             editor.error = error;
         }
-        self.docs[i].library_due |= matches!(source, Source::Materials | Source::Rules | Source::Tools) && !sent.is_empty();
         for r in sent.drain(..) {
             self.send_to(i, r);
         }
@@ -8435,7 +8465,7 @@ impl Viewer {
         }
         self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
-        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE).exact_size(28.0).show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE).exact_size(30.0).show(ui, |ui| self.tab_bar(ui));
         // The title follows the active tab, once a click on the strip has chosen it.
         let t = title(self.project.as_deref(), self.docs[self.active].path.as_deref());
         if t != self.titled {
@@ -8521,6 +8551,8 @@ mod tests {
                 notes: Vec::new(),
                 opened: false,
                 closed: false,
+                wrote: None,
+                records: false,
                 rebuild_ms: 0.0,
                 scene_ms: 0.0,
                 bodies: Vec::new(),
@@ -8549,10 +8581,8 @@ mod tests {
             tree: TreeRows::default(),
             local_error: None,
             table: None,
-            library_due: false,
             path: None,
             file_state: None,
-            pending_file: None,
             sketch: None,
             entering: None,
             menu: None,
@@ -8704,7 +8734,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let sk = v.docs[v.active].sketch.as_mut().unwrap();
         sk.draft.take_up(Tool::Line);
         sk.selected = vec![Pick::Point("o".into())];
@@ -9199,7 +9229,7 @@ mod tests {
         if let Some(m) = &mut v.docs[v.active].model {
             m.editing = Some(("outline".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let sk = v.docs[v.active].sketch.as_ref().expect("editing");
         assert_eq!(sk.placed.as_ref().map(|p| p.solved.dof), Ok(0));
         // The view looks at the whole sketch, 80 × 40.
@@ -9208,7 +9238,7 @@ mod tests {
         if let Some(m) = &mut v.docs[v.active].model {
             m.inspect["features"] = json!([]);
         }
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         assert!(v.docs[v.active].sketch.is_none());
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
     }
@@ -9339,7 +9369,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         v.docs[v.active].sketch.as_mut().unwrap().draft.take_up(Tool::Line);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -9389,7 +9419,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -9460,7 +9490,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         v.docs[v.active].sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -9502,7 +9532,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         v.docs[v.active].sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -9524,16 +9554,6 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         });
         h.step();
-        eprintln!(
-            "DBG after press: field={:?}",
-            h.state().docs[h.state().active]
-                .sketch
-                .as_ref()
-                .unwrap()
-                .field
-                .as_ref()
-                .map(|f| (&f.text, std::mem::discriminant(&f.entry) == std::mem::discriminant(&crate::dims::Entry::Draw)))
-        );
         h.event(egui::Event::PointerButton {
             pos: egui::pos2(300.0, 300.0),
             button: egui::PointerButton::Primary,
@@ -9541,7 +9561,6 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         });
         h.step();
-        eprintln!("DBG after release: field={:?}", h.state().docs[h.state().active].sketch.as_ref().unwrap().field.as_ref().map(|f| &f.text));
         let sk = h.state().docs[h.state().active].sketch.as_ref().unwrap();
         assert!(sk.field.is_none(), "a click leaves the field");
         assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle stays");
@@ -9559,7 +9578,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let sk = v.docs[v.active].sketch.as_mut().unwrap();
         sk.draft.take_up(Tool::Line);
         sk.draft.escape();
@@ -9717,7 +9736,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let sk = v.docs[v.active].sketch.as_mut().unwrap();
         sk.selected = vec![Pick::Curve("right_hole".into())];
         let mut form = crate::pattern::PatternForm::new(sk, crate::pattern::Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
@@ -9758,7 +9777,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let sk = v.docs[v.active].sketch.as_mut().unwrap();
         sk.selected = vec![Pick::Curve("right_hole".into())];
         let mut form = crate::pattern::PatternForm::new(sk, crate::pattern::Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
@@ -9791,7 +9810,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Point("o".into())];
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -9831,7 +9850,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         v.docs[v.active].sketch.as_mut().unwrap().draft.take_up(Tool::Dimension);
         let screen = |v: &Viewer, q: [f64; 2]| {
             let (x, y) = v.docs[v.active].sketch.as_ref().unwrap().camera.offset(q, 400.0);
@@ -9888,7 +9907,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let element = json!({"name": "Plate", "anchors": ["a", "c"],
             "parameters": [{"name": "width", "value": 100}, {"name": "height", "value": 50}],
             "presets": {"Small": {"width": 20, "height": 10}},
@@ -9958,7 +9977,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let sk = v.docs[v.active].sketch.as_mut().unwrap();
         sk.selected = ["bottom", "right", "top", "left", "axis", "left_hole", "right_hole"].iter().map(|n| Pick::Curve(n.to_string())).collect();
         let element = sk.extract("Plate", Some(&sk.params)).unwrap();
@@ -10052,7 +10071,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let shot = std::env::var_os("DATUM_PALETTE_SHOT");
         let ui = |v: &mut Viewer, ui: &mut egui::Ui| {
             egui::Panel::right("datum_library").min_size(200.0).show(ui, |ui| v.palette(ui));
@@ -10157,7 +10176,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         (v, inbox)
     }
 
@@ -10937,7 +10956,7 @@ mod tests {
             m.editing = Some(("sketch1".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("sketch1".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         (v, inbox)
     }
 
@@ -11133,7 +11152,7 @@ mod tests {
             if let Some(path) = shot {
                 h.render().unwrap().save(path).unwrap();
             }
-            h.get_by_label("Close Ctrl+W").click();
+            h.get_by_label("Close tab Ctrl+W").click();
             h.run();
         }
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));
@@ -11523,7 +11542,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 v.shortcuts(ui);
@@ -12074,7 +12093,7 @@ mod tests {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.docs[v.active].entering = Some("outline".into());
-        v.sync_sketch();
+        v.sync_sketch(v.active);
         let name = v.docs[v.active].sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.keys().next().unwrap().clone();
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![crate::sketch::Pick::Curve(name.clone())];
         let mut h = egui_kittest::Harness::builder().build_ui_state(
@@ -13034,28 +13053,100 @@ mod tests {
         assert!(v.playing.is_none(), "another tab ends the lesson");
     }
 
-    /// A library command answered on a background tab brings the records again.
+    /// A model that wrote library records brings them again, on any tab; a preview's model does
+    /// not (its `modified` is a trial's).
     #[test]
     fn a_background_answer_brings_the_library_records() {
+        use crate::table::Source;
         let (mut v, _inbox) = viewer("parametric.json");
         v.docs.push(document("parametric.json").0);
-        v.docs[1].library_due = true;
-        let m = v.docs[1].model.take().unwrap();
+        v.docs[1].table = Some((Source::Materials, Default::default()));
+        let mut m = v.docs[1].model.take().unwrap();
+        m.preview = Some((json!({"name": "x"}), Ok(json!({}))));
+        m.error = Some("refused".into());
         v.took(1, m);
-        assert!(!v.docs[1].library_due, "the answer was taken");
-        assert!(v.docs[1].model.is_some(), "the model is back");
+        assert!(v.docs[1].table.as_ref().unwrap().1.error.is_none(), "a preview is no record answer");
+        let mut m = v.docs[1].model.take().unwrap();
+        m.preview = None;
+        m.records = true;
+        m.error = Some("refused".into());
+        v.took(1, m);
+        assert_eq!(v.docs[1].table.as_ref().unwrap().1.error.as_deref(), Some("refused"), "the answer is the tab's");
     }
 
-    /// A model that comes back records the state of the file its command read or wrote.
+    /// The stamp is the state of the file the model itself opened or saved: a parameter edit's
+    /// model leaves it alone, the save's model sets it; a second Open then has nothing to reload.
     #[test]
     fn a_model_records_its_files_state() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
-        let path = reference_model("symmetric_plate.json");
-        v.docs[0].pending_file = Some(path.clone());
+        let path = std::env::temp_dir().join(format!("datum-stamp-{}.json", std::process::id()));
+        std::fs::write(&path, "{}").unwrap();
+        v.docs[0].path = Some(path.clone());
         let m = v.docs[0].model.take().unwrap();
         v.took(0, m);
-        assert_eq!(v.docs[0].file_state, file_stamp(&path));
-        assert!(v.docs[0].pending_file.is_none());
+        assert_eq!(v.docs[0].file_state, None, "a rebuild that wrote no file stamps nothing");
+        let mut m = v.docs[0].model.take().unwrap();
+        m.wrote = Some(path.clone());
+        v.took(0, m);
+        let stamp = file_stamp(&path);
+        assert_eq!(v.docs[0].file_state, stamp);
+        // Reopening the same path with that stamp: the tab is shown, not reloaded or asked about.
+        v.open_path(&egui::Context::default(), path.clone());
+        assert_eq!((v.docs.len(), v.active), (1, 0), "the tab that has it");
+        assert!(!v.docs[0].busy, "nothing in flight");
+        assert_eq!(v.docs[0].file_state, stamp);
+    }
+
+    /// A trial's `modified` is not the engineer's change: the dot and the exit dialog wait for it.
+    #[test]
+    fn a_preview_is_not_a_change() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        let mut m = v.docs[0].model.take().unwrap();
+        m.inspect["modified"] = json!(true);
+        m.preview = Some((json!({"name": "x"}), Ok(json!({}))));
+        v.docs[0].model = Some(m);
+        assert!(!v.dirty(0) && !v.modified(), "a preview is no unsaved change");
+    }
+
+    /// A sketch of a tab shown again follows its model, which may have come while it was hidden.
+    #[test]
+    fn a_background_sketch_follows_its_model() {
+        let (mut v, inbox) = viewer_in_sketch();
+        v.docs.push(document("parametric.json").0);
+        // The parameter edited from the tab's own table.
+        v.send_to(0, Request::SetParameter("w".into(), json!(42.0)));
+        assert!(inbox.try_iter().any(|r| matches!(r, Request::SetParameter(n, _) if n == "w")));
+        let mut m = v.docs[0].model.take().unwrap();
+        m.inspect["parameters"]["w"]["value"] = json!(42.0);
+        v.activate(1);
+        v.took(0, m);
+        v.activate(0);
+        let sk = v.docs[0].sketch.as_ref().expect("the sketch is back");
+        assert_eq!(sk.params.get("w"), Some(&42.0), "the sketch took the new value");
+    }
+
+    /// A library table of a background tab sends its edits to that tab's session.
+    #[test]
+    fn a_background_library_table_edits_its_own_session() {
+        use crate::table::Source;
+        let (mut v, inbox0) = viewer("parametric.json");
+        let (doc1, inbox1) = document("parametric.json");
+        v.docs.push(doc1);
+        v.docs[1].table = Some((Source::Materials, Default::default()));
+        v.active = 0;
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui_state(|ui, v: &mut Viewer| v.table_window(ui.ctx(), None), v);
+        h.run();
+        h.key_press(egui::Key::ArrowDown);
+        h.run();
+        h.event(egui::Event::Text("9".into()));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        drop(h);
+        let sent0: Vec<Request> = inbox0.try_iter().collect();
+        let sent1: Vec<Request> = inbox1.try_iter().collect();
+        assert!(sent1.iter().any(|r| matches!(r, Request::Command("put_library", _))), "the library in its own session: {sent1:?}");
+        assert!(!sent0.iter().any(|r| matches!(r, Request::Command("put_library", _))), "not the other tab's: {sent0:?}");
     }
 
     /// The strip shows every tab and a click on one shows it.
@@ -13071,6 +13162,15 @@ mod tests {
         h.get_by_label("parametric").click();
         h.run();
         assert_eq!(h.state().active, 1);
+    }
+
+    /// A new tab starts in the view the active one has.
+    #[test]
+    fn a_new_tab_keeps_the_perspective() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.docs[0].camera.perspective = true;
+        v.new_tab(&egui::Context::default());
+        assert!(v.docs[1].camera.perspective, "the new tab looks the way the active one does");
     }
 
     /// A clean tab goes when closed; the last tab is emptied the way Close always did, and the
@@ -13108,7 +13208,7 @@ mod tests {
         v.quit(Quit::SaveAll);
         assert!(!v.quitting_dialog);
         assert_eq!(v.quitting, Some(true));
-        assert!(v.docs[0].pending_file.is_some(), "the save's file is recorded");
+        assert!(v.docs[0].file_state.is_none(), "nothing written back yet");
         assert!(sent(&inbox).iter().any(|(c, _)| *c == "save"));
     }
 }
