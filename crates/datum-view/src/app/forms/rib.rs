@@ -48,7 +48,7 @@ impl Viewer {
     /// The sketches a rib can run along: on a face of sheet metal, with an open chain. Each with
     /// the body at the end of the sheet it lies on, the newest sketch first.
     fn rib_sketches(&self) -> Vec<(String, String)> {
-        let Some(m) = &self.doc.model else { return Vec::new() };
+        let Some(m) = &self.docs[self.active].model else { return Vec::new() };
         let features = m.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
         let by_name = |n: &str| features.iter().find(|f| f["name"].as_str() == Some(n));
         // Whether body `end`'s chain of first inputs comes to `start`.
@@ -82,20 +82,21 @@ impl Viewer {
     /// Opens the form of a rib on the newest sketch that can carry one, or says what is missing.
     pub(in crate::app) fn open_rib(&mut self, at: egui::Pos2) {
         let Some((sketch, body)) = self.rib_sketches().into_iter().next() else {
-            self.doc.contour_hint = Some((at, std::time::Instant::now(), Act::Rib));
+            self.docs[self.active].contour_hint = Some((at, std::time::Instant::now(), Act::Rib));
             return;
         };
         self.close_revolve();
-        self.doc.flange = None;
-        self.doc.flange_edges.clear();
-        self.doc.picking = None;
-        self.doc.under = None;
-        self.doc.rib = Some(RibForm { name: self.feature_name("rib"), body, sketch, tool: None, flip: false, editing: false, sent: None });
+        self.docs[self.active].flange = None;
+        self.docs[self.active].flange_edges.clear();
+        self.docs[self.active].picking = None;
+        self.docs[self.active].under = None;
+        self.docs[self.active].rib =
+            Some(RibForm { name: self.feature_name("rib"), body, sketch, tool: None, flip: false, editing: false, sent: None });
     }
 
     /// Drops the rib form, and the preview it made.
     pub(in crate::app) fn close_rib(&mut self) {
-        if let Some(r) = self.doc.rib.take()
+        if let Some(r) = self.docs[self.active].rib.take()
             && r.sent.is_some()
         {
             self.send(Request::Preview(None));
@@ -107,10 +108,10 @@ impl Viewer {
     pub(in crate::app) fn rib_window(&mut self, ctx: &egui::Context) {
         let sketches = self.rib_sketches();
         let tools: Vec<String> = self.tools.iter().filter_map(|t| t["name"].as_str().map(String::from)).collect();
-        let Some(f) = &mut self.doc.rib else { return };
+        let d = &mut self.docs[self.active];
+        let Some(f) = &mut d.rib else { return };
         let params = f.params();
-        let preview =
-            self.doc.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| Some(p) == params.as_ref().map(|(_, j)| j)).map(|(_, r)| r);
+        let preview = d.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| Some(p) == params.as_ref().map(|(_, j)| j)).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::Rib))
@@ -180,15 +181,15 @@ mod tests {
     #[test]
     fn b_offers_the_newest_sketch_on_the_sheet() {
         let (mut v, _inbox) = viewer("rib.json");
-        v.doc.model.as_mut().unwrap().bodies = vec!["rib2".into()];
+        v.docs[v.active].model.as_mut().unwrap().bodies = vec!["rib2".into()];
         assert_eq!(v.rib_sketches(), [("path2".to_string(), "rib2".to_string()), ("path".to_string(), "rib2".to_string())]);
         v.open_rib(egui::pos2(0.0, 0.0));
-        let f = v.doc.rib.as_ref().unwrap();
+        let f = v.docs[v.active].rib.as_ref().unwrap();
         assert_eq!((f.sketch.as_str(), f.body.as_str(), f.tool.as_ref(), f.name.as_str()), ("path2", "rib2", None, "rib1"));
         // No sketch to run along: the form stays shut and says why.
         let (mut v, _inbox) = viewer("parametric.json");
         v.open_rib(egui::pos2(0.0, 0.0));
-        assert!(v.doc.rib.is_none() && v.doc.contour_hint.is_some_and(|(_, _, a)| a == Act::Rib));
+        assert!(v.docs[v.active].rib.is_none() && v.docs[v.active].contour_hint.is_some_and(|(_, _, a)| a == Act::Rib));
     }
 
     /// The rib's form asks for a tool and never chooses one; flipped it says so, an edit changes

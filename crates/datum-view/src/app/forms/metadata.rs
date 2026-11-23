@@ -89,26 +89,32 @@ impl Viewer {
     /// the curves it marks (D276). A second F12 takes the selection a form without targets was
     /// waiting for, and leaves a draft begun as it is.
     pub(in crate::app) fn open_metadata(&mut self) {
-        if let Some(form) = &mut self.doc.metadata {
-            if form.targets.is_empty()
-                && let Some(sk) = &self.doc.sketch
-                && form.feature == sk.feature
-            {
-                let targets = selection(sk);
-                if !targets.is_empty() {
-                    form.set_targets(&sk.json, targets);
+        {
+            let d = &mut self.docs[self.active];
+            if let Some(form) = &mut d.metadata {
+                if form.targets.is_empty()
+                    && let Some(sk) = &d.sketch
+                    && form.feature == sk.feature
+                {
+                    let targets = selection(sk);
+                    if !targets.is_empty() {
+                        form.set_targets(&sk.json, targets);
+                    }
                 }
+                return;
             }
-            return;
         }
-        let Some(sk) = &self.doc.sketch else { return };
-        let targets = selection(sk);
-        let marked: Vec<String> =
-            sk.json["sketch"]["metadata"].as_object().into_iter().flat_map(|m| m.keys()).filter(|n| curve(&sk.json, n)).cloned().collect();
-        let presets = self.metadata_presets();
-        let (values, initial, mixed) = draft(&sk.json, &targets);
-        self.doc.metadata = Some(MetadataForm {
-            feature: sk.feature.clone(),
+        let (feature, targets, marked, presets, values, initial, mixed) = {
+            let Some(sk) = &self.docs[self.active].sketch else { return };
+            let targets = selection(sk);
+            let marked: Vec<String> =
+                sk.json["sketch"]["metadata"].as_object().into_iter().flat_map(|m| m.keys()).filter(|n| curve(&sk.json, n)).cloned().collect();
+            let presets = self.metadata_presets();
+            let (values, initial, mixed) = draft(&sk.json, &targets);
+            (sk.feature.clone(), targets, marked, presets, values, initial, mixed)
+        };
+        self.docs[self.active].metadata = Some(MetadataForm {
+            feature,
             targets,
             marked,
             values,
@@ -147,23 +153,26 @@ impl Viewer {
     /// The editor window, while a sketch is open: not in the way of the sketch, which can still be
     /// selected in; Escape closes it without sending the draft.
     pub(in crate::app) fn metadata_window(&mut self, ctx: &egui::Context) {
-        let Some(form) = &self.doc.metadata else { return };
-        if self.doc.sketch.as_ref().is_none_or(|sk| sk.feature != form.feature) {
-            self.doc.metadata = None;
-            return;
-        }
-        // Opened with nothing selected: a selection made in the sketch is what it waits for.
-        if self.doc.metadata.as_ref().is_some_and(|f| f.targets.is_empty())
-            && let Some(sk) = &self.doc.sketch
         {
-            let targets = selection(sk);
-            if !targets.is_empty()
-                && let Some(form) = &mut self.doc.metadata
+            let d = &mut self.docs[self.active];
+            let Some(form) = &d.metadata else { return };
+            if d.sketch.as_ref().is_none_or(|sk| sk.feature != form.feature) {
+                d.metadata = None;
+                return;
+            }
+            // Opened with nothing selected: a selection made in the sketch is what it waits for.
+            if d.metadata.as_ref().is_some_and(|f| f.targets.is_empty())
+                && let Some(sk) = &d.sketch
             {
-                form.set_targets(&sk.json, targets);
+                let targets = selection(sk);
+                if !targets.is_empty()
+                    && let Some(form) = &mut d.metadata
+                {
+                    form.set_targets(&sk.json, targets);
+                }
             }
         }
-        let mut open = self.doc.metadata.is_some();
+        let mut open = self.docs[self.active].metadata.is_some();
         // A combo box's list takes Escape first; otherwise the editor closes without sending.
         let popup = ctx.any_popup_open();
         let mut close = !popup && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -175,7 +184,8 @@ impl Viewer {
             .resizable(false)
             .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
             .show(ctx, |ui| {
-                let Some(form) = self.doc.metadata.as_mut() else { return };
+                let d = &mut self.docs[self.active];
+                let Some(form) = d.metadata.as_mut() else { return };
                 if form.targets.is_empty() {
                     if form.marked.is_empty() {
                         ui.label(self.i18n.t("metadata-none-marked", "No curve is marked yet: select lines or arcs in the sketch, then press F12"));
@@ -188,7 +198,7 @@ impl Viewer {
                     let marked = form.marked.clone();
                     for n in &marked {
                         if ui.selectable_label(false, n).clicked()
-                            && let Some(sk) = self.doc.sketch.as_ref()
+                            && let Some(sk) = d.sketch.as_ref()
                         {
                             form.set_targets(&sk.json, vec![n.clone()]);
                         }
@@ -253,18 +263,18 @@ impl Viewer {
             });
         if apply
             && let Err(why) = self.apply_metadata()
-            && let Some(form) = &mut self.doc.metadata
+            && let Some(form) = &mut self.docs[self.active].metadata
         {
             form.notice = Some(why);
         }
         if close || !open {
-            self.doc.metadata = None;
+            self.docs[self.active].metadata = None;
         }
     }
 
     /// Sends the draft as one `edit_metadata`, unless nothing changed or a value is no JSON.
     pub(in crate::app) fn apply_metadata(&mut self) -> Result<(), String> {
-        let Some(form) = self.doc.metadata.as_ref() else { return Ok(()) };
+        let Some(form) = self.docs[self.active].metadata.as_ref() else { return Ok(()) };
         let mut set = Map::new();
         for (k, text) in &form.values {
             if form.remove.contains(k) {
@@ -292,7 +302,7 @@ impl Viewer {
         }
         let params = json!({"name": form.feature, "elements": form.targets, "set": set, "remove": remove});
         self.send(Request::Command("edit_metadata", params));
-        self.doc.metadata = None;
+        self.docs[self.active].metadata = None;
         Ok(())
     }
 }
