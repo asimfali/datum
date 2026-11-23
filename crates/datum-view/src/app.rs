@@ -9,6 +9,7 @@ mod native_windows;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::SystemTime;
 
@@ -912,6 +913,8 @@ impl TreeRows {
 /// One open model: its session's channels, its picture, and everything the engineer does
 /// with it.
 struct Document {
+    /// Identifies this tab's own windows (D134): UI only, never written to the model.
+    id: u64,
     requests: Sender<Request>,
     models: Receiver<Model>,
     model: Option<Model>,
@@ -934,6 +937,8 @@ struct Document {
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
     table: Option<(crate::table::Source, crate::table::Editor)>,
+    /// A library command this document's table sent: its answer brings the records again.
+    library_due: bool,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
     /// The file's modification time and size when the tab last opened or saved it; and the file
@@ -1037,8 +1042,6 @@ struct Viewer {
     new_rule: crate::table::Pending,
     new_tool: crate::table::Pending,
     new_preset: crate::table::Pending,
-    /// A library command was sent: the materials and rules are read again with the model it brings.
-    library_due: bool,
     /// A newer release, once the background check finds one: its version and page.
     update: Receiver<(String, String)>,
     newer: Option<(String, String)>,
@@ -1671,6 +1674,7 @@ impl Document {
         std::thread::spawn(move || worker(inbox, outbox, ctx));
         let geometry = Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO));
         let doc = Document {
+            id: next_document_id(),
             requests,
             models,
             model: None,
@@ -1686,6 +1690,7 @@ impl Document {
             new_parameter: Default::default(),
             local_error: None,
             table: None,
+            library_due: false,
             path: None,
             file_state: None,
             pending_file: path.map(Path::to_path_buf),
@@ -1728,6 +1733,13 @@ impl Document {
         }
         doc
     }
+}
+
+/// The next tab's identifier: only its windows use it (D134).
+static NEXT_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_document_id() -> u64 {
+    NEXT_DOCUMENT_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// What a second Open of a path does (D134).
@@ -1809,7 +1821,6 @@ impl Viewer {
             new_rule: Default::default(),
             new_tool: Default::default(),
             new_preset: Default::default(),
-            library_due: false,
             update,
             newer: None,
             library: crate::templates::library(None),
@@ -2122,9 +2133,11 @@ impl Viewer {
             && d.model.as_ref().is_none_or(|m| m.inspect["modified"] != true && m.inspect["features"].as_array().is_none_or(Vec::is_empty))
     }
 
-    /// Shows tab `i`: the window's picture is drawn again, the title follows its file.
+    /// Shows tab `i`: the window's picture is drawn again, the title follows its file. A lesson
+    /// plays on the tab it started in: another tab ends it.
     fn activate(&mut self, i: usize) {
         if i != self.active {
+            self.playing = None;
             self.active = i;
             self.drawn = None;
         }
@@ -2133,8 +2146,7 @@ impl Viewer {
     /// A new empty tab, activated: its own thread and channels.
     fn new_tab(&mut self, ctx: &egui::Context) {
         self.docs.push(Document::spawn(None, ctx));
-        self.active = self.docs.len() - 1;
-        self.drawn = None;
+        self.activate(self.docs.len() - 1);
     }
 
     /// The tab's name: its file's, else "Untitled".
@@ -2218,6 +2230,8 @@ impl Viewer {
         if self.active >= self.docs.len() {
             self.active = self.docs.len() - 1;
         }
+        // The window shows another tab: a lesson on the closed one ends.
+        self.playing = None;
         self.drawn = None;
     }
 
@@ -2547,7 +2561,7 @@ impl Viewer {
         match tick {
             Tick::Going => {}
             Tick::Put(level, element) => {
-                self.library_due = true;
+                self.docs[self.active].library_due = true;
                 self.send(Request::Command("put_library", json!({"level": level, "element": element})));
             }
             Tick::Finished => return self.end_hand(ctx, showing, None),
@@ -3109,8 +3123,13 @@ impl Viewer {
     }
 
     fn send(&mut self, r: Request) {
-        let _ = self.docs[self.active].requests.send(r);
-        self.docs[self.active].busy = true;
+        self.send_to(self.active, r);
+    }
+
+    /// Sends a command to document `i`'s session: its own worker answers, not the active tab's.
+    fn send_to(&mut self, i: usize, r: Request) {
+        let _ = self.docs[i].requests.send(r);
+        self.docs[i].busy = true;
     }
 
     /// Starts editing sketch feature `name`, once the model brings its context.
@@ -3441,7 +3460,8 @@ impl Viewer {
         if self.quitting == Some(true) && m.error.is_some() {
             self.quitting = None;
         }
-        if active && std::mem::take(&mut self.library_due) {
+        // A library command this document's table sent: its answer brings the records again.
+        if std::mem::take(&mut self.docs[i].library_due) {
             self.reload_library_records();
             if let (Some((_, editor)), Some(why)) = (&mut self.docs[i].table, &m.error) {
                 editor.error = Some(why.clone());
@@ -5045,58 +5065,65 @@ impl Viewer {
         let Some(mut ed) = self.fillet_presets_editor.take() else { return };
         let (mut close, mut save) = (false, false);
         let title = self.i18n.t("presets-title", "Fillet presets");
-        let close_requested = self.native_windows.show(ctx, frame, "fillet_presets", title, egui::vec2(360.0, 420.0), |ui| {
-            egui::CentralPanel::default().show(ui, |ui| {
-                let width = 70.0;
-                ui.heading(self.i18n.t("presets-fillet", "Fillet radiuses"));
-                let mut gone = None;
-                for (i, row) in ed.fillet.iter_mut().enumerate() {
+        let close_requested = self.native_windows.show(
+            ctx,
+            frame,
+            native_windows::Target { id: egui::ViewportId::from_hash_of("fillet_presets"), key: "fillet_presets" },
+            title,
+            egui::vec2(360.0, 420.0),
+            |ui| {
+                egui::CentralPanel::default().show(ui, |ui| {
+                    let width = 70.0;
+                    ui.heading(self.i18n.t("presets-fillet", "Fillet radiuses"));
+                    let mut gone = None;
+                    for (i, row) in ed.fillet.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(row).desired_width(width));
+                            if ui.button("\u{2212}").clicked() {
+                                gone = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = gone {
+                        ed.fillet.remove(i);
+                    }
+                    if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
+                        ed.fillet.push(String::new());
+                    }
+                    ui.separator();
+                    ui.heading(self.i18n.t("presets-chamfer", "Chamfer sizes (the second waits for the geometry)"));
+                    let mut gone = None;
+                    for (i, (a, b)) in ed.chamfer.iter_mut().enumerate() {
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(a).desired_width(width));
+                            ui.label("x");
+                            ui.add(egui::TextEdit::singleline(b).desired_width(width));
+                            if ui.button("\u{2212}").clicked() {
+                                gone = Some(i);
+                            }
+                        });
+                    }
+                    if let Some(i) = gone {
+                        ed.chamfer.remove(i);
+                    }
+                    if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
+                        ed.chamfer.push((String::new(), String::new()));
+                    }
+                    if let Some(e) = &ed.error {
+                        ui.colored_label(egui::Color32::from_rgb(220, 40, 40), e.clone());
+                    }
+                    ui.separator();
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(row).desired_width(width));
-                        if ui.button("\u{2212}").clicked() {
-                            gone = Some(i);
+                        if ui.button(self.i18n.t("ok", "OK")).clicked() {
+                            save = true;
+                        }
+                        if ui.button(self.i18n.t("cancel", "Cancel")).clicked() {
+                            close = true;
                         }
                     });
-                }
-                if let Some(i) = gone {
-                    ed.fillet.remove(i);
-                }
-                if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
-                    ed.fillet.push(String::new());
-                }
-                ui.separator();
-                ui.heading(self.i18n.t("presets-chamfer", "Chamfer sizes (the second waits for the geometry)"));
-                let mut gone = None;
-                for (i, (a, b)) in ed.chamfer.iter_mut().enumerate() {
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(a).desired_width(width));
-                        ui.label("x");
-                        ui.add(egui::TextEdit::singleline(b).desired_width(width));
-                        if ui.button("\u{2212}").clicked() {
-                            gone = Some(i);
-                        }
-                    });
-                }
-                if let Some(i) = gone {
-                    ed.chamfer.remove(i);
-                }
-                if ui.button(self.i18n.t("presets-add", "Add")).clicked() {
-                    ed.chamfer.push((String::new(), String::new()));
-                }
-                if let Some(e) = &ed.error {
-                    ui.colored_label(egui::Color32::from_rgb(220, 40, 40), e.clone());
-                }
-                ui.separator();
-                ui.horizontal(|ui| {
-                    if ui.button(self.i18n.t("ok", "OK")).clicked() {
-                        save = true;
-                    }
-                    if ui.button(self.i18n.t("cancel", "Cancel")).clicked() {
-                        close = true;
-                    }
                 });
-            });
-        });
+            },
+        );
         close |= close_requested;
         if save {
             match ed.parse() {
@@ -5122,15 +5149,25 @@ impl Viewer {
     /// The parameters, the materials or the rules of one material in a window of their own
     /// (D178): rebuilt every frame, from the model or from the library read last, the edits sent
     /// as the side bar sends them.
+    /// The table of every document, each in its own window (D134): the tab that opened it need
+    /// not be the active one, and its editor works on its own model.
     fn table_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
+        for i in 0..self.docs.len() {
+            self.table_of(i, ctx, frame);
+        }
+    }
+
+    /// The table window of document `i`, while it has one open.
+    fn table_of(&mut self, i: usize, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use crate::table::{MATERIALS, RULES, Source, TOOLS};
-        let Some((source, mut editor)) = self.docs[self.active].table.take() else { return };
+        let doc_id = self.docs[i].id;
+        let Some((source, mut editor)) = self.docs[i].table.take() else { return };
         // The presets are those of the element being kept; the others are the model's or the library's.
-        if source == Source::Presets && self.keeping.is_none() || source != Source::Presets && self.docs[self.active].model.is_none() {
+        if source == Source::Presets && self.keeping.is_none() || source != Source::Presets && self.docs[i].model.is_none() {
             return;
         }
         let null = Json::Null;
-        let d = &mut self.docs[self.active];
+        let d = &mut self.docs[i];
         let inspect = d.model.as_ref().map_or(&null, |m| &m.inspect);
         let element = self.keeping.as_ref().map_or(&null, |k| &k.element);
         let materials: Vec<String> = self.materials.iter().filter_map(|e| e["name"].as_str().map(String::from)).collect();
@@ -5157,27 +5194,36 @@ impl Viewer {
         };
         let (mut out, mut picked) = (Default::default(), None);
         let width = datum_table::layout(&table).size()[0] as f32 * crate::table::SCALE * self.table_zoom + 40.0;
-        let closed = self.native_windows.show(ctx, frame, source.window_key(), title, egui::vec2(width, 400.0), |ui| {
-            // The viewport's root draws nothing under its widgets: the theme's panel is its background.
-            egui::CentralPanel::default().show(ui, |ui| {
-                if source == Source::Rules {
-                    if materials.is_empty() {
-                        ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in the View menu, Materials"));
-                        return;
-                    }
-                    let rows = (6.0 * ui.spacing().interact_size.y).min(ui.available_height() * 0.3);
-                    egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
-                        for name in &materials {
-                            if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
-                                picked = Some(name.clone());
-                            }
+        // The window belongs to the document (its id); where it opens is remembered by the source,
+        // the same for every tab (D293, D134).
+        let closed = self.native_windows.show(
+            ctx,
+            frame,
+            native_windows::Target { id: egui::ViewportId::from_hash_of(("datum_table", doc_id, source.window_key())), key: source.window_key() },
+            title,
+            egui::vec2(width, 400.0),
+            |ui| {
+                // The viewport's root draws nothing under its widgets: the theme's panel is its background.
+                egui::CentralPanel::default().show(ui, |ui| {
+                    if source == Source::Rules {
+                        if materials.is_empty() {
+                            ui.label(self.i18n.t("table-rules-no-material", "No materials yet: add one in the View menu, Materials"));
+                            return;
                         }
-                    });
-                    ui.separator();
-                }
-                out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
-            });
-        });
+                        let rows = (6.0 * ui.spacing().interact_size.y).min(ui.available_height() * 0.3);
+                        egui::ScrollArea::vertical().id_salt("datum_rule_materials").max_height(rows).show(ui, |ui| {
+                            for name in &materials {
+                                if ui.selectable_label(selected.as_ref() == Some(name), name).clicked() {
+                                    picked = Some(name.clone());
+                                }
+                            }
+                        });
+                        ui.separator();
+                    }
+                    out = editor.show(ui, &table, &editable, self.table_zoom, &self.i18n);
+                });
+            },
+        );
         if let Some(name) = picked.filter(|n| selected.as_ref() != Some(n)) {
             self.rule_material = Some(name);
             self.new_rule.clear();
@@ -5208,11 +5254,11 @@ impl Viewer {
         if !out.edits.is_empty() {
             editor.error = error;
         }
-        self.library_due |= matches!(source, Source::Materials | Source::Rules | Source::Tools) && !sent.is_empty();
+        self.docs[i].library_due |= matches!(source, Source::Materials | Source::Rules | Source::Tools) && !sent.is_empty();
         for r in sent.drain(..) {
-            self.send(r);
+            self.send_to(i, r);
         }
-        self.docs[self.active].table = (!closed).then_some((source, editor));
+        self.docs[i].table = (!closed).then_some((source, editor));
     }
 
     /// E: the form of an extrusion at `at`, for the sketch open (left), else the only one not
@@ -8464,6 +8510,7 @@ mod tests {
         let edits = inspect["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
         let planes = offsets(&inspect);
         let doc = Document {
+            id: next_document_id(),
             requests,
             models,
             model: Some(Model {
@@ -8502,6 +8549,7 @@ mod tests {
             tree: TreeRows::default(),
             local_error: None,
             table: None,
+            library_due: false,
             path: None,
             file_state: None,
             pending_file: None,
@@ -8565,7 +8613,6 @@ mod tests {
             new_rule: Default::default(),
             new_tool: Default::default(),
             new_preset: Default::default(),
-            library_due: false,
             update: channel().1,
             newer: None,
             library: crate::templates::library(None),
@@ -12902,6 +12949,101 @@ mod tests {
         assert_eq!(v.active, 0, "round");
         v.cycle_tab(-1);
         assert_eq!(v.active, 1, "back round");
+    }
+
+    /// Tables belong to their tabs (D134): both windows stay when another tab is shown, and an
+    /// edit in the background tab's table goes to its own session.
+    #[test]
+    fn tables_belong_to_their_tabs() {
+        use crate::table::Source;
+        let (mut v, _inbox0) = viewer("parametric.json");
+        let (doc1, _inbox1) = document("parametric.json");
+        v.docs.push(doc1);
+        v.docs[0].table = Some((Source::Parameters, Default::default()));
+        v.docs[1].table = Some((Source::Parameters, Default::default()));
+        v.active = 0;
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui_state(|ui, v: &mut Viewer| v.table_window(ui.ctx(), None), v);
+        h.run();
+        assert!(h.state().docs[0].table.is_some() && h.state().docs[1].table.is_some(), "both windows open");
+        h.state_mut().activate(1);
+        h.run();
+        assert!(h.state().docs[0].table.is_some() && h.state().docs[1].table.is_some(), "showing another tab keeps both");
+    }
+
+    /// An edit in the table of a background tab is a command of that tab's session.
+    #[test]
+    fn a_background_table_edits_its_own_session() {
+        use crate::table::Source;
+        let (mut v, inbox0) = viewer("parametric.json");
+        let (doc1, inbox1) = document("parametric.json");
+        v.docs.push(doc1);
+        v.docs[1].table = Some((Source::Parameters, Default::default()));
+        v.active = 0;
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui_state(|ui, v: &mut Viewer| v.table_window(ui.ctx(), None), v);
+        h.run();
+        for key in [egui::Key::ArrowDown, egui::Key::ArrowRight] {
+            h.key_press(key);
+            h.run();
+        }
+        h.event(egui::Event::Text("9".into()));
+        h.run();
+        h.key_press(egui::Key::Enter);
+        h.run();
+        drop(h);
+        let sent0: Vec<Request> = inbox0.try_iter().collect();
+        let sent1: Vec<Request> = inbox1.try_iter().collect();
+        assert!(
+            sent1.iter().any(|r| matches!(r, Request::SetParameter(n, v) if n == "floor_count" && *v == json!(9.0))),
+            "the background tab's own session: {sent1:?}"
+        );
+        assert!(!sent0.iter().any(|r| matches!(r, Request::SetParameter(..))), "not the other tab's: {sent0:?}");
+    }
+
+    /// Closing a tab takes its table window with it; the other tab's table stays.
+    #[test]
+    fn closing_a_tab_closes_its_table() {
+        use crate::table::Source;
+        let (mut v, _inbox) = viewer("parametric.json");
+        let (doc1, _inbox1) = document("parametric.json");
+        v.docs.push(doc1);
+        v.docs[0].table = Some((Source::Parameters, Default::default()));
+        v.docs[1].table = Some((Source::Parameters, Default::default()));
+        v.active = 0;
+        let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui_state(|ui, v: &mut Viewer| v.table_window(ui.ctx(), None), v);
+        h.run();
+        h.state_mut().native_windows.finish_frame();
+        assert_eq!(h.state().native_windows.openings(), 2);
+        h.state_mut().close_tab(1);
+        h.run();
+        h.state_mut().native_windows.finish_frame();
+        assert_eq!(h.state().docs.len(), 1);
+        assert!(h.state().docs[0].table.is_some(), "the other tab's table");
+        assert_eq!(h.state().native_windows.openings(), 1, "the closed tab's window is gone");
+    }
+
+    /// A lesson plays on its tab: another tab ends it.
+    #[test]
+    fn another_tab_ends_the_lesson() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.docs.push(document("parametric.json").0);
+        v.active = 0;
+        v.playing = Some(Playing { lesson: 0, step: 0, showing: None, lost: None });
+        v.activate(0);
+        assert!(v.playing.is_some(), "showing the same tab keeps it");
+        v.activate(1);
+        assert!(v.playing.is_none(), "another tab ends the lesson");
+    }
+
+    /// A library command answered on a background tab brings the records again.
+    #[test]
+    fn a_background_answer_brings_the_library_records() {
+        let (mut v, _inbox) = viewer("parametric.json");
+        v.docs.push(document("parametric.json").0);
+        v.docs[1].library_due = true;
+        let m = v.docs[1].model.take().unwrap();
+        v.took(1, m);
+        assert!(!v.docs[1].library_due, "the answer was taken");
+        assert!(v.docs[1].model.is_some(), "the model is back");
     }
 
     /// A model that comes back records the state of the file its command read or wrote.
