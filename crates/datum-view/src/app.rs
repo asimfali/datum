@@ -63,7 +63,7 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             }
             viewer.side_bar = crate::sidebar::SideBar::from_text(&kept(SIDE_BAR));
             viewer.touchpad = kept(TOUCHPAD) == "true";
-            viewer.camera.perspective = kept(PERSPECTIVE) == "true";
+            viewer.doc.camera.perspective = kept(PERSPECTIVE) == "true";
             // What the menu chose last wins over the settings file's.
             viewer.set_language(&kept(LANGUAGE));
             match crate::settings::theme(&kept(THEME)) {
@@ -908,7 +908,9 @@ impl TreeRows {
     }
 }
 
-struct Viewer {
+/// One open model: its session's channels, its picture, and everything the engineer does
+/// with it.
+struct Document {
     requests: Sender<Request>,
     models: Receiver<Model>,
     model: Option<Model>,
@@ -920,22 +922,6 @@ struct Viewer {
     /// GPU vertices of the current scene, their version, and the anchor they are relative to.
     geometry: Arc<Geometry>,
     version: u64,
-    /// Multisampling of the view when the camera is still: smooth edges, at about twice the GPU
-    /// time on a weak card.
-    smooth: bool,
-    /// Two fingers pan instead of zooming: a laptop without a mouse.
-    touchpad: bool,
-    /// Made on the first frame.
-    renderer: Option<Renderer>,
-    /// The picture as an egui texture, and the size it was registered with.
-    texture: Option<(egui::TextureId, [u32; 2])>,
-    /// What the picture shows: geometry version, camera matrices, size and samples.
-    drawn: Option<Drawn>,
-    /// Smoothed time between frames, and of the window's own work in a frame, milliseconds.
-    frame_ms: f64,
-    ui_ms: f64,
-    /// The GPU drawing the view and its API: a software one explains a slow frame.
-    adapter: String,
     /// Parameter definitions as typed, by name; a new one's name and definition.
     edits: BTreeMap<String, String>,
     new_parameter: crate::table::Pending,
@@ -947,43 +933,14 @@ struct Viewer {
     local_error: Option<String>,
     /// The table window, while it is open (D178): what it shows and its editor.
     table: Option<(crate::table::Source, crate::table::Editor)>,
-    native_windows: NativeWindows,
-    /// The library's materials and rules the tables show, read when one opens and after the
-    /// commands it sent were run; the new material's and the new rule's cells as typed so far; and
-    /// the material whose rules the rules table shows.
-    materials: Vec<Json>,
-    rules: Vec<Json>,
-    tools: Vec<Json>,
-    rule_material: Option<String>,
-    new_material: crate::table::Pending,
-    new_rule: crate::table::Pending,
-    new_tool: crate::table::Pending,
-    new_preset: crate::table::Pending,
-    /// A library command was sent: the materials and rules are read again with the model it brings.
-    library_due: bool,
     /// The file the model was opened from or saved to.
     path: Option<PathBuf>,
-    /// A newer release, once the background check finds one: its version and page.
-    update: Receiver<(String, String)>,
-    newer: Option<(String, String)>,
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
-    /// The sketch elements of the library (built in, beside the program, the project's).
-    library: Vec<crate::templates::Item>,
-    /// What the library palette is filtered by.
-    library_filter: String,
-    /// The selection being kept in the library.
-    keeping: Option<Keep>,
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
-    /// The activity bar and side bar: which side, what it shows, folded sections (D162).
-    side_bar: crate::sidebar::SideBar,
-    /// The sketch's modes the next sketch starts with: the last one's (D167).
-    modes: crate::sketch::Modes,
-    /// The panes and where they are (D161); what the flat pattern pane looks at.
-    dock: egui_dock::DockState<crate::dock::Pane>,
     flat: crate::flat::FlatView,
     /// A variant being named: below which variant (none: the base), of which part, and the name
     /// typed.
@@ -991,44 +948,6 @@ struct Viewer {
     /// A set of the product being named (D169): the name typed.
     new_set: Option<String>,
     hold: Option<(f64, egui::Pos2, bool)>,
-    /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
-    quitting: Option<bool>,
-    /// The folder of the model last opened or saved: where the next one is opened from.
-    worked_in: Option<PathBuf>,
-    recent: Vec<PathBuf>,
-    /// The project open (its folder): where a new model is saved and the dialogs look while no
-    /// model file says otherwise; it stays when a model of another project is opened (D142).
-    project: Option<PathBuf>,
-    recent_projects: Vec<PathBuf>,
-    /// The title the window was last given.
-    titled: String,
-    /// The keys in force, the settings file they come from, and what in it could not be
-    /// applied, shown until dismissed.
-    keys: Keys,
-    /// The language in force: a code, or `system`; `i18n` is what it says. Kept between runs only
-    /// once the menu chose it (`language_chosen`): until then the settings file's word stands.
-    language: String,
-    language_chosen: bool,
-    /// The panels' theme; kept between runs only once the menu chose it (`theme_chosen`), like the
-    /// language.
-    theme: egui::ThemePreference,
-    theme_chosen: bool,
-    i18n: crate::i18n::I18n,
-    settings: Option<PathBuf>,
-    settings_problems: Vec<String>,
-    /// The table editor's zoom, from `settings.json`.
-    table_zoom: f32,
-    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
-    /// sizes (D284: a pair, the second waits for the geometry).
-    fillet_presets: Vec<f64>,
-    chamfer_presets: Vec<(f64, Option<f64>)>,
-    /// The presets' editor (D284), open or none.
-    fillet_presets_editor: Option<crate::presets::Editor>,
-    /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
-    /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
-    /// shows the window.
-    shown: u8,
-    maximized: bool,
     /// Picking a face to sketch on, and the body and face under the cursor.
     /// A plane or a face to be clicked, and what for.
     picking: Option<Purpose>,
@@ -1075,6 +994,97 @@ struct Viewer {
     material: Option<(Option<String>, String)>,
     /// The viewport's rectangle at the last frame: where the sketch's pixels are.
     viewport: egui::Rect,
+    /// The rectangle of the pane showing the sketch edited (the 3D view's, or the flat pattern's
+    /// for a sketch on the blank) at the last frame, and whether such a sketch was framed yet.
+    sketch_rect: egui::Rect,
+    blank_fitted: bool,
+}
+
+struct Viewer {
+    doc: Document,
+    /// Multisampling of the view when the camera is still: smooth edges, at about twice the GPU
+    /// time on a weak card.
+    smooth: bool,
+    /// Two fingers pan instead of zooming: a laptop without a mouse.
+    touchpad: bool,
+    /// Made on the first frame.
+    renderer: Option<Renderer>,
+    /// The picture as an egui texture, and the size it was registered with.
+    texture: Option<(egui::TextureId, [u32; 2])>,
+    /// What the picture shows: geometry version, camera matrices, size and samples.
+    drawn: Option<Drawn>,
+    /// Smoothed time between frames, and of the window's own work in a frame, milliseconds.
+    frame_ms: f64,
+    ui_ms: f64,
+    /// The GPU drawing the view and its API: a software one explains a slow frame.
+    adapter: String,
+    native_windows: NativeWindows,
+    /// The library's materials and rules the tables show, read when one opens and after the
+    /// commands it sent were run; the new material's and the new rule's cells as typed so far; and
+    /// the material whose rules the rules table shows.
+    materials: Vec<Json>,
+    rules: Vec<Json>,
+    tools: Vec<Json>,
+    rule_material: Option<String>,
+    new_material: crate::table::Pending,
+    new_rule: crate::table::Pending,
+    new_tool: crate::table::Pending,
+    new_preset: crate::table::Pending,
+    /// A library command was sent: the materials and rules are read again with the model it brings.
+    library_due: bool,
+    /// A newer release, once the background check finds one: its version and page.
+    update: Receiver<(String, String)>,
+    newer: Option<(String, String)>,
+    /// The sketch elements of the library (built in, beside the program, the project's).
+    library: Vec<crate::templates::Item>,
+    /// What the library palette is filtered by.
+    library_filter: String,
+    /// The selection being kept in the library.
+    keeping: Option<Keep>,
+    /// The activity bar and side bar: which side, what it shows, folded sections (D162).
+    side_bar: crate::sidebar::SideBar,
+    /// The sketch's modes the next sketch starts with: the last one's (D167).
+    modes: crate::sketch::Modes,
+    /// The panes and where they are (D161); what the flat pattern pane looks at.
+    dock: egui_dock::DockState<crate::dock::Pane>,
+    /// Closing the window: once the model is saved (`true`), or at once, its changes dropped.
+    quitting: Option<bool>,
+    /// The folder of the model last opened or saved: where the next one is opened from.
+    worked_in: Option<PathBuf>,
+    recent: Vec<PathBuf>,
+    /// The project open (its folder): where a new model is saved and the dialogs look while no
+    /// model file says otherwise; it stays when a model of another project is opened (D142).
+    project: Option<PathBuf>,
+    recent_projects: Vec<PathBuf>,
+    /// The title the window was last given.
+    titled: String,
+    /// The keys in force, the settings file they come from, and what in it could not be
+    /// applied, shown until dismissed.
+    keys: Keys,
+    /// The language in force: a code, or `system`; `i18n` is what it says. Kept between runs only
+    /// once the menu chose it (`language_chosen`): until then the settings file's word stands.
+    language: String,
+    language_chosen: bool,
+    /// The panels' theme; kept between runs only once the menu chose it (`theme_chosen`), like the
+    /// language.
+    theme: egui::ThemePreference,
+    theme_chosen: bool,
+    i18n: crate::i18n::I18n,
+    settings: Option<PathBuf>,
+    settings_problems: Vec<String>,
+    /// The table editor's zoom, from `settings.json`.
+    table_zoom: f32,
+    /// The fillet tool's presets (D283), from `settings.json`: the radiuses, and the chamfers'
+    /// sizes (D284: a pair, the second waits for the geometry).
+    fillet_presets: Vec<f64>,
+    chamfer_presets: Vec<(f64, Option<f64>)>,
+    /// The presets' editor (D284), open or none.
+    fillet_presets_editor: Option<crate::presets::Editor>,
+    /// Frames drawn so far, up to two: the window is maximized once it is shown (after the
+    /// first), if it was left so. Asked of the window as it is made, Windows drops it when eframe
+    /// shows the window.
+    shown: u8,
+    maximized: bool,
     /// The lessons in the folder, read at the start (D230).
     lessons: Vec<crate::lessons::Read>,
     /// The lesson being played.
@@ -1083,10 +1093,6 @@ struct Viewer {
     own_records: (Vec<Json>, Vec<Json>),
     /// This frame's places a lesson can point at, by action or place name.
     spots: BTreeMap<&'static str, egui::Rect>,
-    /// The rectangle of the pane showing the sketch edited (the 3D view's, or the flat pattern's
-    /// for a sketch on the blank) at the last frame, and whether such a sketch was framed yet.
-    sketch_rect: egui::Rect,
-    blank_fitted: bool,
 }
 
 /// The form of a flange: its name, height and angle as typed, the side, whether corners where
@@ -1666,7 +1672,7 @@ impl Viewer {
                 repaint.request_repaint();
             }
         });
-        let mut v = Self {
+        let doc = Document {
             requests,
             models,
             model: None,
@@ -1676,66 +1682,20 @@ impl Viewer {
             turn: None,
             geometry,
             version: 0,
-            smooth: true,
-            touchpad: false,
-            renderer: None,
-            texture: None,
-            drawn: None,
-            frame_ms: 0.0,
-            ui_ms: 0.0,
-            adapter,
             edits: BTreeMap::new(),
             offsets: BTreeMap::new(),
             tree: TreeRows::default(),
             new_parameter: Default::default(),
             local_error: None,
             table: None,
-            native_windows: NativeWindows::default(),
-            materials: Vec::new(),
-            rules: Vec::new(),
-            tools: Vec::new(),
-            rule_material: None,
-            new_material: Default::default(),
-            new_rule: Default::default(),
-            new_tool: Default::default(),
-            new_preset: Default::default(),
-            library_due: false,
             path: None,
-            update,
-            newer: None,
             sketch: None,
             entering: None,
-            library: crate::templates::library(None),
-            library_filter: String::new(),
-            keeping: None,
             menu: None,
-            side_bar: crate::sidebar::SideBar::default(),
-            modes: crate::sketch::Modes::default(),
-            dock: crate::dock::default_layout(),
             flat: crate::flat::FlatView::default(),
             new_level: None,
             new_set: None,
             hold: None,
-            quitting: None,
-            worked_in: None,
-            recent: Vec::new(),
-            project: None,
-            recent_projects: Vec::new(),
-            titled: String::new(),
-            keys,
-            i18n: crate::i18n::I18n::chosen(language.as_deref()),
-            language: language.unwrap_or_else(|| "system".into()),
-            language_chosen: false,
-            theme: theme.unwrap_or_default(),
-            theme_chosen: false,
-            settings,
-            settings_problems,
-            table_zoom,
-            fillet_presets,
-            chamfer_presets,
-            fillet_presets_editor: None,
-            shown: 0,
-            maximized: false,
             picking: None,
             under: None,
             plane_draft: None,
@@ -1760,12 +1720,61 @@ impl Viewer {
             next_rule: None,
             material: None,
             viewport: egui::Rect::ZERO,
+            sketch_rect: egui::Rect::ZERO,
+            blank_fitted: false,
+        };
+        let mut v = Self {
+            doc,
+            smooth: true,
+            touchpad: false,
+            renderer: None,
+            texture: None,
+            drawn: None,
+            frame_ms: 0.0,
+            ui_ms: 0.0,
+            adapter,
+            native_windows: NativeWindows::default(),
+            materials: Vec::new(),
+            rules: Vec::new(),
+            tools: Vec::new(),
+            rule_material: None,
+            new_material: Default::default(),
+            new_rule: Default::default(),
+            new_tool: Default::default(),
+            new_preset: Default::default(),
+            library_due: false,
+            update,
+            newer: None,
+            library: crate::templates::library(None),
+            library_filter: String::new(),
+            keeping: None,
+            side_bar: crate::sidebar::SideBar::default(),
+            modes: crate::sketch::Modes::default(),
+            dock: crate::dock::default_layout(),
+            quitting: None,
+            worked_in: None,
+            recent: Vec::new(),
+            project: None,
+            recent_projects: Vec::new(),
+            titled: String::new(),
+            keys,
+            i18n: crate::i18n::I18n::chosen(language.as_deref()),
+            language: language.unwrap_or_else(|| "system".into()),
+            language_chosen: false,
+            theme: theme.unwrap_or_default(),
+            theme_chosen: false,
+            settings,
+            settings_problems,
+            table_zoom,
+            fillet_presets,
+            chamfer_presets,
+            fillet_presets_editor: None,
+            shown: 0,
+            maximized: false,
             lessons: crate::lessons::folder().map_or_else(Vec::new, |d| crate::lessons::read(&d)),
             playing: None,
             own_records: Default::default(),
             spots: BTreeMap::new(),
-            sketch_rect: egui::Rect::ZERO,
-            blank_fitted: false,
         };
         v.reload_library_records();
         if let Some(p) = path {
@@ -1788,7 +1797,7 @@ impl Viewer {
         if let Some(d) = path.as_deref().and_then(std::path::Path::parent) {
             self.worked_in = Some(d.to_path_buf());
         }
-        self.path = path;
+        self.doc.path = path;
         self.reload_library();
     }
 
@@ -1803,7 +1812,7 @@ impl Viewer {
         self.reload_library();
         self.reload_library_records();
         // A model without a file works in the project open: its library, its rules.
-        if self.model.is_some() {
+        if self.doc.model.is_some() {
             let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
             self.send(Request::Command("set_project", params));
         }
@@ -1812,7 +1821,7 @@ impl Viewer {
     /// The project the window works in: the model file's own (a model keeps its project's
     /// rules), else, for a model without a file, the project open.
     fn current_project(&self) -> Option<PathBuf> {
-        datum_model::workspace::project_of(self.path.as_deref(), self.project.as_deref())
+        datum_model::workspace::project_of(self.doc.path.as_deref(), self.project.as_deref())
     }
 
     fn reload_library_records(&mut self) {
@@ -1829,10 +1838,10 @@ impl Viewer {
 
     /// Opens the table window on `source`, or closes it if that is what it shows.
     fn toggle_table(&mut self, source: crate::table::Source) {
-        if self.table.as_ref().is_some_and(|t| t.0 == source) {
-            self.table = None;
+        if self.doc.table.as_ref().is_some_and(|t| t.0 == source) {
+            self.doc.table = None;
         } else {
-            self.table = Some((source, Default::default()));
+            self.doc.table = Some((source, Default::default()));
             self.new_preset.clear();
             self.reload_library_records();
         }
@@ -1860,7 +1869,8 @@ impl Viewer {
     /// The dialog to export as `kind` (`dxf`, …): in that folder of the workspace, named after the
     /// model, or after `feature` while the model has no file (D133).
     fn exported(&self, kind: &str, feature: &str) -> rfd::FileDialog {
-        let stem = self.path.as_deref().and_then(std::path::Path::file_stem).map_or_else(|| feature.to_string(), |s| s.to_string_lossy().to_string());
+        let stem =
+            self.doc.path.as_deref().and_then(std::path::Path::file_stem).map_or_else(|| feature.to_string(), |s| s.to_string_lossy().to_string());
         let dialog = rfd::FileDialog::new().add_filter(kind.to_uppercase(), &[kind]).set_file_name(format!("{stem}.{kind}"));
         match kept_in(self.current_project().as_deref(), kind) {
             Some(d) => dialog.set_directory(d),
@@ -1871,7 +1881,7 @@ impl Viewer {
     /// Exports the model as STEP by dialog. Geometry STEP has no exact type for is written as
     /// B-splines only if the engineer says yes (D147); no, and nothing is written.
     fn export_step(&mut self) {
-        let inexact: Vec<String> = self.model.as_ref().map_or_else(Vec::new, |m| {
+        let inexact: Vec<String> = self.doc.model.as_ref().map_or_else(Vec::new, |m| {
             m.inspect["step_inexact"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(|f| format!("`{f}`"))).collect()
         });
         let approximate = !inexact.is_empty();
@@ -1905,8 +1915,13 @@ impl Viewer {
     /// (curves DXF has no exact entity for, D211), once the engineer says yes (D147);
     /// `Some(false)` with none; `None` when the engineer says no.
     fn dxf_approved(&self, name: &str) -> Option<bool> {
-        let polylines =
-            self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| n == name)).and_then(|(_, f)| f.as_ref().ok()).map_or(0, |f| f.polylines());
+        let polylines = self
+            .doc
+            .model
+            .as_ref()
+            .and_then(|m| m.flats.iter().find(|(n, _)| n == name))
+            .and_then(|(_, f)| f.as_ref().ok())
+            .map_or(0, |f| f.polylines());
         if polylines == 0 {
             return Some(false);
         }
@@ -1940,7 +1955,7 @@ impl Viewer {
 
     /// The folder of the model open, or of the last one opened or saved.
     fn working_folder(&self) -> Option<PathBuf> {
-        self.path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf).or_else(|| self.worked_in.clone())
+        self.doc.path.as_deref().and_then(std::path::Path::parent).map(std::path::Path::to_path_buf).or_else(|| self.worked_in.clone())
     }
 
     /// Opens a model chosen in the file dialog (Open…, Ctrl+O).
@@ -2004,7 +2019,7 @@ impl Viewer {
 
     /// Saves the model: to its file, or (`ask`, or none yet) to one chosen.
     fn save(&mut self, ask: bool) -> bool {
-        let path = match (&self.path, ask) {
+        let path = match (&self.doc.path, ask) {
             (Some(p), false) => Some(p.clone()),
             (Some(p), true) => {
                 let name = p.file_name().map_or_else(|| "model.json".to_string(), |n| n.to_string_lossy().to_string());
@@ -2020,7 +2035,7 @@ impl Viewer {
 
     /// Whether the model is changed since it was opened or saved.
     fn modified(&self) -> bool {
-        self.model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
+        self.doc.model.as_ref().is_some_and(|m| m.inspect["modified"] == true)
     }
 
     /// Whether the model may be left (closed, replaced): asked first if it has changes not saved
@@ -2033,6 +2048,7 @@ impl Viewer {
     /// dropped, `None` kept open.
     fn ask_to_save(&mut self) -> Option<bool> {
         let file = self
+            .doc
             .path
             .as_ref()
             .and_then(|p| p.file_name())
@@ -2063,7 +2079,7 @@ impl Viewer {
     /// Closes the model (Close, Ctrl+W): the window shows none. Whether it is gone: the engineer
     /// may keep it.
     fn close(&mut self) -> bool {
-        if self.model.is_none() {
+        if self.doc.model.is_none() {
             return true;
         }
         if !self.may_leave() {
@@ -2104,8 +2120,8 @@ impl Viewer {
     /// Lesson `lesson` from its beginning: no model, no rule chosen.
     fn start_lesson(&mut self, lesson: usize) {
         if self.close() {
-            self.next_rule = None;
-            self.material = None;
+            self.doc.next_rule = None;
+            self.doc.material = None;
             self.playing = Some(Playing { lesson, step: 0, showing: None, lost: None });
         }
     }
@@ -2113,21 +2129,21 @@ impl Viewer {
     /// What of the window a lesson's step may ask about (`WINDOW` in `lessons`).
     fn lesson_window(&self) -> Json {
         json!({
-            "model": self.model.is_some(),
-            "sketch": self.sketch.is_some(),
-            "tool": self.sketch.as_ref().map(|sk| format!("{:?}", sk.draft.tool).to_lowercase()),
-            "picking": self.picking.map(|p| format!("{p:?}").to_lowercase()),
-            "form": self.extrusion.is_some(),
+            "model": self.doc.model.is_some(),
+            "sketch": self.doc.sketch.is_some(),
+            "tool": self.doc.sketch.as_ref().map(|sk| format!("{:?}", sk.draft.tool).to_lowercase()),
+            "picking": self.doc.picking.map(|p| format!("{p:?}").to_lowercase()),
+            "form": self.doc.extrusion.is_some(),
             "sheet_rule": self.sheet_rule().is_some(),
-            "table": self.table.as_ref().map(|t| format!("{:?}", t.0).to_lowercase()),
+            "table": self.doc.table.as_ref().map(|t| format!("{:?}", t.0).to_lowercase()),
             "project": self.project.is_some(),
             "project_safe": self.project.as_ref().is_some_and(|p| !beside_program(p)),
             "own_materials": self.own_records.0,
             "own_rules": self.own_records.1,
-            "selected": self.sketch.as_ref().map_or_else(Vec::new, |sk| sk.selected.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>()),
-            "pattern_menu": matches!(self.menu, Some(Menu::Pattern { .. })),
-            "pattern_picked": matches!(&self.menu, Some(Menu::Pattern { form, .. }) if !form.cell.is_empty()),
-            "saved": self.path.is_some() && !self.modified(),
+            "selected": self.doc.sketch.as_ref().map_or_else(Vec::new, |sk| sk.selected.iter().map(|p| format!("{p:?}")).collect::<Vec<_>>()),
+            "pattern_menu": matches!(self.doc.menu, Some(Menu::Pattern { .. })),
+            "pattern_picked": matches!(&self.doc.menu, Some(Menu::Pattern { form, .. }) if !form.cell.is_empty()),
+            "saved": self.doc.path.is_some() && !self.modified(),
         })
     }
 
@@ -2136,7 +2152,7 @@ impl Viewer {
         (step.done.window.is_some() || step.done.model.is_some())
             && step.done.window.as_ref().is_none_or(|w| crate::lessons::matches(w, &self.lesson_window()))
             // A form's preview shows in `inspect` what is not made yet.
-            && step.done.model.as_ref().is_none_or(|p| self.model.as_ref().is_some_and(|m| m.preview.is_none() && crate::lessons::matches(p, &m.inspect)))
+            && step.done.model.as_ref().is_none_or(|p| self.doc.model.as_ref().is_some_and(|m| m.preview.is_none() && crate::lessons::matches(p, &m.inspect)))
     }
 
     /// What move `m` of the hand comes to now; none while its place is not on screen.
@@ -2158,12 +2174,12 @@ impl Viewer {
                 Some(Aim::Keys(k.logical_key, modifiers, ctx.format_shortcut(k)))
             }
             Move::Sketch([x, y]) => {
-                self.sketch.as_ref()?;
-                let half = self.sketch_rect.size() * 0.5;
-                Some(Aim::Spot(self.sketch_rect.center() + egui::vec2(x * half.x, -y * half.y)))
+                self.doc.sketch.as_ref()?;
+                let half = self.doc.sketch_rect.size() * 0.5;
+                Some(Aim::Spot(self.doc.sketch_rect.center() + egui::vec2(x * half.x, -y * half.y)))
             }
             Move::Curve(kind) => {
-                let sk = self.sketch.as_ref()?;
+                let sk = self.doc.sketch.as_ref()?;
                 let p = sk.placed.as_ref().ok()?;
                 let point = |n: &String| p.solved.points.get(n).copied();
                 let at = if kind == "line" {
@@ -2176,9 +2192,9 @@ impl Viewer {
                     let o = point(&c.center)?;
                     [o.x + 0.5 * c.diameter.value()?, o.y]
                 };
-                let (dx, dy) = sk.camera.offset(at, f64::from(self.sketch_rect.height()));
-                let spot = self.sketch_rect.center() + egui::vec2(dx as f32, dy as f32);
-                self.sketch_rect.contains(spot).then_some(Aim::Spot(spot))
+                let (dx, dy) = sk.camera.offset(at, f64::from(self.doc.sketch_rect.height()));
+                let spot = self.doc.sketch_rect.center() + egui::vec2(dx as f32, dy as f32);
+                self.doc.sketch_rect.contains(spot).then_some(Aim::Spot(spot))
             }
             Move::Put { level, element } => Some(Aim::Put(level.clone(), element.clone())),
         }
@@ -2191,18 +2207,18 @@ impl Viewer {
         let Some(s) = lesson.steps.get(p.step) else { return };
         let moves = s.show.clone();
         let mark = back.then(|| Mark {
-            model: self.model.is_some(),
-            sketch: self.sketch.as_ref().map(|sk| SketchMark {
+            model: self.doc.model.is_some(),
+            sketch: self.doc.sketch.as_ref().map(|sk| SketchMark {
                 feature: sk.feature.clone(),
                 selected: sk.selected.clone(),
                 draft: sk.draft.clone(),
                 camera: sk.camera,
             }),
-            menu: self.menu.clone(),
-            picking: self.picking,
-            table: self.table.as_ref().map(|t| t.0),
-            next_rule: self.next_rule.clone(),
-            material: self.material.clone(),
+            menu: self.doc.menu.clone(),
+            picking: self.doc.picking,
+            table: self.doc.table.as_ref().map(|t| t.0),
+            next_rule: self.doc.next_rule.clone(),
+            material: self.doc.material.clone(),
         });
         if mark.as_ref().is_some_and(|m| m.model) {
             self.send(Request::Mark);
@@ -2234,7 +2250,7 @@ impl Viewer {
                     | Event::Text(_)
             )
         });
-        let tick = if stop { Tick::Finished } else { showing.hand.tick(raw.predicted_dt, self.busy, |m| self.aim(ctx, m), &mut raw.events) };
+        let tick = if stop { Tick::Finished } else { showing.hand.tick(raw.predicted_dt, self.doc.busy, |m| self.aim(ctx, m), &mut raw.events) };
         match tick {
             Tick::Going => {}
             Tick::Put(level, element) => {
@@ -2261,7 +2277,7 @@ impl Viewer {
         }
         let Some(mark) = showing.back else { return };
         // Still in the same sketch: it stays open, as the engineer left it.
-        let kept = mark.sketch.as_ref().is_some_and(|m| self.sketch.as_ref().is_some_and(|sk| sk.feature == m.feature));
+        let kept = mark.sketch.as_ref().is_some_and(|m| self.doc.sketch.as_ref().is_some_and(|sk| sk.feature == m.feature));
         if kept {
             self.close_extrusion();
             self.close_revolve();
@@ -2273,23 +2289,23 @@ impl Viewer {
         } else {
             self.leave();
         }
-        self.picking = mark.picking;
-        if self.table.as_ref().map(|t| t.0) != mark.table {
-            self.table = None;
+        self.doc.picking = mark.picking;
+        if self.doc.table.as_ref().map(|t| t.0) != mark.table {
+            self.doc.table = None;
             if let Some(source) = mark.table {
                 self.toggle_table(source);
             }
         }
-        self.next_rule = mark.next_rule;
-        self.material = mark.material;
+        self.doc.next_rule = mark.next_rule;
+        self.doc.material = mark.material;
         if mark.model {
             self.send(Request::Back);
             if let Some(m) = mark.sketch {
-                match &mut self.sketch {
+                match &mut self.doc.sketch {
                     Some(sk) if kept => {
                         (sk.selected, sk.draft, sk.camera) = (m.selected, m.draft, m.camera);
                         sk.field = None;
-                        self.menu = mark.menu;
+                        self.doc.menu = mark.menu;
                     }
                     _ => self.enter(m.feature),
                 }
@@ -2303,7 +2319,7 @@ impl Viewer {
     /// The step reached: past those done, unless a command is on its way and what shows is old,
     /// or the hand is at work.
     fn lesson_step(&self, playing: &Playing, lesson: &crate::lessons::Lesson) -> usize {
-        if self.busy || playing.showing.is_some() {
+        if self.doc.busy || playing.showing.is_some() {
             return playing.step;
         }
         playing.step + lesson.steps[playing.step.min(lesson.steps.len())..].iter().take_while(|s| self.step_done(s)).count()
@@ -2315,7 +2331,7 @@ impl Viewer {
         let Some((_, Ok(lesson))) = self.lessons.get(playing.lesson) else { return };
         let (step, total) = (self.lesson_step(playing, lesson), lesson.steps.len());
         let now = lesson.steps.get(step);
-        self.spots.insert("view", self.viewport);
+        self.spots.insert("view", self.doc.viewport);
         let hand = playing.showing.as_ref().map(|s| (s.hand.cursor, s.hand.pressed.clone()));
         let lost = playing.lost.clone();
         if let Some((at, pressed)) = &hand {
@@ -2399,7 +2415,7 @@ impl Viewer {
         ui.add(egui::TextEdit::singleline(&mut self.library_filter).hint_text(self.i18n.t("search", "Search")));
         ui.weak(self.i18n.t("library-hint", "Double-click to place · drag onto the sketch"));
         let current =
-            self.sketch.as_ref().filter(|s| s.draft.tool == Tool::Template).and_then(|s| s.draft.template.as_ref()).map(|t| t["name"].clone());
+            self.doc.sketch.as_ref().filter(|s| s.draft.tool == Tool::Template).and_then(|s| s.draft.template.as_ref()).map(|t| t["name"].clone());
         let filter = self.library_filter.trim().to_lowercase();
         let mut chosen = None;
         let mut edit = None;
@@ -2415,7 +2431,7 @@ impl Viewer {
                 },
             );
         }
-        if let (Some(t), Some(sk)) = (chosen, &mut self.sketch) {
+        if let (Some(t), Some(sk)) = (chosen, &mut self.doc.sketch) {
             sk.draft.choose(t);
             sk.field = None;
         }
@@ -2796,8 +2812,8 @@ impl Viewer {
     }
 
     fn send(&mut self, r: Request) {
-        let _ = self.requests.send(r);
-        self.busy = true;
+        let _ = self.doc.requests.send(r);
+        self.doc.busy = true;
     }
 
     /// Starts editing sketch feature `name`, once the model brings its context.
@@ -2805,11 +2821,11 @@ impl Viewer {
         self.close_extrusion();
         self.close_edge_finish();
         self.close_loft();
-        self.picking = None;
-        self.metadata = None;
-        self.sketch = None;
+        self.doc.picking = None;
+        self.doc.metadata = None;
+        self.doc.sketch = None;
         self.send(Request::Editing(Some(name.clone())));
-        self.entering = Some(name);
+        self.doc.entering = Some(name);
     }
 
     fn leave(&mut self) {
@@ -2820,16 +2836,16 @@ impl Viewer {
         self.close_edge_finish();
         self.close_loft();
         self.close_mirror();
-        self.metadata = None;
-        self.menu = None;
+        self.doc.metadata = None;
+        self.doc.menu = None;
         crate::dock::close(&mut self.dock, crate::dock::Pane::Library);
-        if let Some(sk) = &self.sketch {
+        if let Some(sk) = &self.doc.sketch {
             self.modes = sk.modes;
         }
-        if self.sketch.is_some() || self.entering.is_some() {
-            self.sketch = None;
-            self.entering = None;
-            let _ = self.requests.send(Request::Editing(None));
+        if self.doc.sketch.is_some() || self.doc.entering.is_some() {
+            self.doc.sketch = None;
+            self.doc.entering = None;
+            let _ = self.doc.requests.send(Request::Editing(None));
         }
     }
 
@@ -2851,12 +2867,13 @@ impl Viewer {
     /// Starts picking a plane or a face for `purpose`, or stops if already picking for it.
     fn pick(&mut self, purpose: Purpose) {
         self.close_edge_finish();
-        self.picking = if self.picking == Some(purpose) { None } else { Some(purpose) };
-        self.under = None;
+        self.doc.picking = if self.doc.picking == Some(purpose) { None } else { Some(purpose) };
+        self.doc.under = None;
     }
 
     fn new_sketch(&mut self, mut fields: Json) {
         let taken: Vec<&str> = self
+            .doc
             .model
             .as_ref()
             .map(|m| m.inspect["features"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect())
@@ -2871,16 +2888,16 @@ impl Viewer {
 
     /// Brings the sketch being edited up to the model just received, or starts one asked for.
     fn sync_sketch(&mut self) {
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         let params: BTreeMap<String, f64> = m.inspect["parameters"]
             .as_object()
             .map(|p| p.iter().filter_map(|(n, v)| Some((n.clone(), v["value"].as_f64()?))).collect())
             .unwrap_or_default();
         let feature = |name: &str| m.inspect["features"].as_array().and_then(|f| f.iter().find(|f| f["name"] == name)).cloned();
-        let wanted = self.sketch.as_ref().map(|s| s.feature.clone()).or_else(|| self.entering.clone());
+        let wanted = self.doc.sketch.as_ref().map(|s| s.feature.clone()).or_else(|| self.doc.entering.clone());
         let Some(name) = wanted else { return };
         match (&m.editing, feature(&name)) {
-            (Some((n, context)), Some(json)) if *n == name => match &mut self.sketch {
+            (Some((n, context)), Some(json)) if *n == name => match &mut self.doc.sketch {
                 Some(s) => {
                     s.refresh(context.clone(), json, params);
                     s.draft.fillet_presets = self.fillet_presets.clone();
@@ -2892,21 +2909,21 @@ impl Viewer {
                     sk.modes = self.modes;
                     // On the blank: in the flat pattern pane, framing the blank (there).
                     if sk.on_blank() {
-                        self.flat.chosen = sk.json["inputs"][0].as_str().map(String::from);
-                        self.blank_fitted = false;
+                        self.doc.flat.chosen = sk.json["inputs"][0].as_str().map(String::from);
+                        self.doc.blank_fitted = false;
                         crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
                     }
                     sk.draft.fillet_presets = self.fillet_presets.clone();
                     sk.draft.chamfer_presets = self.chamfer_presets.clone();
-                    self.sketch = Some(sk);
+                    self.doc.sketch = Some(sk);
                     // Its section under the part's, the library beside the 3D view (D163).
                     self.side_bar.visible = true;
                     crate::dock::open(&mut self.dock, crate::dock::Pane::Library);
-                    self.entering = None;
+                    self.doc.entering = None;
                 }
             },
             // Still on its way, or gone (undone, or the model replaced).
-            (_, Some(_)) if self.sketch.is_none() => {}
+            (_, Some(_)) if self.doc.sketch.is_none() => {}
             _ => self.leave(),
         }
     }
@@ -2975,10 +2992,10 @@ impl Viewer {
 
     /// The active part (D169): the variant's, else the one last clicked in 3D.
     fn active_part(&self) -> Option<String> {
-        let m = self.model.as_ref()?;
+        let m = self.doc.model.as_ref()?;
         match m.inspect["level"].as_str() {
             Some(level) => m.inspect["levels"].as_array()?.iter().find(|l| l["name"] == level)?["part"].as_str().map(String::from),
-            None => self.part.clone(),
+            None => self.doc.part.clone(),
         }
     }
 
@@ -2993,13 +3010,13 @@ impl Viewer {
     }
 
     fn next_rule_of(&self, kind: &str) -> Option<String> {
-        let rule = self.next_rule.as_ref()?;
+        let rule = self.doc.next_rule.as_ref()?;
         self.rules.iter().any(|r| r["name"] == *rule && r["kind"] == kind).then(|| rule.clone())
     }
 
     fn toolbar_rule(&self, part: Option<&str>) -> Option<&str> {
-        let Some(part) = part else { return self.next_rule.as_deref() };
-        let inspect = &self.model.as_ref()?.inspect;
+        let Some(part) = part else { return self.doc.next_rule.as_deref() };
+        let inspect = &self.doc.model.as_ref()?.inspect;
         let row = if let Some(level) = inspect["level"].as_str() {
             inspect["levels"].as_array()?.iter().find(|l| l["name"] == level)
         } else {
@@ -3018,8 +3035,8 @@ impl Viewer {
     /// The toolbar's material and rule of the active part, or of the next new part.
     fn material_and_rule(&mut self, ui: &mut egui::Ui) {
         let part = self.active_part();
-        let enabled = self.model.is_some();
-        let features = self.model.iter().flat_map(|m| m.inspect["features"].as_array().into_iter().flatten());
+        let enabled = self.doc.model.is_some();
+        let features = self.doc.model.iter().flat_map(|m| m.inspect["features"].as_array().into_iter().flatten());
         // The kind a part's rules must be of: its first feature's; any, for a new part.
         let kind = part.as_ref().map(|p| {
             if features.clone().any(|f| f["name"] == *p && matches!(f["op"].as_str(), Some("sheet" | "plate" | "loft"))) { "sheet" } else { "part" }
@@ -3030,7 +3047,7 @@ impl Viewer {
         let material = record
             .and_then(|r| r["material"].as_str())
             .map(String::from)
-            .or_else(|| self.material.iter().find(|(p, _)| *p == part).map(|(_, m)| m.clone()));
+            .or_else(|| self.doc.material.iter().find(|(p, _)| *p == part).map(|(_, m)| m.clone()));
         let mut apply: Option<Option<String>> = None;
         let mut pick_material: Option<Option<String>> = None;
         ui.add_enabled_ui(enabled, |ui| {
@@ -3086,52 +3103,52 @@ impl Viewer {
         if let Some(chosen) = pick_material {
             // The first rule of the material; none: the material alone is shown.
             apply = Some(chosen.as_deref().and_then(|m| rules_of(&self.rules, Some(m), kind).first().map(|r| r.to_string())));
-            self.material = chosen.map(|m| (part.clone(), m));
+            self.doc.material = chosen.map(|m| (part.clone(), m));
         }
         if let Some(rule) = apply {
             match part {
                 Some(body) => self.send(Request::Command("set_part", json!({"body": body, "rule": rule}))),
-                None => self.next_rule = rule,
+                None => self.doc.next_rule = rule,
             }
         }
     }
 
     fn receive(&mut self) {
-        while let Ok(m) = self.models.try_recv() {
-            self.busy = false;
+        while let Ok(m) = self.doc.models.try_recv() {
+            self.doc.busy = false;
             // Fitted when it arrives, not when asked for: until then the view holds the last model.
             // Again when it becomes empty or stops being so: a new model, its first sketch.
             let empty = |m: &Model| m.scene.bounds.is_none();
-            self.fitted &= !m.opened && self.model.as_ref().map(empty) == Some(empty(&m));
-            self.geometry = m.geometry.clone();
-            self.version += 1;
+            self.doc.fitted &= !m.opened && self.doc.model.as_ref().map(empty) == Some(empty(&m));
+            self.doc.geometry = m.geometry.clone();
+            self.doc.version += 1;
             if let Some(p) = m.inspect["parameters"].as_object() {
-                self.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
+                self.doc.edits = p.iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
             }
-            self.offsets = offsets(&m.inspect);
+            self.doc.offsets = offsets(&m.inspect);
             // A save that failed while closing the window: it stays open, the error shown.
             if self.quitting == Some(true) && m.error.is_some() {
                 self.quitting = None;
             }
             if std::mem::take(&mut self.library_due) {
                 self.reload_library_records();
-                if let (Some((_, editor)), Some(why)) = (&mut self.table, &m.error) {
+                if let (Some((_, editor)), Some(why)) = (&mut self.doc.table, &m.error) {
                     editor.error = Some(why.clone());
                 }
             }
             if m.opened {
                 self.reload_library_records();
             }
-            if self.part.as_ref().is_some_and(|p| !m.inspect["parts"].as_array().into_iter().flatten().any(|r| r["part"] == *p)) {
-                self.part = None;
+            if self.doc.part.as_ref().is_some_and(|p| !m.inspect["parts"].as_array().into_iter().flatten().any(|r| r["part"] == *p)) {
+                self.doc.part = None;
             }
-            if self.model.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.edge_base, &m.edge_base)) {
-                self.edge_hover = None;
+            if self.doc.model.as_ref().is_none_or(|old| !Arc::ptr_eq(&old.edge_base, &m.edge_base)) {
+                self.doc.edge_hover = None;
             }
             if let Some(applied) = m.edge_applied {
                 self.edge_finish_applied(applied);
             }
-            self.model = if m.closed { None } else { Some(m) };
+            self.doc.model = if m.closed { None } else { Some(m) };
             self.sync_sketch();
         }
     }
@@ -3140,7 +3157,7 @@ impl Viewer {
     /// base and its variants, one chosen for the product; a click works in it; a new variant is
     /// named here.
     fn levels_panel(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         let active = m.inspect["level"].as_str().map(String::from);
         // Depth first: a variant, then those below it.
         let levels: Vec<LevelRow> = m.inspect["levels"]
@@ -3161,7 +3178,7 @@ impl Viewer {
             .t("set-base-hint", "The base: every part as the root makes it, the product shown whole; a change here reaches every variant")
             .to_string();
         let mut clicked_part: Option<Option<String>> = None;
-        if ui.selectable_label(active.is_none() && self.part.is_none(), self.i18n.t("set-base", "Base")).on_hover_text(base).clicked() {
+        if ui.selectable_label(active.is_none() && self.doc.part.is_none(), self.i18n.t("set-base", "Base")).on_hover_text(base).clicked() {
             go = Some(None);
             clicked_part = Some(None);
         }
@@ -3184,7 +3201,7 @@ impl Viewer {
                     .clicked()
                 {
                     let taken: Vec<&str> = m.inspect["sets"].as_array().into_iter().flatten().filter_map(Json::as_str).collect();
-                    self.new_set = (1..).map(|k| format!("Set {k}")).find(|n| !taken.contains(&n.as_str()));
+                    self.doc.new_set = (1..).map(|k| format!("Set {k}")).find(|n| !taken.contains(&n.as_str()));
                 }
             });
             if let Some(c) = current
@@ -3200,7 +3217,7 @@ impl Viewer {
                 set_cmd = Some(("remove_set", c.to_string()));
             }
         });
-        if let Some(name) = &mut self.new_set {
+        if let Some(name) = &mut self.doc.new_set {
             ui.horizontal(|ui| {
                 ui.label(self.i18n.t("set-new", "New set:"));
                 let r = ui.add(egui::TextEdit::singleline(name).desired_width(120.0));
@@ -3221,7 +3238,7 @@ impl Viewer {
             // Worked in: a variant of it, or in the base, the part clicked (the toolbar's material and rule are its).
             let here = match &active {
                 Some(a) => family.iter().any(|l| &l.0 == a),
-                None => self.part.as_deref() == Some(part),
+                None => self.doc.part.as_deref() == Some(part),
             };
             ui.horizontal(|ui| {
                 let mut visible = p["visible"].as_bool().unwrap_or(true);
@@ -3263,7 +3280,7 @@ impl Viewer {
                         .on_hover_text(self.i18n.f("variant-new-hint", "Below { $below }: it differs only where you change it", &[("below", &below)]))
                         .clicked()
                     {
-                        self.new_level = Some((chosen.clone(), part.to_string(), fresh(&levels, "Variant")));
+                        self.doc.new_level = Some((chosen.clone(), part.to_string(), fresh(&levels, "Variant")));
                     }
                 });
                 if here
@@ -3303,7 +3320,7 @@ impl Viewer {
             });
         }
         let mut add: Option<(Option<String>, String, String)> = None;
-        if let Some((parent, part, name)) = &mut self.new_level {
+        if let Some((parent, part, name)) = &mut self.doc.new_level {
             ui.horizontal(|ui| {
                 ui.label(self.i18n.f(
                     "variant-of",
@@ -3322,7 +3339,7 @@ impl Viewer {
             });
         }
         if let Some((parent, part, name)) = add {
-            self.new_level = None;
+            self.doc.new_level = None;
             // A new variant is the one its part shows in the product.
             if !name.is_empty() {
                 self.send(Request::Command("add_level", json!({"name": name, "parent": parent, "part": part})));
@@ -3331,7 +3348,7 @@ impl Viewer {
         }
         if let Some((command, name)) = set_cmd {
             if command == "save_set" || command.is_empty() {
-                self.new_set = None;
+                self.doc.new_set = None;
             }
             if !command.is_empty() {
                 self.send(Request::Command(command, json!({ "name": name })));
@@ -3344,7 +3361,7 @@ impl Viewer {
             self.send(Request::Command("show", json!({ "part": part, "visible": visible })));
         }
         if let Some(p) = clicked_part {
-            self.part = p;
+            self.doc.part = p;
         }
         if let Some(level) = go
             && level != active
@@ -3363,7 +3380,7 @@ impl Viewer {
         self.status(ui);
         ui.separator();
         let list: Vec<Section> =
-            self.side_bar.container.sections().iter().copied().filter(|s| *s != Section::Sketch || self.sketch.is_some()).collect();
+            self.side_bar.container.sections().iter().copied().filter(|s| *s != Section::Sketch || self.doc.sketch.is_some()).collect();
         for (k, s) in list.iter().enumerate() {
             let hint = match s {
                 Section::Parts => self.i18n.t("levels-hint", LEVELS),
@@ -3380,7 +3397,7 @@ impl Viewer {
             let room = (ui.available_height() - HEADER * (list.len() - k - 1) as f32).max(HEADER);
             egui::ScrollArea::vertical().id_salt(("datum_section", *s)).auto_shrink([false, true]).max_height(room).show(ui, |ui| match s {
                 Section::Parts => {
-                    let editing = self.sketch.is_some();
+                    let editing = self.doc.sketch.is_some();
                     ui.add_enabled_ui(!editing, |ui| self.levels_panel(ui))
                         .response
                         .on_disabled_hover_text(self.i18n.t("levels-sketch-first", "Done with the sketch first"));
@@ -3448,9 +3465,9 @@ impl Viewer {
     /// The model's state over the side bar: the version, the journal of actions, the last error
     /// and what the last commands changed beyond what they asked.
     fn status(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &self.model else {
-            ui.label(if self.busy { self.i18n.t("opening", "Opening…") } else { self.i18n.t("no-model", "No model open.") });
-            if !self.busy {
+        let Some(m) = &self.doc.model else {
+            ui.label(if self.doc.busy { self.i18n.t("opening", "Opening…") } else { self.i18n.t("no-model", "No model open.") });
+            if !self.doc.busy {
                 let key = |act| self.keys.get(act).map_or_else(String::new, |k| ui.ctx().format_shortcut(k));
                 ui.weak(self.i18n.f(
                     "no-model-start",
@@ -3488,10 +3505,10 @@ impl Viewer {
 
     /// The sketch being edited: its state, tools, constraints, groups, Done.
     fn sketch_section(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         let (mut done, mut pattern) = (false, false);
         let mut sent = Vec::new();
-        if let Some(sk) = &mut self.sketch {
+        if let Some(sk) = &mut self.doc.sketch {
             ui.heading(self.i18n.f("sketch-heading", "Sketch { $name }", &[("name", &sk.feature)]));
             match &sk.placed {
                 Ok(p) if p.solved.dof == 0 => ui.label(self.i18n.t("fully-defined", "Fully defined")),
@@ -3550,7 +3567,7 @@ impl Viewer {
                     }
                 }
                 let hint = self.keys.hint(ui.ctx(), &self.i18n, Act::Pattern);
-                let open = self.menu.is_some();
+                let open = self.doc.menu.is_some();
                 if crate::icons::tile(ui, self.i18n.label(Act::Pattern), &hint, open, true, |p, c, colour| {
                     crate::sketch::paint_glyph(p, c, crate::sketch::Glyph::Pattern, colour)
                 })
@@ -3709,7 +3726,7 @@ impl Viewer {
     /// The parameters of the level worked in: changed in place, added, removed or back as the
     /// parent has them.
     fn parameters_section(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         let level = m.inspect["level"].as_str();
         let (changed, own, set, own_parameters) = marks(&m.inspect);
         let mut revert: Option<Json> = None;
@@ -3722,7 +3739,7 @@ impl Viewer {
         egui::Grid::new("parameters").num_columns(4).striped(true).show(ui, |ui| {
             for (name, p) in &params {
                 ui.label(name);
-                let text = self.edits.entry(name.clone()).or_default();
+                let text = self.doc.edits.entry(name.clone()).or_default();
                 // A grid cell is as wide as its column was: sized explicitly, the field widens it.
                 let r = field(ui, text, "");
                 // Applied when the field is left (Enter, Tab or a click elsewhere) changed. The
@@ -3758,8 +3775,8 @@ impl Viewer {
                 ui.end_row();
             }
             // A new parameter: its name, then its value; Enter in the value or Add adds it.
-            self.new_parameter.resize(2, String::new());
-            let (name, value) = self.new_parameter.split_at_mut(1);
+            self.doc.new_parameter.resize(2, String::new());
+            let (name, value) = self.doc.new_parameter.split_at_mut(1);
             let (name, value) = (&mut name[0], &mut value[0]);
             ui.add_sized([60.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(name).hint_text(self.i18n.t("param-name", "name")));
             let r = field(ui, value, self.i18n.t("param-value", "value or formula"));
@@ -3774,28 +3791,28 @@ impl Viewer {
             self.run(ui, Act::ParameterTable);
         }
         if added {
-            let mut cells = std::mem::take(&mut self.new_parameter);
+            let mut cells = std::mem::take(&mut self.doc.new_parameter);
             cells.resize(2, String::new());
             let (name, value) = (cells[0].trim().to_string(), std::mem::take(&mut cells[1]));
             if params.contains_key(&name) {
-                self.local_error =
+                self.doc.local_error =
                     Some(self.i18n.f("param-taken", "`{ $name }` is a parameter already: change its value in its row", &[("name", &name)]));
-                self.new_parameter = vec![name, value];
+                self.doc.new_parameter = vec![name, value];
             } else {
-                self.local_error = None;
+                self.doc.local_error = None;
                 send.push((name, if value.trim().is_empty() { "0".into() } else { value }));
             }
         }
-        if let Some(e) = &self.local_error {
+        if let Some(e) = &self.doc.local_error {
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
         if let Some(name) = removed {
-            let _ = self.requests.send(Request::Command("remove_parameter", json!({"name": name})));
-            self.busy = true;
+            let _ = self.doc.requests.send(Request::Command("remove_parameter", json!({"name": name})));
+            self.doc.busy = true;
         }
         for (name, text) in send {
-            let _ = self.requests.send(Request::SetParameter(name, value_of(&text)));
-            self.busy = true;
+            let _ = self.doc.requests.send(Request::SetParameter(name, value_of(&text)));
+            self.doc.busy = true;
         }
         if let Some(r) = revert {
             self.send(Request::Command("revert", r));
@@ -3804,7 +3821,7 @@ impl Viewer {
 
     /// The features of the level worked in: their state, on or off, what to do with each.
     fn features_section(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         let (changed, own, set, own_parameters) = marks(&m.inspect);
         let mut revert: Option<Json> = None;
         let _ = (&set, &own_parameters);
@@ -3813,10 +3830,10 @@ impl Viewer {
         let mut toggle: Option<(String, Json)> = None;
         let mut show_flat: Option<String> = None;
         // A sketch row clicked while an extrusion waits for one, and where.
-        let waiting = self.extrusion.as_ref().is_some_and(|x| x.sketch.is_none());
+        let waiting = self.doc.extrusion.as_ref().is_some_and(|x| x.sketch.is_none());
         // Out of `self` while the rows borrow it.
-        let mut offsets = std::mem::take(&mut self.offsets);
-        let mut tree = std::mem::take(&mut self.tree);
+        let mut offsets = std::mem::take(&mut self.doc.offsets);
+        let mut tree = std::mem::take(&mut self.doc.tree);
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Under the rows, which win a click: what is left selects nothing, as Esc does.
             let empty = ui.interact(ui.available_rect_before_wrap(), ui.id().with("tree"), egui::Sense::click());
@@ -3958,23 +3975,24 @@ impl Viewer {
                 });
             }
         });
-        self.offsets = offsets;
+        self.doc.offsets = offsets;
         let (clicked, renamed) = (tree.clicked.take(), tree.renamed.take());
         // Removed by its row's menu, or by Delete on the row selected (no sketch open, nothing
         // typed): the model refuses one another feature uses, and says which.
-        let delete = self.sketch.is_none() && !ui.ctx().text_edit_focused() && ui.input(|i| i.key_pressed(egui::Key::Delete));
+        let delete = self.doc.sketch.is_none() && !ui.ctx().text_edit_focused() && ui.input(|i| i.key_pressed(egui::Key::Delete));
         let removed = tree.removed.take().or_else(|| delete.then(|| tree.selected.clone()).flatten());
-        self.tree = tree;
+        self.doc.tree = tree;
         if let Some(name) = removed {
-            if self.tree.selected.as_ref() == Some(&name) {
-                self.tree.selected = None;
+            if self.doc.tree.selected.as_ref() == Some(&name) {
+                self.doc.tree.selected = None;
             }
             self.send(Request::Command("remove", json!({"name": name})));
         }
         // A sketch row clicked while an extrusion waits for one gives it its sketch, and where;
         // otherwise a click selects a row, a second click on the selected row renames it.
         let is_sketch = |key: &str| {
-            self.model
+            self.doc
+                .model
                 .as_ref()
                 .is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == key && f["op"] == "sketch"))
         };
@@ -3984,10 +4002,10 @@ impl Viewer {
                 self.pick_loft_profile(&key);
             } else if waiting && is_sketch(&key) {
                 picked = Some((key, ui.input(|i| i.pointer.interact_pos()).unwrap_or_default()));
-            } else if self.tree.selected.as_ref() == Some(&key) {
+            } else if self.doc.tree.selected.as_ref() == Some(&key) {
                 self.start_rename();
             } else {
-                self.tree.selected = Some(key);
+                self.doc.tree.selected = Some(key);
             }
         }
         if let Some((name, text)) = renamed {
@@ -3997,14 +4015,14 @@ impl Viewer {
         }
         let edit = edit.or(toggle);
         if let Some(f) = show_flat {
-            self.flat.chosen = Some(f);
+            self.doc.flat.chosen = Some(f);
             crate::dock::open(&mut self.dock, crate::dock::Pane::Flat);
         }
-        if let (Some((sketch, at)), true) = (picked, self.extrusion.is_some()) {
+        if let (Some((sketch, at)), true) = (picked, self.doc.extrusion.is_some()) {
             // Where the sketch lies decides what is made of it.
             let kind = self.plain_kind(Some(&sketch));
             let name = self.feature_name(kind.command());
-            if let Some(x) = &mut self.extrusion {
+            if let Some(x) = &mut self.doc.extrusion {
                 (x.sketch, x.at, x.kind, x.name) = (Some(sketch), at, kind, name);
             }
         }
@@ -4030,23 +4048,23 @@ impl Viewer {
 
     /// The selected feature's title made a field: the title, or the key without one.
     fn start_rename(&mut self) {
-        let Some(key) = self.tree.selected.clone() else { return };
-        let feature = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == key.as_str()));
+        let Some(key) = self.doc.tree.selected.clone() else { return };
+        let feature = self.doc.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == key.as_str()));
         if let Some(f) = feature {
             let text = f["title"].as_str().unwrap_or(&key).to_string();
-            self.tree.renaming = Some(Renaming { key, text, fresh: true });
+            self.doc.tree.renaming = Some(Renaming { key, text, fresh: true });
         }
     }
 
     /// The sketch edited, as the pane showing it paints it: the model's view for most, the flat
     /// pattern for one on the blank.
     fn sketch_in_3d(&self) -> Option<&SketchEdit> {
-        self.sketch.as_ref().filter(|s| !s.on_blank())
+        self.doc.sketch.as_ref().filter(|s| !s.on_blank())
     }
 
     /// The sketch edited, its draft, measures and frame, over what the pane has painted.
     fn paint_sketch(&self, painter: &egui::Painter, rect: egui::Rect) {
-        let Some(sk) = &self.sketch else { return };
+        let Some(sk) = &self.doc.sketch else { return };
         if let Some(t) = &sk.turned {
             t.paint(
                 sk,
@@ -4079,13 +4097,13 @@ impl Viewer {
 
     fn viewport(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        self.viewport = rect;
+        self.doc.viewport = rect;
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
         let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
         // A sketch on the blank is edited in the flat pattern pane: here the model stays a model.
         let sketched = self.sketch_in_3d().is_some();
         if sketched {
-            self.sketch_rect = rect;
+            self.doc.sketch_rect = rect;
             self.sketch_input(ui, rect, &r, offset);
             self.sketch_menu(ui.ctx());
         } else {
@@ -4094,7 +4112,7 @@ impl Viewer {
         let (loft_hover, edge_hover) = if self.loft_is_picking() {
             let hover = r.hover_pos().or(r.interact_pointer_pos()).and_then(|cursor| self.loft_profile_at(rect, cursor));
             if r.clicked()
-                && let Some(name) = hover.and_then(|i| self.model.as_ref()?.loft_profiles.get(i)).map(|p| p.name.clone())
+                && let Some(name) = hover.and_then(|i| self.doc.model.as_ref()?.loft_profiles.get(i)).map(|p| p.name.clone())
             {
                 self.pick_loft_profile(&name);
             }
@@ -4105,29 +4123,29 @@ impl Viewer {
             self.pick_input(ui, rect, &r, offset);
             (None, None)
         };
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         let (lo, hi) = crate::origin::held(m.scene.bounds);
         let radius = sphere(&m.scene).1;
         let scene = m.scene.bounds.map(|_| (m.scene.anchor(), radius));
         // A model just opened is fitted once, where the view's shape is known; an empty one to
         // the origin planes, until something is in it.
-        if r.double_clicked() || !self.fitted {
-            match self.sketch.as_mut().filter(|_| sketched) {
+        if r.double_clicked() || !self.doc.fitted {
+            match self.doc.sketch.as_mut().filter(|_| sketched) {
                 // On a dimension, a double click changes it; elsewhere it fits the view.
                 Some(sk) if r.double_clicked() => {
                     if sk.hover.is_none() {
                         sk.fit(scene, true);
                     }
                 }
-                _ => self.camera.fit(Some((lo, hi)), aspect),
+                _ => self.doc.camera.fit(Some((lo, hi)), aspect),
             }
-            self.fitted = true;
+            self.doc.fitted = true;
         }
         let anchor = m.scene.anchor();
-        let (view_projection, eye) = match self.sketch.as_ref().filter(|_| sketched) {
+        let (view_projection, eye) = match self.doc.sketch.as_ref().filter(|_| sketched) {
             Some(SketchEdit { turned: Some(t), .. }) => t.camera.matrices(anchor, aspect, radius),
             Some(sk) => sk.camera.matrices(anchor, aspect, radius),
-            None => self.camera.matrices(anchor, aspect, radius),
+            None => self.doc.camera.matrices(anchor, aspect, radius),
         };
         let ppp = ui.ctx().pixels_per_point();
         let [w, h] = [rect.width(), rect.height()].map(|x| (x * ppp).round() as u32);
@@ -4138,13 +4156,13 @@ impl Viewer {
         // GPU; once it stops, the view is drawn smooth again.
         let moving = self.drawn.is_some_and(|d| (d.1, d.2) != (view_projection, eye));
         let smooth_now = self.smooth && !moving;
-        let drawn = (self.version, view_projection, eye, [w, h, u32::from(smooth_now)]);
+        let drawn = (self.doc.version, view_projection, eye, [w, h, u32::from(smooth_now)]);
         // No GPU (the lessons' test on a machine without one): all but the picture works.
         if self.drawn != Some(drawn)
             && let Some(rs) = rs
         {
             let renderer = self.renderer.get_or_insert_with(|| Renderer::new(&rs.device));
-            let frame = Frame { version: self.version, geometry: self.geometry.clone(), view_projection, eye };
+            let frame = Frame { version: self.doc.version, geometry: self.doc.geometry.clone(), view_projection, eye };
             let encoder = renderer.draw(&rs.device, &rs.queue, &frame, w, h, smooth_now);
             // Submitted before egui's own commands of this frame, which show the picture.
             rs.queue.submit([encoder.finish()]);
@@ -4199,7 +4217,7 @@ impl Viewer {
         let (clip, screen) = (|q| crate::camera::clip(&view_projection, q - anchor), |c| in_rect(c, rect));
         let work: Vec<crate::origin::Square> = self.work_planes().into_iter().map(|(_, s)| s).collect();
         if !sketched {
-            let lit = match (self.picking, self.under) {
+            let lit = match (self.doc.picking, self.doc.under) {
                 (Some(_), Some(Under::Work(k))) => Some(k),
                 _ => None,
             };
@@ -4207,8 +4225,8 @@ impl Viewer {
         }
         // The origin planes while picking, and with no body yet: what work planes and sketches
         // are placed by.
-        if self.picking.is_some_and(|p| p != Purpose::Flange) || (!sketched && m.scene.bodies.is_empty()) {
-            let lit = self.picking.and_then(|purpose| match self.under {
+        if self.doc.picking.is_some_and(|p| p != Purpose::Flange) || (!sketched && m.scene.bodies.is_empty()) {
+            let lit = self.doc.picking.and_then(|purpose| match self.doc.under {
                 Some(Under::Origin(k)) => Some(k),
                 Some(_) => None,
                 None => (purpose == Purpose::Sketch).then_some(crate::origin::FIRST),
@@ -4219,7 +4237,7 @@ impl Viewer {
             crate::origin::paint_origin(&painter, clip, screen, size);
             // The points of the sketches shown, as their lines are; while a work plane is picked
             // through points (D204), every corner of the bodies too.
-            let corners = self.picking == Some(Purpose::Plane);
+            let corners = self.doc.picking == Some(Purpose::Plane);
             for (spot, p) in &m.spots {
                 let (sketch, vertex) = (spot.get("point").is_some(), spot.get("vertex").is_some());
                 if !(sketch || (corners && vertex)) {
@@ -4255,14 +4273,14 @@ impl Viewer {
             }
         };
         if !sketched {
-            for (feature, face) in &self.flange_edges {
+            for (feature, face) in &self.doc.flange_edges {
                 if let Some(body) = m.bodies.iter().position(|b| b == feature) {
                     tint(*face, body, 150);
                 }
             }
         }
-        if let Some(Under::Face(f)) = self.under.filter(|_| !sketched) {
-            for &edge in &self.contour {
+        if let Some(Under::Face(f)) = self.doc.under.filter(|_| !sketched) {
+            for &edge in &self.doc.contour {
                 tint(edge, f.body, 110);
             }
         }
@@ -4280,16 +4298,16 @@ impl Viewer {
             for l in &u.lines {
                 draw(l, egui::Stroke::new(2.0, used));
             }
-            let picked = self.flange.as_ref().and_then(|f| f.edges.as_ref());
+            let picked = self.doc.flange.as_ref().and_then(|f| f.edges.as_ref());
             for (ends, id) in &u.edges {
                 let on = picked.map_or_else(|| u.used_edges.contains(id), |p| p.contains(&format!("{id:?}")));
-                let lit = self.toggling == Some(crate::uses::Toggle::Edge(*id));
+                let lit = self.doc.toggling == Some(crate::uses::Toggle::Edge(*id));
                 if on || lit {
                     draw(ends, egui::Stroke::new(if lit { 4.0 } else { 3.0 }, if on { used } else { free }));
                 }
             }
             for (k, p) in u.profiles.iter().enumerate() {
-                let lit = self.toggling == Some(crate::uses::Toggle::Profile(k));
+                let lit = self.doc.toggling == Some(crate::uses::Toggle::Profile(k));
                 let width = if lit {
                     4.0
                 } else if p.used {
@@ -4305,16 +4323,16 @@ impl Viewer {
                 crate::origin::paint(&painter, clip, screen, std::slice::from_ref(square), size, Some(0), true);
             }
         }
-        if (self.picking.is_some() || self.waits_for_sketch())
-            && let Some(Under::Face(f)) = self.under
+        if (self.doc.picking.is_some() || self.waits_for_sketch())
+            && let Some(Under::Face(f)) = self.doc.under
         {
-            tint(f.face, f.body, if self.picking.is_some_and(|p| p != Purpose::Flange) { 90 } else { 70 });
+            tint(f.face, f.body, if self.doc.picking.is_some_and(|p| p != Purpose::Flange) { 90 } else { 70 });
         }
-        if let Some(purpose) = self.picking {
+        if let Some(purpose) = self.doc.picking {
             // A plane through points (D204): those picked, numbered, and the one under the cursor.
             if purpose == Purpose::Plane {
                 let orange = egui::Color32::from_rgb(235, 110, 20);
-                for (k, (_, p)) in self.plane_points.iter().enumerate() {
+                for (k, (_, p)) in self.doc.plane_points.iter().enumerate() {
                     if let Some(at) = on_screen(&view_projection, *p - anchor, rect) {
                         painter.circle_filled(at, 5.0, orange);
                         painter.text(
@@ -4327,14 +4345,14 @@ impl Viewer {
                     }
                 }
                 // The line under the cursor.
-                if let Some(Under::Line(k)) = self.under
+                if let Some(Under::Line(k)) = self.doc.under
                     && let Some(l) = m.lines.get(k)
                     && let (Some(a), Some(b)) =
                         (on_screen(&view_projection, l.ends[0] - anchor, rect), on_screen(&view_projection, l.ends[1] - anchor, rect))
                 {
                     painter.line_segment([a, b], egui::Stroke::new(3.0, orange));
                 }
-                if let Some(Under::Spot(k)) = self.under
+                if let Some(Under::Spot(k)) = self.doc.under
                     && let Some(at) = m.spots.get(k).and_then(|(_, p)| on_screen(&view_projection, *p - anchor, rect))
                 {
                     painter.circle_stroke(at, 7.0, egui::Stroke::new(2.0, orange));
@@ -4351,7 +4369,7 @@ impl Viewer {
                 Purpose::Trim => "Click the work plane to trim the sheet by · Esc: cancel",
                 Purpose::Mirror => self.i18n.t("mirror-pick-plane", "Click the plane or plane face to mirror the part across · Esc: cancel"),
                 Purpose::Branch => {
-                    branch_hint = match &self.branch_main {
+                    branch_hint = match &self.doc.branch_main {
                         None => "Click the main pipe · Esc: cancel".to_string(),
                         Some(main) => format!("Click the branch pipe (main: {main}) · Esc: cancel"),
                     };
@@ -4376,7 +4394,7 @@ impl Viewer {
         let (tris, lines) = (m.geometry.triangles.indices.len() / 3, m.geometry.lines.indices.len() / 2);
         let status = format!(
             "{}frame {:.1} ms (ui {:.1}) · rebuild {:.0} ms · scene {:.0} ms · {tris} triangles · {lines} edges\n{}",
-            if self.busy { "rebuilding…  " } else { "" },
+            if self.doc.busy { "rebuilding…  " } else { "" },
             self.frame_ms,
             self.ui_ms,
             m.rebuild_ms,
@@ -4395,10 +4413,10 @@ impl Viewer {
 
     /// The eligible sketch whose projected outline is nearest the cursor.
     fn loft_profile_at(&self, rect: egui::Rect, cursor: egui::Pos2) -> Option<usize> {
-        let m = self.model.as_ref()?;
+        let m = self.doc.model.as_ref()?;
         let (anchor, radius) = sphere(&m.scene);
         let aspect = f64::from(rect.width() / rect.height().max(1.0));
-        let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+        let (vp, _) = self.doc.camera.matrices(anchor, aspect, radius);
         let project = |point| on_screen(&vp, point - anchor, rect);
         m.loft_profiles
             .iter()
@@ -4426,10 +4444,10 @@ impl Viewer {
         let work = self.work_planes();
         // The extrusion's wait for a sketch also takes an end of sheet metal clicked: a flange.
         let waiting = self.waits_for_sketch();
-        if self.picking.is_none() && !waiting {
-            self.under = None;
+        if self.doc.picking.is_none() && !waiting {
+            self.doc.under = None;
         }
-        if let (Some(purpose), Some(m)) = (self.picking.or(waiting.then_some(Purpose::Flange)), &self.model) {
+        if let (Some(purpose), Some(m)) = (self.doc.picking.or(waiting.then_some(Purpose::Flange)), &self.doc.model) {
             let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
             let size = crate::origin::half(m.scene.bounds);
             let squares: Vec<crate::origin::Square> = work.iter().map(|(_, s)| s.clone()).collect();
@@ -4437,7 +4455,7 @@ impl Viewer {
             let spot = match (purpose, offset) {
                 (Purpose::Plane, Some((x, y))) => {
                     let (anchor, radius) = sphere(&m.scene);
-                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+                    let (vp, _) = self.doc.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     m.spots
                         .iter()
@@ -4451,9 +4469,9 @@ impl Viewer {
             };
             // Or else a line of a sketch, unless points are being picked.
             let line = match (purpose, offset) {
-                (Purpose::Plane, Some((x, y))) if self.plane_points.is_empty() => {
+                (Purpose::Plane, Some((x, y))) if self.doc.plane_points.is_empty() => {
                     let (anchor, radius) = sphere(&m.scene);
-                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+                    let (vp, _) = self.doc.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     m.lines
                         .iter()
@@ -4470,7 +4488,7 @@ impl Viewer {
                 }
                 _ => None,
             };
-            self.under = offset.and_then(|(x, y)| {
+            self.doc.under = offset.and_then(|(x, y)| {
                 if let Some(k) = spot {
                     return Some(Under::Spot(k));
                 }
@@ -4478,12 +4496,12 @@ impl Viewer {
                     return Some(Under::Line(k));
                 }
                 let (anchor, radius) = sphere(&m.scene);
-                let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
+                let (origin, dir) = self.doc.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
                 if purpose == Purpose::Flange {
                     // An end by its edge, within a few pixels, as a flange is picked in Inventor;
                     // else the narrow end face itself under the cursor.
                     let (anchor, radius) = sphere(&m.scene);
-                    let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+                    let (vp, _) = self.doc.camera.matrices(anchor, aspect, radius);
                     let cursor = rect.center() + egui::vec2(x as f32, y as f32);
                     let near = m
                         .ends
@@ -4520,10 +4538,10 @@ impl Viewer {
                 [first, planes].into_iter().flatten().min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, u)| u)
             });
             // A face under the cursor (an edge has no normal): the contour of it nearest the cursor.
-            self.contour = match (purpose, self.under, offset) {
+            self.doc.contour = match (purpose, self.doc.under, offset) {
                 (Purpose::Flange, Some(Under::Face(f)), Some((x, y))) if f.normal != datum_math::Vec3::ZERO => {
                     let (anchor, radius) = sphere(&m.scene);
-                    let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
+                    let (origin, dir) = self.doc.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
                     let on_body = m.contours.iter().filter(|(k, _)| *k == f.body).map(|(_, c)| c);
                     crate::uses::nearest_contour(on_body, f.face, origin + dir * f.distance)
                         .map_or_else(Vec::new, |c| c.edges.iter().map(|e| e.0).collect())
@@ -4531,41 +4549,43 @@ impl Viewer {
                 _ => Vec::new(),
             };
             if r.clicked() {
-                chosen = self.under.map(|u| (purpose, u));
+                chosen = self.doc.under.map(|u| (purpose, u));
             } else if purpose == Purpose::Sketch && (r.secondary_clicked() || ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                 chosen = Some((purpose, Under::Origin(crate::origin::FIRST)));
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                self.picking = None;
-                self.plane_points.clear();
-                self.flange_edges.clear();
-                self.branch_main = None;
-            } else if self.picking == Some(Purpose::Flange) && !self.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.doc.picking = None;
+                self.doc.plane_points.clear();
+                self.doc.flange_edges.clear();
+                self.doc.branch_main = None;
+            } else if self.doc.picking == Some(Purpose::Flange) && !self.doc.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            {
                 self.open_flange();
             }
         }
         // A click on a body in 3D (no pick asked for) takes its part for the toolbar's material and
         // rule, and brings its flat pattern forward (D164).
-        if self.picking.is_none()
+        if self.doc.picking.is_none()
             && self.sketch_in_3d().is_none()
             && r.clicked()
-            && let (Some(m), Some((x, y))) = (&self.model, offset)
+            && let (Some(m), Some((x, y))) = (&self.doc.model, offset)
         {
             let (anchor, radius) = sphere(&m.scene);
-            let (origin, dir) = self.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect, anchor, radius);
+            let (origin, dir) =
+                self.doc.camera.ray(x / (f64::from(rect.width()) * 0.5), -y / (f64::from(rect.height()) * 0.5), aspect, anchor, radius);
             let hit = m.scene.pick(origin, dir);
             let named = hit.and_then(|f| m.bodies.get(f.body)).cloned();
             // A body is named by its last feature, its part by the first.
             let part = hit.and_then(|f| m.begun.get(f.body)).cloned();
-            self.part = part.filter(|n| m.inspect["parts"].as_array().into_iter().flatten().any(|p| p["part"] == *n));
+            self.doc.part = part.filter(|n| m.inspect["parts"].as_array().into_iter().flatten().any(|p| p["part"] == *n));
             // Whether the pane is open is not known here: the dock is out of `self` while the
             // panes are drawn. A pane opened later shows the body clicked last.
             if let Some(n) = named.filter(|n| m.flats.iter().any(|(f, _)| f == n)) {
-                self.flat.chosen = Some(n);
+                self.doc.flat.chosen = Some(n);
             }
         }
         // What a pick refers to in a feature: an origin plane, a work plane, a body's face.
-        let body = |v: &Self, f: crate::scene::Hit| v.model.as_ref().map(|m| m.bodies[f.body].clone());
+        let body = |v: &Self, f: crate::scene::Hit| v.doc.model.as_ref().map(|m| m.bodies[f.body].clone());
         match chosen {
             Some((Purpose::Sketch, Under::Origin(k))) => self.new_sketch(crate::origin::sketch_fields(k)),
             Some((Purpose::Sketch, Under::Work(k))) => self.new_sketch(json!({"inputs": [work[k].0]})),
@@ -4575,40 +4595,40 @@ impl Viewer {
             }
             // A third point picked: the plane through the three, its offset 0.
             Some((Purpose::Plane, Under::Spot(k))) => {
-                let Some(spot) = self.model.as_ref().and_then(|m| m.spots.get(k).cloned()) else { return };
-                if !self.plane_points.iter().any(|(s, _)| *s == spot.0) {
-                    self.plane_points.push(spot);
+                let Some(spot) = self.doc.model.as_ref().and_then(|m| m.spots.get(k).cloned()) else { return };
+                if !self.doc.plane_points.iter().any(|(s, _)| *s == spot.0) {
+                    self.doc.plane_points.push(spot);
                 }
-                if self.plane_points.len() == 3 {
-                    self.plane_draft = Some((through_points(&self.plane_points), "0".into()));
-                    self.plane_points.clear();
-                    self.picking = None;
+                if self.doc.plane_points.len() == 3 {
+                    self.doc.plane_draft = Some((through_points(&self.doc.plane_points), "0".into()));
+                    self.doc.plane_points.clear();
+                    self.doc.picking = None;
                 }
             }
             // A line picked: the plane through it, square to its sketch.
             Some((Purpose::Plane, Under::Line(k))) => {
-                self.plane_draft = self.model.as_ref().and_then(|m| m.lines.get(k)).map(PlaneLine::plane_draft);
-                self.picking = None;
+                self.doc.plane_draft = self.doc.model.as_ref().and_then(|m| m.lines.get(k)).map(PlaneLine::plane_draft);
+                self.doc.picking = None;
             }
             // Points and lines are picked for a work plane alone.
             Some((Purpose::Sketch | Purpose::Look, Under::Spot(_) | Under::Line(_))) => {}
             // An end clicked: alone it is the selection; with Shift or Ctrl it is added or left.
             Some((Purpose::Flange, Under::Face(f))) => {
                 let Some(feature) = body(self, f) else { return };
-                if self.extrusion.is_some() {
-                    self.extrusion = None;
-                    self.flange_edges.clear();
+                if self.doc.extrusion.is_some() {
+                    self.doc.extrusion = None;
+                    self.doc.flange_edges.clear();
                 }
-                self.picking = Some(Purpose::Flange);
+                self.doc.picking = Some(Purpose::Flange);
                 // An edge, or all the contour of the face under the cursor.
-                let picks: Vec<(String, datum_brep::TopoId)> = if self.contour.is_empty() {
+                let picks: Vec<(String, datum_brep::TopoId)> = if self.doc.contour.is_empty() {
                     vec![(feature.clone(), f.face)]
                 } else {
-                    self.contour.iter().map(|&e| (feature.clone(), e)).collect()
+                    self.doc.contour.iter().map(|&e| (feature.clone(), e)).collect()
                 };
-                let same_body = self.flange_edges.first().is_none_or(|(b, _)| *b == feature);
+                let same_body = self.doc.flange_edges.first().is_none_or(|(b, _)| *b == feature);
                 let adding = crate::select::adding(&ui.input(|i| i.modifiers)) && same_body;
-                crate::select::click(&mut self.flange_edges, picks, adding);
+                crate::select::click(&mut self.doc.flange_edges, picks, adding);
             }
             Some((Purpose::Flange, _)) => {}
             Some((Purpose::Trim, Under::Work(k))) => self.open_trim(work[k].0.clone()),
@@ -4640,20 +4660,20 @@ impl Viewer {
                     Under::Face(f) => json!({"inputs": [body(self, f)], "face": format!("{:?}", f.face)}),
                     Under::Spot(_) | Under::Line(_) => return,
                 };
-                self.plane_draft = Some((from, "10".into()));
-                self.plane_points.clear();
-                self.picking = None;
+                self.doc.plane_draft = Some((from, "10".into()));
+                self.doc.plane_points.clear();
+                self.doc.picking = None;
             }
             Some((Purpose::Look, under)) => {
-                let forward = self.camera.axes().2;
+                let forward = self.doc.camera.axes().2;
                 let normal = match under {
                     Under::Face(f) => f.normal,
                     Under::Origin(k) => crate::origin::origin_squares()[k].normal_towards(forward),
                     Under::Work(k) => work[k].1.normal_towards(forward),
                     Under::Spot(_) | Under::Line(_) => return,
                 };
-                self.turn = Some(crate::cube::Turn::toward(&self.camera, normal, ui.input(|i| i.time), false));
-                self.picking = None;
+                self.doc.turn = Some(crate::cube::Turn::toward(&self.doc.camera, normal, ui.input(|i| i.time), false));
+                self.doc.picking = None;
                 ui.ctx().request_repaint();
             }
             None => {}
@@ -4662,12 +4682,12 @@ impl Viewer {
 
     /// Whether the extrusion form waits for a sketch to be clicked in the tree.
     fn waits_for_sketch(&self) -> bool {
-        self.picking.is_none() && self.extrusion.as_ref().is_some_and(|x| x.sketch.is_none())
+        self.doc.picking.is_none() && self.doc.extrusion.as_ref().is_some_and(|x| x.sketch.is_none())
     }
 
     /// The model's work planes (D150) that are made, by feature, as squares about the model.
     fn work_planes(&self) -> Vec<(String, crate::origin::Square)> {
-        let Some(m) = &self.model else { return Vec::new() };
+        let Some(m) = &self.doc.model else { return Vec::new() };
         let near = m.scene.anchor();
         m.inspect["features"]
             .as_array()
@@ -4748,7 +4768,7 @@ impl Viewer {
                     Some(Ok(())) => {
                         self.fillet_presets = fillet;
                         self.chamfer_presets = chamfer;
-                        if let Some(sk) = &mut self.sketch {
+                        if let Some(sk) = &mut self.doc.sketch {
                             sk.draft.fillet_presets = self.fillet_presets.clone();
                             sk.draft.chamfer_presets = self.chamfer_presets.clone();
                         }
@@ -4766,13 +4786,13 @@ impl Viewer {
     /// as the side bar sends them.
     fn table_window(&mut self, ctx: &egui::Context, frame: Option<&eframe::Frame>) {
         use crate::table::{MATERIALS, RULES, Source, TOOLS};
-        let Some((source, mut editor)) = self.table.take() else { return };
+        let Some((source, mut editor)) = self.doc.table.take() else { return };
         // The presets are those of the element being kept; the others are the model's or the library's.
-        if source == Source::Presets && self.keeping.is_none() || source != Source::Presets && self.model.is_none() {
+        if source == Source::Presets && self.keeping.is_none() || source != Source::Presets && self.doc.model.is_none() {
             return;
         }
         let null = Json::Null;
-        let inspect = self.model.as_ref().map_or(&null, |m| &m.inspect);
+        let inspect = self.doc.model.as_ref().map_or(&null, |m| &m.inspect);
         let element = self.keeping.as_ref().map_or(&null, |k| &k.element);
         let materials: Vec<String> = self.materials.iter().filter_map(|e| e["name"].as_str().map(String::from)).collect();
         if source == Source::Rules && !self.rule_material.as_ref().is_some_and(|s| materials.contains(s)) {
@@ -4781,7 +4801,7 @@ impl Viewer {
         let selected = self.rule_material.clone();
         let rules: Vec<Json> = self.rules.iter().filter(|r| selected.as_ref().is_some_and(|s| r["material"] == *s)).cloned().collect();
         let (table, title) = match source {
-            Source::Parameters => (crate::table::parameters(inspect, &self.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
+            Source::Parameters => (crate::table::parameters(inspect, &self.doc.new_parameter, &self.i18n), self.i18n.t("table-title", "Parameters")),
             Source::Materials => (
                 crate::table::records(&MATERIALS, &self.materials, &self.new_material, &self.i18n),
                 self.i18n.t("table-materials-title", "Materials"),
@@ -4831,7 +4851,7 @@ impl Viewer {
         };
         let (mut sent, error) = match (source, &selected) {
             (Source::Parameters, _) => {
-                let (mut sent, error) = crate::table::parameter_requests(inspect, &mut self.new_parameter, &out.edits, i18n);
+                let (mut sent, error) = crate::table::parameter_requests(inspect, &mut self.doc.new_parameter, &out.edits, i18n);
                 sent.extend(crate::table::remove_requests(inspect, &out.delete));
                 (sent, error)
             }
@@ -4853,20 +4873,20 @@ impl Viewer {
         for r in sent.drain(..) {
             self.send(r);
         }
-        self.table = (!closed).then_some((source, editor));
+        self.doc.table = (!closed).then_some((source, editor));
     }
 
     /// E: the form of an extrusion at `at`, for the sketch open (left), else the only one not
     /// used yet, else the one clicked in the tree.
     fn extrude(&mut self, at: egui::Pos2) {
         // Ends of sheet metal picked: a flange on them, not an extrusion.
-        if self.sketch.is_none() && !self.flange_edges.is_empty() {
+        if self.doc.sketch.is_none() && !self.doc.flange_edges.is_empty() {
             self.open_flange();
             return;
         }
         // The contours selected in the open sketch; with none selected and several regions, they
         // are to be selected first.
-        let profiles: Vec<String> = self.sketch.as_ref().map_or_else(Vec::new, |sk| {
+        let profiles: Vec<String> = self.doc.sketch.as_ref().map_or_else(Vec::new, |sk| {
             let keeps = |n: &str| {
                 sk.placed.as_ref().is_ok_and(|p| {
                     p.lines
@@ -4882,18 +4902,18 @@ impl Viewer {
         // On a face or the blank of sheet metal a cut takes all the sketch holds, as a perforation
         // does: closed contours and lines alike (D235). What is not to be cut is construction, or
         // another sketch.
-        let cuts_sheet = self.sketch.as_ref().is_some_and(|sk| matches!(self.plain_kind(Some(&sk.feature)), Kind::SheetCut));
-        let chain = self.sketch.as_ref().filter(|_| !cuts_sheet).and_then(|sk| sheet_chain(sk, &profiles, at, self.sketch_rect));
+        let cuts_sheet = self.doc.sketch.as_ref().is_some_and(|sk| matches!(self.plain_kind(Some(&sk.feature)), Kind::SheetCut));
+        let chain = self.doc.sketch.as_ref().filter(|_| !cuts_sheet).and_then(|sk| sheet_chain(sk, &profiles, at, self.doc.sketch_rect));
         let profiles = if chain.is_some() || cuts_sheet { Vec::new() } else { profiles };
         if profiles.is_empty()
             && !cuts_sheet
             && chain.is_none()
-            && let Some(sk) = &self.sketch
+            && let Some(sk) = &self.doc.sketch
             && let Ok(p) = &sk.placed
             && let (regions, chains) = candidates(sk, p)
             && regions + chains.len() > 1
         {
-            self.contour_hint = Some((at, std::time::Instant::now(), Act::Extrude));
+            self.doc.contour_hint = Some((at, std::time::Instant::now(), Act::Extrude));
             return;
         }
         let sketch = self.sketch_to_use();
@@ -4903,7 +4923,7 @@ impl Viewer {
         };
         let name = self.feature_name(kind.command());
         let mode = if matches!(kind, Kind::SheetCut) && self.adds_by_default(&profiles) { Some("join") } else { None };
-        self.extrusion = Some(Extrusion {
+        self.doc.extrusion = Some(Extrusion {
             sketch,
             name,
             profiles,
@@ -4925,10 +4945,10 @@ impl Viewer {
 
     /// Whether the open sketch lies on a blank and its profile `profiles` is off it (`adds_to_blank`).
     fn adds_by_default(&self, profiles: &[String]) -> bool {
-        let Some(sk) = self.sketch.as_ref().filter(|sk| sk.on_blank()) else { return false };
+        let Some(sk) = self.doc.sketch.as_ref().filter(|sk| sk.on_blank()) else { return false };
         let Ok(placed) = &sk.placed else { return false };
         let input = sk.json["inputs"][0].as_str();
-        let Some((_, Ok(flat))) = self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| Some(n.as_str()) == input)) else { return false };
+        let Some((_, Ok(flat))) = self.doc.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| Some(n.as_str()) == input)) else { return false };
         let outline: Vec<Vec2> = flat.ends.iter().map(|e| e[0]).collect();
         adds_to_blank(&outline, &profile_points(placed, profiles))
     }
@@ -4936,9 +4956,9 @@ impl Viewer {
     /// The sketch E and R work on: the one open (left, as the form comes), else the only one drawn
     /// and not used yet.
     fn sketch_to_use(&mut self) -> Option<String> {
-        let open = self.sketch.as_ref().map(|s| s.feature.clone());
+        let open = self.doc.sketch.as_ref().map(|s| s.feature.clone());
         self.leave();
-        let features = self.model.as_ref()?.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
+        let features = self.doc.model.as_ref()?.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
         let used = |name: &str| {
             features.iter().any(|f| f["op"] != "sketch" && f["inputs"].as_array().is_some_and(|i| i.iter().any(|n| n.as_str() == Some(name))))
         };
@@ -4955,7 +4975,7 @@ impl Viewer {
     /// one line beside the axis, rolled sheet metal by the toolbar's sheet rule.
     fn revolve(&mut self, at: egui::Pos2) {
         let found = self.sketch_to_use().and_then(|name| {
-            let f = self.model.as_ref()?.inspect["features"].as_array()?.iter().find(|f| f["name"] == name.as_str())?;
+            let f = self.doc.model.as_ref()?.inspect["features"].as_array()?.iter().find(|f| f["name"] == name.as_str())?;
             let sketch = &f["sketch"];
             let lines: BTreeMap<String, bool> = sketch["lines"].as_object()?.iter().map(|(n, l)| (n.clone(), l["construction"] == true)).collect();
             let curved = ["arcs", "circles"].iter().any(|k| sketch[k].as_object().is_some_and(|m| m.values().any(|c| c["construction"] != true)));
@@ -4976,16 +4996,16 @@ impl Viewer {
             Some((name, lines.into_iter().collect::<Vec<_>>(), axis, beside == 1 && !curved))
         });
         let Some((sketch, lines, axis, single)) = found else {
-            self.contour_hint = Some((at, std::time::Instant::now(), Act::Revolve));
+            self.doc.contour_hint = Some((at, std::time::Instant::now(), Act::Revolve));
             return;
         };
-        self.flange = None;
-        self.flange_edges.clear();
-        self.picking = None;
+        self.doc.flange = None;
+        self.doc.flange_edges.clear();
+        self.doc.picking = None;
         // One line has no closed profile to turn into a body: it can only be rolled, by a rule.
         let turned = if single { Turned::Rolled } else { Turned::Revolve };
         let name = self.feature_name(if turned == Turned::Rolled { "rolled" } else { "revolve" });
-        self.revolve = Some(RevolveForm {
+        self.doc.revolve = Some(RevolveForm {
             name,
             sketch,
             lines,
@@ -5003,7 +5023,7 @@ impl Viewer {
 
     /// The lines of sketch feature `sketch`, with whether each is a construction line.
     fn sketch_lines(&self, sketch: &str) -> Vec<(String, bool)> {
-        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
+        let features = self.doc.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
         let f = features.iter().find(|f| f["name"] == sketch);
         f.and_then(|f| f["sketch"]["lines"].as_object())
             .map_or_else(Vec::new, |m| m.iter().map(|(n, l)| (n.clone(), l["construction"] == true)).collect())
@@ -5012,13 +5032,15 @@ impl Viewer {
     /// The form of feature `name` (a revolution, rolled sheet or trim), opened from the tree with
     /// its values: OK changes it.
     fn reedit(&mut self, name: &str) {
-        let Some(f) = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == name).cloned()) else { return };
+        let Some(f) = self.doc.model.as_ref().and_then(|m| m.inspect["features"].as_array()?.iter().find(|f| f["name"] == name).cloned()) else {
+            return;
+        };
         self.leave();
         let input = |k: usize| f["inputs"][k].as_str().unwrap_or_default().to_string();
         match f["op"].as_str() {
             Some(op @ ("revolve" | "rolled")) => {
                 let sketch = input(0);
-                self.revolve = Some(RevolveForm {
+                self.doc.revolve = Some(RevolveForm {
                     name: name.to_string(),
                     lines: self.sketch_lines(&sketch),
                     sketch,
@@ -5040,7 +5062,7 @@ impl Viewer {
                     (None, true) => input(1),
                 };
                 let turn: Option<datum_ops::TurnAxis> = serde_json::from_value(f["turn"].clone()).ok().flatten();
-                self.mirror = Some(MirrorForm {
+                self.doc.mirror = Some(MirrorForm {
                     name: name.to_string(),
                     body: input(0),
                     plane: Json::Null,
@@ -5052,20 +5074,20 @@ impl Viewer {
                 });
             }
             Some("trim") => {
-                self.trim =
+                self.doc.trim =
                     Some(TrimForm { name: name.to_string(), body: input(0), plane: input(1), flip: f["flip"] == true, editing: true, sent: None });
             }
             Some("rib") => {
-                self.rib = Some(RibForm::editing(name.to_string(), input(0), input(1), f["tool"].as_str().map(String::from), f["flip"] == true));
+                self.doc.rib = Some(RibForm::editing(name.to_string(), input(0), input(1), f["tool"].as_str().map(String::from), f["flip"] == true));
             }
-            Some("edge_finish") => self.edge_finish = Some(EdgeFinishForm::editing(name.to_string(), &f)),
+            Some("edge_finish") => self.doc.edge_finish = Some(EdgeFinishForm::editing(name.to_string(), &f)),
             Some("loft") => {
                 self.clear_loft_selection();
-                self.part = Some(name.to_string());
-                self.loft = Some(LoftForm::editing(name.to_string(), &f));
+                self.doc.part = Some(name.to_string());
+                self.doc.loft = Some(LoftForm::editing(name.to_string(), &f));
             }
             Some("flange") => {
-                self.flange = Some(FlangeForm {
+                self.doc.flange = Some(FlangeForm {
                     name: name.to_string(),
                     height: definition(&f["height"]),
                     angle: if f["angle"].is_null() { "90".into() } else { definition(&f["angle"]) },
@@ -5101,7 +5123,7 @@ impl Viewer {
                 });
             }
             Some(op @ ("extrude" | "sheet" | "plate")) => {
-                let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array().cloned()).unwrap_or_default();
+                let features = self.doc.model.as_ref().and_then(|m| m.inspect["features"].as_array().cloned()).unwrap_or_default();
                 let is_sketch = |n: &str| features.iter().any(|g| g["name"] == n && g["op"] == "sketch");
                 let sketch = f["inputs"].as_array().into_iter().flatten().filter_map(Json::as_str).find(|n| is_sketch(n)).map(String::from);
                 let (depth, symmetric) = match op {
@@ -5119,7 +5141,7 @@ impl Viewer {
                 };
                 // A body of its own is written without `mode`.
                 let mode = EXTRUDE_MODES.into_iter().chain(["intersect"]).find(|m| f["mode"] == *m).or(Some("new"));
-                self.extrusion = Some(Extrusion {
+                self.doc.extrusion = Some(Extrusion {
                     sketch,
                     name: name.to_string(),
                     profiles: f["profiles"].as_array().into_iter().flatten().filter_map(Json::as_str).map(String::from).collect(),
@@ -5130,7 +5152,7 @@ impl Viewer {
                     kind,
                     flip: f["flip"] == true,
                     side: serde_json::from_value(f["side"].clone()).unwrap_or(datum_ops::Side::Left),
-                    at: self.viewport.center(),
+                    at: self.doc.viewport.center(),
                     sent: None,
                     selected: false,
                     editing: true,
@@ -5144,30 +5166,30 @@ impl Viewer {
 
     /// The feature an open form changes.
     fn edited_feature(&self) -> Option<String> {
-        let flange = self.flange.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        let revolve = self.revolve.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        let trim = self.trim.as_ref().filter(|f| f.editing).map(|f| &f.name).or(self.rib.as_ref().and_then(RibForm::edited));
-        let mirror = self.mirror.as_ref().filter(|f| f.editing).map(|f| &f.name);
-        let extrusion = self.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let flange = self.doc.flange.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let revolve = self.doc.revolve.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let trim = self.doc.trim.as_ref().filter(|f| f.editing).map(|f| &f.name).or(self.doc.rib.as_ref().and_then(RibForm::edited));
+        let mirror = self.doc.mirror.as_ref().filter(|f| f.editing).map(|f| &f.name);
+        let extrusion = self.doc.extrusion.as_ref().filter(|f| f.editing).map(|f| &f.name);
         flange
             .or(revolve)
             .or(trim)
             .or(mirror)
             .or(extrusion)
-            .or(self.loft.as_ref().and_then(LoftForm::edited))
-            .or(self.edge_finish.as_ref().and_then(EdgeFinishForm::edited))
+            .or(self.doc.loft.as_ref().and_then(LoftForm::edited))
+            .or(self.doc.edge_finish.as_ref().and_then(EdgeFinishForm::edited))
             .cloned()
     }
 
     /// With a form changing a feature, Shift or Ctrl held: what is under the cursor of what the
     /// feature may stand on is lit, and a click takes it in or out (D234).
     fn toggle_uses(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>, aspect: f64) {
-        self.toggling = None;
+        self.doc.toggling = None;
         let adding = crate::select::adding(&ui.input(|i| i.modifiers));
-        let (Some(m), Some((x, y)), true, true) = (&self.model, offset, adding, self.edited_feature().is_some()) else { return };
+        let (Some(m), Some((x, y)), true, true) = (&self.doc.model, offset, adding, self.edited_feature().is_some()) else { return };
         let Some(u) = &m.uses else { return };
         let (anchor, radius) = sphere(&m.scene);
-        let (vp, _) = self.camera.matrices(anchor, aspect, radius);
+        let (vp, _) = self.doc.camera.matrices(anchor, aspect, radius);
         let cursor = rect.center() + egui::vec2(x as f32, y as f32);
         let distance = |[a, b]: [datum_math::Vec3; 2]| {
             let (a, b) = (on_screen(&vp, a - anchor, rect)?, on_screen(&vp, b - anchor, rect)?);
@@ -5175,16 +5197,16 @@ impl Viewer {
             let t = ((cursor - a).dot(d) / d.length_sq().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
             Some((a + d * t).distance(cursor))
         };
-        self.toggling = u.nearest(distance, 6.0);
+        self.doc.toggling = u.nearest(distance, 6.0);
         if !r.clicked() {
             return;
         }
         // No edge there: the contour of the face clicked, if the flange may stand on it.
-        if self.toggling.is_none()
-            && let Some(f) = self.flange.as_mut()
+        if self.doc.toggling.is_none()
+            && let Some(f) = self.doc.flange.as_mut()
         {
             let half = (f64::from(rect.width()) * 0.5, f64::from(rect.height()) * 0.5);
-            let (origin, dir) = self.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
+            let (origin, dir) = self.doc.camera.ray(x / half.0, -y / half.1, aspect, anchor, radius);
             let Some(hit) = m.scene.pick(origin, dir) else { return };
             let Some(contour) = crate::uses::nearest_contour(u.contours.iter(), hit.face, origin + dir * hit.distance) else { return };
             let now = f.edges.clone().unwrap_or_else(|| u.used_edges.iter().map(|e| format!("{e:?}")).collect());
@@ -5193,19 +5215,19 @@ impl Viewer {
             }
             return;
         }
-        match self.toggling {
+        match self.doc.toggling {
             Some(crate::uses::Toggle::Edge(id)) => {
                 let now =
-                    self.flange.as_ref().and_then(|f| f.edges.clone()).unwrap_or_else(|| u.used_edges.iter().map(|e| format!("{e:?}")).collect());
-                if let (Some(next), Some(f)) = (crate::uses::toggled_edge(&now, id), &mut self.flange) {
+                    self.doc.flange.as_ref().and_then(|f| f.edges.clone()).unwrap_or_else(|| u.used_edges.iter().map(|e| format!("{e:?}")).collect());
+                if let (Some(next), Some(f)) = (crate::uses::toggled_edge(&now, id), &mut self.doc.flange) {
                     f.edges = Some(next);
                 }
             }
             Some(crate::uses::Toggle::Profile(k)) => {
                 let next = u.toggled_profile(k);
-                if let Some(x) = self.extrusion.as_mut().filter(|_| next.is_some()) {
+                if let Some(x) = self.doc.extrusion.as_mut().filter(|_| next.is_some()) {
                     x.picked.clone_from(&next);
-                } else if let Some(f) = self.revolve.as_mut().filter(|_| next.is_some()) {
+                } else if let Some(f) = self.doc.revolve.as_mut().filter(|_| next.is_some()) {
                     f.picked.clone_from(&next);
                 }
             }
@@ -5216,9 +5238,9 @@ impl Viewer {
     /// What a form says of the feature it changes: what it is made of, how much of it, and how to
     /// change that if a click can.
     fn uses_note(&self) -> Option<(String, Option<String>)> {
-        let u = self.model.as_ref()?.uses.as_ref()?;
+        let u = self.doc.model.as_ref()?.uses.as_ref()?;
         let mut note = self.i18n.f("uses-inputs", "Uses: { $names }", &[("names", &u.inputs.join(", "))]);
-        let edges = self.flange.as_ref().and_then(|f| f.edges.as_ref()).map_or(u.used_edges.len(), Vec::len);
+        let edges = self.doc.flange.as_ref().and_then(|f| f.edges.as_ref()).map_or(u.used_edges.len(), Vec::len);
         if !u.edges.is_empty() {
             note += " · ";
             note += &self.i18n.f("uses-edges", "edges: { $count }", &[("count", &edges.to_string())]);
@@ -5235,7 +5257,7 @@ impl Viewer {
 
     /// Drops the revolution form, and the preview it made.
     fn close_revolve(&mut self) {
-        if let Some(r) = self.revolve.take()
+        if let Some(r) = self.doc.revolve.take()
             && r.sent.is_some()
         {
             self.send(Request::Preview(None));
@@ -5248,9 +5270,9 @@ impl Viewer {
     fn revolve_window(&mut self, ctx: &egui::Context) {
         let rule = self.sheet_rule();
         let note = self.uses_note();
-        let Some(f) = &mut self.revolve else { return };
+        let Some(f) = &mut self.doc.revolve else { return };
         let shown = f.params(rule.as_deref());
-        let preview = shown.as_ref().and_then(|(_, params)| self.model.as_ref()?.preview.as_ref().filter(|(p, _)| p == params).map(|(_, r)| r));
+        let preview = shown.as_ref().and_then(|(_, params)| self.doc.model.as_ref()?.preview.as_ref().filter(|(p, _)| p == params).map(|(_, r)| r));
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::Revolve))
@@ -5341,9 +5363,9 @@ impl Viewer {
     /// body, an extrusion, or a cut through the wall of sheet metal; off a face, a plate when a
     /// sheet rule is chosen.
     fn plain_kind(&self, sketch: Option<&str>) -> Kind {
-        let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
+        let features = self.doc.model.as_ref().and_then(|m| m.inspect["features"].as_array()).map_or(&[][..], Vec::as_slice);
         match sketch {
-            Some(s) if Self::on_face(self.model.as_ref(), s) => {
+            Some(s) if Self::on_face(self.doc.model.as_ref(), s) => {
                 if on_sheet(features, s) {
                     Kind::SheetCut
                 } else {
@@ -5367,63 +5389,63 @@ impl Viewer {
 
     /// The first free name of `command` + a number: `extrude1`, `plate2`.
     fn feature_name(&self, command: &str) -> String {
-        free_feature_name(self.model.as_ref().map_or(&Json::Null, |m| &m.inspect), command)
+        free_feature_name(self.doc.model.as_ref().map_or(&Json::Null, |m| &m.inspect), command)
     }
 
     /// A body clicked while a branch pipe is asked for: the first rolled one is the main pipe, the
     /// second another rolled one makes the branch command.
     fn branch_click(&mut self, clicked: usize) {
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         if !rolled_part(m, clicked) {
             return;
         }
         let feature = m.bodies[clicked].clone();
-        match self.branch_main.clone() {
-            None => self.branch_main = Some(feature),
+        match self.doc.branch_main.clone() {
+            None => self.doc.branch_main = Some(feature),
             Some(main) if main == feature => {}
             Some(main) => {
                 let params =
                     json!({"main": main, "branch": feature, "hole": self.feature_name("branch_hole"), "saddle": self.feature_name("saddle")});
                 self.send(Request::Command("branch", params));
-                self.picking = None;
-                self.under = None;
-                self.branch_main = None;
+                self.doc.picking = None;
+                self.doc.under = None;
+                self.doc.branch_main = None;
             }
         }
     }
 
     /// The feature of the rolled sheet a trim goes to: the only one, else the part clicked last.
     fn trim_body(&self) -> Option<String> {
-        let m = self.model.as_ref()?;
+        let m = self.doc.model.as_ref()?;
         let rolled =
             |b: &String| m.inspect["features"].as_array().is_some_and(|fs| fs.iter().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"));
         let mut sheets = m.bodies.iter().zip(&m.begun).filter(|(_, b)| rolled(b));
         let first = sheets.next()?;
         match sheets.next() {
             None => Some(first.0.clone()),
-            Some(second) => [first, second].into_iter().chain(sheets).find(|(_, b)| self.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
+            Some(second) => [first, second].into_iter().chain(sheets).find(|(_, b)| self.doc.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
         }
     }
 
     /// The feature a mirror goes from: the only part, else the part clicked last.
     fn mirror_body(&self) -> Option<String> {
-        let m = self.model.as_ref()?;
+        let m = self.doc.model.as_ref()?;
         let mut parts = m.bodies.iter().zip(&m.begun).filter(|(_, b)| !is_turned_copy(&m.inspect, b));
         let first = parts.next()?;
         match parts.next() {
             None => Some(first.0.clone()),
-            Some(second) => [first, second].into_iter().chain(parts).find(|(_, b)| self.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
+            Some(second) => [first, second].into_iter().chain(parts).find(|(_, b)| self.doc.part.as_ref() == Some(*b)).map(|(body, _)| body.clone()),
         }
     }
 
     /// Opens the form of a mirror of `body` across `plane`, and stops picking.
     fn open_mirror(&mut self, body: String, plane: Json, plane_label: String) {
         self.close_revolve();
-        self.flange = None;
-        self.flange_edges.clear();
-        self.picking = None;
-        self.under = None;
-        self.mirror = Some(MirrorForm {
+        self.doc.flange = None;
+        self.doc.flange_edges.clear();
+        self.doc.picking = None;
+        self.doc.under = None;
+        self.doc.mirror = Some(MirrorForm {
             name: self.feature_name("mirror"),
             body,
             plane,
@@ -5437,7 +5459,7 @@ impl Viewer {
 
     /// Drops the mirror form, and the preview it made.
     fn close_mirror(&mut self) {
-        if let Some(m) = self.mirror.take()
+        if let Some(m) = self.doc.mirror.take()
             && m.sent.is_some()
         {
             self.send(Request::Preview(None));
@@ -5449,9 +5471,9 @@ impl Viewer {
     /// refused, Esc or Cancel drops it.
     fn mirror_window(&mut self, ctx: &egui::Context) {
         let note = self.uses_note();
-        let Some(f) = &mut self.mirror else { return };
+        let Some(f) = &mut self.doc.mirror else { return };
         let (command, params) = f.params();
-        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let preview = self.doc.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::MirrorPart))
@@ -5482,10 +5504,10 @@ impl Viewer {
             });
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if cancel || esc {
-            self.mirror = None;
+            self.doc.mirror = None;
             self.send(Request::Preview(None));
         } else if (add || enter) && ok {
-            self.mirror = None;
+            self.doc.mirror = None;
             self.send(Request::Preview(None));
             self.send(Request::Command(command, params));
         } else {
@@ -5501,16 +5523,16 @@ impl Viewer {
     fn open_trim(&mut self, plane: String) {
         let Some(body) = self.trim_body() else { return };
         self.close_revolve();
-        self.flange = None;
-        self.flange_edges.clear();
-        self.picking = None;
-        self.under = None;
-        self.trim = Some(TrimForm { name: self.feature_name("trim"), body, plane, flip: false, editing: false, sent: None });
+        self.doc.flange = None;
+        self.doc.flange_edges.clear();
+        self.doc.picking = None;
+        self.doc.under = None;
+        self.doc.trim = Some(TrimForm { name: self.feature_name("trim"), body, plane, flip: false, editing: false, sent: None });
     }
 
     /// Drops the trim form, and the preview it made.
     fn close_trim(&mut self) {
-        if let Some(t) = self.trim.take()
+        if let Some(t) = self.doc.trim.take()
             && t.sent.is_some()
         {
             self.send(Request::Preview(None));
@@ -5522,9 +5544,9 @@ impl Viewer {
     /// drops it.
     fn trim_window(&mut self, ctx: &egui::Context) {
         let note = self.uses_note();
-        let Some(f) = &mut self.trim else { return };
+        let Some(f) = &mut self.doc.trim else { return };
         let (command, params) = f.params();
-        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let preview = self.doc.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::Trim))
@@ -5548,10 +5570,10 @@ impl Viewer {
             });
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if cancel || esc {
-            self.trim = None;
+            self.doc.trim = None;
             self.send(Request::Preview(None));
         } else if (add || enter) && ok {
-            self.trim = None;
+            self.doc.trim = None;
             self.send(Request::Preview(None));
             self.send(Request::Command(command, params));
         } else {
@@ -5566,9 +5588,9 @@ impl Viewer {
     /// Opens the form of a flange on the ends picked, and stops picking.
     fn open_flange(&mut self) {
         self.close_revolve();
-        self.picking = None;
-        self.under = None;
-        self.flange = Some(FlangeForm {
+        self.doc.picking = None;
+        self.doc.under = None;
+        self.doc.flange = Some(FlangeForm {
             name: self.feature_name("flange"),
             height: "20".into(),
             angle: "90".into(),
@@ -5597,15 +5619,15 @@ impl Viewer {
     fn flange_window(&mut self, ctx: &egui::Context) {
         // The work planes made before the flange: what its wall may go to.
         let planes: Vec<String> = {
-            let features = self.model.as_ref().and_then(|m| m.inspect["features"].as_array());
+            let features = self.doc.model.as_ref().and_then(|m| m.inspect["features"].as_array());
             let before =
-                features.into_iter().flatten().take_while(|g| self.flange.as_ref().is_none_or(|f| !f.editing || g["name"] != f.name.as_str()));
+                features.into_iter().flatten().take_while(|g| self.doc.flange.as_ref().is_none_or(|f| !f.editing || g["name"] != f.name.as_str()));
             before.filter(|g| g["op"] == "plane").filter_map(|g| g["name"].as_str().map(String::from)).collect()
         };
         let note = self.uses_note();
-        let Some(f) = &mut self.flange else { return };
-        let edges: Vec<String> = self.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
-        let (command, params) = match self.flange_edges.first() {
+        let Some(f) = &mut self.doc.flange else { return };
+        let edges: Vec<String> = self.doc.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
+        let (command, params) = match self.doc.flange_edges.first() {
             _ if f.editing => {
                 let mut fields = f.fields();
                 if let Some(edges) = &f.edges {
@@ -5615,12 +5637,12 @@ impl Viewer {
             }
             Some((body, _)) => ("add", f.params(body, &edges)),
             None => {
-                self.flange = None;
+                self.doc.flange = None;
                 return;
             }
         };
         // The preview of what the form says now; until it comes, none.
-        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let preview = self.doc.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::Flange))
@@ -5748,12 +5770,12 @@ impl Viewer {
             });
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         if cancel || esc {
-            self.flange = None;
-            self.flange_edges.clear();
+            self.doc.flange = None;
+            self.doc.flange_edges.clear();
             self.send(Request::Preview(None));
         } else if (add || enter) && ok {
-            self.flange = None;
-            self.flange_edges.clear();
+            self.doc.flange = None;
+            self.doc.flange_edges.clear();
             self.send(Request::Preview(None));
             self.send(Request::Command(command, params));
         } else if f.sent.as_ref() != Some(&params) {
@@ -5764,7 +5786,7 @@ impl Viewer {
 
     /// Drops the extrusion form, and the preview it made.
     fn close_extrusion(&mut self) {
-        if let Some(x) = self.extrusion.take()
+        if let Some(x) = self.doc.extrusion.take()
             && x.sent.is_some()
         {
             self.send(Request::Preview(None));
@@ -5775,10 +5797,10 @@ impl Viewer {
     /// every change; Enter makes it once the preview of what it says now is not refused, Esc drops
     /// it. Without a sketch yet it only says to click one.
     fn extrusion_form(&mut self, ctx: &egui::Context) {
-        if let Some((at, since, act)) = self.contour_hint {
+        if let Some((at, since, act)) = self.doc.contour_hint {
             const SECONDS: u64 = 4;
             if since.elapsed().as_secs() >= SECONDS || ctx.input(|i| i.pointer.any_pressed()) {
-                self.contour_hint = None;
+                self.doc.contour_hint = None;
             } else {
                 let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(at) + egui::vec2(14.0, 14.0);
                 egui::Area::new(egui::Id::new("datum_contour_hint")).fixed_pos(at).order(egui::Order::Tooltip).interactable(false).show(ctx, |ui| {
@@ -5797,18 +5819,18 @@ impl Viewer {
                 ctx.request_repaint_after(std::time::Duration::from_millis(500));
             }
         }
-        let Some(x) = &self.extrusion else { return };
+        let Some(x) = &self.doc.extrusion else { return };
         let (sheet, face, cut) = (matches!(x.kind, Kind::Sheet(..)), matches!(x.kind, Kind::Face), matches!(x.kind, Kind::SheetCut));
         let next_rule = if sheet || face { self.sheet_rule() } else { self.part_rule() };
         // Sheet metal is made by a sheet rule: without one the form only says so. A change keeps
         // the part's rule.
         let refused = (sheet || face) && next_rule.is_none() && !x.editing;
         let note = self.uses_note();
-        let Some(x) = &mut self.extrusion else { return };
+        let Some(x) = &mut self.doc.extrusion else { return };
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
         let Some(sketch) = x.sketch.clone() else {
             if esc {
-                self.extrusion = None;
+                self.doc.extrusion = None;
                 return;
             }
             let at = ctx.input(|i| i.pointer.latest_pos()).unwrap_or(x.at) + egui::vec2(14.0, 14.0);
@@ -5818,11 +5840,11 @@ impl Viewer {
             });
             return;
         };
-        let on_face = Self::on_face(self.model.as_ref(), &sketch);
+        let on_face = Self::on_face(self.doc.model.as_ref(), &sketch);
         // The preview of what the form says now; until it comes, none (a reply to an earlier
         // depth must not let Enter make this one).
         let (shown, params) = x.params(&sketch, on_face, next_rule.as_deref());
-        let preview = self.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let preview = self.doc.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
         let (mut add, mut cancel) = (false, false);
         egui::Area::new(egui::Id::new("datum_extrusion")).fixed_pos(x.at).order(egui::Order::Foreground).show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
@@ -5971,7 +5993,7 @@ impl Viewer {
     /// The offset of a new work plane, asked once its base is picked: a number or a formula;
     /// Enter or OK adds the plane, Esc or Cancel drops it.
     fn plane_window(&mut self, ctx: &egui::Context) {
-        let Some((from, offset)) = &mut self.plane_draft else { return };
+        let Some((from, offset)) = &mut self.doc.plane_draft else { return };
         let (mut add, mut cancel) = (false, false);
         egui::Window::new(self.i18n.label(Act::WorkPlane))
             .collapsible(false)
@@ -5997,32 +6019,33 @@ impl Viewer {
                 });
             });
         if cancel {
-            self.plane_draft = None;
+            self.doc.plane_draft = None;
         } else if add {
             let mut fields = from.clone();
             fields["offset"] = value_of(offset);
             fields["op"] = json!("plane");
             let taken: Vec<String> = self.work_planes().into_iter().map(|(n, _)| n).collect();
             let features: Vec<&str> = self
+                .doc
                 .model
                 .as_ref()
                 .map(|m| m.inspect["features"].as_array().into_iter().flatten().filter_map(|f| f["name"].as_str()).collect())
                 .unwrap_or_default();
             fields["name"] =
                 json!((1..).map(|k| format!("plane{k}")).find(|n| !features.contains(&n.as_str()) && !taken.contains(n)).unwrap_or_default());
-            self.plane_draft = None;
+            self.doc.plane_draft = None;
             self.send(Request::Command("add", fields));
         }
     }
 
     /// The mouse in the model's view: a turn to a view under way, orbit, pan, zoom.
     fn view_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response) {
-        if let Some(turn) = self.turn {
+        if let Some(turn) = self.doc.turn {
             let ([right, up], done) = turn.at(ui.input(|i| i.time));
-            self.camera.set(right, up);
+            self.doc.camera.set(right, up);
             if done {
-                self.turn = None;
-                self.fitted &= !turn.fit;
+                self.doc.turn = None;
+                self.doc.fitted &= !turn.fit;
             } else {
                 ui.ctx().request_repaint();
             }
@@ -6030,14 +6053,14 @@ impl Viewer {
         let nav = navigation(ui, r, self.touchpad);
         if r.dragged_by(egui::PointerButton::Primary) && !nav.space {
             let d = r.drag_delta();
-            self.turn = None;
-            self.camera.orbit(f64::from(d.x), f64::from(d.y));
+            self.doc.turn = None;
+            self.doc.camera.orbit(f64::from(d.x), f64::from(d.y));
         }
         if nav.pan != egui::Vec2::ZERO {
-            self.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), f64::from(rect.height()));
+            self.doc.camera.pan(f64::from(nav.pan.x), f64::from(nav.pan.y), f64::from(rect.height()));
         }
         if nav.zoom != 1.0 {
-            self.camera.zoom(nav.zoom);
+            self.doc.camera.zoom(nav.zoom);
         }
     }
 
@@ -6048,21 +6071,21 @@ impl Viewer {
             return;
         }
         let now = ui.input(|i| i.time);
-        match crate::cube::show(ui, rect, &self.camera, &self.i18n) {
+        match crate::cube::show(ui, rect, &self.doc.camera, &self.i18n) {
             Some(crate::cube::Ask::Look(d)) => {
                 let d = datum_math::Vec3::new(d[0].into(), d[1].into(), d[2].into());
-                self.turn = Some(crate::cube::Turn::toward(&self.camera, d, now, false));
+                self.doc.turn = Some(crate::cube::Turn::toward(&self.doc.camera, d, now, false));
                 // The turn goes on in the frames to come: a click asks for none by itself.
                 ui.ctx().request_repaint();
             }
             Some(crate::cube::Ask::Roll(quarter)) => {
-                self.turn = Some(crate::cube::Turn::to(&self.camera, self.camera.rolled(quarter), now, false));
+                self.doc.turn = Some(crate::cube::Turn::to(&self.doc.camera, self.doc.camera.rolled(quarter), now, false));
                 ui.ctx().request_repaint();
             }
             Some(crate::cube::Ask::Home) => self.home(ui),
             Some(crate::cube::Ask::Orbit(dx, dy)) => {
-                self.turn = None;
-                self.camera.orbit(dx, dy);
+                self.doc.turn = None;
+                self.doc.camera.orbit(dx, dy);
             }
             None => {}
         }
@@ -6071,7 +6094,7 @@ impl Viewer {
     /// Turns to the home view, the default direction, and fits the model there.
     fn home(&mut self, ui: &egui::Ui) {
         let c = Camera::default();
-        self.turn = Some(crate::cube::Turn::to(&self.camera, [c.right, c.up], ui.input(|i| i.time), true));
+        self.doc.turn = Some(crate::cube::Turn::to(&self.doc.camera, [c.right, c.up], ui.input(|i| i.time), true));
         ui.ctx().request_repaint();
     }
 }
@@ -6094,7 +6117,7 @@ impl Viewer {
     /// The menu a held right click opened (D155): a pattern's numbers and the elements it
     /// copies, or what to do with the copies selected; previewed as it changes, sent on Done.
     fn sketch_menu(&mut self, ctx: &egui::Context) {
-        let (Some(sk), Some(menu)) = (&mut self.sketch, &mut self.menu) else { return };
+        let (Some(sk), Some(menu)) = (&mut self.doc.sketch, &mut self.doc.menu) else { return };
         let at = match menu {
             Menu::Pattern { at, .. } | Menu::Copies { at, .. } | Menu::Polygon { at, .. } | Menu::Note { at, .. } => *at,
         };
@@ -6298,19 +6321,19 @@ impl Viewer {
             End::Stay => {}
             End::Cancel => {
                 menu.cancel(sk);
-                self.menu = None;
+                self.doc.menu = None;
             }
             End::Send(p) => {
                 menu.cancel(sk);
                 sk.selected.clear();
                 let params = sk.apply(p);
-                self.menu = None;
+                self.doc.menu = None;
                 self.send(Request::Command("edit_sketch", params));
             }
             End::Edit(name) => {
                 menu.cancel(sk);
                 sk.selected.clear();
-                self.menu = Some(match crate::pattern::PatternForm::edit(sk, &name) {
+                self.doc.menu = Some(match crate::pattern::PatternForm::edit(sk, &name) {
                     Ok(form) => Menu::Pattern { at, form, error: None },
                     Err(why) => Menu::Note { at, why },
                 });
@@ -6319,7 +6342,7 @@ impl Viewer {
     }
 
     fn sketch_input(&mut self, ui: &egui::Ui, rect: egui::Rect, r: &egui::Response, offset: Option<(f64, f64)>) {
-        let Some(sk) = &mut self.sketch else { return };
+        let Some(sk) = &mut self.doc.sketch else { return };
         let h = f64::from(rect.height());
         let nav = navigation(ui, r, self.touchpad);
         // The tool over: the view is the sketch's again (D248).
@@ -6332,11 +6355,11 @@ impl Viewer {
             && !sk.on_blank()
             && r.dragged_by(egui::PointerButton::Primary)
             && !nav.space
-            && let Some(m) = &self.model
+            && let Some(m) = &self.doc.model
         {
             if sk.turned.is_none() {
                 let (anchor, radius) = sphere(&m.scene);
-                sk.set_turned(Some(crate::turned::Turned::new(&sk.camera, &self.camera, anchor, radius)));
+                sk.set_turned(Some(crate::turned::Turned::new(&sk.camera, &self.doc.camera, anchor, radius)));
             }
             if let Some(t) = &mut sk.turned {
                 t.camera.orbit(f64::from(r.drag_delta().x), f64::from(r.drag_delta().y));
@@ -6349,7 +6372,7 @@ impl Viewer {
             if nav.zoom != 1.0 {
                 t.camera.zoom(nav.zoom);
             }
-            if let (Some(m), Some((x, y))) = (&self.model, offset) {
+            if let (Some(m), Some((x, y))) = (&self.doc.model, offset) {
                 t.look_at(&m.scene, &m.bodies, [f64::from(rect.width()), h], x, y);
             }
         } else {
@@ -6909,11 +6932,11 @@ impl Viewer {
                 _ => None,
             };
             if let Some((group, sides)) = polygon {
-                if let Some(m) = self.menu.take() {
+                if let Some(m) = self.doc.menu.take() {
                     m.cancel(sk);
                 }
                 let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
-                self.menu = Some(Menu::Polygon { at, group, sides: sides.to_string(), error: None });
+                self.doc.menu = Some(Menu::Polygon { at, group, sides: sides.to_string(), error: None });
             } else {
                 // A group's badge stands for what the group holds; inside a contour, off its
                 // curves, the click takes the contour (D191: then E extrudes it).
@@ -6930,36 +6953,36 @@ impl Viewer {
         // short one (a right drag pans): the last command again, as Enter, by the mouse alone.
         let (now, pos, down, pressed) = ui.input(|i| (i.time, i.pointer.latest_pos(), i.pointer.secondary_down(), i.pointer.secondary_pressed()));
         if pressed && r.hovered() {
-            self.hold = pos.map(|p| (now, p, false));
+            self.doc.hold = pos.map(|p| (now, p, false));
         }
         let mut held = false;
-        if let (Some((since, at, opened)), Some(p)) = (&mut self.hold, pos) {
+        if let (Some((since, at, opened)), Some(p)) = (&mut self.doc.hold, pos) {
             if !down || p.distance(*at) > 6.0 {
                 // Let go, or moved: a drag pans. A hold that opened the menu repeats nothing.
                 held = *opened;
-                self.hold = None;
+                self.doc.hold = None;
             } else if !*opened && now - *since >= HOLD {
                 *opened = true;
-                if let Some(m) = self.menu.take() {
+                if let Some(m) = self.doc.menu.take() {
                     m.cancel(sk);
                 }
-                self.menu = Some(Menu::open(sk, *at));
+                self.doc.menu = Some(Menu::open(sk, *at));
             } else if !*opened {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
             }
         }
-        if r.secondary_clicked() && !held && self.menu.is_none() {
+        if r.secondary_clicked() && !held && self.doc.menu.is_none() {
             sk.draft.again();
         }
         // The menu's pattern takes the selection as what stops its copies, previewed at once.
-        if let Some(Menu::Pattern { form, error, .. }) = &mut self.menu
+        if let Some(Menu::Pattern { form, error, .. }) = &mut self.doc.menu
             && let Some(i) = form.bounding
         {
             form.take_bound(sk, i);
             *error = form.preview(sk).err();
         }
         // The menu's pattern takes the selection as the elements to copy, previewed at once.
-        if let Some(Menu::Pattern { form, error, .. }) = &mut self.menu
+        if let Some(Menu::Pattern { form, error, .. }) = &mut self.doc.menu
             && form.picking
         {
             let before = form.cell.len();
@@ -6969,7 +6992,7 @@ impl Viewer {
             }
             *error = form.preview(sk).err();
         }
-        if self.menu.is_none() && !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
+        if self.doc.menu.is_none() && !ui.ctx().text_edit_focused() && !typing_field && !field_done.1 {
             // Enter: the last command again (an Enter that put a value in is not one).
             if !field_done.0 && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 sk.draft.again();
@@ -7229,11 +7252,11 @@ impl Viewer {
         // Placing a library element: the mirror tool's key flips the element instead of taking
         // the tool up (D258). In its parameter field the key is text, as it should be; the
         // checkbox there flips the element.
-        let placing = self.sketch.as_ref().is_some_and(|sk| sk.draft.tool == Tool::Template);
+        let placing = self.doc.sketch.as_ref().is_some_and(|sk| sk.draft.tool == Tool::Template);
         if placing
             && let Some(key) = self.keys.get(Act::Mirror).copied()
             && ui.input_mut(|i| crate::actions::pressed(i, &key))
-            && let Some(sk) = &mut self.sketch
+            && let Some(sk) = &mut self.doc.sketch
         {
             sk.draft.mirror = !sk.draft.mirror;
             return;
@@ -7253,8 +7276,8 @@ impl Viewer {
         use crate::actions::Context;
         let here = match a.context {
             Context::Anywhere => true,
-            Context::Model => self.sketch.is_none(),
-            Context::Sketch => self.sketch.is_some(),
+            Context::Model => self.doc.sketch.is_none(),
+            Context::Sketch => self.doc.sketch.is_some(),
         };
         here && match a.act {
             Act::Save
@@ -7270,69 +7293,71 @@ impl Viewer {
             | Act::RuleTable
             | Act::ToolTable
             | Act::Rib
-            | Act::Loft => self.model.is_some(),
+            | Act::Loft => self.doc.model.is_some(),
             Act::EdgeFinish => {
-                self.edge_finish.is_some() || self.model.as_ref().is_some_and(|m| m.scene.bodies.iter().any(|b| !b.finish_edges.is_empty()))
+                self.doc.edge_finish.is_some() || self.doc.model.as_ref().is_some_and(|m| m.scene.bodies.iter().any(|b| !b.finish_edges.is_empty()))
             }
             Act::CloseProject => self.project.is_some(),
             Act::Extrude | Act::Revolve => {
-                self.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
+                self.doc.model.as_ref().is_some_and(|m| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "sketch"))
             }
             // Something to lay flat, or the pane open to close.
-            Act::Trim => self.model.as_ref().is_some_and(|m| {
+            Act::Trim => self.doc.model.as_ref().is_some_and(|m| {
                 m.inspect["features"].as_array().into_iter().flatten().any(|f| f["op"] == "plane")
                     && m.begun
                         .iter()
                         .any(|b| m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == b.as_str() && f["op"] == "rolled"))
             }),
-            Act::MirrorPart => self.model.as_ref().is_some_and(|m| m.begun.iter().any(|b| !is_turned_copy(&m.inspect, b))),
-            Act::Branch => self.model.as_ref().is_some_and(|m| (0..m.bodies.len()).filter(|&k| rolled_part(m, k)).count() >= 2),
-            Act::FlatPane => self.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
-            Act::Rename => self.tree.selected.is_some(),
+            Act::MirrorPart => self.doc.model.as_ref().is_some_and(|m| m.begun.iter().any(|b| !is_turned_copy(&m.inspect, b))),
+            Act::Branch => self.doc.model.as_ref().is_some_and(|m| (0..m.bodies.len()).filter(|&k| rolled_part(m, k)).count() >= 2),
+            Act::FlatPane => {
+                self.doc.model.as_ref().is_some_and(|m| !m.flats.is_empty()) || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
+            }
+            Act::Rename => self.doc.tree.selected.is_some(),
             // A command of the whole window; for now it measures in a sketch only (D177).
-            Act::Measure => self.sketch.is_some(),
+            Act::Measure => self.doc.sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
-            Act::Group => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
-            Act::Mirror => self.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty()),
-            Act::Polygon => self.sketch.as_ref().is_some_and(|sk| crate::polygon::curve(sk).is_some()),
-            Act::Tangent => self.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
+            Act::Group => self.doc.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty() && sk.selected_group().is_none()),
+            Act::Mirror => self.doc.sketch.as_ref().is_some_and(|sk| !sk.selected.is_empty()),
+            Act::Polygon => self.doc.sketch.as_ref().is_some_and(|sk| crate::polygon::curve(sk).is_some()),
+            Act::Tangent => self.doc.sketch.as_ref().is_some_and(|sk| sk.draft.chain.as_ref().is_some_and(|c| c.last.is_some())),
             _ => true,
         }
     }
 
     /// Whether `act` is on, for those that are turned on and off or chosen.
     fn checked(&self, act: Act) -> bool {
-        let draft = self.sketch.as_ref().map(|sk| &sk.draft);
+        let draft = self.doc.sketch.as_ref().map(|sk| &sk.draft);
         match act {
             Act::SmoothEdges => self.smooth,
             Act::Touchpad => self.touchpad,
-            Act::Perspective => self.camera.perspective,
-            Act::NewSketch => self.picking == Some(Purpose::Sketch),
-            Act::WorkPlane => self.picking == Some(Purpose::Plane),
-            Act::Extrude => self.extrusion.is_some(),
-            Act::Revolve => self.revolve.is_some(),
-            Act::LookAt => self.picking == Some(Purpose::Look),
-            Act::Flange => self.picking == Some(Purpose::Flange),
-            Act::Trim => self.picking == Some(Purpose::Trim) || self.trim.is_some(),
-            Act::MirrorPart => self.picking == Some(Purpose::Mirror) || self.mirror.is_some(),
-            Act::Branch => self.picking == Some(Purpose::Branch),
+            Act::Perspective => self.doc.camera.perspective,
+            Act::NewSketch => self.doc.picking == Some(Purpose::Sketch),
+            Act::WorkPlane => self.doc.picking == Some(Purpose::Plane),
+            Act::Extrude => self.doc.extrusion.is_some(),
+            Act::Revolve => self.doc.revolve.is_some(),
+            Act::LookAt => self.doc.picking == Some(Purpose::Look),
+            Act::Flange => self.doc.picking == Some(Purpose::Flange),
+            Act::Trim => self.doc.picking == Some(Purpose::Trim) || self.doc.trim.is_some(),
+            Act::MirrorPart => self.doc.picking == Some(Purpose::Mirror) || self.doc.mirror.is_some(),
+            Act::Branch => self.doc.picking == Some(Purpose::Branch),
             Act::Tangent => draft.is_some_and(|d| d.tangent),
             Act::Construction => draft.is_some_and(|d| d.construction),
             Act::Measure => draft.is_some_and(|d| d.tool == Tool::Measure),
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
-                let mut m = self.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
+                let mut m = self.doc.sketch.as_ref().map_or(self.modes, |sk| sk.modes);
                 *mode(&mut m, act)
             }
             Act::SideBar => self.side_bar.visible,
             Act::SideBarRight => self.side_bar.right,
             Act::FlatPane => crate::dock::is_open(&self.dock, crate::dock::Pane::Flat),
-            Act::ParameterTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
-            Act::Rib => self.rib.is_some(),
-            Act::Loft => self.loft.is_some(),
-            Act::EdgeFinish => self.edge_finish.is_some(),
-            Act::ToolTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Tools),
-            Act::MaterialTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
-            Act::RuleTable => self.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Rules),
+            Act::ParameterTable => self.doc.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Parameters),
+            Act::Rib => self.doc.rib.is_some(),
+            Act::Loft => self.doc.loft.is_some(),
+            Act::EdgeFinish => self.doc.edge_finish.is_some(),
+            Act::ToolTable => self.doc.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Tools),
+            Act::MaterialTable => self.doc.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Materials),
+            Act::RuleTable => self.doc.table.as_ref().is_some_and(|t| t.0 == crate::table::Source::Rules),
             _ if TOOLS.contains(&act) => draft.is_some_and(|d| d.tool == tool(act)),
             _ => false,
         }
@@ -7360,7 +7385,7 @@ impl Viewer {
             Act::Redo => self.send(Request::Command("redo", json!({}))),
             Act::SmoothEdges => self.smooth = !self.smooth,
             Act::Touchpad => self.touchpad = !self.touchpad,
-            Act::Perspective => self.camera.perspective = !self.camera.perspective,
+            Act::Perspective => self.doc.camera.perspective = !self.doc.camera.perspective,
             Act::Home => self.home(ui),
             Act::ParameterTable => self.toggle_table(crate::table::Source::Parameters),
             Act::ToolTable => self.toggle_table(crate::table::Source::Tools),
@@ -7389,8 +7414,8 @@ impl Viewer {
                 self.leave();
                 match line {
                     Some(l) => {
-                        self.picking = None;
-                        self.plane_draft = Some(l.plane_draft());
+                        self.doc.picking = None;
+                        self.doc.plane_draft = Some(l.plane_draft());
                     }
                     None => self.pick(Purpose::Plane),
                 }
@@ -7416,7 +7441,7 @@ impl Viewer {
                     self.pick(Purpose::Trim);
                 } else {
                     let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
-                    self.contour_hint = Some((at, std::time::Instant::now(), Act::Trim));
+                    self.doc.contour_hint = Some((at, std::time::Instant::now(), Act::Trim));
                 }
             }
             Act::MirrorPart => {
@@ -7425,22 +7450,22 @@ impl Viewer {
                     self.pick(Purpose::Mirror);
                 } else {
                     let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
-                    self.contour_hint = Some((at, std::time::Instant::now(), Act::MirrorPart));
+                    self.doc.contour_hint = Some((at, std::time::Instant::now(), Act::MirrorPart));
                 }
             }
             Act::Branch => {
                 self.leave();
                 self.pick(Purpose::Branch);
-                self.branch_main = None;
+                self.doc.branch_main = None;
             }
             Act::Rectangle => {
-                if let (Some(sk), Some(t)) = (&mut self.sketch, self.library.first()) {
+                if let (Some(sk), Some(t)) = (&mut self.doc.sketch, self.library.first()) {
                     sk.draft.choose(t.entry.element.clone());
                     sk.field = None;
                 }
             }
             Act::Tangent => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     sk.draft.tangent = !sk.draft.tangent;
                 }
             }
@@ -7454,39 +7479,39 @@ impl Viewer {
             | Act::Fillet
             | Act::Offset
             | Act::Dimension => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     sk.draft.take_up(tool(act));
                 }
             }
             // F3 again ends measuring, as Esc does (D177).
             Act::Measure => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     sk.draft.press(Tool::Measure);
                 }
             }
             Act::Infer | Act::Presets | Act::Badges | Act::Names | Act::Dimensions => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     let on = mode(&mut sk.modes, act);
                     *on = !*on;
                 }
             }
             Act::Mirror => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     sk.start_mirror();
                 }
             }
             Act::Polygon => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     sk.draft.press(Tool::Polygon);
                 }
             }
             Act::Group => {
-                if let Some(p) = self.sketch.as_mut().and_then(SketchEdit::group_selection) {
+                if let Some(p) = self.doc.sketch.as_mut().and_then(SketchEdit::group_selection) {
                     self.send(Request::Command("edit_sketch", p));
                 }
             }
             Act::ProjectSection => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     match sk.project_sections() {
                         Ok(Some(p)) => self.send(Request::Command("edit_sketch", p)),
                         Ok(None) => sk.notice = Some(self.i18n.t("no-section", "The sketch plane crosses no body before the sketch").to_string()),
@@ -7496,7 +7521,7 @@ impl Viewer {
             }
             // The curves selected change kind; with none, the next ones drawn do.
             Act::Construction => {
-                if let Some(sk) = &mut self.sketch {
+                if let Some(sk) = &mut self.doc.sketch {
                     match sk.toggle_construction() {
                         Some(p) => self.send(Request::Command("edit_sketch", p)),
                         None => sk.draft.construction = !sk.draft.construction,
@@ -7507,12 +7532,12 @@ impl Viewer {
             Act::Metadata => self.open_metadata(),
             // The menu a held right click opens, at once, by the cursor.
             Act::Pattern => {
-                if let Some(sk) = &mut self.sketch {
-                    if let Some(m) = self.menu.take() {
+                if let Some(sk) = &mut self.doc.sketch {
+                    if let Some(m) = self.doc.menu.take() {
                         m.cancel(sk);
                     }
                     let at = ui.input(|i| i.pointer.latest_pos()).unwrap_or_else(|| ui.max_rect().center());
-                    self.menu = Some(Menu::open(sk, at));
+                    self.doc.menu = Some(Menu::open(sk, at));
                 }
             }
             Act::SideBar => self.side_bar.visible = !self.side_bar.visible,
@@ -7760,7 +7785,7 @@ impl egui_dock::TabViewer for Tabs<'_> {
                 self.v.viewport(ui, self.rs);
             }
             Pane::Flat => self.v.flat_pane(ui),
-            Pane::Library if self.v.sketch.is_some() => {
+            Pane::Library if self.v.doc.sketch.is_some() => {
                 egui::ScrollArea::vertical().show(ui, |ui| self.v.palette(ui));
             }
             Pane::Library => {
@@ -7787,7 +7812,7 @@ impl Viewer {
     /// projected.
     fn sketch_on_blank(&mut self, body: &str, back: bool) {
         // The K the blank shown is laid at: saved, from its rule or as its features were made.
-        let flat = self.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| n == body));
+        let flat = self.doc.model.as_ref().and_then(|m| m.flats.iter().find(|(n, _)| n == body));
         let Some((_, Ok(flat))) = flat else { return };
         let k = flat.k_factor;
         self.new_sketch(json!({
@@ -7802,21 +7827,21 @@ impl Viewer {
     /// faint under it, then the sketch as the 3D view has it.
     fn blank_sketch(&mut self, ui: &mut egui::Ui) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        self.sketch_rect = rect;
-        let Some(sk) = &self.sketch else { return };
-        let blank = self.model.as_ref().and_then(|m| {
+        self.doc.sketch_rect = rect;
+        let Some(sk) = &self.doc.sketch else { return };
+        let blank = self.doc.model.as_ref().and_then(|m| {
             let input = sk.json["inputs"][0].as_str()?;
             m.flats.iter().find(|(n, _)| n == input).and_then(|(_, f)| f.as_ref().ok().cloned())
         });
         let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
-        if let (Some(sk), Some(flat)) = (&mut self.sketch, &blank)
-            && (!self.blank_fitted || (r.double_clicked() && sk.hover.is_none()))
+        if let (Some(sk), Some(flat)) = (&mut self.doc.sketch, &blank)
+            && (!self.doc.blank_fitted || (r.double_clicked() && sk.hover.is_none()))
         {
             sk.fit_blank([flat.size.x, flat.size.y], f64::from(rect.width() / rect.height().max(1.0)));
-            self.blank_fitted = true;
+            self.doc.blank_fitted = true;
         }
         let painter = ui.painter_at(rect);
-        match (&blank, &self.sketch) {
+        match (&blank, &self.doc.sketch) {
             (Some(flat), Some(sk)) => crate::flat::paint_under(&painter, rect, flat, &sk.camera),
             _ => {
                 painter.rect_filled(rect, 0.0, ui.visuals().extreme_bg_color);
@@ -7831,7 +7856,7 @@ impl Viewer {
     /// (of the several, the one chosen here or by a click on the body in 3D), its side, its bend
     /// lines as guides.
     fn flat_pane(&mut self, ui: &mut egui::Ui) {
-        let Some(m) = &self.model else {
+        let Some(m) = &self.doc.model else {
             ui.weak(self.i18n.t("no-model", "No model open."));
             return;
         };
@@ -7839,18 +7864,18 @@ impl Viewer {
             ui.weak(self.i18n.t("flat-none", "No flat pattern here: work in a part that makes a sheet or a plate (a body's blank comes by itself)."));
             return;
         }
-        let chosen = self.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
+        let chosen = self.doc.flat.chosen.clone().filter(|c| m.flats.iter().any(|(n, _)| n == c)).unwrap_or_else(|| m.flats[0].0.clone());
         let by_hand = m.inspect["features"].as_array().into_iter().flatten().any(|f| f["name"] == chosen.as_str() && f["op"] == "unfold");
         let back = m.inspect["flats"][&chosen]["back"].as_bool().unwrap_or(false);
         let blank_ok = matches!(m.flats.iter().find(|(n, _)| *n == chosen), Some((_, Ok(_))));
-        let sketching = self.sketch.is_some();
+        let sketching = self.doc.sketch.is_some();
         let (mut set_back, mut export, mut sketch) = (None, false, false);
         ui.horizontal(|ui| {
             if m.flats.len() > 1 {
                 egui::ComboBox::from_id_salt("datum_flat_chosen").selected_text(chosen.as_str()).show_ui(ui, |ui| {
                     for (n, _) in &m.flats {
                         if ui.selectable_label(*n == chosen, n.as_str()).clicked() {
-                            self.flat.chosen = Some(n.clone());
+                            self.doc.flat.chosen = Some(n.clone());
                         }
                     }
                 });
@@ -7886,11 +7911,11 @@ impl Viewer {
         {
             self.send(Request::Command("export_dxf", json!({"name": chosen, "path": p.display().to_string(), "approximate": approximate})));
         }
-        if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) {
+        if self.doc.sketch.as_ref().is_some_and(SketchEdit::on_blank) {
             self.blank_sketch(ui);
             return;
         }
-        let Some(m) = &self.model else { return };
+        let Some(m) = &self.doc.model else { return };
         match m.flats.iter().find(|(n, _)| *n == chosen).map(|(_, v)| v) {
             Some(Ok(f)) => {
                 if !f.overlaps.is_empty() {
@@ -7902,7 +7927,7 @@ impl Viewer {
                     );
                     ui.colored_label(ui.visuals().warn_fg_color, text);
                 }
-                self.flat.show(ui, f);
+                self.doc.flat.show(ui, f);
             }
             Some(Err(e)) => {
                 ui.colored_label(
@@ -7933,7 +7958,7 @@ impl eframe::App for Viewer {
         storage.set_string(LAYOUT, crate::dock::to_text(&self.dock));
         storage.set_string(SIDE_BAR, self.side_bar.to_text());
         storage.set_string(TOUCHPAD, self.touchpad.to_string());
-        storage.set_string(PERSPECTIVE, self.camera.perspective.to_string());
+        storage.set_string(PERSPECTIVE, self.doc.camera.perspective.to_string());
         if self.language_chosen {
             storage.set_string(LANGUAGE, self.language.clone());
         }
@@ -7964,7 +7989,7 @@ impl Viewer {
         }
         self.receive();
         self.spots.clear();
-        let t = title(self.project.as_deref(), self.path.as_deref());
+        let t = title(self.project.as_deref(), self.doc.path.as_deref());
         if t != self.titled {
             ui.send_viewport_cmd(egui::ViewportCommand::Title(t.clone()));
             self.titled = t;
@@ -7976,7 +8001,7 @@ impl Viewer {
             self.quitting = self.ask_to_save();
         }
         if let Some(saving) = self.quitting
-            && (!saving || (!self.busy && !self.modified()))
+            && (!saving || (!self.doc.busy && !self.modified()))
         {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -7995,8 +8020,8 @@ impl Viewer {
         self.keep(ui.ctx());
         self.plane_window(ui.ctx());
         let using = self.edited_feature();
-        if using != self.using {
-            self.using.clone_from(&using);
+        if using != self.doc.using {
+            self.doc.using.clone_from(&using);
             self.send(Request::Using(using));
         }
         self.flange_window(ui.ctx());
@@ -8012,7 +8037,7 @@ impl Viewer {
         self.presets_window(ui.ctx(), frame);
         self.native_windows.finish_frame();
         self.settings_said(ui.ctx());
-        self.edge_hover = None;
+        self.doc.edge_hover = None;
         // The panes, docked where the engineer put them (D161).
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(ui, |ui| {
             let mut dock = std::mem::replace(&mut self.dock, egui_dock::DockState::new(Vec::new()));
@@ -8023,7 +8048,7 @@ impl Viewer {
         });
         self.edge_finish_ui(ui.ctx());
         // The flat pattern pane closed on a sketch on the blank finishes the sketch, as Done does.
-        if self.sketch.as_ref().is_some_and(SketchEdit::on_blank) && !crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
+        if self.doc.sketch.as_ref().is_some_and(SketchEdit::on_blank) && !crate::dock::is_open(&self.dock, crate::dock::Pane::Flat) {
             self.leave();
         }
         self.lesson_card(ui.ctx());
@@ -8048,7 +8073,7 @@ mod tests {
         let (_outbox, models) = channel();
         let edits = inspect["parameters"].as_object().unwrap().iter().map(|(n, v)| (n.clone(), definition(&v["definition"]))).collect();
         let planes = offsets(&inspect);
-        let v = Viewer {
+        let doc = Document {
             requests,
             models,
             model: Some(Model {
@@ -8081,66 +8106,20 @@ mod tests {
             turn: None,
             geometry: Arc::new(Geometry::new(&Scene::default(), datum_math::Vec3::ZERO)),
             version: 0,
-            smooth: true,
-            touchpad: false,
-            renderer: None,
-            texture: None,
-            drawn: None,
-            frame_ms: 0.0,
-            ui_ms: 0.0,
-            adapter: String::new(),
             edits,
             new_parameter: Default::default(),
             offsets: planes,
             tree: TreeRows::default(),
             local_error: None,
             table: None,
-            native_windows: NativeWindows::default(),
-            materials: Vec::new(),
-            rules: Vec::new(),
-            tools: Vec::new(),
-            rule_material: None,
-            new_material: Default::default(),
-            new_rule: Default::default(),
-            new_tool: Default::default(),
-            new_preset: Default::default(),
-            library_due: false,
             path: None,
-            update: channel().1,
-            newer: None,
             sketch: None,
             entering: None,
-            library: crate::templates::library(None),
-            library_filter: String::new(),
-            keeping: None,
             menu: None,
-            side_bar: crate::sidebar::SideBar::default(),
-            modes: crate::sketch::Modes::default(),
-            dock: crate::dock::default_layout(),
             flat: crate::flat::FlatView::default(),
             new_level: None,
             new_set: None,
             hold: None,
-            quitting: None,
-            worked_in: None,
-            recent: Vec::new(),
-            project: None,
-            recent_projects: Vec::new(),
-            titled: String::new(),
-            keys: Keys::default(),
-            language: "en".into(),
-            language_chosen: false,
-            theme: egui::ThemePreference::default(),
-            theme_chosen: false,
-            i18n: crate::i18n::I18n::default(),
-            settings: None,
-            settings_problems: Vec::new(),
-            table_zoom: 1.0,
-            fillet_presets: vec![2.0, 5.0],
-            chamfer_presets: vec![(2.0, None), (4.0, None)],
-            fillet_presets_editor: None,
-            shown: 0,
-            maximized: false,
             picking: None,
             under: None,
             plane_draft: None,
@@ -8165,12 +8144,61 @@ mod tests {
             next_rule: None,
             material: None,
             viewport: egui::Rect::ZERO,
+            sketch_rect: egui::Rect::ZERO,
+            blank_fitted: false,
+        };
+        let v = Viewer {
+            doc,
+            smooth: true,
+            touchpad: false,
+            renderer: None,
+            texture: None,
+            drawn: None,
+            frame_ms: 0.0,
+            ui_ms: 0.0,
+            adapter: String::new(),
+            native_windows: NativeWindows::default(),
+            materials: Vec::new(),
+            rules: Vec::new(),
+            tools: Vec::new(),
+            rule_material: None,
+            new_material: Default::default(),
+            new_rule: Default::default(),
+            new_tool: Default::default(),
+            new_preset: Default::default(),
+            library_due: false,
+            update: channel().1,
+            newer: None,
+            library: crate::templates::library(None),
+            library_filter: String::new(),
+            keeping: None,
+            side_bar: crate::sidebar::SideBar::default(),
+            modes: crate::sketch::Modes::default(),
+            dock: crate::dock::default_layout(),
+            quitting: None,
+            worked_in: None,
+            recent: Vec::new(),
+            project: None,
+            recent_projects: Vec::new(),
+            titled: String::new(),
+            keys: Keys::default(),
+            language: "en".into(),
+            language_chosen: false,
+            theme: egui::ThemePreference::default(),
+            theme_chosen: false,
+            i18n: crate::i18n::I18n::default(),
+            settings: None,
+            settings_problems: Vec::new(),
+            table_zoom: 1.0,
+            fillet_presets: vec![2.0, 5.0],
+            chamfer_presets: vec![(2.0, None), (4.0, None)],
+            fillet_presets_editor: None,
+            shown: 0,
+            maximized: false,
             lessons: Vec::new(),
             playing: None,
             own_records: Default::default(),
             spots: BTreeMap::new(),
-            sketch_rect: egui::Rect::ZERO,
-            blank_fitted: false,
         };
         (v, inbox)
     }
@@ -8201,7 +8229,7 @@ mod tests {
         let ctx = egui::Context::default();
         v.start_hand(&ctx, true);
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Mark)), "a model to come back to");
-        v.busy = true;
+        v.doc.busy = true;
         let click = egui::Event::PointerButton {
             pos: egui::pos2(5.0, 5.0),
             button: egui::PointerButton::Primary,
@@ -8225,12 +8253,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.draft.take_up(Tool::Line);
         sk.selected = vec![Pick::Point("o".into())];
         (v, inbox)
@@ -8254,21 +8282,21 @@ mod tests {
         let (mut v, inbox) = viewer_in_sketch();
         lesson_with_escape(&mut v);
         let at = egui::pos2(30.0, 30.0);
-        v.menu = Some(Menu::open(v.sketch.as_ref().unwrap(), at));
-        assert!(matches!(v.menu, Some(Menu::Pattern { .. })));
+        v.doc.menu = Some(Menu::open(v.doc.sketch.as_ref().unwrap(), at));
+        assert!(matches!(v.doc.menu, Some(Menu::Pattern { .. })));
         let ctx = egui::Context::default();
         v.start_hand(&ctx, true);
         // The hand changes things meanwhile.
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.selected = vec![Pick::Curve("right_hole".into())];
         sk.draft.escape();
-        v.menu = None;
+        v.doc.menu = None;
         press_esc(&mut v, &ctx);
-        let sk = v.sketch.as_ref().expect("the sketch stays open");
+        let sk = v.doc.sketch.as_ref().expect("the sketch stays open");
         assert_eq!(sk.feature, "outline");
         assert_eq!(sk.selected, vec![Pick::Point("o".into())]);
         assert_eq!(sk.draft.tool, Tool::Line);
-        assert!(matches!(v.menu, Some(Menu::Pattern { .. })), "the menu is back");
+        assert!(matches!(v.doc.menu, Some(Menu::Pattern { .. })), "the menu is back");
         let requests: Vec<Request> = inbox.try_iter().collect();
         assert!(requests.iter().any(|r| matches!(r, Request::Back)));
         assert!(!requests.iter().any(|r| matches!(r, Request::Editing(None))), "the sketch was not left");
@@ -8279,14 +8307,14 @@ mod tests {
     fn show_me_leaves_a_sketch_the_hand_opened() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
         lesson_with_escape(&mut v);
-        assert!(v.sketch.is_none());
+        assert!(v.doc.sketch.is_none());
         let ctx = egui::Context::default();
         v.start_hand(&ctx, true);
         let (opened, _) = viewer_in_sketch();
-        v.sketch = opened.sketch;
-        assert!(v.sketch.is_some());
+        v.doc.sketch = opened.doc.sketch;
+        assert!(v.doc.sketch.is_some());
         press_esc(&mut v, &ctx);
-        assert!(v.sketch.is_none());
+        assert!(v.doc.sketch.is_none());
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Back)));
     }
 
@@ -8297,16 +8325,16 @@ mod tests {
         assert_eq!(w["selected"], json!(["Point(\"o\")"]));
         assert_eq!(w["pattern_menu"], json!(false));
         assert_eq!(w["pattern_picked"], json!(false));
-        let mut menu = Menu::open(v.sketch.as_ref().unwrap(), egui::pos2(10.0, 10.0));
-        v.menu = Some(menu.clone());
+        let mut menu = Menu::open(v.doc.sketch.as_ref().unwrap(), egui::pos2(10.0, 10.0));
+        v.doc.menu = Some(menu.clone());
         let w = v.lesson_window();
         assert_eq!((&w["pattern_menu"], &w["pattern_picked"]), (&json!(true), &json!(false)));
         if let Menu::Pattern { form, .. } = &mut menu {
             form.cell = vec!["right_hole".into()];
         }
-        v.menu = Some(menu);
+        v.doc.menu = Some(menu);
         assert_eq!(v.lesson_window()["pattern_picked"], json!(true));
-        v.sketch.as_mut().unwrap().selected.clear();
+        v.doc.sketch.as_mut().unwrap().selected.clear();
         assert_eq!(v.lesson_window()["selected"], json!([]));
     }
 
@@ -8317,7 +8345,7 @@ mod tests {
         lesson_with_escape(&mut v);
         let ctx = egui::Context::default();
         v.start_hand(&ctx, true);
-        v.busy = false;
+        v.doc.busy = false;
         let mut raw = egui::RawInput { predicted_dt: 6.0, ..Default::default() };
         v.hand_input(&ctx, &mut raw);
         let p = v.playing.as_ref().unwrap();
@@ -8332,26 +8360,26 @@ mod tests {
     #[test]
     fn the_hand_clicks_a_curve_where_it_is() {
         let (mut v, _inbox) = viewer_in_sketch();
-        v.sketch_rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(600.0, 400.0));
+        v.doc.sketch_rect = egui::Rect::from_min_size(egui::pos2(100.0, 50.0), egui::vec2(600.0, 400.0));
         let ctx = egui::Context::default();
         let line = crate::lessons::Move::Curve("line".into());
-        let (center, h) = (v.sketch_rect.center(), f64::from(v.sketch_rect.height()));
-        let lines = &v.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines;
+        let (center, h) = (v.doc.sketch_rect.center(), f64::from(v.doc.sketch_rect.height()));
+        let lines = &v.doc.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines;
         let first = lines.iter().find(|(_, l)| !l.construction).unwrap().0.clone();
         let spots: Vec<egui::Pos2> = [[0.0, 0.0], [20.0, -10.0]]
             .into_iter()
             .map(|shift: [f64; 2]| {
-                let sk = v.sketch.as_mut().unwrap();
+                let sk = v.doc.sketch.as_mut().unwrap();
                 sk.camera.center = [shift[0], shift[1]];
                 let Some(crate::lessons::Aim::Spot(at)) = v.aim(&ctx, &line) else { panic!("a line in view") };
-                let sk = v.sketch.as_ref().unwrap();
+                let sk = v.doc.sketch.as_ref().unwrap();
                 let (x, y) = (f64::from(at.x - center.x), f64::from(at.y - center.y));
                 assert_eq!(sk.curve_at(x, y, h).as_deref(), Some(first.as_str()), "the click takes the line");
                 at
             })
             .collect();
         assert_ne!(spots[0], spots[1], "it follows the line on the screen");
-        v.sketch.as_mut().unwrap().camera.center = [1e9, 1e9];
+        v.doc.sketch.as_mut().unwrap().camera.center = [1e9, 1e9];
         assert!(v.aim(&ctx, &line).is_none(), "off the view");
     }
 
@@ -8385,7 +8413,7 @@ mod tests {
     }
 
     fn features_of(v: &Viewer) -> usize {
-        v.model.as_ref().map_or(0, |m| m.inspect["features"].as_array().map_or(0, Vec::len))
+        v.doc.model.as_ref().map_or(0, |m| m.inspect["features"].as_array().map_or(0, Vec::len))
     }
 
     /// Every lesson of the repo, played in the real window from its first step to its last: each
@@ -8404,15 +8432,15 @@ mod tests {
         for lesson in 0..lessons {
             let title = h.state().lessons[lesson].1.as_ref().unwrap().title.clone();
             h.state_mut().start_lesson(lesson);
-            window_until(&mut h, "a lesson starts", |v| !v.busy && v.model.is_none());
+            window_until(&mut h, "a lesson starts", |v| !v.doc.busy && v.doc.model.is_none());
             for _ in 0..3 {
                 window_frame(&mut h);
             }
             loop {
-                window_until(&mut h, "the model comes", |v| !v.busy);
+                window_until(&mut h, "the model comes", |v| !v.doc.busy);
                 // Here a table's window lies in the frame, over the menu; in the program it is a
                 // window of its own.
-                h.state_mut().table = None;
+                h.state_mut().doc.table = None;
                 window_frame(&mut h);
                 let at = h.state().playing.as_ref().unwrap().step;
                 let steps = &h.state().lessons[lesson].1.as_ref().unwrap().steps;
@@ -8422,25 +8450,25 @@ mod tests {
                 let said = format!("{title}, step {}: {what}", at + 1);
                 if show {
                     let (model, features, sketch) =
-                        (h.state().model.is_some(), features_of(h.state()), h.state().sketch.as_ref().map(|s| s.feature.clone()));
+                        (h.state().doc.model.is_some(), features_of(h.state()), h.state().doc.sketch.as_ref().map(|s| s.feature.clone()));
                     h.state_mut().start_hand(&ctx, true);
-                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.busy);
+                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.doc.busy);
                     for _ in 0..5 {
                         window_frame(&mut h);
                     }
-                    window_until(&mut h, &said, |v| !v.busy);
+                    window_until(&mut h, &said, |v| !v.doc.busy);
                     let v = h.state();
                     assert_eq!(v.playing.as_ref().unwrap().lost, None, "{said}");
                     assert_eq!(v.playing.as_ref().unwrap().step, at, "shown, not done: {said}");
                     assert_eq!(
-                        (v.model.is_some(), features_of(v), v.sketch.as_ref().map(|s| s.feature.clone())),
+                        (v.doc.model.is_some(), features_of(v), v.doc.sketch.as_ref().map(|s| s.feature.clone())),
                         (model, features, sketch),
                         "taken back: {said}"
                     );
                 }
                 if perform {
                     h.state_mut().start_hand(&ctx, false);
-                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.busy);
+                    window_until(&mut h, &said, |v| v.playing.as_ref().is_some_and(|p| p.showing.is_none()) && !v.doc.busy);
                     assert_eq!(h.state().playing.as_ref().unwrap().lost, None, "{said}");
                 } else if reading {
                     h.state_mut().playing.as_mut().unwrap().step += 1;
@@ -8455,7 +8483,7 @@ mod tests {
                 window_until(&mut h, &format!("done: {said}"), |v| v.playing.as_ref().unwrap().step > at);
             }
             // What each lesson leaves: the learner gets the real thing.
-            let features = h.state().model.as_ref().unwrap().inspect["features"].clone();
+            let features = h.state().doc.model.as_ref().unwrap().inspect["features"].clone();
             let sketch = features.as_array().unwrap().iter().find(|f| f["op"] == "sketch").cloned().unwrap_or_default();
             match lesson {
                 0 => assert!(project.join("library/material/08пс.json").is_file() && project.join("library/rule/08пс 2 мм.json").is_file()),
@@ -8480,15 +8508,15 @@ mod tests {
         };
         let new_sketch = ACTIONS.iter().find(|a| a.act == Act::NewSketch).unwrap();
         let (mut v, inbox) = viewer("parametric.json");
-        v.model = None;
+        v.doc.model = None;
         let _ = inbox.try_iter().count();
         assert!(!v.available(new_sketch));
         press_s(&mut v);
-        assert!(v.picking.is_none() && inbox.try_iter().next().is_none());
+        assert!(v.doc.picking.is_none() && inbox.try_iter().next().is_none());
         let (mut v, _inbox) = viewer("parametric.json");
         assert!(v.available(new_sketch));
         press_s(&mut v);
-        assert_eq!(v.picking, Some(Purpose::Sketch));
+        assert_eq!(v.doc.picking, Some(Purpose::Sketch));
     }
 
     /// A lesson starts with no model, no rule, at its first step; a step shows done only once the
@@ -8496,20 +8524,20 @@ mod tests {
     #[test]
     fn a_lesson_starts_clean_and_steps_wait_for_the_model() {
         let (mut v, _inbox) = viewer("parametric.json");
-        v.model = None;
-        v.next_rule = Some("Лист".into());
-        v.material = Some((None, "Сталь".into()));
+        v.doc.model = None;
+        v.doc.next_rule = Some("Лист".into());
+        v.doc.material = Some((None, "Сталь".into()));
         let step = |model: bool| format!(r#"{{"what": "w", "done": {{"window": {{"model": {model}}}}}}}"#);
         let text = format!(r#"{{"format": "datum-lesson/1", "title": "t", "steps": [{}, {}, {}]}}"#, step(false), step(false), step(true));
         v.lessons = vec![("t.json".into(), crate::lessons::Lesson::parse(&text))];
         v.start_lesson(0);
-        assert!(v.next_rule.is_none() && v.material.is_none());
+        assert!(v.doc.next_rule.is_none() && v.doc.material.is_none());
         let playing = v.playing.take().expect("playing");
         assert_eq!((playing.lesson, playing.step), (0, 0));
         let lesson = v.lessons[0].1.as_ref().unwrap();
-        v.busy = true;
+        v.doc.busy = true;
         assert_eq!(v.lesson_step(&playing, lesson), 0, "busy: what shows is old");
-        v.busy = false;
+        v.doc.busy = false;
         assert_eq!(v.lesson_step(&playing, lesson), 2, "two done steps pass together, the third waits");
     }
 
@@ -8598,7 +8626,7 @@ mod tests {
         let cmds = sent(&inbox);
         assert_eq!(cmds[0].0, "set_project");
         assert!(cmds[0].1.get("project").is_none());
-        v.model = None;
+        v.doc.model = None;
         v.set_project(Some(root.clone()));
         assert!(sent(&inbox).is_empty(), "no model, nothing to tell");
         let _ = std::fs::remove_dir_all(&root);
@@ -8623,7 +8651,7 @@ mod tests {
         v.lessons = vec![("t.json".into(), crate::lessons::Lesson::parse(text))];
         let lesson = v.lessons[0].1.as_ref().unwrap();
         assert!(!v.step_done(&lesson.steps[0]));
-        v.busy = false;
+        v.doc.busy = false;
         let playing = Playing { lesson: 0, step: 0, showing: None, lost: None };
         assert_eq!(v.lesson_step(&playing, lesson), 0);
     }
@@ -8638,8 +8666,8 @@ mod tests {
         let root = project_root("viewer_project_lesson");
         let (mut v, _inbox) = viewer("parametric.json");
         v.project = Some(root.clone());
-        v.path = None;
-        v.model = None;
+        v.doc.path = None;
+        v.doc.model = None;
         v.reload_library_records();
         assert!(v.own_records.0.is_empty() && v.own_records.1.is_empty(), "{:?}", v.own_records);
         assert!(!v.step_done(materials_step) && !v.step_done(rules_step));
@@ -8710,20 +8738,20 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         let id = session.graph().nodes()[0].id;
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }));
         }
         v.sync_sketch();
-        let sk = v.sketch.as_ref().expect("editing");
+        let sk = v.doc.sketch.as_ref().expect("editing");
         assert_eq!(sk.placed.as_ref().map(|p| p.solved.dof), Ok(0));
         // The view looks at the whole sketch, 80 × 40.
         assert!(sk.camera.half_height > 20.0 && (sk.camera.center[0] - 40.0).abs() < 1e-9, "{:?}", sk.camera);
         // When the model no longer has it (undone), the window stops editing it.
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.inspect["features"] = json!([]);
         }
         v.sync_sketch();
-        assert!(v.sketch.is_none());
+        assert!(v.doc.sketch.is_none());
         assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
     }
 
@@ -8743,7 +8771,7 @@ mod tests {
         );
         h.run();
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
-        let top = crate::cube::face_middle(&h.state().camera, rect, datum_math::Vec3::new(0.0, 0.0, 1.0));
+        let top = crate::cube::face_middle(&h.state().doc.camera, rect, datum_math::Vec3::new(0.0, 0.0, 1.0));
         h.hover_at(top);
         h.run();
         // As a hand clicks: the button held for a tenth of a second, the mouse a pixel off.
@@ -8758,7 +8786,7 @@ mod tests {
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
         h.step();
         h.run();
-        let c = h.state().camera;
+        let c = h.state().doc.camera;
         assert_eq!((c.right, c.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)));
     }
 
@@ -8790,7 +8818,7 @@ mod tests {
             *v = std::mem::replace(h.state_mut(), viewer("symmetric_plate.json").0);
         };
         v.start_sketch();
-        assert_eq!(v.picking, Some(Purpose::Sketch));
+        assert_eq!(v.doc.picking, Some(Purpose::Sketch));
         let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
         frame(&mut v, vec![enter]);
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -8801,38 +8829,38 @@ mod tests {
         );
         // A point of XY in front of the eye, where nothing else is: (2, −2, 0).
         v.pick(Purpose::Look);
-        let (m, _) = v.camera.matrices(datum_math::Vec3::ZERO, 1.5, 10.0);
+        let (m, _) = v.doc.camera.matrices(datum_math::Vec3::ZERO, 1.5, 10.0);
         let at =
             on_screen(&m, datum_math::Vec3::new(2.0, -2.0, 0.0), egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0))).unwrap();
         let click = |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         frame(&mut v, vec![click(true), click(false)]);
-        assert_eq!(v.picking, None);
-        assert_eq!((v.camera.right, v.camera.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)), "from above");
+        assert_eq!(v.doc.picking, None);
+        assert_eq!((v.doc.camera.right, v.doc.camera.up), (datum_math::Vec3::new(1.0, 0.0, 0.0), datum_math::Vec3::new(0.0, 1.0, 0.0)), "from above");
         // A work plane through a sketch line: the line picked is all it takes; no offset.
-        v.camera = Camera::default();
+        v.doc.camera = Camera::default();
         let through = PlaneLine {
             sketch: "skeleton".into(),
             line: "l".into(),
             ends: [datum_math::Vec3::new(1.0, -2.0, 0.0), datum_math::Vec3::new(3.0, -2.0, 0.0)],
         };
-        v.model.as_mut().unwrap().lines = vec![through];
+        v.doc.model.as_mut().unwrap().lines = vec![through];
         v.pick(Purpose::Plane);
         frame(&mut v, vec![click(true), click(false)]);
-        assert_eq!(v.plane_draft, Some((json!({"inputs": ["skeleton"], "line": {"input": 0, "line": "l"}}), "0".to_string())));
-        assert_eq!(v.picking, None);
-        v.plane_draft = None;
-        v.model.as_mut().unwrap().lines.clear();
+        assert_eq!(v.doc.plane_draft, Some((json!({"inputs": ["skeleton"], "line": {"input": 0, "line": "l"}}), "0".to_string())));
+        assert_eq!(v.doc.picking, None);
+        v.doc.plane_draft = None;
+        v.doc.model.as_mut().unwrap().lines.clear();
         // A work plane from XY: the plane picked, then its offset typed and Enter.
-        v.camera = Camera::default();
+        v.doc.camera = Camera::default();
         v.pick(Purpose::Plane);
         frame(&mut v, vec![click(true), click(false)]);
-        assert_eq!(v.plane_draft, Some((json!({"base": "xy"}), "10".to_string())));
+        assert_eq!(v.doc.plane_draft, Some((json!({"base": "xy"}), "10".to_string())));
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.plane_window(ui.ctx()), v);
         h.run();
         h.key_press(egui::Key::Enter);
         h.run();
         let v = h.into_state();
-        assert!(v.plane_draft.is_none());
+        assert!(v.doc.plane_draft.is_none());
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add", f) if f["op"] == "plane" && f["base"] == "xy" && f["offset"] == 10.0)));
     }
@@ -8845,12 +8873,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        v.sketch.as_mut().unwrap().draft.take_up(Tool::Line);
+        v.doc.sketch.as_mut().unwrap().draft.take_up(Tool::Line);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -8859,7 +8887,7 @@ mod tests {
             },
             v,
         );
-        let tool = |h: &egui_kittest::Harness<Viewer>| h.state().sketch.as_ref().unwrap().draft.tool;
+        let tool = |h: &egui_kittest::Harness<Viewer>| h.state().doc.sketch.as_ref().unwrap().draft.tool;
         let button = |h: &mut egui_kittest::Harness<Viewer>, pressed, at: egui::Pos2| {
             h.hover_at(at);
             h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: egui::Modifiers::NONE });
@@ -8895,10 +8923,10 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -8909,7 +8937,7 @@ mod tests {
             v,
         );
         let camera = |h: &egui_kittest::Harness<Viewer>| {
-            let c = &h.state().sketch.as_ref().unwrap().camera;
+            let c = &h.state().doc.sketch.as_ref().unwrap().camera;
             (c.center, c.half_height)
         };
         let wheel = |h: &mut egui_kittest::Harness<Viewer>, modifiers| {
@@ -8954,7 +8982,7 @@ mod tests {
         button(&mut h, false, egui::pos2(400.0, 260.0));
         h.event(key(false));
         h.run();
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         assert!(sk.camera.center != before.0 && sk.frame.is_none() && sk.selected.is_empty(), "{:?} → {:?}", before.0, sk.camera.center);
     }
 
@@ -8966,12 +8994,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        v.sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
+        v.doc.sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, v: &mut Viewer| {
                 let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -8990,7 +9018,7 @@ mod tests {
         };
         click(&mut h, egui::pos2(40.0, 40.0));
         click(&mut h, egui::pos2(60.0, 40.0));
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle placed");
         let f = sk.field.as_ref().expect("the diameter's field opened");
         assert!(matches!(f.entry, crate::dims::Entry::Diameter(_)), "{f:?}");
@@ -8998,7 +9026,7 @@ mod tests {
         // Esc: the size edit goes, the circle stays, the command ends.
         h.key_press(egui::Key::Escape);
         h.run();
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         assert!(sk.field.is_none(), "the field gone");
         assert_eq!(sk.draft.tool, Tool::Select, "the command ended");
         assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle stays");
@@ -9008,12 +9036,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        v.sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
+        v.doc.sketch.as_mut().unwrap().draft.take_up(Tool::Circle);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).with_step_dt(1.0 / 60.0).build_ui_state(
             |ui, v: &mut Viewer| {
                 let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -9024,7 +9052,7 @@ mod tests {
         );
         click(&mut h, egui::pos2(40.0, 40.0));
         click(&mut h, egui::pos2(60.0, 40.0));
-        assert!(h.state().sketch.as_ref().unwrap().field.is_some(), "the field opened again");
+        assert!(h.state().doc.sketch.as_ref().unwrap().field.is_some(), "the field opened again");
         h.hover_at(egui::pos2(300.0, 300.0));
         h.step();
         h.event(egui::Event::PointerButton {
@@ -9037,6 +9065,7 @@ mod tests {
         eprintln!(
             "DBG after press: field={:?}",
             h.state()
+                .doc
                 .sketch
                 .as_ref()
                 .unwrap()
@@ -9051,8 +9080,8 @@ mod tests {
             modifiers: egui::Modifiers::NONE,
         });
         h.step();
-        eprintln!("DBG after release: field={:?}", h.state().sketch.as_ref().unwrap().field.as_ref().map(|f| &f.text));
-        let sk = h.state().sketch.as_ref().unwrap();
+        eprintln!("DBG after release: field={:?}", h.state().doc.sketch.as_ref().unwrap().field.as_ref().map(|f| &f.text));
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         assert!(sk.field.is_none(), "a click leaves the field");
         assert!(sk.placed.as_ref().unwrap().circles.contains_key("c1"), "the circle stays");
     }
@@ -9065,12 +9094,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.draft.take_up(Tool::Line);
         sk.draft.escape();
         sk.selected = vec![Pick::Point("o".into())];
@@ -9093,18 +9122,18 @@ mod tests {
         }
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
         h.step();
-        assert_eq!(h.state().sketch.as_ref().unwrap().draft.tool, Tool::Select, "held: no command again");
-        let Some(Menu::Pattern { form, .. }) = &mut h.state_mut().menu else { panic!("the pattern menu") };
+        assert_eq!(h.state().doc.sketch.as_ref().unwrap().draft.tool, Tool::Select, "held: no command again");
+        let Some(Menu::Pattern { form, .. }) = &mut h.state_mut().doc.menu else { panic!("the pattern menu") };
         assert_eq!(form.base, crate::pattern::Base::Around("o".into()));
         form.fields.insert("n", "2".into());
         form.fields.insert("angle", "90".into());
         form.picking = true;
-        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve("right_hole".into())];
+        h.state_mut().doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("right_hole".into())];
         h.step();
-        assert_eq!(h.state().sketch.as_ref().unwrap().placed.as_ref().map(|p| p.patterns.len()), Ok(1), "previewed");
+        assert_eq!(h.state().doc.sketch.as_ref().unwrap().placed.as_ref().map(|p| p.patterns.len()), Ok(1), "previewed");
         h.key_press(egui::Key::Enter);
         h.run();
-        assert!(h.state().menu.is_none());
+        assert!(h.state().doc.menu.is_none());
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(
             sent.iter().any(|r| matches!(r, Request::Command("edit_sketch", p)
@@ -9112,7 +9141,7 @@ mod tests {
             "the pattern sent"
         );
         // The pattern's badge: a click selects its copy; held, the menu as it was given.
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         let badge = sk.badges(400.0).into_iter().find(|b| b.pick == Pick::Pattern("pattern1".into())).expect("a badge");
         let at = egui::pos2(300.0 + badge.at.0 as f32, 200.0 + badge.at.1 as f32);
         h.hover_at(at);
@@ -9121,14 +9150,14 @@ mod tests {
             h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
             h.step();
         }
-        assert_eq!(h.state().sketch.as_ref().unwrap().selected, [Pick::Copy("pattern1".into(), [1, 0])]);
+        assert_eq!(h.state().doc.sketch.as_ref().unwrap().selected, [Pick::Copy("pattern1".into(), [1, 0])]);
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: true, modifiers: egui::Modifiers::NONE });
         for _ in 0..40 {
             h.step();
         }
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed: false, modifiers: egui::Modifiers::NONE });
         h.step();
-        let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern's menu") };
+        let Some(Menu::Pattern { form, .. }) = &h.state().doc.menu else { panic!("the pattern's menu") };
         assert_eq!((form.name.as_str(), form.fields["n"].as_str(), form.fields["angle"].as_str()), ("pattern1", "2", "90"));
         assert_eq!(form.of.as_deref(), Some("right_hole"));
     }
@@ -9223,17 +9252,17 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.selected = vec![Pick::Curve("right_hole".into())];
         let mut form = crate::pattern::PatternForm::new(sk, crate::pattern::Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
         form.picking = true;
         form.fields.insert("n1", "3".into());
-        v.menu = Some(Menu::Pattern { at: egui::pos2(20.0, 20.0), form, error: None });
+        v.doc.menu = Some(Menu::Pattern { at: egui::pos2(20.0, 20.0), form, error: None });
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 v.shortcuts(ui);
@@ -9249,7 +9278,7 @@ mod tests {
         h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
         h.event(egui::Event::Text("0".into()));
         h.run();
-        let Some(Menu::Pattern { error, .. }) = &h.state().menu else { panic!("the pattern menu") };
+        let Some(Menu::Pattern { error, .. }) = &h.state().doc.menu else { panic!("the pattern menu") };
         assert!(error.as_deref().is_some_and(|e| e.contains("degenerate")), "the pattern is degenerate, as it was");
         assert!(h.query_by_label_contains("degenerate").is_none(), "but not said while the field is typed in");
         h.get_by_label("Pattern on a grid").click();
@@ -9264,12 +9293,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.selected = vec![Pick::Curve("right_hole".into())];
         let mut form = crate::pattern::PatternForm::new(sk, crate::pattern::Base::Grid([[1.0, 0.0], [0.0, 1.0]]));
         form.take_cell(sk);
@@ -9297,12 +9326,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Point("o".into())];
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Point("o".into())];
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 v.shortcuts(ui);
@@ -9313,12 +9342,12 @@ mod tests {
         h.run();
         h.key_press(egui::Key::A);
         h.step();
-        let Some(Menu::Pattern { form, .. }) = &h.state().menu else { panic!("the pattern menu") };
+        let Some(Menu::Pattern { form, .. }) = &h.state().doc.menu else { panic!("the pattern menu") };
         assert_eq!(form.base, crate::pattern::Base::Around("o".into()));
         h.key_press(egui::Key::Escape);
         h.step();
-        assert!(h.state().menu.is_none());
-        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve("right_hole".into())];
+        assert!(h.state().doc.menu.is_none());
+        h.state_mut().doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("right_hole".into())];
         h.key_press(egui::Key::G);
         h.step();
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -9337,14 +9366,14 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        v.sketch.as_mut().unwrap().draft.take_up(Tool::Dimension);
+        v.doc.sketch.as_mut().unwrap().draft.take_up(Tool::Dimension);
         let screen = |v: &Viewer, q: [f64; 2]| {
-            let (x, y) = v.sketch.as_ref().unwrap().camera.offset(q, 400.0);
+            let (x, y) = v.doc.sketch.as_ref().unwrap().camera.offset(q, 400.0);
             egui::pos2(300.0 + x as f32, 200.0 + y as f32)
         };
         let (right, left) = (screen(&v, [80.0, 12.0]), screen(&v, [0.0, 12.0]));
@@ -9364,7 +9393,7 @@ mod tests {
                 h.step();
             }
         };
-        let field = |h: &egui_kittest::Harness<Viewer>| match h.state().sketch.as_ref().unwrap().field.as_ref().map(|f| &f.entry) {
+        let field = |h: &egui_kittest::Harness<Viewer>| match h.state().doc.sketch.as_ref().unwrap().field.as_ref().map(|f| &f.entry) {
             Some(Entry::New { constraint, .. }) => constraint.clone(),
             _ => Json::Null,
         };
@@ -9377,7 +9406,7 @@ mod tests {
         h.run();
         // The plate's width is `w` already: the distance would repeat it, so it is offered as a
         // reference dimension.
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         assert_eq!(sk.conflict.as_ref().map(|c| c.constraint["type"].clone()), Some(json!("point_line")));
         assert!(sk.draft.picks.is_empty() && sk.draft.asked.is_none(), "the next pick starts anew");
         drop(h);
@@ -9393,10 +9422,10 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
         let element = json!({"name": "Plate", "anchors": ["a", "c"],
             "parameters": [{"name": "width", "value": 100}, {"name": "height", "value": 50}],
@@ -9404,7 +9433,7 @@ mod tests {
             "sketch": {"points": {"a": [0, 0], "b": [1, 0], "c": [1, 1], "d": [0, 1]},
                        "lines": {"bottom": {"from": "a", "to": "b"}, "right": {"from": "b", "to": "c"}, "top": {"from": "c", "to": "d"}, "left": {"from": "d", "to": "a"}},
                        "constraints": [{"type": "length", "line": "bottom", "value": "width"}, {"type": "length", "line": "left", "value": "height"}]}});
-        v.sketch.as_mut().unwrap().draft.choose(element);
+        v.doc.sketch.as_mut().unwrap().draft.choose(element);
         // `DATUM_ELEMENT_SHOT=file.png` saves a picture of the field and the preview.
         let shot = std::env::var_os("DATUM_ELEMENT_SHOT");
         let builder = egui_kittest::Harness::builder().with_size([600.0, 400.0]);
@@ -9414,7 +9443,7 @@ mod tests {
             ui.painter().rect_filled(rect, 0.0, egui::Color32::from_rgb(235, 238, 242));
             let offset = r.hover_pos().map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
             v.sketch_input(ui, rect, &r, offset);
-            if let Some(sk) = &v.sketch {
+            if let Some(sk) = &v.doc.sketch {
                 let painter = ui.painter().with_clip_rect(rect);
                 sk.paint(&painter, rect);
                 sk.draft.paint(sk, &painter, rect, &crate::i18n::I18n::default());
@@ -9451,7 +9480,7 @@ mod tests {
         let edit = sent.iter().find_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p.clone()) } else { None }).expect("placed");
         let lengths: Vec<&Json> = edit["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "length").map(|c| &c["value"]).collect();
         assert_eq!(lengths, [&json!(100.0), &json!(7.0)], "{edit}");
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.draft.tool == Tool::Select && sk.field.is_none(), "Esc ends the command");
     }
 
@@ -9463,12 +9492,12 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.selected = ["bottom", "right", "top", "left", "axis", "left_hole", "right_hole"].iter().map(|n| Pick::Curve(n.to_string())).collect();
         let element = sk.extract("Plate", Some(&sk.params)).unwrap();
         let names = |e: &Json| e["parameters"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
@@ -9546,7 +9575,7 @@ mod tests {
         h.get_by_label("Presets…").click();
         h.run();
         drop(h);
-        assert_eq!(v.table.as_ref().map(|t| t.0), Some(crate::table::Source::Presets));
+        assert_eq!(v.doc.table.as_ref().map(|t| t.0), Some(crate::table::Source::Presets));
     }
 
     /// The library palette: a double click on an element starts placing it, a drag onto the
@@ -9557,10 +9586,10 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
         let shot = std::env::var_os("DATUM_PALETTE_SHOT");
         let ui = |v: &mut Viewer, ui: &mut egui::Ui| {
@@ -9587,7 +9616,7 @@ mod tests {
             item.click();
             h.run();
         }
-        assert_eq!(v.sketch.as_ref().unwrap().draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Center rectangle")));
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Center rectangle")));
         {
             let mut h = egui_kittest::Harness::builder().with_size([800.0, 400.0]).build_ui(|u| ui(&mut v, u));
             h.run();
@@ -9599,7 +9628,7 @@ mod tests {
             h.drop_at(egui::pos2(300.0, 200.0));
             h.run();
         }
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert_eq!(sk.draft.template.as_ref().map(|t| t["name"].clone()), Some(json!("Rectangle")), "the dragged one is being placed");
         assert_eq!(sk.draft.tool, Tool::Template);
         assert!(sk.draft.clicks.is_empty(), "hangs at the cursor: the base point is not clicked yet");
@@ -9662,10 +9691,10 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
         (v, inbox)
     }
@@ -9674,14 +9703,14 @@ mod tests {
     fn l_in_the_model_opens_the_loft_form() {
         let (mut v, _inbox) = viewer("loft-01-line.json");
         v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
-        v.next_rule = Some("Sheet".into());
+        v.doc.next_rule = Some("Sheet".into());
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert!(v.loft_is_picking() && v.sketch.is_none());
+        assert!(v.loft_is_picking() && v.doc.sketch.is_none());
         v.leave();
-        assert!(v.loft.is_none());
+        assert!(v.doc.loft.is_none());
         v.reedit("loft");
         assert_eq!(v.edited_feature().as_deref(), Some("loft"));
     }
@@ -9690,16 +9719,16 @@ mod tests {
     fn the_toolbar_loft_starts_profile_picking_with_a_sheet_rule() {
         let (mut v, _) = viewer("loft-01-line.json");
         v.rules = vec![json!({"name":"Sheet","kind":"sheet"})];
-        v.next_rule = None;
+        v.doc.next_rule = None;
         let label = v.i18n.label(Act::Loft).to_string();
         let mut h = egui_kittest::Harness::builder().with_size([900.0, 200.0]).build_ui_state(|ui, v: &mut Viewer| v.toolbar(ui), v);
 
         h.get_by_label(&label).click();
         h.run();
         assert!(!h.state().loft_is_picking());
-        assert!(h.state().contour_hint.is_some_and(|(_, _, act)| act == Act::Loft));
+        assert!(h.state().doc.contour_hint.is_some_and(|(_, _, act)| act == Act::Loft));
 
-        h.state_mut().next_rule = Some("Sheet".into());
+        h.state_mut().doc.next_rule = Some("Sheet".into());
         h.get_by_label(&label).click();
         h.run();
         assert!(h.state().loft_is_picking());
@@ -9712,23 +9741,23 @@ mod tests {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/loft-04-concentric-arcs.json");
         session.execute("open", &json!({"path": path})).unwrap();
         let picture = picture(&session, None, None, &mut MeshCache::default());
-        let model = v.model.as_mut().unwrap();
+        let model = v.doc.model.as_mut().unwrap();
         model.scene = picture.scene;
         model.loft_profiles = picture.loft_profiles;
         model.inspect["parts"] = json!([{"part":"loft","rule":"Active"}]);
         v.rules = vec![json!({"name":"Next","kind":"sheet"}), json!({"name":"Active","kind":"sheet"})];
-        v.next_rule = Some("Next".into());
+        v.doc.next_rule = Some("Next".into());
         assert_eq!(v.loft_toolbar_rule().as_deref(), Some("Next"));
-        v.part = Some("loft".into());
+        v.doc.part = Some("loft".into());
         assert_eq!(v.loft_toolbar_rule().as_deref(), Some("Active"));
         v.open_loft(egui::Pos2::ZERO);
 
         let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
-        let (anchor, radius) = sphere(&v.model.as_ref().unwrap().scene);
-        let (vp, _) = v.camera.matrices(anchor, 800.0 / 600.0, radius);
+        let (anchor, radius) = sphere(&v.doc.model.as_ref().unwrap().scene);
+        let (vp, _) = v.doc.camera.matrices(anchor, 800.0 / 600.0, radius);
         let project = |q| on_screen(&vp, q - anchor, rect);
         for name in ["sketch1", "sketch2"] {
-            let model = v.model.as_ref().unwrap();
+            let model = v.doc.model.as_ref().unwrap();
             let profile = model.loft_profiles.iter().find(|p| p.name == name).unwrap();
             let hit = profile.screen(&project).map(|[a, b]| a + (b - a) * 0.5).find_map(|p| {
                 let i = v.loft_profile_at(rect, p)?;
@@ -9754,13 +9783,13 @@ mod tests {
         };
         press(egui::Key::L, egui::Modifiers::SHIFT);
         press(egui::Key::S, egui::Modifiers::NONE);
-        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select));
-        assert!(v.picking.is_none() && inbox.try_iter().next().is_none(), "no other sketch");
+        assert_eq!(v.doc.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select));
+        assert!(v.doc.picking.is_none() && inbox.try_iter().next().is_none(), "no other sketch");
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::L, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
+        assert_eq!(v.doc.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Line));
     }
 
     /// A harness of the metadata window alone, as the window draws it.
@@ -9779,12 +9808,12 @@ mod tests {
     #[test]
     fn f12_opens_metadata_on_the_selection() {
         let (mut v, inbox) = sketching();
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into()), Pick::Curve("left_hole".into())];
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into()), Pick::Curve("left_hole".into())];
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        let form = v.metadata.as_ref().expect("the editor opened");
+        let form = v.doc.metadata.as_ref().expect("the editor opened");
         assert_eq!(form.targets, ["bottom"], "a line only: a circle is no target");
         assert!(inbox.try_iter().next().is_none(), "opening sends no command");
         // A second F12 keeps the draft, and the sketch's selection changing does not retarget it.
@@ -9792,8 +9821,8 @@ mod tests {
         h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
-        assert_eq!(v.metadata.as_ref().unwrap().targets, ["bottom"]);
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
+        assert_eq!(v.doc.metadata.as_ref().unwrap().targets, ["bottom"]);
     }
 
     /// On a clean sketch F12 opens a form that takes the selection made in the sketch while it is
@@ -9802,38 +9831,38 @@ mod tests {
     fn a_form_without_targets_takes_the_selection_made_in_the_sketch() {
         let (mut v, _inbox) = sketching();
         {
-            let sk = v.sketch.as_mut().unwrap();
+            let sk = v.doc.sketch.as_mut().unwrap();
             sk.selected.clear();
             sk.json["sketch"]["metadata"] = Json::Null;
         }
         v.open_metadata();
-        assert!(v.metadata.as_ref().is_some_and(|f| f.targets.is_empty() && f.marked.is_empty()));
+        assert!(v.doc.metadata.as_ref().is_some_and(|f| f.targets.is_empty() && f.marked.is_empty()));
         // The window is open; a curve selected in the sketch becomes its target.
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
         let mut h = metadata_harness(v);
         h.run();
-        assert_eq!(h.state().metadata.as_ref().unwrap().targets, ["bottom"]);
+        assert_eq!(h.state().doc.metadata.as_ref().unwrap().targets, ["bottom"]);
     }
 
     /// A second F12 fills a form that is still without targets, and leaves one with targets alone.
     #[test]
     fn a_second_f12_only_fills_a_form_without_targets() {
         let (mut v, _inbox) = sketching();
-        v.sketch.as_mut().unwrap().selected.clear();
+        v.doc.sketch.as_mut().unwrap().selected.clear();
         v.open_metadata();
-        assert!(v.metadata.as_ref().is_some_and(|f| f.targets.is_empty()));
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
+        assert!(v.doc.metadata.as_ref().is_some_and(|f| f.targets.is_empty()));
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.metadata.as_ref().unwrap().targets, ["top"]);
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        assert_eq!(v.doc.metadata.as_ref().unwrap().targets, ["top"]);
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.metadata.as_ref().unwrap().targets, ["top"], "a begun draft is not retargeted");
+        assert_eq!(v.doc.metadata.as_ref().unwrap().targets, ["top"], "a begun draft is not retargeted");
     }
 
     /// Leaving the sketch, or entering another, closes the metadata editor.
@@ -9841,14 +9870,14 @@ mod tests {
     fn leaving_a_sketch_closes_the_metadata_editor() {
         let (mut v, _inbox) = sketching();
         v.open_metadata();
-        assert!(v.metadata.is_some());
+        assert!(v.doc.metadata.is_some());
         v.leave();
-        assert!(v.metadata.is_none(), "leave closes it");
+        assert!(v.doc.metadata.is_none(), "leave closes it");
         let (mut v, _inbox) = viewer_in_sketch();
         v.open_metadata();
-        assert!(v.metadata.is_some());
+        assert!(v.doc.metadata.is_some());
         v.enter("other".into());
-        assert!(v.metadata.is_none(), "enter closes it");
+        assert!(v.doc.metadata.is_none(), "enter closes it");
     }
 
     /// Without a selection F12 lists the marked curves; one picked is edited, and Apply sends one
@@ -9857,24 +9886,24 @@ mod tests {
     fn the_metadata_editor_changes_a_marked_curve() {
         let (mut v, inbox) = sketching();
         {
-            let sk = v.sketch.as_mut().unwrap();
+            let sk = v.doc.sketch.as_mut().unwrap();
             sk.selected.clear();
             sk.json["sketch"]["metadata"] = json!({"bottom": {"note": "old"}, "top": {"stamp.role": "cut"}});
         }
         v.open_metadata();
-        let form = v.metadata.as_ref().unwrap();
+        let form = v.doc.metadata.as_ref().unwrap();
         assert!(form.targets.is_empty() && form.marked == ["bottom", "top"], "{:?}", form.marked);
         let mut h = metadata_harness(v);
         h.run();
         h.get_by_label("bottom").click();
         h.run();
-        let form = h.state().metadata.as_ref().expect("still open");
+        let form = h.state().doc.metadata.as_ref().expect("still open");
         assert_eq!(form.targets, ["bottom"]);
         assert_eq!(form.values.get("note").map(String::as_str), Some("\"old\""), "the existing value shown");
-        h.state_mut().metadata.as_mut().unwrap().values.insert("note".into(), "42".into());
+        h.state_mut().doc.metadata.as_mut().unwrap().values.insert("note".into(), "42".into());
         h.get_by_label("OK").click();
         h.run();
-        assert!(h.state().metadata.is_none(), "applied, the window closes");
+        assert!(h.state().doc.metadata.is_none(), "applied, the window closes");
         let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_metadata", p) = r { Some(p) } else { None }).collect();
         assert_eq!(sent.len(), 1, "one Apply, one command");
         assert_eq!(sent[0], json!({"name": "outline", "elements": ["bottom"], "set": {"note": 42}, "remove": []}));
@@ -9886,12 +9915,12 @@ mod tests {
     fn escape_closes_metadata_and_a_mixed_value_is_honest() {
         let (mut v, inbox) = sketching();
         {
-            let sk = v.sketch.as_mut().unwrap();
+            let sk = v.doc.sketch.as_mut().unwrap();
             sk.selected = vec![Pick::Curve("bottom".into()), Pick::Curve("top".into())];
             sk.json["sketch"]["metadata"] = json!({"bottom": {"note": "a"}, "top": {"note": "b", "stamp.role": "cut"}});
         }
         v.open_metadata();
-        let form = v.metadata.as_ref().unwrap();
+        let form = v.doc.metadata.as_ref().unwrap();
         assert!(form.mixed.contains("note"), "the targets disagree");
         assert_eq!(form.values.get("note").map(String::as_str), Some(""), "no false common value");
         assert!(form.mixed.contains("stamp.role"), "on one target only");
@@ -9899,12 +9928,12 @@ mod tests {
         assert!(v.apply_metadata().is_err(), "nothing typed, nothing to change");
         assert!(inbox.try_iter().next().is_none());
         // Typed, it is set on every target; Escape drops it.
-        v.metadata.as_mut().unwrap().values.insert("note".into(), "7".into());
+        v.doc.metadata.as_mut().unwrap().values.insert("note".into(), "7".into());
         let mut h = metadata_harness(v);
         h.run();
         h.key_press(egui::Key::Escape);
         h.run();
-        assert!(h.state().metadata.is_none(), "Escape closes it");
+        assert!(h.state().doc.metadata.is_none(), "Escape closes it");
         assert!(inbox.try_iter().next().is_none(), "the draft is not sent");
     }
 
@@ -9913,9 +9942,9 @@ mod tests {
     #[test]
     fn a_preset_fills_the_properties_to_send() {
         let (mut v, inbox) = sketching();
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
         v.open_metadata();
-        let form = v.metadata.as_mut().unwrap();
+        let form = v.doc.metadata.as_mut().unwrap();
         form.presets.push(super::forms::Preset {
             id: "mine".into(),
             label: "Mine".into(),
@@ -9941,10 +9970,10 @@ mod tests {
             h.run();
         }
         press(&mut v, egui::Key::N);
-        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select), "nothing selected");
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
+        assert_eq!(v.doc.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Select), "nothing selected");
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
         press(&mut v, egui::Key::N);
-        assert_eq!(v.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Polygon));
+        assert_eq!(v.doc.sketch.as_ref().map(|sk| sk.draft.tool), Some(Tool::Polygon));
     }
 
     /// A polygon's group badge clicked opens the sides form; Done with a new count rebuilds the
@@ -9953,7 +9982,7 @@ mod tests {
     fn a_polygons_badge_changes_its_sides() {
         let (mut v, inbox) = sketching();
         let _ = inbox.try_iter().count();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         sk.selected = vec![Pick::Curve("left_hole".into())];
         let p = crate::polygon::plan(sk, &(json!(6), 6.0)).expect("a polygon");
         sk.apply(p);
@@ -9969,8 +9998,16 @@ mod tests {
             v,
         );
         h.run();
-        let badge =
-            h.state().sketch.as_ref().unwrap().badges(400.0).into_iter().find(|b| b.pick == Pick::Group(group.clone())).expect("the polygon's badge");
+        let badge = h
+            .state()
+            .doc
+            .sketch
+            .as_ref()
+            .unwrap()
+            .badges(400.0)
+            .into_iter()
+            .find(|b| b.pick == Pick::Group(group.clone()))
+            .expect("the polygon's badge");
         let at = egui::pos2(300.0 + badge.at.0 as f32, 200.0 + badge.at.1 as f32);
         h.hover_at(at);
         h.step();
@@ -9980,12 +10017,12 @@ mod tests {
         };
         button(&mut h, true);
         button(&mut h, false);
-        let Some(Menu::Polygon { sides, .. }) = &mut h.state_mut().menu else { panic!("the polygon's form") };
+        let Some(Menu::Polygon { sides, .. }) = &mut h.state_mut().doc.menu else { panic!("the polygon's form") };
         assert_eq!(sides, "6");
         *sides = "4".into();
         h.key_press(egui::Key::Enter);
         h.run();
-        assert!(h.state().menu.is_none(), "Done closes the form");
+        assert!(h.state().doc.menu.is_none(), "Done closes the form");
         let p = inbox
             .try_iter()
             .find_map(|r| match r {
@@ -9995,7 +10032,7 @@ mod tests {
             .expect("the edit_sketch sent");
         assert_eq!(p["groups"][&group].as_array().unwrap().len(), 9, "four vertices, four sides, the circle");
         assert_eq!(p["points"].as_object().unwrap().values().filter(|v| v.is_null()).count(), 6, "the six old vertices go");
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         assert_eq!(crate::polygon::sides_of(sk, &group), Some(4), "the same group, four sides now");
     }
 
@@ -10005,14 +10042,14 @@ mod tests {
     fn the_mirror_key_flips_the_element_being_placed() {
         let (mut v, inbox) = sketching();
         let _ = inbox.try_iter().count();
-        v.sketch.as_mut().unwrap().draft.choose(json!({"name": "Dot", "anchors": ["a"],
+        v.doc.sketch.as_mut().unwrap().draft.choose(json!({"name": "Dot", "anchors": ["a"],
             "sketch": {"points": {"a": [0, 0], "b": [1, 0]}, "lines": {"l": {"from": "a", "to": "b"}}}}));
-        assert!(!v.sketch.as_ref().unwrap().draft.mirror);
+        assert!(!v.doc.sketch.as_ref().unwrap().draft.mirror);
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::M, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.draft.mirror, "M flips the element being placed");
         assert_eq!(sk.draft.tool, Tool::Template, "the mirror tool is not taken up");
         assert!(sk.draft.template.is_some(), "still the same element");
@@ -10040,7 +10077,7 @@ mod tests {
     /// and the rows run as in the window.
     fn titled_tree() -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        v.model.as_mut().unwrap().inspect["features"][0]["title"] = json!("Plate");
+        v.doc.model.as_mut().unwrap().inspect["features"][0]["title"] = json!("Plate");
         let h = egui_kittest::Harness::builder().with_size([400.0, 300.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 v.shortcuts(ui);
@@ -10065,11 +10102,11 @@ mod tests {
     fn delete_removes_the_selected_feature() {
         let (mut h, inbox) = titled_tree();
         h.run();
-        h.state_mut().tree.selected = Some("plate".into());
+        h.state_mut().doc.tree.selected = Some("plate".into());
         press(&mut h, egui::Key::Delete);
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("remove", p) if *p == json!({"name": "plate"}))), "removed");
-        assert!(h.state().tree.selected.is_none(), "selection cleared");
+        assert!(h.state().doc.tree.selected.is_none(), "selection cleared");
     }
 
     /// A row shows its title, and the key in the tooltip.
@@ -10090,15 +10127,15 @@ mod tests {
         h.run();
         h.get_by_label("Plate  ·  sketch").click();
         h.run();
-        assert_eq!(h.state().tree.selected.as_deref(), Some("outline"));
+        assert_eq!(h.state().doc.tree.selected.as_deref(), Some("outline"));
         press(&mut h, egui::Key::F2);
         h.run();
-        assert_eq!(h.state().tree.renaming.as_ref().map(|r| r.text.as_str()), Some("Plate"));
+        assert_eq!(h.state().doc.tree.renaming.as_ref().map(|r| r.text.as_str()), Some("Plate"));
         h.event(egui::Event::Text("Deska".into()));
         h.run();
         press(&mut h, egui::Key::Enter);
         assert_eq!(titles(&inbox), vec![json!({"name": "outline", "title": "Deska"})]);
-        assert!(h.state().tree.renaming.is_none());
+        assert!(h.state().doc.tree.renaming.is_none());
 
         press(&mut h, egui::Key::F2);
         h.run();
@@ -10118,16 +10155,16 @@ mod tests {
         h.get_by_label("Plate  ·  sketch").click();
         h.run();
         h.run();
-        assert!(h.state().tree.renaming.is_some());
+        assert!(h.state().doc.tree.renaming.is_some());
         h.event(egui::Event::Text("x".into()));
         h.run();
         press(&mut h, egui::Key::Escape);
         h.run();
-        assert!(h.state().tree.renaming.is_none());
+        assert!(h.state().doc.tree.renaming.is_none());
         assert!(titles(&inbox).is_empty());
         // Esc again clears the selection.
         press(&mut h, egui::Key::Escape);
-        assert!(h.state().tree.selected.is_none());
+        assert!(h.state().doc.tree.selected.is_none());
     }
 
     /// A folder `name` in the temporary folder, emptied; a project if `project`.
@@ -10197,7 +10234,7 @@ mod tests {
             h.get_by_label(button).click();
             h.run();
         }
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Constrain(kind));
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.tool, Tool::Constrain(kind));
         let area = std::cell::Cell::new(egui::Rect::NOTHING);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
             let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -10208,7 +10245,7 @@ mod tests {
         h.run();
         drop(h);
         // Where each hole's rightmost point is on the screen.
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         let rect = area.get();
         let at = |c: &str| {
             let q = sk.placed.as_ref().unwrap().solved.points[c];
@@ -10240,7 +10277,7 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        let sk = v.sketch.as_mut().unwrap();
+        let sk = v.doc.sketch.as_mut().unwrap();
         let plate = session.graph().find("plate").unwrap();
         sk.context.sources = vec![("plate".to_string(), session.evaluation().results[plate as usize].as_ref().unwrap().clone())];
         sk.draft.tool = Tool::Project;
@@ -10268,7 +10305,7 @@ mod tests {
             |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE };
         let (a, b) = (egui::pos2(300.0, 200.0), egui::pos2(340.0, 160.0));
         frame(&mut v, vec![egui::Event::PointerMoved(a), press(a, true), egui::Event::PointerMoved(b), press(b, false)], Some(a));
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.turned.is_some(), "a drag turned it");
         assert!(sk.draft.projectable.len() > flat, "every edge offered: {} of {flat}", sk.draft.projectable.len());
         assert_eq!(sk.camera.center, before.center, "the sketch's own view stays");
@@ -10291,10 +10328,10 @@ mod tests {
         let [patch] = &sent[..] else { panic!("one edit: {sent:?}") };
         let taken = patch["project"].as_object().unwrap().values().next().unwrap();
         assert_eq!((taken["from"].as_str(), taken["id"].as_str()), (Some("plate"), Some(id.as_str())), "{patch}");
-        assert!(v.sketch.as_ref().unwrap().turned.is_some(), "still turned: for the next edge");
-        v.sketch.as_mut().unwrap().draft.escape();
+        assert!(v.doc.sketch.as_ref().unwrap().turned.is_some(), "still turned: for the next edge");
+        v.doc.sketch.as_mut().unwrap().draft.escape();
         frame(&mut v, vec![], Some(a));
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.turned.is_none(), "back on the sketch's plane");
         assert_eq!(sk.draft.projectable.len(), flat);
     }
@@ -10309,9 +10346,9 @@ mod tests {
         h.event(egui::Event::Key { key: egui::Key::X, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Trim);
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.tool, Tool::Trim);
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         let (x, y) = sk.camera.offset([20.0, 40.0], f64::from(rect.height()));
         let pos = rect.center() + egui::vec2(x as f32, y as f32);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui(|ui| {
@@ -10330,7 +10367,7 @@ mod tests {
         assert_eq!(patch["lines"]["top"], json!({"from": "b", "to": "n"}), "{patch}");
         assert_eq!(patch["remove_constraints"], json!([{"type": "on", "point": "n", "curve": "top"}]));
         assert!(patch.get("points").is_none(), "the corner holds the left side");
-        assert!(v.sketch.as_ref().unwrap().placed.is_ok());
+        assert!(v.doc.sketch.as_ref().unwrap().placed.is_ok());
     }
 
     /// O takes up offset; with 3 typed, a click a hair inside the plate's bottom sends one edit:
@@ -10344,10 +10381,10 @@ mod tests {
         h.event(egui::Event::Key { key: egui::Key::O, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Offset);
-        v.sketch.as_mut().unwrap().draft.offset = Some((json!(3), 3.0));
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.tool, Tool::Offset);
+        v.doc.sketch.as_mut().unwrap().draft.offset = Some((json!(3), 3.0));
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         let points = &sk.placed.as_ref().unwrap().solved.points;
         let (o, a) = (points["o"], points["a"]);
         // A quarter of the way along, off the axis that starts at the middle.
@@ -10370,7 +10407,7 @@ mod tests {
         let dims: Vec<_> = patch["add_constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "point_line").collect();
         assert_eq!(dims.len(), 4, "{patch}");
         assert!(dims.iter().all(|c| c["value"].as_f64() == Some(3.0) && c["line"] != "axis"), "{patch}");
-        assert!(v.sketch.as_ref().unwrap().placed.is_ok());
+        assert!(v.doc.sketch.as_ref().unwrap().placed.is_ok());
     }
 
     /// M takes up the mirror tool for the selected hole, Tab turns "the original goes" on and
@@ -10380,12 +10417,12 @@ mod tests {
     fn a_hole_is_mirrored_in_the_window() {
         let (mut v, inbox) = sketching();
         let _ = inbox.try_iter().count();
-        v.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
+        v.doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("left_hole".into())];
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::M, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Mirror);
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.tool, Tool::Mirror);
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
         let mut toggled = Vec::new();
         for _ in 0..2 {
@@ -10397,10 +10434,10 @@ mod tests {
             h.event(egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
             h.run();
             drop(h);
-            toggled.push(v.sketch.as_ref().unwrap().draft.mirror_moves);
+            toggled.push(v.doc.sketch.as_ref().unwrap().draft.mirror_moves);
         }
         assert_eq!(toggled, [true, false], "Tab: the original goes, then stays");
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         let points = &sk.placed.as_ref().unwrap().solved.points;
         let (m, n, h1, h2) = (points["m"], points["n"], points["h1"], points["h2"]);
         let mid = [0.5 * (m.x + n.x), 0.5 * (m.y + n.y)];
@@ -10427,7 +10464,7 @@ mod tests {
         // The reflection of h1 across the axis is h2.
         let at = [centre[0].as_f64().unwrap(), centre[1].as_f64().unwrap()];
         assert!((at[0] - h2.x).abs() < 1e-6 && (at[1] - h2.y).abs() < 1e-6, "{at:?} vs {h1:?} {h2:?}");
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Select);
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.tool, Tool::Select);
     }
 
     /// A viewer with the model open and its sketch `sketch1` being edited, as `sketching` does.
@@ -10436,10 +10473,10 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(name);
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("sketch1".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("sketch1".into());
+        v.doc.entering = Some("sketch1".into());
         v.sync_sketch();
         (v, inbox)
     }
@@ -10455,18 +10492,18 @@ mod tests {
         h.run();
         drop(h);
         {
-            let sk = v.sketch.as_mut().unwrap();
+            let sk = v.doc.sketch.as_mut().unwrap();
             sk.draft.fillet = Some((json!(2), 2.0));
             sk.draft.chamfer = false;
         }
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
         let follow = |v: &mut Viewer, at: [f64; 2]| {
-            let (x, y) = v.sketch.as_ref().unwrap().camera.offset(at, f64::from(rect.height()));
+            let (x, y) = v.doc.sketch.as_ref().unwrap().camera.offset(at, f64::from(rect.height()));
             rect.center() + egui::vec2(x as f32, y as f32)
         };
         // Inside the region, away from every point, so the region is asked, not a corner.
         let hover = {
-            let sk = v.sketch.as_ref().unwrap();
+            let sk = v.doc.sketch.as_ref().unwrap();
             let pts = &sk.placed.as_ref().unwrap().solved.points;
             let (o, c) = (pts["origin"], pts["p3"]);
             follow(&mut v, [0.5 * (o.x + c.x), 0.5 * (o.y + c.y)])
@@ -10479,10 +10516,10 @@ mod tests {
         h.hover_at(hover);
         h.run();
         drop(h);
-        assert!(v.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan inside the region");
+        assert!(v.doc.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan inside the region");
         // And at a corner, where a construction diagonal also ends: still a corner.
         let hover = {
-            let sk = v.sketch.as_ref().unwrap();
+            let sk = v.doc.sketch.as_ref().unwrap();
             let q = sk.placed.as_ref().unwrap().solved.points["p1"];
             follow(&mut v, [q.x, q.y])
         };
@@ -10494,7 +10531,7 @@ mod tests {
         h.hover_at(hover);
         h.run();
         drop(h);
-        assert!(v.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan at a corner with a construction diagonal");
+        assert!(v.doc.sketch.as_ref().unwrap().draft.plan.is_some(), "no fillet plan at a corner with a construction diagonal");
     }
 
     /// F takes up the fillet tool, Tab turns it into chamfers and back; with the size 5, a click
@@ -10507,7 +10544,7 @@ mod tests {
         h.event(egui::Event::Key { key: egui::Key::F, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
-        assert_eq!(v.sketch.as_ref().unwrap().draft.tool, Tool::Fillet);
+        assert_eq!(v.doc.sketch.as_ref().unwrap().draft.tool, Tool::Fillet);
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
         let mut toggled = Vec::new();
         for _ in 0..2 {
@@ -10519,15 +10556,15 @@ mod tests {
             h.event(egui::Event::Key { key: egui::Key::Tab, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
             h.run();
             drop(h);
-            toggled.push(v.sketch.as_ref().unwrap().draft.chamfer);
+            toggled.push(v.doc.sketch.as_ref().unwrap().draft.chamfer);
         }
         assert_eq!(toggled, [true, false], "Tab: chamfer, then fillet");
         {
-            let sk = v.sketch.as_mut().unwrap();
+            let sk = v.doc.sketch.as_mut().unwrap();
             sk.draft.fillet = Some((json!(5), 5.0));
             sk.draft.chamfer = false;
         }
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         let q = sk.placed.as_ref().unwrap().solved.points["a"];
         let (x, y) = sk.camera.offset([q.x, q.y], f64::from(rect.height()));
         let pos = rect.center() + egui::vec2(x as f32, y as f32);
@@ -10547,7 +10584,7 @@ mod tests {
         assert_eq!(patch["arcs"].as_object().map(|a| a.len()), Some(1), "{patch}");
         let added = patch["add_constraints"].as_array().unwrap();
         assert!(added.iter().any(|c| c["type"] == "radius" && c["value"] == json!(5)), "{patch}");
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.placed.is_ok(), "{:?}", sk.placed.as_ref().err());
         let kept = sk.json["sketch"]["constraints"].as_array().unwrap();
         assert!(kept.iter().any(|c| c["type"] == "horizontal_distance" && c["points"] == json!(["o", "a"])));
@@ -10563,7 +10600,7 @@ mod tests {
         h.run();
         drop(h);
         {
-            let sk = v.sketch.as_mut().unwrap();
+            let sk = v.doc.sketch.as_mut().unwrap();
             sk.draft.fillet_presets = vec![2.0, 5.0];
             sk.draft.chamfer_presets = vec![(2.0, None), (4.0, None)];
         }
@@ -10577,7 +10614,7 @@ mod tests {
             h.run();
             drop(h);
         };
-        let taken = |v: &Viewer| v.sketch.as_ref().unwrap().draft.fillet.as_ref().map(|(j, s)| (j.as_f64(), *s));
+        let taken = |v: &Viewer| v.doc.sketch.as_ref().unwrap().draft.fillet.as_ref().map(|(j, s)| (j.as_f64(), *s));
         press(&mut v, egui::Key::ArrowUp);
         assert_eq!(taken(&v), Some((Some(2.0), 2.0)), "no value yet: up the smallest");
         press(&mut v, egui::Key::ArrowUp);
@@ -10596,7 +10633,7 @@ mod tests {
     #[test]
     fn a_constraint_by_hand() {
         let (v, inbox) = both_holes_by_hand("Concentric", crate::constrain::Kind::Concentric);
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.draft.picks.is_empty(), "two holes picked, then done: {:?}", sk.draft.picks);
         let why = &sk.conflict.as_ref().expect("refused").why;
         assert!(!why.is_empty(), "with why");
@@ -10608,7 +10645,7 @@ mod tests {
     #[test]
     fn equal_circles_by_hand() {
         let (v, inbox) = both_holes_by_hand("Equal", crate::constrain::Kind::Equal);
-        let sk = v.sketch.as_ref().unwrap();
+        let sk = v.doc.sketch.as_ref().unwrap();
         assert!(sk.conflict.is_none(), "{:?}", sk.conflict.as_ref().map(|c| &c.why));
         let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_sketch", p) = r { Some(p) } else { None }).collect();
         assert_eq!(sent.len(), 1);
@@ -10622,7 +10659,7 @@ mod tests {
     #[test]
     fn close_a_saved_model() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        v.path = Some("plate.json".into());
+        v.doc.path = Some("plate.json".into());
         assert!(!v.modified());
         {
             // `DATUM_MENU_SHOT=file.png` saves a picture of the open File menu.
@@ -10640,7 +10677,7 @@ mod tests {
             h.run();
         }
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)));
-        assert!(v.path.is_none() && v.sketch.is_none());
+        assert!(v.doc.path.is_none() && v.doc.sketch.is_none());
     }
 
     /// A new parameter from the panel (issue #57): Add sends it, a formula as typed; a name
@@ -10654,13 +10691,13 @@ mod tests {
             h.get_all_by_label(click).next().unwrap().click();
             h.run();
         };
-        v.new_parameter = vec!["gap".into(), "w / 10".into()];
+        v.doc.new_parameter = vec!["gap".into(), "w / 10".into()];
         panel(&mut v, "Add");
-        assert!(v.new_parameter.iter().all(String::is_empty) && v.local_error.is_none());
-        v.new_parameter = vec!["hole".into(), "5".into()];
+        assert!(v.doc.new_parameter.iter().all(String::is_empty) && v.doc.local_error.is_none());
+        v.doc.new_parameter = vec!["hole".into(), "5".into()];
         panel(&mut v, "Add");
-        assert!(v.local_error.as_ref().is_some_and(|e| e.contains("already")), "{:?}", v.local_error);
-        assert_eq!(v.new_parameter[0], "hole", "kept to be renamed");
+        assert!(v.doc.local_error.as_ref().is_some_and(|e| e.contains("already")), "{:?}", v.doc.local_error);
+        assert_eq!(v.doc.new_parameter[0], "hole", "kept to be renamed");
         panel(&mut v, "Remove the parameter");
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::SetParameter(n, val) if n == "gap" && val == "w / 10")));
@@ -10673,7 +10710,7 @@ mod tests {
     #[test]
     fn the_parameters_table_sets_a_value() {
         let (mut v, inbox) = viewer("parametric.json");
-        v.table = Some(Default::default());
+        v.doc.table = Some(Default::default());
         let mut h = egui_kittest::Harness::builder().with_size([500.0, 500.0]).build_ui(|ui| v.table_window(ui.ctx(), None));
         h.run();
         for key in [egui::Key::ArrowDown, egui::Key::ArrowRight] {
@@ -10702,7 +10739,7 @@ mod tests {
             h.run();
         };
         click(&mut v, "Стенка верхняя");
-        v.new_level = Some((Some("2 м".into()), "wall".into(), "Variant 1".into()));
+        v.doc.new_level = Some((Some("2 м".into()), "wall".into(), "Variant 1".into()));
         click(&mut v, "Create");
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"] == "2 м")));
@@ -10711,20 +10748,20 @@ mod tests {
                 .any(|r| matches!(r, Request::Command("add_level", p) if p["name"] == "Variant 1" && p["parent"] == "2 м" && p["part"] == "wall"))
         );
         assert!(sent.iter().any(|r| matches!(r, Request::Command("choose", p) if p["level"] == "Variant 1")), "the new one chosen");
-        v.model.as_mut().unwrap().inspect["level"] = json!("2 м");
+        v.doc.model.as_mut().unwrap().inspect["level"] = json!("2 м");
         click(&mut v, "Base");
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("activate", p) if p["level"].is_null())), "the base: the root");
         // The product kept as a set, under the name typed.
-        v.new_set = Some("Шкаф 2 м".into());
+        v.doc.new_set = Some("Шкаф 2 м".into());
         click(&mut v, "Save");
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("save_set", p) if p["name"] == "Шкаф 2 м")));
-        assert_eq!(v.new_set, None);
+        assert_eq!(v.doc.new_set, None);
         // In the variant of 2.5 m: its sketch changed (a dot), its length set (the undo arrow by the parameter too).
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         session.execute("activate", &json!({"level": "2,5 м"})).unwrap();
-        v.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
+        v.doc.model.as_mut().unwrap().inspect = session.execute("inspect", &json!({})).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
         h.run();
         assert!(h.query_by_label("outline  ·  sketch").is_some());
@@ -10741,7 +10778,7 @@ mod tests {
     #[test]
     fn a_feature_is_turned_off_by_its_box() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        let last = v.model.as_ref().unwrap().inspect["features"].as_array().unwrap().last().unwrap()["name"].as_str().unwrap().to_string();
+        let last = v.doc.model.as_ref().unwrap().inspect["features"].as_array().unwrap().last().unwrap()["name"].as_str().unwrap().to_string();
         let mut h = egui_kittest::Harness::builder().with_size([360.0, 900.0]).build_ui(|ui| v.side(ui));
         h.run();
         h.get_all_by_role(egui::accesskit::Role::CheckBox).last().unwrap().click();
@@ -10804,7 +10841,7 @@ mod tests {
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/wall_variants.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         session.execute("activate", &json!({"level": "2,5 м"})).unwrap();
-        let m = v.model.as_mut().unwrap();
+        let m = v.doc.model.as_mut().unwrap();
         m.flats = session.flats();
         m.inspect = session.execute("inspect", &json!({})).unwrap();
         assert!(matches!(&m.flats[..], [(n, Ok(_))] if n == "notched"), "the part's body, laid flat");
@@ -10825,7 +10862,7 @@ mod tests {
             let mut session = Session::default();
             let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/sheet_panel.json");
             session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-            v.model.as_mut().unwrap().flats = session.flats();
+            v.doc.model.as_mut().unwrap().flats = session.flats();
             let mut h = egui_kittest::Harness::builder().with_size([800.0, 360.0]).with_pixels_per_point(1.0).build_ui(|ui| v.flat_pane(ui));
             h.run();
             h.render().unwrap().save(dir).unwrap();
@@ -10837,7 +10874,7 @@ mod tests {
     #[test]
     fn keys_close_and_new() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        v.path = Some("plate.json".into());
+        v.doc.path = Some("plate.json".into());
         let ctrl = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND };
         let mut text = String::new();
         let mut h = egui_kittest::Harness::builder().with_size([400.0, 80.0]).build_ui(|ui| {
@@ -10923,10 +10960,11 @@ mod tests {
             v,
         );
         h.run();
-        let sheet = h.state().model.as_ref().unwrap().inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == "panel").unwrap().clone();
+        let sheet =
+            h.state().doc.model.as_ref().unwrap().inspect["features"].as_array().unwrap().iter().find(|f| f["name"] == "panel").unwrap().clone();
         h.get_all_by_label("Change it").next().unwrap().click();
         h.run();
-        let x = h.state().extrusion.as_ref().expect("the form");
+        let x = h.state().doc.extrusion.as_ref().expect("the form");
         let (width, symmetric) = datum_model::sheet_width(&sheet["z0"], &sheet["z1"]);
         assert!(x.editing && x.name == "panel" && matches!(x.kind, Kind::Sheet(..)));
         assert_eq!((x.depth.clone(), x.symmetric), (definition(&width), symmetric));
@@ -10961,7 +10999,7 @@ mod tests {
     /// with the keys and the extrusion form.
     fn extruding(second: bool) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        let features = v.doc.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
         let drawn = json!({"lines": {"l": {"from": "a", "to": "b"}}});
         features.push(json!({"name": "extra", "op": "sketch", "inputs": [], "sketch": drawn}));
         if second {
@@ -10992,18 +11030,18 @@ mod tests {
         let params = json!({"name": "extrude1", "sketch": "extra", "mode": "new", "z1": 7.0});
         // The preview of the depth before is no leave to make this one: Enter waits.
         let reply = Ok(json!({"mode": "new", "body": "extrude1"}));
-        h.state_mut().model.as_mut().unwrap().preview =
+        h.state_mut().doc.model.as_mut().unwrap().preview =
             Some((json!({"name": "extrude1", "sketch": "extra", "mode": "new", "z1": 10.0}), reply.clone()));
         h.key_press(egui::Key::Enter);
         h.run();
-        assert!(h.state().extrusion.is_some(), "a preview of 10 does not let 7 be made");
-        h.state_mut().model.as_mut().unwrap().preview = Some((params.clone(), reply));
+        assert!(h.state().doc.extrusion.is_some(), "a preview of 10 does not let 7 be made");
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((params.clone(), reply));
         h.key_press(egui::Key::Enter);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(sent.first(), Some(Request::Preview(Some(("extrude", p)))) if p["z1"] == 10.0), "the default depth previewed first");
         assert!(matches!(&sent[sent.len() - 2..], [Request::Preview(None), Request::Command("extrude", p)] if *p == params), "made: {sent:?}");
-        assert!(h.state().extrusion.is_none());
+        assert!(h.state().doc.extrusion.is_none());
     }
 
     /// The sketch `outline` of `model` open for editing in the extruding harness.
@@ -11012,10 +11050,10 @@ mod tests {
         let mut session = Session::default();
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
         session.execute("open", &json!({"path": path.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
         let h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -11031,12 +11069,12 @@ mod tests {
     #[test]
     fn e_extrudes_the_contour_selected() {
         let (mut h, inbox) = extruding_in_sketch("symmetric_plate.json");
-        let name = h.state().sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.iter().find(|(_, l)| !l.construction).unwrap().0.clone();
-        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve(name.clone())];
+        let name = h.state().doc.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.iter().find(|(_, l)| !l.construction).unwrap().0.clone();
+        h.state_mut().doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve(name.clone())];
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        assert!(h.state().sketch.is_none());
+        assert!(h.state().doc.sketch.is_none());
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(
             sent.iter().any(|r| matches!(r, Request::Preview(Some(("extrude", p))) if p["profiles"] == json!([name]))),
@@ -11048,16 +11086,16 @@ mod tests {
     /// `curve` selected, and `rule` chosen for the next part.
     fn with_open_chain(curve: &str, rule: Option<&str>) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut h, inbox) = extruding_in_sketch("symmetric_plate.json");
-        let p = h.state_mut().sketch.as_mut().unwrap().placed.as_mut().unwrap();
+        let p = h.state_mut().doc.sketch.as_mut().unwrap().placed.as_mut().unwrap();
         for (n, at) in [("q1", [200.0, 0.0]), ("q2", [200.0, 50.0]), ("q3", [250.0, 50.0])] {
             p.solved.points.insert(n.into(), datum_math::Vec2::new(at[0], at[1]));
         }
         for (n, line) in [("l1", json!({"from": "q1", "to": "q2"})), ("l2", json!({"from": "q2", "to": "q3"}))] {
             p.lines.insert(n.into(), serde_json::from_value(line).unwrap());
         }
-        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve(curve.into())];
+        h.state_mut().doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve(curve.into())];
         h.state_mut().rules = vec![json!({"name": "Лист", "kind": "sheet", "material": "Сталь"})];
-        h.state_mut().next_rule = rule.map(String::from);
+        h.state_mut().doc.next_rule = rule.map(String::from);
         h.run();
         (h, inbox)
     }
@@ -11082,7 +11120,7 @@ mod tests {
         h.run();
         let flipped = previews(&inbox).pop().expect("a preview of the other side");
         assert_eq!(flipped["side"], "right");
-        h.state_mut().model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "sheet1"}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "sheet1"}))));
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("sheet", p) if p == flipped)));
@@ -11109,12 +11147,12 @@ mod tests {
         h.run();
         let normal = previews(&inbox).pop().expect("a preview about the normal");
         assert_eq!(normal["turn"], "normal");
-        h.state_mut().model.as_mut().unwrap().preview = Some((normal.clone(), Ok(json!({}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((normal.clone(), Ok(json!({}))));
         h.run();
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("add", p) if p == normal)));
-        assert!(h.state().mirror.is_none());
+        assert!(h.state().doc.mirror.is_none());
     }
 
     /// A plane given by a work plane or by a face of another part goes into the inputs.
@@ -11179,20 +11217,20 @@ mod tests {
         let (v, inbox) = viewer("symmetric_plate.json");
         let face = datum_brep::TopoId(0xab);
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.flange_window(ui.ctx()), v);
-        h.state_mut().flange_edges = vec![("sheet1".into(), face)];
+        h.state_mut().doc.flange_edges = vec![("sheet1".into(), face)];
         h.state_mut().open_flange();
         h.run();
         h.get_by_label("Height");
-        let params = h.state().flange.as_ref().unwrap().params("sheet1", &[format!("{face:?}")]);
+        let params = h.state().doc.flange.as_ref().unwrap().params("sheet1", &[format!("{face:?}")]);
         let previews: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).collect();
         assert_eq!(previews.last(), Some(&params));
-        h.state_mut().model.as_mut().unwrap().preview = Some((params.clone(), Ok(json!({"body": "flange1"}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((params.clone(), Ok(json!({"body": "flange1"}))));
         h.key_press(egui::Key::Enter);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
         let made = sent.iter().find_map(|r| if let Request::Command("add", p) = r { Some(p) } else { None }).expect("the flange");
         assert_eq!((&made["op"], &made["edges"]), (&json!("flange"), &json!([format!("{face:?}")])));
-        assert!(h.state().flange.is_none() && h.state().flange_edges.is_empty());
+        assert!(h.state().doc.flange.is_none() && h.state().doc.flange_edges.is_empty());
     }
 
     /// Esc while ends are picked for a flange drops them and stops picking.
@@ -11200,7 +11238,7 @@ mod tests {
     fn escape_drops_the_ends_picked() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
         v.pick(Purpose::Flange);
-        v.flange_edges = vec![("sheet1".into(), datum_brep::TopoId(0xab))];
+        v.doc.flange_edges = vec![("sheet1".into(), datum_brep::TopoId(0xab))];
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -11211,7 +11249,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::Escape);
         h.run();
-        assert!(h.state().picking.is_none() && h.state().flange_edges.is_empty());
+        assert!(h.state().doc.picking.is_none() && h.state().doc.flange_edges.is_empty());
     }
 
     /// An arc on the chain (a rolled section, D200): E on it asks for sheet metal along the
@@ -11219,12 +11257,12 @@ mod tests {
     #[test]
     fn e_on_an_arc_of_an_open_chain_makes_sheet_metal() {
         let (mut h, inbox) = with_open_chain("l2", Some("Лист"));
-        let p = h.state_mut().sketch.as_mut().unwrap().placed.as_mut().unwrap();
+        let p = h.state_mut().doc.sketch.as_mut().unwrap().placed.as_mut().unwrap();
         for (n, at) in [("q4", [300.0, 100.0]), ("q5", [250.0, 100.0])] {
             p.solved.points.insert(n.into(), datum_math::Vec2::new(at[0], at[1]));
         }
         p.arcs.insert("a1".into(), serde_json::from_value(json!({"center": "q5", "from": "q3", "to": "q4"})).unwrap());
-        h.state_mut().sketch.as_mut().unwrap().selected = vec![Pick::Curve("a1".into())];
+        h.state_mut().doc.sketch.as_mut().unwrap().selected = vec![Pick::Curve("a1".into())];
         h.run();
         inbox.try_iter().for_each(drop);
         h.key_press(egui::Key::E);
@@ -11263,7 +11301,7 @@ mod tests {
         h.run();
         let flipped = previews(&inbox).pop().expect("a preview of the other side");
         assert_eq!(flipped["flip"], true);
-        h.state_mut().model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "plate1"}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "plate1"}))));
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("plate", p) if p == flipped)));
@@ -11273,7 +11311,7 @@ mod tests {
     /// `plate` is sheet metal), grown by a join first when `grown`.
     fn on_a_face_of(op: &str, grown: bool) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut h, inbox) = with_open_chain("bottom", Some("Лист"));
-        let features = h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        let features = h.state_mut().doc.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
         let base = if grown { "grown" } else { "base" };
         let outline = features.iter_mut().find(|f| f["name"] == "outline").unwrap();
         (outline["inputs"], outline["face"]) = (json!([base]), json!("top"));
@@ -11309,7 +11347,7 @@ mod tests {
             let want = json!({"name": "extrude1", "sketch": "outline", "mode": "cut"});
             let sent: Vec<Request> = inbox.try_iter().collect();
             assert!(matches!(sent.last(), Some(Request::Preview(Some(("extrude", p)))) if *p == want), "{sent:?}");
-            h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"mode": "cut", "body": "grown"}))));
+            h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"mode": "cut", "body": "grown"}))));
             h.run();
             h.get_by_label("Cut · grown");
             h.key_press(egui::Key::Enter);
@@ -11322,10 +11360,10 @@ mod tests {
     #[test]
     fn e_with_a_contour_and_a_chain_asks_which() {
         let (mut h, inbox) = with_open_chain("bottom", Some("Лист"));
-        h.state_mut().sketch.as_mut().unwrap().selected.clear();
+        h.state_mut().doc.sketch.as_mut().unwrap().selected.clear();
         h.key_press(egui::Key::E);
         h.run();
-        assert!(h.state().contour_hint.is_some() && h.state().extrusion.is_none());
+        assert!(h.state().doc.contour_hint.is_some() && h.state().doc.extrusion.is_none());
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)))));
     }
 
@@ -11345,14 +11383,14 @@ mod tests {
     fn e_in_a_sketch_of_two_regions_asks_for_a_contour() {
         let (mut h, inbox) = extruding_in_sketch("symmetric_plate.json");
         // A circle off by itself beside the plate's outline: two regions.
-        let p = h.state_mut().sketch.as_mut().unwrap().placed.as_mut().unwrap();
+        let p = h.state_mut().doc.sketch.as_mut().unwrap().placed.as_mut().unwrap();
         p.solved.points.insert("far".into(), datum_math::Vec2::new(500.0, 500.0));
         p.circles.insert("far_circle".into(), serde_json::from_value(json!({"center": "far", "diameter": 5})).unwrap());
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        assert!(h.state().sketch.is_some() && h.state().extrusion.is_none());
-        assert!(h.state().contour_hint.is_some());
+        assert!(h.state().doc.sketch.is_some() && h.state().doc.extrusion.is_none());
+        assert!(h.state().doc.contour_hint.is_some());
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(_))));
     }
 
@@ -11368,7 +11406,7 @@ mod tests {
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(sent.last(), Some(Request::Preview(None))));
         assert!(!sent.iter().any(|r| matches!(r, Request::Command(..))));
-        assert!(h.state().extrusion.is_none());
+        assert!(h.state().doc.extrusion.is_none());
     }
 
     /// A sketch of points alone (for a work plane) is no sketch to extrude: E does not take it, it
@@ -11376,7 +11414,7 @@ mod tests {
     #[test]
     fn e_leaves_a_sketch_of_points_alone() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
-        let features = v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        let features = v.doc.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
         features.push(json!({"name": "marks", "op": "sketch", "inputs": [], "sketch": {"points": {"p1": [1, 2]}}}));
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 900.0]).build_ui_state(
             |ui, v: &mut Viewer| {
@@ -11389,7 +11427,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()), "waits");
+        assert!(h.state().doc.extrusion.as_ref().is_some_and(|x| x.sketch.is_none()), "waits");
     }
 
     /// With two sketches unused, E waits for a click in the tree.
@@ -11400,10 +11438,10 @@ mod tests {
         h.key_press(egui::Key::E);
         h.run();
         h.get_by_label("Click a sketch in the tree, or an edge of the sheet for a flange");
-        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
+        assert!(h.state().doc.extrusion.as_ref().is_some_and(|x| x.sketch.is_none()));
         h.get_by_label("other  ·  sketch").click();
         h.run();
-        assert_eq!(h.state().extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
+        assert_eq!(h.state().doc.extrusion.as_ref().and_then(|x| x.sketch.as_deref()), Some("other"));
     }
 
     /// A new sketch opens on what it can project (D220): a skeleton far bigger than the sketch's
@@ -11551,16 +11589,16 @@ mod tests {
         let mut session = Session::default();
         let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
-        if let Some(m) = &mut v.model {
+        if let Some(m) = &mut v.doc.model {
             m.editing = Some(("outline".into(), Context { id: session.graph().nodes()[0].id, inputs: Vec::new(), sources: Vec::new() }));
         }
-        v.entering = Some("outline".into());
+        v.doc.entering = Some("outline".into());
         v.sync_sketch();
-        let name = v.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.keys().next().unwrap().clone();
-        v.sketch.as_mut().unwrap().selected = vec![crate::sketch::Pick::Curve(name.clone())];
+        let name = v.doc.sketch.as_ref().unwrap().placed.as_ref().unwrap().lines.keys().next().unwrap().clone();
+        v.doc.sketch.as_mut().unwrap().selected = vec![crate::sketch::Pick::Curve(name.clone())];
         let mut h = egui_kittest::Harness::builder().build_ui_state(
             |ui, v: &mut Viewer| {
-                if v.sketch.is_some() {
+                if v.doc.sketch.is_some() {
                     v.run(ui, Act::WorkPlane);
                 }
             },
@@ -11568,8 +11606,8 @@ mod tests {
         );
         h.run();
         let v = h.into_state();
-        assert_eq!(v.picking, None);
-        assert_eq!(v.plane_draft, Some((json!({"inputs": ["outline"], "line": {"input": 0, "line": name}}), "0".to_string())));
+        assert_eq!(v.doc.picking, None);
+        assert_eq!(v.doc.plane_draft, Some((json!({"inputs": ["outline"], "line": {"input": 0, "line": name}}), "0".to_string())));
     }
 
     /// Three points picked for a work plane (D204): the features they are of become its inputs,
@@ -11609,7 +11647,7 @@ mod tests {
         session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
         let flat = session.flat_of("relieved").unwrap();
         assert_eq!(flat.k_factor, 0.44);
-        let m = v.model.as_mut().unwrap();
+        let m = v.doc.model.as_mut().unwrap();
         m.flats = vec![("sheet1".into(), Ok(flat))];
         v.sketch_on_blank("sheet1", true);
         let on_blank =
@@ -11631,18 +11669,18 @@ mod tests {
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add", p) if *p == want)), "{sent:?}");
 
         // Edited, it is no sketch of the 3D pane; E makes a cut of sheet metal.
-        let m = v.model.as_mut().unwrap();
+        let m = v.doc.model.as_mut().unwrap();
         m.inspect["features"] = json!([
             {"name": "sheet1", "op": "sheet", "inputs": ["path"]},
             {"name": "sketch1", "op": "sketch", "inputs": ["sheet1"], "flat": "front"},
         ]);
         assert!(matches!(v.plain_kind(Some("sketch1")), Kind::SheetCut));
-        let json = v.model.as_ref().unwrap().inspect["features"][1].clone();
+        let json = v.doc.model.as_ref().unwrap().inspect["features"][1].clone();
         let context = Context { id: datum_brep::TopoId(0), inputs: Vec::new(), sources: Vec::new() };
-        v.sketch = Some(SketchEdit::new("sketch1".into(), context, json, BTreeMap::new(), None));
-        assert!(v.sketch.as_ref().is_some_and(SketchEdit::on_blank));
+        v.doc.sketch = Some(SketchEdit::new("sketch1".into(), context, json, BTreeMap::new(), None));
+        assert!(v.doc.sketch.as_ref().is_some_and(SketchEdit::on_blank));
         assert!(v.sketch_in_3d().is_none());
-        v.sketch.as_mut().unwrap().json["flat"] = Json::Null;
+        v.doc.sketch.as_mut().unwrap().json["flat"] = Json::Null;
         assert!(v.sketch_in_3d().is_some());
     }
 
@@ -11705,7 +11743,7 @@ mod tests {
     #[test]
     fn a_click_inside_takes_the_contour() {
         let (h, _inbox) = extruding_in_sketch("symmetric_plate.json");
-        let sk = h.state().sketch.as_ref().unwrap();
+        let sk = h.state().doc.sketch.as_ref().unwrap();
         let picks = |x: f64, y: f64| {
             let (dx, dy) = sk.camera.offset([x, y], 400.0);
             let mut names: Vec<String> =
@@ -11736,7 +11774,7 @@ mod tests {
     /// The toolbar's lists over a model with one part `plate` and the library's records.
     fn toolbar_lists() -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        v.model.as_mut().unwrap().inspect["parts"] = json!([{"part": "plate", "rule": null}]);
+        v.doc.model.as_mut().unwrap().inspect["parts"] = json!([{"part": "plate", "rule": null}]);
         v.materials = vec![json!({"name": "steel"})];
         v.rules =
             vec![json!({"name": "body", "kind": "part", "material": "steel"}), json!({"name": "plate_s", "kind": "sheet", "material": "steel"})];
@@ -11750,13 +11788,13 @@ mod tests {
     fn the_rule_of_the_next_part_goes_with_e() {
         let (mut h, _inbox) = toolbar_lists();
         h.run();
-        h.state_mut().material = Some((None, "steel".into()));
+        h.state_mut().doc.material = Some((None, "steel".into()));
         h.run();
         h.get_all_by_role(egui::accesskit::Role::ComboBox).nth(1).unwrap().click();
         h.run();
         h.get_by_label("body").click();
         h.run();
-        assert_eq!(h.state().next_rule.as_deref(), Some("body"));
+        assert_eq!(h.state().doc.next_rule.as_deref(), Some("body"));
         let x = |mode| Extrusion {
             sketch: None,
             name: "e".into(),
@@ -11779,7 +11817,7 @@ mod tests {
         assert_eq!(x("new").params("s", false, rule.as_deref()).1["rule"], "body");
         assert!(x("join").params("s", false, rule.as_deref()).1.get("rule").is_none());
         assert!(x("cut").params("s", false, rule.as_deref()).1.get("rule").is_none());
-        h.state_mut().next_rule = Some("plate_s".into());
+        h.state_mut().doc.next_rule = Some("plate_s".into());
         assert_eq!(h.state().part_rule(), None);
     }
 
@@ -11787,8 +11825,8 @@ mod tests {
     #[test]
     fn the_rule_of_the_active_part_is_set() {
         let (mut h, inbox) = toolbar_lists();
-        h.state_mut().part = Some("plate".into());
-        h.state_mut().material = Some((Some("plate".into()), "steel".into()));
+        h.state_mut().doc.part = Some("plate".into());
+        h.state_mut().doc.material = Some((Some("plate".into()), "steel".into()));
         h.run();
         h.get_all_by_role(egui::accesskit::Role::ComboBox).nth(1).unwrap().click();
         h.run();
@@ -11796,7 +11834,7 @@ mod tests {
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(&sent[..], [Request::Command("set_part", p)] if *p == json!({"body": "plate", "rule": "body"})), "{sent:?}");
-        assert_eq!(h.state().next_rule, None);
+        assert_eq!(h.state().doc.next_rule, None);
     }
 
     /// The branch tool: available with two rolled shells; the first click takes the main pipe, a
@@ -11805,29 +11843,29 @@ mod tests {
     fn two_pipes_clicked_make_a_branch() {
         let (mut v, inbox) = viewer("rolled.json");
         assert!(!v.available(Act::Branch.action()));
-        let m = v.model.as_mut().unwrap();
+        let m = v.doc.model.as_mut().unwrap();
         m.inspect["features"].as_array_mut().unwrap().push(json!({"name": "pipe", "op": "rolled"}));
         m.bodies = vec!["shell".into(), "pipe".into(), "cut".into()];
         m.begun = vec!["shell".into(), "pipe".into(), "cut".into()];
         assert!(v.available(Act::Branch.action()));
         v.pick(Purpose::Branch);
         v.branch_click(2);
-        assert!(v.branch_main.is_none());
+        assert!(v.doc.branch_main.is_none());
         v.branch_click(0);
         v.branch_click(0);
-        assert_eq!(v.branch_main.as_deref(), Some("shell"));
+        assert_eq!(v.doc.branch_main.as_deref(), Some("shell"));
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Command(..))));
         v.branch_click(1);
         let sent: Vec<Request> = inbox.try_iter().collect();
         let [Request::Command("branch", p)] = &sent[..] else { panic!("{sent:?}") };
         assert_eq!((&p["main"], &p["branch"]), (&json!("shell"), &json!("pipe")));
-        assert!(v.picking.is_none() && v.branch_main.is_none());
+        assert!(v.doc.picking.is_none() && v.doc.branch_main.is_none());
     }
 
     /// A harness for the trim form over the rolled sheet `shell` (its body and part) and a work plane `cut`.
     fn trimming() -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer("rolled.json");
-        let m = v.model.as_mut().unwrap();
+        let m = v.doc.model.as_mut().unwrap();
         m.inspect["features"].as_array_mut().unwrap().push(json!({"name": "cut", "op": "plane"}));
         m.bodies = vec!["shell".into()];
         m.begun = vec!["shell".into()];
@@ -11854,13 +11892,13 @@ mod tests {
         // No Enter while the preview of these fields has not come.
         h.key_press(egui::Key::Enter);
         h.run();
-        assert!(h.state().trim.is_some() && !inbox.try_iter().any(|r| matches!(r, Request::Command(..))));
-        h.state_mut().model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "trim1"}))));
+        assert!(h.state().doc.trim.is_some() && !inbox.try_iter().any(|r| matches!(r, Request::Command(..))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((flipped.clone(), Ok(json!({"body": "trim1"}))));
         h.key_press(egui::Key::Enter);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("add", p) if *p == flipped)), "{sent:?}");
-        assert!(h.state().trim.is_none());
+        assert!(h.state().doc.trim.is_none());
     }
 
     /// A trim opened from the tree keeps its name and values; the other side is an edit of it.
@@ -11868,16 +11906,16 @@ mod tests {
     fn a_trim_is_changed_from_the_tree() {
         let (mut h, inbox) = trimming();
         let trim = json!({"name": "trim1", "op": "trim", "inputs": ["shell", "cut"]});
-        h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(trim);
+        h.state_mut().doc.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(trim);
         h.state_mut().reedit("trim1");
         h.run();
-        assert!(h.state().trim.as_ref().is_some_and(|t| t.editing && t.body == "shell" && t.plane == "cut" && !t.flip));
+        assert!(h.state().doc.trim.as_ref().is_some_and(|t| t.editing && t.body == "shell" && t.plane == "cut" && !t.flip));
         h.get_by_label("Other side").click();
         h.run();
         let want = json!({"name": "trim1", "flip": true});
         let previews: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(previews.last(), Some(Request::Preview(Some(("edit", p)))) if *p == want), "{previews:?}");
-        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("edit", p) if p == want)));
@@ -11891,14 +11929,14 @@ mod tests {
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(|ui, v: &mut Viewer| v.extrusion_form(ui.ctx()), v);
         h.state_mut().reedit("plate");
         h.run();
-        let x = h.state().extrusion.as_ref().unwrap();
+        let x = h.state().doc.extrusion.as_ref().unwrap();
         assert!(x.editing && x.depth == "t" && !x.symmetric && x.sketch.as_deref() == Some("outline") && x.mode == Some("new"));
-        h.state_mut().extrusion.as_mut().unwrap().symmetric = true;
+        h.state_mut().doc.extrusion.as_mut().unwrap().symmetric = true;
         h.run();
         let want = json!({"name": "plate", "mode": "new", "through": false, "symmetric": true, "z1": "t"});
         let previews: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(previews.last(), Some(Request::Preview(Some(("edit", p)))) if *p == want), "{previews:?}");
-        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
         h.run();
         h.key_press(egui::Key::Enter);
         h.run();
@@ -11923,7 +11961,7 @@ mod tests {
         inbox.try_iter().for_each(drop);
         h.key_press(egui::Key::Escape);
         h.run();
-        assert!(h.state().trim.is_none());
+        assert!(h.state().doc.trim.is_none());
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Preview(None))));
     }
 
@@ -11931,11 +11969,11 @@ mod tests {
     #[test]
     fn the_trim_goes_to_the_sheet_clicked() {
         let (mut v, _inbox) = viewer("rolled.json");
-        let m = v.model.as_mut().unwrap();
+        let m = v.doc.model.as_mut().unwrap();
         m.bodies = vec!["shell".into(), "cone".into()];
         m.begun = vec!["shell".into(), "cone".into()];
         assert_eq!(v.trim_body(), None);
-        v.part = Some("cone".into());
+        v.doc.part = Some("cone".into());
         assert_eq!(v.trim_body().as_deref(), Some("cone"));
     }
 
@@ -11943,9 +11981,9 @@ mod tests {
     /// sketch is the only one not used yet.
     fn revolving(model: &str, rule: Option<&str>) -> (egui_kittest::Harness<'static, Viewer>, std::sync::mpsc::Receiver<Request>) {
         let (mut v, inbox) = viewer(model);
-        v.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().truncate(1);
+        v.doc.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().truncate(1);
         v.rules = vec![json!({"name": "Лист", "kind": "sheet", "material": "Сталь"})];
-        v.next_rule = rule.map(String::from);
+        v.doc.next_rule = rule.map(String::from);
         let h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
             |ui, v: &mut Viewer| {
                 v.shortcuts(ui);
@@ -11962,17 +12000,17 @@ mod tests {
         let (mut h, inbox) = revolving("revolve.json", Some("Лист"));
         h.key_press(egui::Key::R);
         h.run();
-        let f = h.state().revolve.as_ref().expect("the form");
+        let f = h.state().doc.revolve.as_ref().expect("the form");
         assert_eq!((f.axis.as_str(), f.turned == Turned::Revolve), ("axis", true));
         h.get_by_label("Angle");
         let want = json!({"name": "revolve1", "op": "revolve", "inputs": ["profile"], "axis": "axis", "angle": 360.0});
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(matches!(sent.last(), Some(Request::Preview(Some(("add", p)))) if *p == want), "{sent:?}");
-        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"body": "revolve1"}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({"body": "revolve1"}))));
         h.key_press(egui::Key::Enter);
         h.run();
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Command("add", p) if p == want)));
-        assert!(h.state().revolve.is_none());
+        assert!(h.state().doc.revolve.is_none());
     }
 
     /// A single line beside the axis: R asks for rolled sheet metal, by the rule chosen.
@@ -11981,7 +12019,7 @@ mod tests {
         let (mut h, inbox) = revolving("rolled.json", Some("Лист"));
         h.key_press(egui::Key::R);
         h.run();
-        assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled && f.axis == "axis"));
+        assert!(h.state().doc.revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled && f.axis == "axis"));
         h.get_by_label("Gap, mm");
         let want = json!({"name": "rolled1", "sketch": "shell_profile", "rule": "Лист", "axis": "axis", "side": "left", "gap": 2.0});
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -11990,7 +12028,7 @@ mod tests {
         let (mut h, inbox) = revolving("rolled.json", None);
         h.key_press(egui::Key::R);
         h.run();
-        assert!(h.state().revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled));
+        assert!(h.state().doc.revolve.as_ref().is_some_and(|f| f.turned == Turned::Rolled));
         h.get_by_label("First choose the material and the sheet rule on the toolbar: the thickness and K-factor come from the rule");
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(Some(_)))));
     }
@@ -12001,13 +12039,13 @@ mod tests {
     fn r_takes_the_loose_line_for_the_axis() {
         let (mut h, _) = revolving("revolve.json", None);
         // Named last, so the first line in name order is one of the contour's.
-        let lines = h.state_mut().model.as_mut().unwrap().inspect["features"][0]["sketch"]["lines"].as_object_mut().unwrap();
+        let lines = h.state_mut().doc.model.as_mut().unwrap().inspect["features"][0]["sketch"]["lines"].as_object_mut().unwrap();
         let mut axis = lines.remove("axis").unwrap();
         axis["construction"] = json!(false);
         lines.insert("z_axis".into(), axis);
         h.key_press(egui::Key::R);
         h.run();
-        assert!(h.state().revolve.as_ref().is_some_and(|f| f.axis == "z_axis" && f.turned == Turned::Revolve));
+        assert!(h.state().doc.revolve.as_ref().is_some_and(|f| f.axis == "z_axis" && f.turned == Turned::Revolve));
     }
 
     /// R with no sketch to take only says to open one.
@@ -12015,10 +12053,10 @@ mod tests {
     fn r_with_no_sketch_to_take_says_to_open_one() {
         let (mut h, _) = revolving("revolve.json", None);
         let used = json!({"name": "b", "op": "revolve", "inputs": ["profile"]});
-        h.state_mut().model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(used);
+        h.state_mut().doc.model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap().push(used);
         h.key_press(egui::Key::R);
         h.run();
-        assert!(h.state().revolve.is_none() && h.state().contour_hint.is_some());
+        assert!(h.state().doc.revolve.is_none() && h.state().doc.contour_hint.is_some());
     }
 
     /// A click in 3D on a body brings its blank forward (D164), as the window runs it: inside the
@@ -12032,7 +12070,7 @@ mod tests {
         let mut meshes = crate::scene::MeshCache::default();
         let pic = picture(&session, None, None, &mut meshes);
         {
-            let m = v.model.as_mut().unwrap();
+            let m = v.doc.model.as_mut().unwrap();
             m.scene = pic.scene;
             m.bodies = pic.bodies;
             m.begun = pic.begun;
@@ -12040,13 +12078,13 @@ mod tests {
             m.flats = session.flats();
         }
         v.dock = egui_dock::DockState::new(Vec::new());
-        let b = v.model.as_ref().unwrap().scene.bounds;
-        v.camera.fit(Some(crate::origin::held(b)), 1.5);
+        let b = v.doc.model.as_ref().unwrap().scene.bounds;
+        v.doc.camera.fit(Some(crate::origin::held(b)), 1.5);
         // A point on the branch's side, on screen.
         let rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(600.0, 400.0));
-        let m = v.model.as_ref().unwrap();
+        let m = v.doc.model.as_ref().unwrap();
         let (anchor, radius) = sphere(&m.scene);
-        let (vp, _) = v.camera.matrices(anchor, 1.5, radius);
+        let (vp, _) = v.doc.camera.matrices(anchor, 1.5, radius);
         let target = datum_math::Vec3::new(0.0, -19.0, 100.0);
         let at = on_screen(&vp, target - anchor, rect).unwrap();
         let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
@@ -12066,8 +12104,8 @@ mod tests {
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
         h.step();
         h.run();
-        assert_eq!(h.state().flat.chosen.as_deref(), Some("branch_saddle"));
-        assert_eq!(h.state().part.as_deref(), Some("branch"));
+        assert_eq!(h.state().doc.flat.chosen.as_deref(), Some("branch_saddle"));
+        assert_eq!(h.state().doc.part.as_deref(), Some("branch"));
     }
 
     /// A sketch on the blank, not used yet, is not drawn in 3D: it lies in the blank's
@@ -12105,14 +12143,14 @@ mod tests {
         h.run();
         h.run();
         h.run();
-        assert!(h.state().flange.as_ref().is_some_and(|f| f.editing));
+        assert!(h.state().doc.flange.as_ref().is_some_and(|f| f.editing));
         assert_eq!(usings(&inbox), [Some("tray".to_string())]);
         h.run();
         assert!(usings(&inbox).is_empty());
         h.key_press(egui::Key::Escape);
         h.run();
         h.run();
-        assert!(h.state().flange.is_none());
+        assert!(h.state().doc.flange.is_none());
         assert_eq!(usings(&inbox), [None]);
     }
 
@@ -12147,8 +12185,8 @@ mod tests {
     /// Where world point `q` is in the view of `using_harness` with the camera the viewer holds.
     fn screen_of(v: &Viewer, q: datum_math::Vec3) -> egui::Pos2 {
         let rect = egui::Rect::from_min_max(egui::pos2(USING_VIEW[0], USING_VIEW[1]), egui::pos2(USING_VIEW[2], USING_VIEW[3]));
-        let (anchor, radius) = sphere(&v.model.as_ref().unwrap().scene);
-        let (vp, _) = v.camera.matrices(anchor, f64::from(rect.width() / rect.height()), radius);
+        let (anchor, radius) = sphere(&v.doc.model.as_ref().unwrap().scene);
+        let (vp, _) = v.doc.camera.matrices(anchor, f64::from(rect.width() / rect.height()), radius);
         on_screen(&vp, q - anchor, rect).expect("in front of the eye")
     }
 
@@ -12185,7 +12223,7 @@ mod tests {
         v.reedit("rim_back");
         let [(a, at_a), (b, at_b)] = two_lines(&v);
         let (id_a, id_b) = (datum_brep::TopoId(1), datum_brep::TopoId(2));
-        v.model.as_mut().unwrap().uses = Some(crate::uses::Uses {
+        v.doc.model.as_mut().unwrap().uses = Some(crate::uses::Uses {
             inputs: vec!["rim_back".into()],
             edges: vec![(a, id_a), (b, id_b)],
             used_edges: vec![id_a],
@@ -12193,20 +12231,20 @@ mod tests {
         });
         let mut h = using_harness(v);
         h.run();
-        assert!(h.state().flange.as_ref().is_some_and(|f| f.editing && f.edges.is_none()));
-        let edges = |h: &egui_kittest::Harness<'static, Viewer>| h.state().flange.as_ref().unwrap().edges.clone();
+        assert!(h.state().doc.flange.as_ref().is_some_and(|f| f.editing && f.edges.is_none()));
+        let edges = |h: &egui_kittest::Harness<'static, Viewer>| h.state().doc.flange.as_ref().unwrap().edges.clone();
         let (name_a, name_b) = (format!("{id_a:?}"), format!("{id_b:?}"));
         // Nothing held, a click far from every edge, a modifier with a click far away: no change.
         click_with(&mut h, at_b, egui::Modifiers::NONE);
         assert_eq!(edges(&h), None);
         click_with(&mut h, egui::pos2(300.0, 390.0), egui::Modifiers::CTRL);
         assert_eq!(edges(&h), None);
-        assert_eq!(h.state().toggling, None);
+        assert_eq!(h.state().doc.toggling, None);
         // Ctrl adds, the edge under the cursor was lit before the click.
         h.event(egui::Event::ModifiersChanged(egui::Modifiers::CTRL));
         h.hover_at(at_b);
         h.run();
-        assert_eq!(h.state().toggling, Some(crate::uses::Toggle::Edge(id_b)));
+        assert_eq!(h.state().doc.toggling, Some(crate::uses::Toggle::Edge(id_b)));
         h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
         h.run();
         click_with(&mut h, at_b, egui::Modifiers::CTRL);
@@ -12226,7 +12264,7 @@ mod tests {
             panic!("{sent:?}")
         };
         assert_eq!(want["edges"], json!([name_a, name_b]));
-        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
         h.key_press(egui::Key::Enter);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -12238,7 +12276,7 @@ mod tests {
     fn a_flange_form_never_toggled_sends_no_edges() {
         let (mut v, inbox) = viewer("sheet_rims.json");
         v.reedit("rim_back");
-        v.model.as_mut().unwrap().uses = Some(crate::uses::Uses::default());
+        v.doc.model.as_mut().unwrap().uses = Some(crate::uses::Uses::default());
         let mut h = form_harness(v);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -12246,7 +12284,7 @@ mod tests {
             panic!("{sent:?}")
         };
         assert!(want.get("edges").is_none(), "{want}");
-        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
         h.key_press(egui::Key::Enter);
         h.run();
         let sent: Vec<Request> = inbox.try_iter().collect();
@@ -12259,10 +12297,10 @@ mod tests {
     fn a_click_with_ctrl_changes_an_extrusions_profiles() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
         v.reedit("plate");
-        v.extrusion.as_mut().unwrap().at = egui::pos2(10.0, 10.0);
+        v.doc.extrusion.as_mut().unwrap().at = egui::pos2(10.0, 10.0);
         let [(a, _), (b, at_b)] = two_lines(&v);
         let profile = |name: &str, line| crate::uses::Profile { curves: vec![name.into()], lines: vec![line], used: true };
-        v.model.as_mut().unwrap().uses = Some(crate::uses::Uses {
+        v.doc.model.as_mut().unwrap().uses = Some(crate::uses::Uses {
             inputs: vec!["outline".into()],
             profiles: vec![profile("p", a), profile("q", b)],
             ..crate::uses::Uses::default()
@@ -12276,20 +12314,20 @@ mod tests {
                 _ => panic!("{sent:?}"),
             }
         };
-        assert!(h.state().extrusion.as_ref().is_some_and(|x| x.editing && x.picked.is_none()));
+        assert!(h.state().doc.extrusion.as_ref().is_some_and(|x| x.editing && x.picked.is_none()));
         let first = changes(&inbox);
         assert!(first.get("profiles").is_none(), "{first}");
         let mut h = using_harness(h.into_state());
         // A click without a modifier changes nothing.
         click_with(&mut h, at_b, egui::Modifiers::NONE);
-        assert_eq!(h.state().extrusion.as_ref().unwrap().picked, None);
+        assert_eq!(h.state().doc.extrusion.as_ref().unwrap().picked, None);
         click_with(&mut h, at_b, egui::Modifiers::CTRL);
-        assert_eq!(h.state().extrusion.as_ref().unwrap().picked, Some(vec!["p".to_string()]));
+        assert_eq!(h.state().doc.extrusion.as_ref().unwrap().picked, Some(vec!["p".to_string()]));
         let mut h = form_harness(h.into_state());
         h.run();
         let want = changes(&inbox);
         assert_eq!(want["profiles"], json!(["p"]));
-        h.state_mut().model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
+        h.state_mut().doc.model.as_mut().unwrap().preview = Some((want.clone(), Ok(json!({}))));
         h.run();
         h.key_press(egui::Key::Enter);
         h.run();
@@ -12304,12 +12342,12 @@ mod tests {
         for selected in [false, true] {
             let (mut h, inbox) = on_a_face_of("plate", false);
             if !selected {
-                h.state_mut().sketch.as_mut().unwrap().selected.clear();
+                h.state_mut().doc.sketch.as_mut().unwrap().selected.clear();
             }
             h.key_press(egui::Key::E);
             h.run();
-            assert!(h.state().contour_hint.is_none(), "selected {selected}");
-            let x = h.state().extrusion.as_ref().unwrap_or_else(|| panic!("selected {selected}: no form"));
+            assert!(h.state().doc.contour_hint.is_none(), "selected {selected}");
+            let x = h.state().doc.extrusion.as_ref().unwrap_or_else(|| panic!("selected {selected}: no form"));
             assert!(x.profiles.is_empty() && matches!(x.kind, Kind::SheetCut), "selected {selected}: {:?}", x.profiles);
             let sent: Vec<Request> = inbox.try_iter().collect();
             assert!(
@@ -12323,7 +12361,7 @@ mod tests {
     #[test]
     fn e_on_a_lone_chain_on_a_sheet_cuts_along_it() {
         let (mut h, inbox) = on_a_face_of("plate", false);
-        let sk = h.state_mut().sketch.as_mut().unwrap();
+        let sk = h.state_mut().doc.sketch.as_mut().unwrap();
         sk.selected.clear();
         let p = sk.placed.as_mut().unwrap();
         p.lines.retain(|n, _| n == "l1" || n == "l2");
@@ -12332,7 +12370,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        let x = h.state().extrusion.as_ref().expect("a form");
+        let x = h.state().doc.extrusion.as_ref().expect("a form");
         assert!(matches!(x.kind, Kind::SheetCut), "a cut, not a sheet");
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(!sent.iter().any(|r| matches!(r, Request::Preview(Some(("sheet", _))))), "{sent:?}");
@@ -12344,7 +12382,7 @@ mod tests {
     #[test]
     fn e_on_an_ordinary_face_with_two_regions_still_asks() {
         let (mut h, inbox) = on_a_face_of("extrude", false);
-        let sk = h.state_mut().sketch.as_mut().unwrap();
+        let sk = h.state_mut().doc.sketch.as_mut().unwrap();
         sk.selected.clear();
         let p = sk.placed.as_mut().unwrap();
         p.solved.points.insert("far".into(), datum_math::Vec2::new(500.0, 500.0));
@@ -12352,7 +12390,7 @@ mod tests {
         h.run();
         h.key_press(egui::Key::E);
         h.run();
-        assert!(h.state().contour_hint.is_some() && h.state().extrusion.is_none());
+        assert!(h.state().doc.contour_hint.is_some() && h.state().doc.extrusion.is_none());
         assert!(!inbox.try_iter().any(|r| matches!(r, Request::Preview(_))));
     }
 }
