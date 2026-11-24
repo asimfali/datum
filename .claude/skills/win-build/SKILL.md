@@ -1,8 +1,8 @@
 ---
 name: win-build
-description: Makes/refreshes the local Windows build of Datum (C:\develop\datum) — syncs the branch from this WSL repo and builds datum.exe with the Windows toolchain. Use when the author asks to make a build, refresh the Windows copy, or "see it" locally.
+description: Собирает Datum локально под Windows из WSL. Используй по команде «проверка» или по просьбе обновить Windows-сборку для ручной проверки.
 ---
 
-Run `scripts/win-build.sh [branch] [--test]` from `/home/simanov/develop/datum` (default branch: the WSL repo's current one). The script syncs the branch into `C:\develop\datum` (detached at the built commit) and builds `datum.exe` there; `--test` also runs the pinned-hash check (C4) on Windows.
+Из корня репозитория Datum в WSL запусти `bash scripts/win-build.sh`. Скрипт собирает коммит на вершине текущей ветки. Если автор указал другую ветку, передай её имя первым аргументом. Незакоммиченные изменения WSL в сборку не входят. Добавь `--test`, если автор просит также проверить детерминизм (C4) на Windows.
 
-Report: the branch synced, the build result, and the path `C:\develop\datum\target\debug\datum.exe` (the author runs it from Windows himself). If the script says the Windows tree is dirty, tell the author and stop — never discard his uncommitted changes. Do not push anywhere.
+По выводу скрипта сообщи результат, ветку, коммит и фактический путь к `datum.exe` для выбранного профиля. Приложение запускает автор. Если скрипт остановился из-за изменений в Windows-копии, передай его сообщение автору. Оставь изменения в Windows-копии на месте. Публикации в удалённых репозиториях для этой команды не нужны.
