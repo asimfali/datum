@@ -35,15 +35,16 @@ if [[ -d apps/datum-cli && -d tests/models ]] && "$python" -c "import OCP" 2>/de
     out=$(mktemp -d)
     trap 'rm -rf "$out"' EXIT
     cargo build -q -p datum-cli
+    datum="${CARGO_TARGET_DIR:-target}/debug/datum"
     for m in tests/models/*.json; do
         # B-splines where STEP has no exact type (D147): OCCT checks them too. A model with
         # levels (D152): each part and variant; its frame, if it holds no body, is not exported.
         levels=$("$python" -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1], encoding="utf-8")).get("levels", {})))' "$m")
         if [[ -z $levels ]]; then
-            target/debug/datum build "$m" --out "$out/$(basename "$m" .json).step" --approximate >/dev/null
+            "$datum" build "$m" --out "$out/$(basename "$m" .json).step" --approximate >/dev/null
         fi
         while IFS= read -r level; do
-            [[ -n $level ]] && target/debug/datum build "$m" --level "$level" --out "$out/$(basename "$m" .json) [$level].step" --approximate >/dev/null
+            [[ -n $level ]] && "$datum" build "$m" --level "$level" --out "$out/$(basename "$m" .json) [$level].step" --approximate >/dev/null
         done <<< "$levels"
     done
     find "$out" -name '*.step' -size -1024k -print0 | sort -z | xargs -0 "$python" scripts/step_check.py
