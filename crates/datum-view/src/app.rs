@@ -139,6 +139,11 @@ pub(crate) enum Request {
     Command(&'static str, Json),
     /// The sketch feature edited in the window, if any: its context comes with every model.
     Editing(Option<String>),
+    /// The sketch is local to the named forming component.
+    EditingForming {
+        component: String,
+        sketch: String,
+    },
     /// The feature whose form is open on it, if any: what it stands on comes with every model.
     Using(Option<String>),
     /// A command shown as if made, not made (D185 item 4: the body is seen at once), with every
@@ -324,6 +329,7 @@ struct Model {
     flats: Vec<(String, Result<Arc<datum_ops::Flat>, String>)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
     editing: Option<(String, Context)>,
+    forming_edit: Option<(String, datum_model::FormingSketch)>,
     /// The params of the command previewed and its reply, or why it is refused; the scene shows
     /// its result.
     preview: Option<(Json, Result<Json, String>)>,
@@ -466,6 +472,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
     let mut session = Session::default();
     let mut meshes = MeshCache::default();
     let mut editing: Option<String> = None;
+    let mut forming_edit: Option<(String, String)> = None;
     let mut using: Option<String> = None;
     let mut previewing: Option<(&'static str, Json)> = None;
     let mut edge_base = None;
@@ -528,7 +535,14 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                         error = Some(e);
                     }
                 },
-                Request::Editing(name) => editing = name,
+                Request::Editing(name) => {
+                    editing = name;
+                    forming_edit = None;
+                }
+                Request::EditingForming { component, sketch } => {
+                    editing = None;
+                    forming_edit = Some((component, sketch));
+                }
                 Request::Using(name) => using = name,
                 Request::Preview(p) => previewing = p,
                 Request::ApplyEdgeFinish(command, params) => {
@@ -590,6 +604,8 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
         };
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
         let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } = picture;
+        let forming_edit =
+            forming_edit.as_ref().and_then(|(component, sketch)| Some((component.clone(), session.forming_sketch(component, sketch)?)));
         if models
             .send(Model {
                 inspect: if edge_preview { base.inspect.clone() } else { inspect },
@@ -607,6 +623,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 begun,
                 flats,
                 editing: context,
+                forming_edit,
                 preview,
                 edge_base: base.clone(),
                 edge_applied,
@@ -959,6 +976,8 @@ struct Document {
     /// The sketch being edited, and one asked for that the model has not brought yet.
     sketch: Option<SketchEdit>,
     entering: Option<String>,
+    /// The containing feature while entering or editing a stamp sketch.
+    forming_owner: Option<String>,
     /// The menu a held right click opened on the sketch (D155), and the hold: since when and
     /// where; whether it opened the menu (then its release repeats nothing).
     menu: Option<Menu>,
@@ -1705,6 +1724,7 @@ impl Document {
             file_state: None,
             sketch: None,
             entering: None,
+            forming_owner: None,
             menu: None,
             flat: crate::flat::FlatView::default(),
             new_level: None,
@@ -3143,21 +3163,37 @@ impl Viewer {
     }
 
     /// Sends a command to document `i`'s session: its own worker answers, not the active tab's.
-    fn send_to(&mut self, i: usize, r: Request) {
+    fn send_to(&mut self, i: usize, mut r: Request) {
+        if let Some(component) = &self.docs[i].forming_owner
+            && let Request::Command("edit_sketch" | "edit_metadata", params) = &mut r
+        {
+            params["component"] = json!(component);
+        }
         let _ = self.docs[i].requests.send(r);
         self.docs[i].busy = true;
     }
 
     /// Starts editing sketch feature `name`, once the model brings its context.
     fn enter(&mut self, name: String) {
+        self.enter_sketch(name, None);
+    }
+
+    fn enter_sketch(&mut self, name: String, component: Option<String>) {
         self.close_extrusion();
         self.close_edge_finish();
         self.close_loft();
         self.docs[self.active].picking = None;
-        self.docs[self.active].metadata = None;
-        self.docs[self.active].sketch = None;
-        self.send(Request::Editing(Some(name.clone())));
-        self.docs[self.active].entering = Some(name);
+        let request = match &component {
+            Some(component) => Request::EditingForming { component: component.clone(), sketch: name.clone() },
+            None => Request::Editing(Some(name.clone())),
+        };
+        let d = &mut self.docs[self.active];
+        d.metadata = None;
+        d.menu = None;
+        d.sketch = None;
+        d.forming_owner = component;
+        d.entering = Some(name);
+        self.send(request);
     }
 
     fn leave(&mut self) {
@@ -3177,6 +3213,7 @@ impl Viewer {
         if self.docs[self.active].sketch.is_some() || self.docs[self.active].entering.is_some() {
             self.docs[self.active].sketch = None;
             self.docs[self.active].entering = None;
+            self.docs[self.active].forming_owner = None;
             let _ = self.docs[self.active].requests.send(Request::Editing(None));
         }
     }
@@ -3222,23 +3259,38 @@ impl Viewer {
         let active = i == self.active;
         let d = &mut self.docs[i];
         let Some(m) = &d.model else { return };
-        let params: BTreeMap<String, f64> = m.inspect["parameters"]
-            .as_object()
-            .map(|p| p.iter().filter_map(|(n, v)| Some((n.clone(), v["value"].as_f64()?))).collect())
-            .unwrap_or_default();
-        let feature = |name: &str| m.inspect["features"].as_array().and_then(|f| f.iter().find(|f| f["name"] == name)).cloned();
+        let features = m.inspect["features"].as_array().map_or(&[][..], Vec::as_slice);
+        let feature = |name: &str| features.iter().find(|f| f["name"] == name);
         let wanted = d.sketch.as_ref().map(|s| s.feature.clone()).or_else(|| d.entering.clone());
         let Some(name) = wanted else { return };
-        match (&m.editing, feature(&name)) {
-            (Some((n, context)), Some(json)) if *n == name => match &mut d.sketch {
+        let (exists, context) = if let Some(owner) = &d.forming_owner {
+            let exists = feature(owner).is_some_and(|f| ["section", "boundary"].iter().any(|role| f["part"]["forming"][*role] == name));
+            let context = m.forming_edit.as_ref().filter(|(component, edit)| component == owner && edit.feature["name"] == name).map(|(_, edit)| {
+                (Context { id: edit.id, inputs: edit.inputs.clone(), sources: edit.sources.clone() }, edit.feature.clone(), edit.params.clone())
+            });
+            (exists, context)
+        } else {
+            let feature = feature(&name);
+            let context = m.editing.as_ref().filter(|(n, _)| *n == name).zip(feature).map(|((_, context), feature)| {
+                let params = m.inspect["parameters"]
+                    .as_object()
+                    .map(|p| p.iter().filter_map(|(n, v)| Some((n.clone(), v["value"].as_f64()?))).collect())
+                    .unwrap_or_default();
+                (context.clone(), feature.clone(), params)
+            });
+            (feature.is_some(), context)
+        };
+        match context {
+            Some((context, json, params)) => match &mut d.sketch {
                 Some(s) => {
-                    s.refresh(context.clone(), json, params);
+                    s.refresh(context, json, params);
                     s.draft.fillet_presets = self.fillet_presets.clone();
                     s.draft.chamfer_presets = self.chamfer_presets.clone();
                 }
                 None => {
-                    let scene = m.scene.bounds.map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
-                    let mut sk = SketchEdit::new(name, context.clone(), json, params, scene);
+                    let scene =
+                        m.scene.bounds.filter(|_| d.forming_owner.is_none()).map(|(lo, hi)| (m.scene.anchor(), (hi - lo).dot(hi - lo).sqrt() * 0.5));
+                    let mut sk = SketchEdit::new(name, context, json, params, scene);
                     sk.modes = self.modes;
                     // On the blank: in the flat pattern pane, framing the blank (there).
                     if sk.on_blank() {
@@ -3260,7 +3312,7 @@ impl Viewer {
                 }
             },
             // Still on its way, or gone (undone, or the model replaced).
-            (_, Some(_)) if d.sketch.is_none() => {}
+            None if exists && d.sketch.is_none() => {}
             _ => {
                 if active {
                     self.leave();
@@ -3268,6 +3320,8 @@ impl Viewer {
                     // The tab is not shown: its own sketch goes, the window's forms are left alone.
                     d.sketch = None;
                     d.entering = None;
+                    d.forming_owner = None;
+                    let _ = d.requests.send(Request::Editing(None));
                 }
             }
         }
@@ -4211,6 +4265,7 @@ impl Viewer {
         let mut revert: Option<Json> = None;
         let _ = (&set, &own_parameters);
         let (mut export, mut edit, mut enter) = (None, None, None);
+        let mut enter_forming = None;
         let mut reedit: Option<String> = None;
         let mut toggle: Option<(String, Json)> = None;
         let mut show_flat: Option<String> = None;
@@ -4309,50 +4364,73 @@ impl Viewer {
                         ui.add(egui::Label::new(egui::RichText::new(e).small()).wrap());
                     }
                 };
-                ui.horizontal(|ui| {
-                    if is_changed
-                        && crate::icons::button(
-                            ui,
-                            Icon::Undo,
-                            self.i18n.t("revert-name", "Back to the parent's"),
-                            self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"),
-                            true,
-                        )
-                        .clicked()
-                    {
-                        revert = Some(json!({"feature": bare}));
-                    }
-                    // On or off (D159); by a formula, it says which and is changed in the JSON.
-                    match &f["enabled"] {
-                        Json::String(formula) => {
-                            ui.weak("ƒ").on_hover_text(self.i18n.f("feature-on-hint", "On while { $formula } is not 0", &[("formula", formula)]));
+                let mut header = |ui: &mut egui::Ui| {
+                    ui.horizontal(|ui| {
+                        if is_changed
+                            && crate::icons::button(
+                                ui,
+                                Icon::Undo,
+                                self.i18n.t("revert-name", "Back to the parent's"),
+                                self.i18n.t("feature-reset-hint", "Changed in this variant: back as the parent has it"),
+                                true,
+                            )
+                            .clicked()
+                        {
+                            revert = Some(json!({"feature": bare}));
                         }
-                        e => {
-                            let mut on = e.as_f64().is_none_or(|v| v != 0.0);
-                            let hint = self.i18n.t(
-                                "feature-off-hint",
-                                "Off: the feature passes its input on unchanged — a variant does without a parent's feature so",
-                            );
-                            if ui.checkbox(&mut on, "").on_hover_text(hint).changed() {
-                                toggle = Some((bare.to_string(), json!({ "enabled": on })));
+                        // On or off (D159); by a formula, it says which and is changed in the JSON.
+                        match &f["enabled"] {
+                            Json::String(formula) => {
+                                ui.weak("ƒ").on_hover_text(self.i18n.f("feature-on-hint", "On while { $formula } is not 0", &[("formula", formula)]));
+                            }
+                            e => {
+                                let mut on = e.as_f64().is_none_or(|v| v != 0.0);
+                                let hint = self.i18n.t(
+                                    "feature-off-hint",
+                                    "Off: the feature passes its input on unchanged — a variant does without a parent's feature so",
+                                );
+                                if ui.checkbox(&mut on, "").on_hover_text(hint).changed() {
+                                    toggle = Some((bare.to_string(), json!({ "enabled": on })));
+                                }
                             }
                         }
-                    }
-                    // Drawn, not a glyph: the window's font may lack one.
-                    let (r, painter) = ui.allocate_painter(egui::vec2(10.0, 10.0), egui::Sense::hover());
-                    let colour = ui.visuals().widgets.active.fg_stroke.color;
-                    if is_changed {
-                        painter.circle_filled(r.rect.center(), 3.5, colour);
-                        r.on_hover_text(self.i18n.t("changed-here", "Changed in this variant"));
-                    } else if is_own {
-                        let c = r.rect.center();
-                        let stroke = egui::Stroke::new(1.5, colour);
-                        painter.line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], stroke);
-                        painter.line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], stroke);
-                        r.on_hover_text(self.i18n.t("own-here", "This variant's own"));
-                    }
-                    ui.vertical(|ui| row(ui));
-                });
+                        // Drawn, not a glyph: the window's font may lack one.
+                        let (r, painter) = ui.allocate_painter(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        let colour = ui.visuals().widgets.active.fg_stroke.color;
+                        if is_changed {
+                            painter.circle_filled(r.rect.center(), 3.5, colour);
+                            r.on_hover_text(self.i18n.t("changed-here", "Changed in this variant"));
+                        } else if is_own {
+                            let c = r.rect.center();
+                            let stroke = egui::Stroke::new(1.5, colour);
+                            painter.line_segment([c - egui::vec2(4.0, 0.0), c + egui::vec2(4.0, 0.0)], stroke);
+                            painter.line_segment([c - egui::vec2(0.0, 4.0), c + egui::vec2(0.0, 4.0)], stroke);
+                            r.on_hover_text(self.i18n.t("own-here", "This variant's own"));
+                        }
+                        ui.vertical(|ui| row(ui));
+                    })
+                };
+                let forming = &f["part"]["forming"];
+                if op == "component" && forming.is_object() {
+                    let id = ui.make_persistent_id(("forming-sketches", self.docs[self.active].id, bare));
+                    let (arrow, _, _) =
+                        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false).show_header(ui, header).body(|ui| {
+                            for (role, label) in
+                                [("section", self.i18n.t("forming-section", "Section")), ("boundary", self.i18n.t("forming-boundary", "Boundary"))]
+                            {
+                                if let Some(name) = forming[role].as_str()
+                                    && ui.button(format!("{label} · {name}")).on_hover_text(self.i18n.t("edit-sketch", "Edit the sketch")).clicked()
+                                {
+                                    enter_forming = Some((name.to_string(), bare.to_string()));
+                                }
+                            }
+                        });
+                    let hint = self.i18n.t("forming-sketches", "Stamp sketches");
+                    arrow.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, hint));
+                    arrow.on_hover_text(hint);
+                } else {
+                    header(ui);
+                }
             }
         });
         self.docs[self.active].offsets = offsets;
@@ -4421,6 +4499,9 @@ impl Viewer {
         if let Some(name) = enter {
             self.enter(name);
         }
+        if let Some((name, component)) = enter_forming {
+            self.enter_sketch(name, Some(component));
+        }
         if let Some(name) = reedit {
             self.reedit(&name);
         }
@@ -4487,6 +4568,16 @@ impl Viewer {
             self.docs[self.active].sketch_rect = rect;
             self.sketch_input(ui, rect, &r, offset);
             self.sketch_menu(ui.ctx());
+            // A stamp sketch is drawn in its definition's frame. The placed part is in model space.
+            if self.docs[self.active].forming_owner.is_some() {
+                if r.double_clicked()
+                    && let Some(sk) = self.docs[self.active].sketch.as_mut().filter(|sk| sk.hover.is_none())
+                {
+                    sk.fit(None, true);
+                }
+                self.paint_sketch(&ui.painter().with_clip_rect(rect), rect);
+                return;
+            }
         } else {
             self.view_input(ui, rect, &r);
         }
@@ -6790,6 +6881,7 @@ impl Viewer {
         // Projecting, a left drag turns the view to the model: parts lying over one another hide
         // what is under them from the sketch's plane.
         if sk.draft.tool == Tool::Project
+            && d.forming_owner.is_none()
             && !sk.on_blank()
             && r.dragged_by(egui::PointerButton::Primary)
             && !nav.space
@@ -7712,6 +7804,9 @@ impl Viewer {
     /// Whether `a` can run now: where the window is, and what it needs.
     fn available(&self, a: &Action) -> bool {
         use crate::actions::Context;
+        if self.docs[self.active].forming_owner.is_some() && matches!(a.act, Act::Extrude | Act::Revolve | Act::WorkPlane) {
+            return false;
+        }
         let here = match a.context {
             Context::Anywhere => true,
             Context::Model => self.docs[self.active].sketch.is_none(),
@@ -8552,6 +8647,7 @@ mod tests {
                 begun: Vec::new(),
                 flats: Vec::new(),
                 editing: None,
+                forming_edit: None,
                 preview: None,
                 edge_base: Arc::default(),
                 edge_applied: None,
@@ -8577,6 +8673,7 @@ mod tests {
             file_state: None,
             sketch: None,
             entering: None,
+            forming_owner: None,
             menu: None,
             flat: crate::flat::FlatView::default(),
             new_level: None,
@@ -11258,6 +11355,56 @@ mod tests {
         drop(h);
         let sent: Vec<Request> = inbox.try_iter().collect();
         assert!(sent.iter().any(|r| matches!(r, Request::Command("edit", p) if p["name"] == last.as_str() && p["enabled"] == false)));
+    }
+
+    #[test]
+    fn a_stamp_opens_and_edits_its_own_sketches_from_the_tree() {
+        let (viewer, inbox) = viewer("stamp-tongue-straight.json");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/stamp-tongue-straight.json");
+        let mut session = Session::default();
+        session.execute("open", &json!({"path": path})).unwrap();
+        let mut h = egui_kittest::Harness::builder().with_size([440.0, 420.0]).build_ui_state(|ui, v: &mut Viewer| v.features_section(ui), viewer);
+        h.run();
+        assert!(h.query_by_label("Section · section").is_none());
+        h.get_by_label("Stamp sketches").click();
+        h.run();
+        for (label, name) in [("Section · section", "section"), ("Boundary · boundary", "boundary")] {
+            h.get_by_label(label).click();
+            h.run();
+            let Request::EditingForming { component, sketch } = inbox.try_recv().unwrap() else { panic!("expected a stamp sketch") };
+            assert_eq!((component.as_str(), sketch.as_str()), ("stamp", name));
+            let v = h.state_mut();
+            let i = v.active;
+            let context = session.forming_sketch(&component, &sketch).unwrap();
+            v.docs[i].model.as_mut().unwrap().forming_edit = Some((component, context));
+            v.sync_sketch(i);
+            let sk = v.docs[i].sketch.as_mut().unwrap();
+            assert_eq!(sk.feature, name);
+            assert!(sk.placed.is_ok());
+            let patch = if name == "section" {
+                let constraints = sk.json["sketch"]["constraints"].as_array().unwrap();
+                let angle = constraints.iter().position(|c| c["type"] == "angle").unwrap();
+                sk.edit_label(&Pick::Constraint(angle), [0.0, 0.0]);
+                let field = sk.field.as_mut().unwrap();
+                assert_eq!(field.text, "15");
+                field.text = "25".into();
+                sk.commit_field().unwrap()
+            } else {
+                let tip = sk.placed.as_ref().unwrap().solved.points["section_tip"].x;
+                assert!(tip < 9.82962913144534, "the cut follows the projected tip after the angle edit");
+                let points = json!({"root_left": [0, -6], "root_right": [0, 6], "tip_left": [tip, -6], "tip_right": [tip, 6]});
+                sk.apply(json!({"points": points}).as_object().unwrap().clone())
+            };
+            v.send(Request::Command("edit_sketch", patch));
+            let Request::Command("edit_sketch", params) = inbox.try_recv().unwrap() else { panic!("expected a sketch edit") };
+            assert_eq!(params["component"], "stamp");
+            let reply = session.execute("edit_sketch", &params).unwrap();
+            assert_eq!(reply["failed"], json!([]));
+        }
+        let v = h.state_mut();
+        v.leave();
+        assert!(v.docs[v.active].forming_owner.is_none());
+        assert!(matches!(inbox.try_recv(), Ok(Request::Editing(None))));
     }
 
     /// The activity bar shows the side bar's sets (D162): the model's sections under one another;

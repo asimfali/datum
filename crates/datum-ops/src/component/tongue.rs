@@ -182,13 +182,22 @@ pub(crate) fn form(
     rule: [Option<&Num>; 3],
     values: &[&Value],
 ) -> Result<Value, BrepError> {
-    let (wall, strip, window, cut) = prepare(feature, def, forming, params, placements, rule, values)?;
-    let body = stitch(feature, wall, &strip, &window)?;
+    let (wall, strip, window) = prepare(feature, def, forming, params, placements, rule, values)?;
+    let (body, opposite) = stitch(feature, wall, &strip, &window)?;
     validated(&body)?;
+    let at_wall = |p: Vec2| window.to_world.apply(Vec3::new(p.x, p.y, 0.0));
+    let outline = window.outline;
+    let cut = StampCut {
+        faces: [window.face, opposite],
+        points: outline.points.into_iter().map(at_wall).collect(),
+        normal: window.to_world.apply_vector(Vec3::new(0.0, 0.0, 1.0)),
+        ids: outline.ids,
+        arcs: outline.arcs.into_iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
+    };
     Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp: Some(cut) })))
 }
 
-/// Evaluate the raised strip, the opening that supplies its metal, and its three free cuts.
+/// Evaluate the raised strip and the opening that supplies its metal.
 fn prepare<'a>(
     feature: TopoId,
     def: &PartDef,
@@ -197,7 +206,7 @@ fn prepare<'a>(
     placements: &[Placement],
     [thickness, radius, k_factor]: [Option<&Num>; 3],
     values: &[&'a Value],
-) -> Result<(&'a Body, Body, Window, StampCut), BrepError> {
+) -> Result<(&'a Body, Body, Window), BrepError> {
     let [Placement::Point(placement)] = placements else {
         return Err(unsupported(format!("a straight tongue needs one point placement: part `{}`", def.name)));
     };
@@ -320,15 +329,8 @@ fn prepare<'a>(
     let to_world = Rigid::frame(Vec3::ZERO, x, width, z).then(onto_wall);
     let face = on.face.ok_or_else(|| invalid("a tongue needs a placement face"))?;
     let outline = free_boundary(feature, [inner_root, far], [lo, hi], [left, tip, right], rounds)?;
-    let at_wall = |p: Vec2| to_world.apply(Vec3::new(p.x, p.y, 0.0));
-    let cut = StampCut {
-        points: outline.points.iter().copied().map(at_wall).collect(),
-        normal: wz,
-        ids: outline.ids.clone(),
-        arcs: outline.arcs.iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
-    };
     let window = Window { face, thickness: t, root_cap, root_ids, root_cross, to_world, sides: [lo, hi], inner_root, outer_root, far, outline };
-    Ok((wall, strip, window, cut))
+    Ok((wall, strip, window))
 }
 
 fn free_boundary(
@@ -456,7 +458,7 @@ mod tests {
             let op = serde_json::from_value::<Op>(json.clone()).unwrap();
             let Op::Component { part, params, placements, thickness, .. } = &op else { panic!("expected component") };
             part.validate().unwrap();
-            let (_, body, _, _) =
+            let (_, body, _) =
                 prepare(stamp(), part, part.forming.as_ref().unwrap(), params, placements, [thickness.as_ref(), None, None], &inputs).unwrap();
             body.validate().unwrap();
             datum_brep::tessellate(&body).unwrap();

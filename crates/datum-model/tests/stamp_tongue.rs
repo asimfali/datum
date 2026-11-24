@@ -1,4 +1,4 @@
-//! The sharp and rounded two-sketch tongues placed on a flat plate.
+//! The sharp and rounded two-sketch tongues placed on a flat wall.
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use datum_brep::{Curve, Surface};
@@ -12,6 +12,7 @@ use std::path::Path;
 const MODEL: &str = include_str!("../../../tests/models/stamp-tongue-straight.json");
 const ROUNDED: &str = include_str!("../../../tests/models/stamp-tongue-rounded.json");
 const NOSE: &str = include_str!("../../../tests/models/stamp-tongue-nose.json");
+const FLANGE: &str = include_str!("../../../tests/models/stamp-tongue-flange.json");
 
 fn run(session: &mut Session, command: &str, params: Value) -> Value {
     session.execute(command, &params).unwrap_or_else(|error| panic!("{command}: {error}"))
@@ -70,6 +71,163 @@ fn cut_x_bounds(session: &mut Session, body: &str) -> (f64, f64) {
         .iter()
         .flat_map(|line| line.iter().map(|p| p.x))
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), x| (lo.min(x), hi.max(x)))
+}
+
+#[test]
+fn a_tongue_on_a_perforated_flange_preserves_the_fold_and_develops_its_cut() {
+    let model: Value = serde_json::from_str(FLANGE).unwrap();
+    let features = model["features"].as_array().unwrap();
+    let mut session = Session::default();
+    for input in features {
+        let reply = run(&mut session, "add", input.clone());
+        assert_eq!(reply["failed"], json!([]), "{input}: {reply}");
+    }
+    let original = session.value("perforated").unwrap().body().unwrap();
+    let formed = session.value("stamp").unwrap().body().unwrap();
+    formed.validate().unwrap();
+    close(formed.volume(), original.volume());
+    for old in original.faces() {
+        let changed = formed.faces().iter().find(|f| f.id == old.id).expect("the original face ID must survive");
+        assert_eq!(changed.surface, old.surface);
+    }
+
+    let mut unfold = features.last().unwrap().clone();
+    for (side, home) in [("front", unfold["face"].clone()), ("back", json!("959b4b5608be700285cbdc117b2d2ad2"))] {
+        let original_blank = format!("original_{side}");
+        unfold["name"] = json!(original_blank);
+        unfold["inputs"] = json!(["perforated"]);
+        unfold["face"] = home;
+        run(&mut session, "add", unfold.clone());
+        let stamped_blank = format!("stamped_{side}");
+        unfold["name"] = json!(stamped_blank);
+        unfold["inputs"] = json!(["stamp"]);
+        run(&mut session, "add", unfold.clone());
+        let base = session.flat_of(&original_blank).unwrap();
+        let flat = session.flat_of(&stamped_blank).unwrap();
+        assert_eq!(flat.size, base.size);
+        assert_eq!(flat.bends, base.bends);
+        assert_eq!(flat.bend_ids, base.bend_ids);
+        assert_eq!(base.bends.len(), 2, "the original bend has two tangent lines");
+        assert_eq!(flat.outer, base.outer);
+        assert_eq!(&flat.pieces[..base.pieces.len()], base.pieces);
+        assert_eq!(&flat.ids[..base.ids.len()], base.ids);
+        let center = base
+            .pieces
+            .iter()
+            .find_map(|piece| match piece {
+                FlatPiece::Circle { center, radius } | FlatPiece::Arc { center, radius, .. } if (*radius - 3.0).abs() < 1e-9 => Some(*center),
+                _ => None,
+            })
+            .expect("the flange hole stays in the developed blank");
+        let [FlatPiece::Line(left, a), FlatPiece::Line(b, c), FlatPiece::Line(d, right)] = &flat.pieces[base.pieces.len()..] else {
+            panic!("expected the stamp's three open cut segments");
+        };
+        assert!(near(*a, *b) && near(*c, *d));
+        close((left.x + right.x) / 2.0, center.x);
+        close((left.x - right.x).abs(), 10.0);
+        close(left.y, right.y);
+        assert!(left.y > a.y && a.y > center.y);
+    }
+}
+
+#[test]
+fn an_existing_flange_hole_in_the_stamp_window_is_refused() {
+    for at in [[47, 20], [47, 25]] {
+        let mut model: Value = serde_json::from_str(FLANGE).unwrap();
+        model["features"][3]["sketch"]["points"]["center"] = json!(at);
+        model["features"][3]["sketch"]["circles"]["hole"]["diameter"] = json!(2);
+        stamp_window_is_refused(&model, &format!("hole at {at:?}"));
+    }
+}
+
+#[test]
+fn a_stamp_window_crossing_the_flange_bend_is_refused() {
+    let mut model: Value = serde_json::from_str(FLANGE).unwrap();
+    // The 10 mm wide cut spans z = 3..13. The flat flange starts at z = 4.
+    model["features"][5]["sketch"]["points"]["p1"] = json!([40, 8]);
+    stamp_window_is_refused(&model, "cut across the bend seam");
+}
+
+fn stamp_window_is_refused(model: &Value, placement: &str) {
+    let mut session = Session::default();
+    let features = model["features"].as_array().unwrap();
+    let (last, inputs) = features.split_last().unwrap();
+    for input in inputs {
+        run(&mut session, "add", input.clone());
+    }
+    assert!(session.value("perforated").unwrap().body().unwrap().validate().is_ok());
+    let error = session.value("stamp").unwrap_err();
+    assert!(error.contains("window"), "unexpected error for {placement}: {error}");
+    run(&mut session, "add", last.clone());
+    assert!(session.value("blank").is_err(), "a failed stamp must not export a blank");
+}
+
+#[test]
+fn independent_edits_to_embedded_sketches_rebuild_the_stamp_and_blank() {
+    let mut session = Session::default();
+    let mut model = model();
+    add_base(&mut session, &model);
+    run(&mut session, "set_parameter", json!({"name": "nose", "value": 5}));
+    model["features"][3]["part"]["parameters"][0]["value"] = json!(4);
+    model["features"][3]["params"] = json!({"nose_length": "nose"});
+    add_stamp(&mut session, &model);
+    run(&mut session, "add", model["features"][4].clone());
+    let section = session.forming_sketch("stamp", "section").unwrap();
+    let boundary = session.forming_sketch("stamp", "boundary").unwrap();
+    assert_eq!(section.params["nose_length"], 5.0);
+    assert_eq!(boundary.sources[0].0, "section");
+    assert_eq!(boundary.feature["sketch"]["metadata"]["root"]["stamp.role"], "transition");
+    assert!(session.forming_sketch("plate", "section").is_none());
+    assert!(session.forming_sketch("stamp", "places").is_none());
+
+    let hashes = |s: &Session| ["stamp", "blank"].map(|n| s.evaluation().results[s.graph().find(n).unwrap() as usize].as_ref().unwrap().hash());
+    let baseline = hashes(&session);
+    let raised = json!({"component": "stamp", "name": "section",
+        "points": {"root_top": [0, 3.5], "shoulder": [5, 3.5], "nose_tip": [9.82962913144534, 4.794095225512604]}});
+    run(&mut session, "edit_sketch", raised);
+    let higher = hashes(&session);
+    assert!(higher.into_iter().zip(baseline).all(|(a, b)| a != b));
+    assert_eq!(session.forming_sketch("stamp", "section").unwrap().id, section.id);
+    assert_eq!(session.forming_sketch("stamp", "boundary").unwrap().feature, boundary.feature);
+
+    let widened = json!({"component": "stamp", "name": "boundary",
+        "points": {"root_left": [0, -6], "root_right": [0, 6], "tip_left": [9.82962913144534, -6], "tip_right": [9.82962913144534, 6]}});
+    run(&mut session, "edit_sketch", widened);
+    let wider = hashes(&session);
+    assert!(wider.into_iter().zip(higher).all(|(a, b)| a != b));
+    assert_eq!(session.forming_sketch("stamp", "boundary").unwrap().id, boundary.id);
+    for expected in [higher, baseline] {
+        run(&mut session, "undo", json!({}));
+        assert_eq!(hashes(&session), expected);
+    }
+    run(&mut session, "redo", json!({}));
+    assert_eq!(hashes(&session), higher);
+    run(&mut session, "redo", json!({}));
+    assert_eq!(hashes(&session), wider);
+
+    let no_role = json!({"component": "stamp", "name": "boundary", "elements": ["tip"], "remove": ["stamp.role"]});
+    run(&mut session, "edit_metadata", no_role);
+    assert!(session.evaluation().results[3].is_err());
+    assert!(session.forming_sketch("stamp", "boundary").is_some());
+    let restore_role = json!({"component": "stamp", "name": "boundary", "elements": ["tip"], "set": {"stamp.role": "cut"}});
+    run(&mut session, "edit_metadata", restore_role);
+    assert_eq!(hashes(&session), wider);
+
+    for (kind, key, value) in [("angle", "degrees", 25), ("length", "value", 6)] {
+        let profile = session.forming_sketch("stamp", "section").unwrap();
+        let constraints = profile.feature["sketch"]["constraints"].as_array().unwrap();
+        let old = constraints.iter().find(|c| c["type"] == kind).unwrap();
+        let mut new = old.clone();
+        new[key] = json!(value);
+        let before = hashes(&session);
+        run(
+            &mut session,
+            "edit_sketch",
+            json!({"component": "stamp", "name": "section",
+            "remove_constraints": [old], "add_constraints": [new]}),
+        );
+        assert!(hashes(&session).into_iter().zip(before).all(|(a, b)| a != b));
+    }
 }
 
 fn top_height(session: &mut Session, body: &str) -> f64 {

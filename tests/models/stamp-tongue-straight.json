@@ -181,9 +181,23 @@
           },
           {
             "name": "boundary",
-            "inputs": [],
+            "inputs": [
+              "section"
+            ],
             "op": {
               "op": "sketch",
+              "project": {
+                "section_tip": {
+                  "from": "section",
+                  "element": "nose_tip",
+                  "at": [
+                    [
+                      9.82962913144534,
+                      0
+                    ]
+                  ]
+                }
+              },
               "plane": {
                 "origin": [
                   0,
@@ -274,12 +288,11 @@
                     "line": "tip"
                   },
                   {
-                    "type": "horizontal_distance",
+                    "type": "vertical",
                     "points": [
-                      "root_right",
+                      "section_tip",
                       "tip_right"
-                    ],
-                    "value": "5 + nose_length * cos(15)"
+                    ]
                   }
                 ]
               }

@@ -5,11 +5,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use datum_brep::{Body, Curve, Ix, Surface};
-use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature};
+use datum_brep::{Body, Curve, Ix, Surface, TopoId};
+use datum_graph::{Evaluation, Evaluator, Graph, NodeIx, Op, Value as Feature, ValueRef};
 use datum_math::Vec3;
 use datum_math::expr::{ExprError, Num, parameter_values};
-use datum_ops::{Flat, PartDef, Placement};
+use datum_ops::{Flat, PartDef, Placed, Placement};
 use serde_json::{Map, Value, json};
 
 use crate::levels::Doc;
@@ -19,6 +19,15 @@ use crate::{SketchPatch, add_feature, feature_json, library, parse_doc, to_json_
 mod extrude;
 mod sheet;
 pub use sheet::{sheet_extent, sheet_width};
+
+/// A forming sketch's editable feature and the evaluated context in its component's frame.
+pub struct FormingSketch {
+    pub id: TopoId,
+    pub feature: Value,
+    pub params: BTreeMap<String, f64>,
+    pub inputs: Vec<(String, ValueRef)>,
+    pub sources: Vec<(String, ValueRef)>,
+}
 
 /// The model being edited, its cache and its latest evaluation. Every edit re-evaluates; the
 /// cache makes that cost proportional to what changed.
@@ -431,17 +440,17 @@ const COMMANDS: &[Command] = &[
                       `{\"center\": \"c\", \"count\": 6}` (`step` degrees or `angle` spread, 360 by default; `grow`; shift \
                       [degrees, outward]); their copies are `i,0`. A cut and an extrusion take the copies with the sketch's own profiles; `inspect` \
                       gives each pattern's copies, profiles and open area. `add_constraints` appends constraints; `remove_constraints` removes those equal \
-                      to the ones given (as `inspect` lists them).",
+                      to the ones given (as `inspect` lists them). With `component`, `name` is its embedded forming section or boundary.",
         params: || {
             let map = json!({"type": "object", "additionalProperties": true});
             let list = json!({"type": "array", "items": {"type": "object"}});
             json!({"type": "object", "properties": {
-                "name": {"type": "string"},
+                "name": {"type": "string"}, "component": {"type": "string"},
                 "points": map, "lines": map, "arcs": map, "circles": map, "measures": map, "groups": map, "patterns": map, "project": map, "metadata": map,
                 "add_constraints": list, "remove_constraints": list
             }, "required": ["name"], "additionalProperties": false})
         },
-        run: |s, p| s.edit_sketch(text(p, "name")?, p),
+        run: |s, p| s.edit_sketch(text(p, "name")?, component_scope(p)?, p),
     },
     Command {
         name: "query_metadata",
@@ -466,9 +475,9 @@ const COMMANDS: &[Command] = &[
                       target the property (a JSON value; null is a value, not a removal), `remove` takes the properties away. Every target \
                       and property is checked first: an unknown curve is an error, a missing property is not. Any property name and any \
                       JSON value is kept as written (D276); a preset the window offers is only a way to fill `set`. A curve left with no \
-                      properties loses its entry.",
+                      properties loses its entry. With `component`, `name` is its embedded forming section or boundary.",
         params: || {
-            json!({"type": "object", "properties": {"name": {"type": "string"},
+            json!({"type": "object", "properties": {"name": {"type": "string"}, "component": {"type": "string"},
             "elements": {"type": "array", "items": {"type": "string"}, "minItems": 1},
             "set": {"type": "object", "additionalProperties": true},
             "remove": {"type": "array", "items": {"type": "string"}}}, "required": ["name", "elements"], "additionalProperties": false})
@@ -485,7 +494,7 @@ const COMMANDS: &[Command] = &[
                 None | Some(Value::Null) => Vec::new(),
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("`remove` lists property names: {e}"))?,
             };
-            s.edit_metadata(text(p, "name")?, &elements, &set, &remove)
+            s.edit_metadata(text(p, "name")?, component_scope(p)?, &elements, &set, &remove)
         },
     },
     Command {
@@ -767,7 +776,7 @@ const COMMANDS: &[Command] = &[
             }
             let mut params = patch.done().unwrap_or_default();
             params.insert("name".into(), json!(name));
-            let mut reply = s.edit_sketch(name, &params)?;
+            let mut reply = s.edit_sketch(name, None, &params)?;
             reply["names"] = json!(renamed);
             reply["open_links"] = json!(open);
             Ok(reply)
@@ -1235,6 +1244,65 @@ fn text<'p>(p: &'p Map<String, Value>, key: &str) -> Result<&'p str, String> {
     p.get(key).and_then(Value::as_str).ok_or_else(|| format!("`{key}` must be a string"))
 }
 
+fn component_scope(p: &Map<String, Value>) -> Result<Option<&str>, String> {
+    p.get("component").map(|_| text(p, "component")).transpose()
+}
+
+fn apply_sketch_patch(op: &mut Op, name: &str, p: &Map<String, Value>) -> Result<Vec<String>, String> {
+    if !matches!(op, Op::Sketch { .. }) {
+        return Err(format!("`{name}` is not a sketch"));
+    }
+    let Ok(Value::Object(mut fields)) = serde_json::to_value(&*op) else { return Err("unreadable feature".into()) };
+    let also = patch_sketch(&mut fields, p)?;
+    *op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
+    op.normalize_metadata().map_err(|e| format!("`{name}`: {e}"))?;
+    Ok(also)
+}
+
+fn change_metadata(op: &mut Op, name: &str, elements: &[String], set: &Map<String, Value>, remove: &[String]) -> Result<bool, String> {
+    let Op::Sketch { sketch, .. } = op else {
+        return Err(format!("`{name}` is not a sketch"));
+    };
+    for n in elements {
+        if !sketch.has_metadata_curve(n) {
+            return Err(format!("`{name}` has no line or arc `{n}`"));
+        }
+    }
+    let mut changed = false;
+    for n in unique(elements) {
+        let before = sketch.metadata.get(&n).cloned().unwrap_or_default();
+        let mut props = before.clone();
+        for (k, v) in set {
+            props.insert(k.clone(), v.clone());
+        }
+        for k in remove {
+            props.remove(k);
+        }
+        if props.is_empty() {
+            changed |= sketch.metadata.remove(&n).is_some();
+        } else if props != before {
+            sketch.metadata.insert(n, props);
+            changed = true;
+        }
+    }
+    if changed {
+        sketch.normalize_metadata().map_err(|e| format!("`{name}`: {e}"))?;
+    }
+    Ok(changed)
+}
+
+fn projections_need_positions(op: &Op) -> bool {
+    matches!(op, Op::Sketch { project, .. } if project.values().any(|p| p.single() && p.at.is_empty()))
+}
+
+fn record_projection_positions(op: &mut Op, placed: &Placed) {
+    if let Op::Sketch { project, .. } = op {
+        for (name, p) in project.iter_mut().filter(|(_, p)| p.single() && p.at.is_empty()) {
+            p.at = placed.projected.get(name).cloned().unwrap_or_default();
+        }
+    }
+}
+
 impl Session {
     /// All that says which model this is and what can be undone, to come back to with
     /// [`Self::restore`]. What was written to a library stays.
@@ -1267,15 +1335,15 @@ impl Session {
     }
 
     /// Applies `edit_sketch` patch `p` to sketch feature `name`.
-    fn edit_sketch(&mut self, name: &str, p: &Map<String, Value>) -> Result<Value, String> {
-        let ix = self.find(name)?;
-        let Ok(Value::Object(mut op)) = serde_json::to_value(&self.graph.nodes()[ix as usize].op) else { return Err("unreadable feature".into()) };
-        if op.get("op") != Some(&json!("sketch")) {
-            return Err(format!("`{name}` is not a sketch"));
+    fn edit_sketch(&mut self, name: &str, component: Option<&str>, p: &Map<String, Value>) -> Result<Value, String> {
+        if let Some(owner) = component {
+            let (mut reply, also) = self.edit_forming_sketch(owner, name, true, |op| apply_sketch_patch(op, name, p))?;
+            reply["also_removed"] = json!(also);
+            return Ok(reply);
         }
-        let also = patch_sketch(&mut op, p)?;
-        let mut op: Op = serde_json::from_value(Value::Object(op)).map_err(|e| e.to_string())?;
-        op.normalize_metadata().map_err(|e| format!("`{name}`: {e}"))?;
+        let ix = self.find(name)?;
+        let mut op = self.graph.nodes()[ix as usize].op.clone();
+        let also = apply_sketch_patch(&mut op, name, p)?;
         // Its inputs follow its projections (D214): a source added, one no longer projected from gone.
         let node = &self.graph.nodes()[ix as usize];
         let now: Vec<String> = node.inputs.iter().map(|&i| self.graph.nodes()[i as usize].name.clone()).collect();
@@ -1292,6 +1360,72 @@ impl Session {
         let mut reply = self.rebuild_recording(ix);
         reply["also_removed"] = json!(also);
         Ok(reply)
+    }
+
+    fn edit_forming_sketch<T>(
+        &mut self,
+        owner: &str,
+        name: &str,
+        update_inputs: bool,
+        change: impl FnOnce(&mut Op) -> Result<T, String>,
+    ) -> Result<(Value, T), String> {
+        let ix = self.find(owner)?;
+        let mut op = self.graph.nodes()[ix as usize].op.clone();
+        let Op::Component { part, params, .. } = &mut op else { return Err(format!("`{owner}` is not a component")) };
+        let index = part.forming_sketch_index(name).ok_or_else(|| format!("`{owner}` has no forming sketch `{name}`"))?;
+        let (earlier, sketches) = part.features.split_at_mut(index);
+        let sketch = &mut sketches[0];
+        let result = change(&mut sketch.op)?;
+        if update_inputs {
+            let on_plane = sketch.inputs.first().is_some_and(|n| earlier.iter().any(|f| f.name == *n && matches!(f.op, Op::Plane { .. })));
+            let inputs = sketch_inputs(&sketch.op, &sketch.inputs, on_plane);
+            if let Some(n) = inputs.iter().find(|n| !earlier.iter().any(|f| f.name == **n)) {
+                return Err(format!("`{owner}` sketch `{name}` projects from `{n}`, not a feature before it"));
+            }
+            sketch.inputs = inputs;
+        }
+        if projections_need_positions(&sketch.op)
+            && let Some(overrides) = self.forming_overrides(params)
+            && let Some(placed) = part.solve_forming_sketch(self.graph.nodes()[ix as usize].id, name, &overrides)
+        {
+            record_projection_positions(&mut part.features[index].op, &placed);
+        }
+        self.graph.set_op(ix, op).map_err(|e| e.to_string())?;
+        Ok((self.rebuild(), result))
+    }
+
+    fn forming_overrides(&self, params: &BTreeMap<String, Num>) -> Option<BTreeMap<String, Num>> {
+        let outer = parameter_values(self.graph.parameters());
+        let lookup = |name: &str| outer.get(name).cloned().unwrap_or_else(|| Err(ExprError::Unknown(name.to_string())));
+        params.iter().map(|(name, number)| Some((name.clone(), Num::Value(number.resolve(&lookup).ok()?)))).collect()
+    }
+
+    /// Context to solve and edit a forming sketch in its definition's frame, including local
+    /// parameters and the component's overrides resolved in the containing model.
+    pub fn forming_sketch(&self, component: &str, name: &str) -> Option<FormingSketch> {
+        let node = &self.graph.nodes()[self.graph.find(component)? as usize];
+        let Op::Component { part, params, .. } = &node.op else { return None };
+        let index = part.forming_sketch_index(name)?;
+        let sketch = &part.features[index];
+        let overrides = self.forming_overrides(params);
+        let context = part.forming_sketch_context(node.id, name, overrides.as_ref())?;
+        let mut feature = serde_json::to_value(&sketch.op).ok()?;
+        feature["name"] = json!(name);
+        feature["inputs"] = json!(sketch.inputs);
+        let prefix: Vec<_> = context.prefix.into_iter().map(|value| value.map(Arc::new)).collect();
+        let named = |i: usize| Some((part.features[i].name.clone(), prefix[i].as_ref()?.clone()));
+        let inputs = sketch.inputs.iter().filter_map(|name| part.features[..index].iter().position(|f| f.name == *name).and_then(named)).collect();
+        let body = |i: usize| prefix[i].as_ref().is_some_and(|v| v.body().is_some());
+        let sources = (0..index)
+            .filter(|&i| {
+                prefix[i].as_ref().is_some_and(|v| {
+                    v.sketch().is_some()
+                        || (v.body().is_some() && !(i + 1..index).any(|j| body(j) && part.features[j].inputs.contains(&part.features[i].name)))
+                })
+            })
+            .filter_map(named)
+            .collect();
+        Some(FormingSketch { id: context.id, feature, params: context.parameters, inputs, sources })
     }
 
     /// The properties of sketch feature `name`'s lines and arcs (D276): those of `elements`, or
@@ -1324,7 +1458,14 @@ impl Session {
 
     /// The properties of `elements` in sketch feature `name`, one change (D276): `set` on every
     /// target, `remove` taken from every target, checked whole before any is written.
-    fn edit_metadata(&mut self, name: &str, elements: &[String], set: &Map<String, Value>, remove: &[String]) -> Result<Value, String> {
+    fn edit_metadata(
+        &mut self,
+        name: &str,
+        component: Option<&str>,
+        elements: &[String],
+        set: &Map<String, Value>,
+        remove: &[String],
+    ) -> Result<Value, String> {
         if elements.is_empty() {
             return Err("`elements` names at least one line or arc to change".into());
         }
@@ -1337,38 +1478,15 @@ impl Session {
         if let Some(k) = remove.iter().find(|k| k.is_empty()) {
             return Err(format!("`remove` has no empty property name (got `{k}`)"));
         }
+        let change = |op: &mut Op| change_metadata(op, name, elements, set, remove);
+        if let Some(owner) = component {
+            return self.edit_forming_sketch(owner, name, false, change).map(|(reply, _)| reply);
+        }
         let ix = self.find(name)?;
         let mut op = self.graph.nodes()[ix as usize].op.clone();
-        let Op::Sketch { sketch, .. } = &mut op else {
-            return Err(format!("`{name}` is not a sketch"));
-        };
-        for n in elements {
-            if !sketch.has_metadata_curve(n) {
-                return Err(format!("`{name}` has no line or arc `{n}`"));
-            }
+        if change(&mut op)? {
+            self.graph.set_op(ix, op).map_err(|e| e.to_string())?;
         }
-        let mut changed = false;
-        for n in unique(elements) {
-            let before = sketch.metadata.get(&n).cloned().unwrap_or_default();
-            let mut props = before.clone();
-            for (k, v) in set {
-                props.insert(k.clone(), v.clone());
-            }
-            for k in remove {
-                props.remove(k);
-            }
-            if props.is_empty() {
-                changed |= sketch.metadata.remove(&n).is_some();
-            } else if props != before {
-                sketch.metadata.insert(n, props);
-                changed = true;
-            }
-        }
-        if !changed {
-            return Ok(self.rebuild_recording(ix));
-        }
-        sketch.normalize_metadata().map_err(|e| format!("`{name}`: {e}"))?;
-        self.graph.set_op(ix, op).map_err(|e| e.to_string())?;
         Ok(self.rebuild_recording(ix))
     }
 
@@ -1948,19 +2066,14 @@ impl Session {
     fn rebuild_recording(&mut self, ix: NodeIx) -> Value {
         let summary = self.rebuild();
         let node = &self.graph.nodes()[ix as usize];
-        let (Op::Sketch { project, .. }, Some(Ok(Feature::Sketch(placed)))) = (&node.op, self.last.results.get(ix as usize).map(|r| r.as_deref()))
-        else {
+        let Some(Ok(Feature::Sketch(placed))) = self.last.results.get(ix as usize).map(|r| r.as_deref()) else {
             return summary;
         };
-        if project.values().all(|p| !p.single() || !p.at.is_empty()) {
+        if !projections_need_positions(&node.op) {
             return summary;
         }
         let mut op = node.op.clone();
-        if let Op::Sketch { project, .. } = &mut op {
-            for (name, p) in project.iter_mut().filter(|(_, p)| p.single() && p.at.is_empty()) {
-                p.at = placed.projected.get(name).cloned().unwrap_or_default();
-            }
-        }
+        record_projection_positions(&mut op, placed);
         // What the edit recomputed: the second rebuild only reads the projections back.
         if self.graph.set_op(ix, op).is_ok() {
             self.rebuild();
