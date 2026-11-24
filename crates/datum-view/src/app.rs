@@ -2335,6 +2335,7 @@ impl Viewer {
         });
         if let Some(choice) = choice {
             self.quit(choice);
+            ctx.request_repaint();
         }
     }
 
@@ -8536,24 +8537,23 @@ impl Viewer {
         }
         self.receive();
         self.spots.clear();
-        // The window closed with unsaved changes: one dialog for all of them (D134); a repeated
-        // close while they are saved waits rather than dropping them.
-        let changed = (0..self.docs.len()).any(|i| self.dirty(i));
-        if ui.input(|i| i.viewport().close_requested()) && (changed || self.quitting_dialog) {
-            ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if changed && self.quitting.is_none() && !self.quitting_dialog {
-                self.quitting_dialog = true;
+        // eframe delivers Close as a new close request, which must pass once exit is confirmed.
+        let ready_to_quit =
+            self.quitting == Some(false) || (self.quitting == Some(true) && (0..self.docs.len()).all(|i| !self.docs[i].busy && !self.dirty(i)));
+        if ui.input(|i| i.viewport().close_requested()) {
+            let changed = (0..self.docs.len()).any(|i| self.dirty(i));
+            if !ready_to_quit && (changed || self.quitting_dialog || self.quitting.is_some()) {
+                ui.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                if changed && self.quitting.is_none() {
+                    self.quitting_dialog = true;
+                }
             }
-        }
-        // Saved, it closes once every tab is written; dropped, at once.
-        if let Some(saving) = self.quitting
-            && (!saving || (0..self.docs.len()).all(|i| !self.docs[i].busy && !self.dirty(i)))
-        {
+        } else if ready_to_quit {
             ui.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
-        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE).exact_size(30.0).show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE.fill(ui.visuals().panel_fill)).exact_size(30.0).show(ui, |ui| self.tab_bar(ui));
         // The title follows the active tab, once a click on the strip has chosen it.
         let t = title(self.project.as_deref(), self.docs[self.active].path.as_deref());
         if t != self.titled {
@@ -13325,6 +13325,32 @@ mod tests {
         assert_eq!(v.docs.len(), 1);
         assert!(v.docs[0].path.is_none(), "unnamed");
         assert!(inbox.try_iter().any(|r| matches!(r, Request::Close)), "the model asked to close");
+    }
+
+    #[test]
+    fn discarding_changes_allows_the_next_close_request() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.docs.push(document("parametric.json").0);
+        for doc in &mut v.docs {
+            doc.model.as_mut().unwrap().inspect["modified"] = json!(true);
+        }
+        let mut h = egui_kittest::Harness::builder().with_size([800.0, 600.0]).build_ui_state(|ui, v: &mut Viewer| v.window(ui, None), v);
+        let root = egui::ViewportId::ROOT;
+        h.input_mut().viewports.get_mut(&root).unwrap().events.push(egui::ViewportEvent::Close);
+        h.step();
+        assert!(h.state().quitting_dialog);
+        assert!(h.output().viewport_output[&root].commands.contains(&egui::ViewportCommand::CancelClose));
+
+        h.input_mut().viewports.get_mut(&root).unwrap().events.clear();
+        h.state_mut().quit(Quit::Discard);
+        h.step();
+        assert!(h.output().viewport_output[&root].commands.contains(&egui::ViewportCommand::Close));
+
+        h.input_mut().viewports.get_mut(&root).unwrap().events.push(egui::ViewportEvent::Close);
+        h.step();
+        let commands = &h.output().viewport_output[&root].commands;
+        assert!(!commands.contains(&egui::ViewportCommand::CancelClose));
+        assert!(!commands.contains(&egui::ViewportCommand::Close));
     }
 
     /// The unsaved tabs dialog's choices: leave at once dropping the changes, stay, or save every
