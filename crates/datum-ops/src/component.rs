@@ -160,6 +160,62 @@ impl<'de> Deserialize<'de> for PartFeature {
 }
 
 impl PartDef {
+    /// The editable section or boundary of an embedded forming definition.
+    pub fn forming_sketch_index(&self, name: &str) -> Option<usize> {
+        let forming = self.forming.as_ref()?;
+        if name != forming.section && name != forming.boundary {
+            return None;
+        }
+        self.features.iter().position(|f| f.name == name && matches!(f.op, crate::Op::Sketch { .. }))
+    }
+
+    /// Inputs available to the editor, even when the sketch or its forming operation fails.
+    pub fn forming_sketch_context(&self, owner: TopoId, name: &str, overrides: Option<&BTreeMap<String, Num>>) -> Option<PartSketchContext> {
+        let index = self.forming_sketch_index(name)?;
+        // Keep an editor available if an override fails in the containing model. Sketches
+        // independent of the unresolved parameters can still be solved.
+        let evaluated = overrides.and_then(|params| parameters(self, params).ok()).map_or_else(BTreeMap::new, |params| parameter_values(&params));
+        let lookup = |name: &str| evaluated.get(name).cloned().unwrap_or_else(|| Err(ExprError::Unknown(name.to_string())));
+        let mut prefix: Vec<Option<Value>> = Vec::with_capacity(index);
+        for i in 0..index {
+            let value = self.evaluate_feature(owner, i, &lookup, |j| prefix[j].as_ref()).ok();
+            prefix.push(value);
+        }
+        let parameters = evaluated.into_iter().filter_map(|(name, value)| Some((name, value.ok()?))).collect();
+        Some(PartSketchContext { id: feature_id(owner, index), parameters, prefix })
+    }
+
+    /// Solves the editable sketch without requiring the containing form to build.
+    pub fn solve_forming_sketch(&self, owner: TopoId, name: &str, overrides: &BTreeMap<String, Num>) -> Option<Placed> {
+        let context = self.forming_sketch_context(owner, name, Some(overrides))?;
+        let lookup = |name: &str| context.parameters.get(name).copied().ok_or_else(|| ExprError::Unknown(name.to_string()));
+        let value = self.evaluate_feature(owner, context.prefix.len(), &lookup, |j| context.prefix[j].as_ref()).ok()?;
+        match value {
+            Value::Sketch(placed) => Some(*placed),
+            _ => None,
+        }
+    }
+
+    fn evaluate_feature<'a>(
+        &self,
+        owner: TopoId,
+        i: usize,
+        lookup: &impl Fn(&str) -> Result<f64, ExprError>,
+        made: impl Fn(usize) -> Option<&'a Value>,
+    ) -> Result<Value, BrepError> {
+        let f = &self.features[i];
+        let fail = |mes: String| BrepError::Invalid(format!("component: feature `{}`: {mes}", f.name));
+        let op = f.op.resolve(lookup).map_err(fail)?;
+        let mut inputs = Vec::with_capacity(f.inputs.len());
+        for name in &f.inputs {
+            let k =
+                self.features[..i].iter().position(|g| g.name == *name).ok_or_else(|| fail(format!("input `{name}` is not an earlier feature")))?;
+            inputs.push(made(k).ok_or_else(|| fail(format!("input `{name}` did not build")))?);
+        }
+        let names: Vec<&str> = f.inputs.iter().map(String::as_str).collect();
+        op.eval_named(feature_id(owner, i), &inputs, &names).map_err(|e| fail(e.to_string()))
+    }
+
     /// What a part of the library must be, checked where it is written: a `stamp`, its features
     /// each after their inputs, roles naming its features, an `axis` that is a direction, a `fit`
     /// naming a parameter, a `thickness` range, presets naming parameters only. The body itself is
@@ -283,6 +339,18 @@ impl PartDef {
     }
 }
 
+/// Evaluated context for a forming sketch in its tool's own frame.
+pub struct PartSketchContext {
+    pub id: TopoId,
+    pub parameters: BTreeMap<String, f64>,
+    /// Earlier features in the definition's order, including a slot for each failed one.
+    pub prefix: Vec<Option<Value>>,
+}
+
+fn feature_id(owner: TopoId, index: usize) -> TopoId {
+    TopoId::derive("component.part").id(owner).index(index as u64).finish()
+}
+
 /// The body of a placed tool and its roles (D256, D260): the body of the definition's last
 /// feature, the bodies of the features the roles name, for the tasks that cut and form the
 /// sheet, and the profile the `cut` role cuts with.
@@ -327,19 +395,8 @@ fn evaluate_features(def: &PartDef, feature: TopoId, params: &BTreeMap<String, N
     let evaluated = parameter_values(&values);
     let lookup = |name: &str| evaluated.get(name).cloned().unwrap_or_else(|| Err(ExprError::Unknown(name.to_string())));
     let mut made: Vec<Value> = Vec::with_capacity(def.features.len());
-    for (i, f) in def.features.iter().enumerate() {
-        let id = TopoId::derive("component.part").id(feature).index(i as u64).finish();
-        let op = f.op.resolve(&lookup).map_err(|e| BrepError::Invalid(format!("component: feature `{}`: {e}", f.name)))?;
-        let mut inputs = Vec::with_capacity(f.inputs.len());
-        for name in &f.inputs {
-            let k = def.features[..i]
-                .iter()
-                .position(|g| g.name == *name)
-                .ok_or_else(|| BrepError::Invalid(format!("component: feature `{}`: input `{name}` is not an earlier feature", f.name)))?;
-            inputs.push(&made[k]);
-        }
-        let names: Vec<&str> = f.inputs.iter().map(String::as_str).collect();
-        let value = op.eval_named(id, &inputs, &names).map_err(|e| BrepError::Invalid(format!("component: feature `{}`: {e}", f.name)))?;
+    for i in 0..def.features.len() {
+        let value = def.evaluate_feature(feature, i, &lookup, |j| Some(&made[j]))?;
         made.push(value);
     }
     Ok(made)

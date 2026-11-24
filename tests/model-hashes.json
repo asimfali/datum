@@ -485,6 +485,16 @@
     "pocket": "a5cf4357502ca0a6d0758843ca25e3884e2c864bed2679b3ce2e8b022b037267",
     "pocket_sketch": "a0f71a762196d90768a8bd80916299b1165fff8b1d006f9fe1579181c8e48f1c"
   },
+  "stamp-tongue-flange.json": {
+    "blank": "e69575cd9e8253a2ae0453f61699431598967688f91d60fd0cc0f5e3b2450a7c",
+    "flanged": "f69b544e56b9d9b96068da68de65da456d6fdd389ae0b6492a90713264b1db5c",
+    "holes": "2f1cb57a88770b57026c9492a6edfb67894b8379bcc9803f12ddc2c52a3bb06f",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "perforated": "dbbe16be21bb12ddfcdbd080cb0c993194301a76172eaf1c1402c13d7c0655e2",
+    "places": "e997c15877d1fb93373f0239e7af2cf6b78fe997e34a0a708743ece2c537dcbe",
+    "plate": "9f1e5fb127bb12a791f3ca0696a8b8a177a0f7370c364df6ff1024271927c707",
+    "stamp": "042eb0b8747a2104411bd8a1ce4b1a47015de9bcea67c48833e5c850c83753b4"
+  },
   "stamp-tongue-nose.json": {
     "blank": "323f262132a917034591f929cf5ddee03ed1b4c6e3b52d4efe27db139eae6a5d",
     "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",

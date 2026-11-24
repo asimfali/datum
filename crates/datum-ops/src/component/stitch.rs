@@ -1,7 +1,7 @@
 use datum_brep::{
     Arc, Body, BrepError, Curve, CurveSpec, Cylinder, FaceSpec, Ix, Plane, ProfileArc, ProfileLoop, Surface, TopoId, Vertex, build_with_curves,
 };
-use datum_math::{Rigid, Sign, Vec2, Vec3, orient3d_coords};
+use datum_math::{Rigid, Vec2, Vec3};
 
 use crate::cut::Frame;
 use crate::sketch::{nearly_parallel, within_rounding};
@@ -28,10 +28,10 @@ pub(super) struct Window {
     pub outline: FreeBoundary,
 }
 
-/// Join a raised strip to a simple flat plate, leaving its unfolded window in the plate.
-pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window) -> Result<Body, BrepError> {
+/// Join a strip to a flat wall, leaving its developed window between the two skins.
+pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window) -> Result<(Body, TopoId), BrepError> {
     let Window { face, thickness: t, root_cap: root, root_ids, root_cross, to_world, sides, inner_root, outer_root, far, ref outline } = *window;
-    let bad = || BrepError::Unsupported("stamp: the tongue needs a clear window in a flat plate".into());
+    let bad = || BrepError::Unsupported("stamp: the tongue needs a clear window in a flat wall".into());
     if !t.is_finite()
         || t <= 0.0
         || !sides.iter().all(|v| v.is_finite())
@@ -42,14 +42,6 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         || outer_root > inner_root
         || inner_root >= far
         || root_cross.is_some_and(|x| x >= outline.points[1].x || x >= outline.points[outline.points.len() - 2].x)
-    {
-        return Err(bad());
-    }
-    // Only a single six-faced, straight-edged plate is supported. In particular there can be no
-    // neighbouring face hidden inside the window or another wall at the same depth.
-    if wall.faces().len() != 6
-        || wall.faces().iter().any(|f| f.loop_count != 1 || f.surface.plane().is_none())
-        || wall.edges().iter().any(|e| wall.edge_curve(e).is_some())
     {
         return Err(bad());
     }
@@ -69,60 +61,58 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
     if top_normal.dot(z) <= 0.0 || !nearly_parallel(top_normal, z) || !within_rounding((o - top_plane.origin).dot(top_normal), size) {
         return Err(bad());
     }
-    let bottom = wall
-        .faces()
-        .iter()
-        .enumerate()
-        .find(|(i, f)| *i != top && f.surface.plane().is_some_and(|p| p.normal.dot(z) < 0.0 && nearly_parallel(p.normal, z)))
-        .map(|(i, _)| i)
-        .ok_or_else(bad)?;
-    let bottom_plane = wall.faces()[bottom].surface.plane().ok_or_else(bad)?;
-    let bottom_normal = bottom_plane.normal * (1.0 / bottom_plane.normal.dot(bottom_plane.normal).sqrt());
-    if !within_rounding((at(0.0, 0.0, -t) - bottom_plane.origin).dot(bottom_normal), size) {
+    let ring = rectangle(Vec2::new(outer_root, sides[0]), Vec2::new(far, sides[1]));
+    let holds = |f| {
+        let loops = crate::cut::outline(wall, f, &frame)?;
+        Ok::<_, BrepError>(
+            !loops.iter().any(|l| ring.touches(l) || ring.winding(l.points[0]) != 0)
+                && loops.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() != 0,
+        )
+    };
+    if !holds(top as Ix)? {
         return Err(bad());
     }
-    // The four other faces must bound a convex body and the whole window prism must lie
-    // strictly inside them. Exact predicates decide clearance, including edge contact.
-    for f in 0..wall.faces().len() {
-        if f == top || f == bottom {
-            continue;
-        }
-        let lp = wall.faces()[f].first_loop;
-        let ids: Vec<_> = wall.loop_half_edges(lp).map(|h| wall.half_edges()[h as usize].origin).collect();
-        let pts: Vec<_> = ids.iter().map(|&v| wall.point(v)).collect();
-        let triangle = (1..pts.len())
-            .find_map(|i| {
-                (i + 1..pts.len()).find_map(|j| {
-                    let n = (pts[i] - pts[0]).cross(pts[j] - pts[0]);
-                    (n != Vec3::ZERO).then_some((pts[0], pts[i], pts[j]))
-                })
-            })
-            .ok_or_else(bad)?;
-        let side = |p| orient3d_coords(triangle.0, triangle.1, triangle.2, p);
-        let signs: Vec<_> = wall.vertices().iter().enumerate().filter(|(i, _)| !ids.contains(&(*i as Ix))).map(|(_, v)| side(v.point)).collect();
-        let inside = signs.iter().copied().find(|s| *s != Sign::Zero).ok_or_else(bad)?;
-        if signs.iter().any(|s| *s != Sign::Zero && *s != inside) {
+    let inside = at(0.0, 0.0, -t);
+    let mut bottom = None;
+    for (i, f) in wall.faces().iter().enumerate() {
+        let Some(p) = f.surface.plane().filter(|p| p.normal.dot(z) < 0.0 && nearly_parallel(p.normal, z)) else { continue };
+        let normal = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+        if within_rounding((inside - p.origin).dot(normal), size) && holds(i as Ix)? && bottom.replace(i).is_some() {
             return Err(bad());
         }
-        for a in [outer_root, far] {
-            for b in sides {
-                for c in [0.0, -t] {
-                    if side(at(a, b, c)) != inside {
-                        return Err(bad());
-                    }
-                }
-            }
-        }
     }
-    let ring = ProfileLoop {
-        points: vec![Vec2::new(outer_root, sides[0]), Vec2::new(far, sides[0]), Vec2::new(far, sides[1]), Vec2::new(outer_root, sides[1])],
-        vertices: Vec::new(),
-        sides: Vec::new(),
-        arcs: vec![None; 4],
-    };
-    for f in [top, bottom] {
-        let outlines = crate::cut::outline(wall, f as Ix, &frame)?;
-        if outlines.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() == 0 || outlines.iter().any(|l| l.touches(&ring)) {
+    let bottom = bottom.ok_or_else(bad)?;
+    // Check the volume swept by the window and raised strip against other faces. Where folding
+    // turns a curved boundary away from the frame, its enclosing box must establish clearance.
+    let local = Rigid::into_frame(o, x, y, z);
+    let (lo, hi) = (0..strip.faces().len() as Ix)
+        .map(|i| strip.face_bounds(i, &local))
+        .fold((Vec3::new(outer_root, sides[0], -t), Vec3::new(far, sides[1], 0.0)), |(lo, hi), (a, b)| {
+            (Vec3::new(lo.x.min(a.x), lo.y.min(a.y), lo.z.min(a.z)), Vec3::new(hi.x.max(b.x), hi.y.max(b.y), hi.z.max(b.z)))
+        });
+    let footprint = rectangle(Vec2::new(lo.x, lo.y), Vec2::new(hi.x, hi.y));
+    for (i, f) in wall.faces().iter().enumerate() {
+        if i == top || i == bottom || !crate::bounds::overlap((lo, hi), wall.face_bounds(i as Ix, &local)) {
+            continue;
+        }
+        let exact = match &f.surface {
+            Surface::Plane(p) => {
+                nearly_parallel(p.normal, z)
+                    || wall
+                        .face_loops(i as Ix)
+                        .flat_map(|l| wall.loop_half_edges(l))
+                        .all(|h| wall.edge_curve(&wall.edges()[wall.half_edges()[h as usize].edge as usize]).is_none())
+            }
+            Surface::Cylinder(c) => nearly_parallel(c.axis, z),
+            _ => false,
+        };
+        if !exact {
+            return Err(bad());
+        }
+        let loops = crate::cut::outline(wall, i as Ix, &frame)?;
+        if loops.iter().any(|l| footprint.touches(l) || footprint.winding(l.points[0]) != 0)
+            || loops.iter().map(|l| l.winding(footprint.points[0])).sum::<i32>() != 0
+        {
             return Err(bad());
         }
     }
@@ -229,5 +219,9 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         };
         faces.push(FaceSpec { id, surface, loops: vec![vec![upper[k], upper[next], lower[next], lower[k]]] });
     }
-    build_with_curves(vertices, faces, curves)
+    Ok((build_with_curves(vertices, faces, curves)?, wall.faces()[bottom].id))
+}
+
+fn rectangle(lo: Vec2, hi: Vec2) -> ProfileLoop {
+    ProfileLoop { points: vec![lo, Vec2::new(hi.x, lo.y), hi, Vec2::new(lo.x, hi.y)], vertices: Vec::new(), sides: Vec::new(), arcs: vec![None; 4] }
 }

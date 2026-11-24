@@ -99,6 +99,8 @@ pub struct Flat {
     /// How each wall lies, as `frame` does for the first: what finds a line of an earlier blank on
     /// this one, whichever face it is laid from now. Not in the hash: it follows from the laying.
     pub planes: Vec<[Vec3; 4]>,
+    /// The original planar faces of this side and the wall frame that lays each of them.
+    plane_faces: Vec<(TopoId, usize)>,
 }
 
 /// A cut along a line of a sketch on sheet metal (D235): its ends in space, on the plane of normal
@@ -116,6 +118,8 @@ pub struct LineCut {
 /// The free boundary of the tongue's pre-cut window, in wall coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StampCut {
+    /// The placement face followed by its opposite face across the sheet.
+    pub faces: [TopoId; 2],
     pub points: Vec<Vec3>,
     pub normal: Vec3,
     pub ids: Vec<TopoId>,
@@ -219,14 +223,16 @@ pub(crate) const ON_KERF: f64 = 1e-7;
 pub(crate) const KERF_PAST: f64 = 4.0;
 
 impl Flat {
-    /// Add the pre-cut to the developed face of the plate, keeping the root intact.
+    /// Add the pre-cut to its developed wall, keeping the root intact.
     pub(crate) fn with_stamp_cut(mut self, cut: &StampCut) -> Result<Self, BrepError> {
-        let [origin, x, y, _] = self
-            .frame
-            .filter(|f| crate::sketch::nearly_parallel(f[3], cut.normal))
-            .ok_or_else(|| BrepError::Unsupported("unfold: lay the tongue sheet from either side of its wall".into()))?;
+        let &(_, wall) = self
+            .plane_faces
+            .iter()
+            .find(|(face, _)| cut.faces.contains(face))
+            .ok_or_else(|| BrepError::Unsupported("unfold: the stamped wall does not lie on this blank".into()))?;
+        let [origin, x, y, normal] = self.planes[wall];
         let project = |p: Vec3| Vec2::new((p - origin).dot(x), (p - origin).dot(y));
-        let same_side = x.cross(y).dot(cut.normal) > 0.0;
+        let same_side = normal.dot(cut.normal) > 0.0;
         self.pieces.extend(cut.points.windows(2).zip(&cut.arcs).map(|(edge, arc)| {
             let (a, b) = (project(edge[0]), project(edge[1]));
             match arc {
@@ -239,6 +245,7 @@ impl Flat {
             k_factor: self.k_factor,
             overlaps: self.overlaps,
             planes: self.planes,
+            plane_faces: self.plane_faces,
             ..Self::new(self.pieces, self.ids, self.size, self.bends, self.bend_ids, (self.outer, self.ends), self.home.zip(self.frame))
         })
     }
@@ -359,6 +366,7 @@ impl Flat {
             k_factor: self.k_factor,
             overlaps: self.overlaps.clone(),
             planes: self.planes.clone(),
+            plane_faces: self.plane_faces.clone(),
             ..Self::new(pieces, ids, self.size, self.bends.clone(), self.bend_ids.clone(), (range, ends), home)
         }
     }
@@ -385,6 +393,12 @@ pub(crate) enum Lay {
 }
 
 impl Lay {
+    /// A planar wall's frame, with its origin at the blank's corner.
+    fn frame(self, lo: Vec2) -> Option<[Vec3; 4]> {
+        let Self::Plane { o, start, ex, ey } = self else { return None };
+        Some([start + ex * (lo.x - o.x) + ey * (lo.y - o.y), ex, ey, ex.cross(ey)])
+    }
+
     /// Where `p`, a point of the strip (or of its neutral layer), lies on the blank.
     fn at(&self, p: Vec3) -> Vec2 {
         match *self {
@@ -1098,21 +1112,23 @@ fn unfold_face(body: &Body, f: Ix, k: f64) -> Result<Flat, BrepError> {
     let ends = outline[outer.clone()].iter().map(|(.., e)| e.map(shift)).collect();
     // The face the blank is laid from, if a plane: a point of it at (X, Y) of the blank is `start`
     // and the offsets from where it lies, so a sketch frame that gives (X, Y) the same is this.
-    let home = (nodes[0].faces.contains(&f)).then_some(lays[0]).and_then(|l| match l {
-        Lay::Plane { o, start, ex, ey } => {
-            let origin = start + ex * (lo.x - o.x) + ey * (lo.y - o.y);
-            Some((id(f), [origin, ex, ey, ex.cross(ey)]))
+    let home = nodes[0].faces.contains(&f).then_some(lays[0]).and_then(|l| Some((id(f), l.frame(lo)?)));
+    let mut planes = Vec::new();
+    let mut plane_faces = Vec::new();
+    for (node, l) in nodes.iter().zip(lays) {
+        if let Some(frame) = l.frame(lo) {
+            let wall = planes.len();
+            plane_faces.extend(node.faces.iter().map(|&f| (id(f), wall)));
+            planes.push(frame);
         }
-        Lay::Bend { .. } => None,
-    });
-    let planes = lays
-        .iter()
-        .filter_map(|l| match *l {
-            Lay::Plane { o, start, ex, ey } => Some([start + ex * (lo.x - o.x) + ey * (lo.y - o.y), ex, ey, ex.cross(ey)]),
-            Lay::Bend { .. } => None,
-        })
-        .collect();
-    Ok(Flat { k_factor: k, overlaps, planes, ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home) })
+    }
+    Ok(Flat {
+        k_factor: k,
+        overlaps,
+        planes,
+        plane_faces,
+        ..Flat::new(pieces, ids, Vec2::new(hi.x - lo.x, hi.y - lo.y), bends, bend_ids, (outer, ends), home)
+    })
 }
 
 /// The middle of the laid vertices of the outlines of `faces`.
@@ -1405,6 +1421,7 @@ impl Flat {
             overlaps: Vec::new(),
             hash: *blake3::hash(&bytes).as_bytes(),
             planes: Vec::new(),
+            plane_faces: Vec::new(),
         }
     }
 }
@@ -1583,5 +1600,57 @@ impl Flat {
             }
         }
         TEMPLATE.replacen(SEED, &format!("$HANDSEED\n  5\n{handle:X}\n"), 1).replacen(ENTITIES, &format!("ENTITIES\n{s}  0\nENDSEC\n"), 1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)]
+
+    use super::{FlatPiece, StampCut, Surface, TopoId, Vec3, unfold};
+    use crate::Op;
+    use serde_json::json;
+
+    #[test]
+    fn stamp_cut_is_laid_from_another_wall_on_either_side() {
+        let id = |tag: &str| TopoId::derive(tag).finish();
+        let sketch: Op = serde_json::from_value(json!({"op": "sketch", "sketch": {
+            "points": {"a": [0, 0], "b": [0, 40], "c": [60, 40]},
+            "lines": {"ab": {"from": "a", "to": "b"}, "bc": {"from": "b", "to": "c"}}
+        }}))
+        .unwrap();
+        let sheet: Op = serde_json::from_value(json!({"op": "sheet", "thickness": 2, "radius": 2, "side": "left", "z0": 0, "z1": 30})).unwrap();
+        let sketch = sketch.eval(id("sketch"), &[]).unwrap();
+        let sheet = sheet.eval(id("sheet"), &[&sketch]).unwrap();
+        let body = sheet.body().unwrap();
+        let on_plane = |normal: Vec3, offset: f64| {
+            body.faces()
+                .iter()
+                .find(|f| {
+                    matches!(f.surface, Surface::Plane(p) if p.normal.cross(normal) == Vec3::ZERO
+                    && p.normal.dot(normal) > 0.0 && p.origin.dot(normal) == offset)
+                })
+                .unwrap_or_else(|| panic!("no face at {offset} along {normal:?}: {:?}", body.faces()))
+                .id
+        };
+        let normal = Vec3::new(1.0, 0.0, 0.0);
+        let cut = StampCut {
+            faces: [on_plane(normal, 0.0), on_plane(-normal, 2.0)],
+            points: vec![Vec3::new(0.0, 10.0, 8.0), Vec3::new(0.0, 20.0, 14.0)],
+            normal,
+            ids: vec![id("pre-cut")],
+            arcs: vec![None],
+        };
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        for face in [on_plane(-up, -40.0), on_plane(up, 42.0)] {
+            let flat = unfold(body, &format!("{face:?}"), 0.5).unwrap();
+            let stamped = flat.clone().with_stamp_cut(&cut).unwrap();
+            assert_eq!(stamped.bends, flat.bends);
+            assert_eq!(&stamped.pieces[..flat.pieces.len()], flat.pieces.as_slice());
+            let Some(FlatPiece::Line(a, b)) = stamped.pieces.last() else { panic!("expected the pre-cut line") };
+            let from_end = |x: f64| x.min(flat.size.x - x);
+            assert!((from_end(a.x) - 10.0).abs() < 1e-9 && (from_end(b.x) - 20.0).abs() < 1e-9, "{a:?} {b:?}");
+            assert_eq!([a.y, b.y], [8.0, 14.0]);
+        }
     }
 }
