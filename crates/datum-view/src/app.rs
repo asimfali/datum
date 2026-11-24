@@ -8553,7 +8553,7 @@ impl Viewer {
         }
         self.shortcuts(ui);
         egui::Panel::top("datum_toolbar").show(ui, |ui| self.top_row(ui));
-        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE).exact_size(30.0).show(ui, |ui| self.tab_bar(ui));
+        egui::Panel::top("datum_tabs").frame(egui::Frame::NONE.fill(ui.visuals().panel_fill)).exact_size(30.0).show(ui, |ui| self.tab_bar(ui));
         // The title follows the active tab, once a click on the strip has chosen it.
         let t = title(self.project.as_deref(), self.docs[self.active].path.as_deref());
         if t != self.titled {
