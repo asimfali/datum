@@ -88,7 +88,7 @@ Design documents are in Russian:
 
 - [`VISION.md`](VISION.md): how Datum works with engineers, agents and documentation
 - [`ROADMAP.md`](ROADMAP.md): the development plan
-- [`ARCHITECTURE.md`](ARCHITECTURE.md): goals, data structures, algorithms, decision log
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) — architecture overview with links to subsystem documentation and the decision log
 - [`AGENTS.md`](AGENTS.md): project rules (determinism, geometry, code style)
 - [`PAINS.md`](PAINS.md): real engineering pain points that drive priorities
 
