@@ -115,7 +115,7 @@
   `#[ignore]` (NonManifold на крышке); 9 passed, 1 ignored (`cargo test -p datum-ops --test component`).
 - `tests/models/louver.json` — СНЯТ (старая геометрия D261; вернётся с bless под новым
   контрактом).
-- `ARCHITECTURE.md` D27, D260–D263, D274/D275; `ROADMAP.md` 0.5.6; `TESTERS.md` (обновить после приёмки).
+- `architecture/decisions.md` D27, D260–D263, D274/D275; `ROADMAP.md` 0.5.6; `TESTERS.md` (обновить после приёмки).
 
 ## Уроки, которые не потерять
 
