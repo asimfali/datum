@@ -34,10 +34,22 @@ impl Side {
     }
 }
 
-/// The open chain of the profile curves of `s` that curve `path` lies on, or else its only one,
-/// from its end named first.
+/// The open chain of the profile curves of `s` that the name `path` gives, or else its only one,
+/// from its end named first. `path` is a group of the sketch (the chain of its lines and arcs, not
+/// construction) or a curve (the chain that curve lies on).
 fn chain<'s>(s: &'s Placed, path: Option<&str>) -> Result<Vec<Step<'s>>, BrepError> {
     let bad = |m: String| BrepError::Sketch(format!("sheet path: {m}"));
+    // A group names the curve set a rebuild of it replaces: its own one open chain, walked by
+    // geometry, so the order of its members means nothing.
+    if let Some((name, members)) = path.and_then(|p| s.groups.get_key_value(p)) {
+        let found = s.contours(&|c, construction| !construction && members.iter().any(|m| m == c));
+        return match (&found.paths[..], &found.loops[..]) {
+            ([], []) => Err(bad(format!("group `{name}` has no single open chain"))),
+            ([], _) => Err(BrepError::Unsupported(format!("sheet path: group `{name}` is a closed contour; a closed path comes later"))),
+            ([one], []) if found.branches.is_empty() => Ok(one.clone()),
+            _ => Err(bad(format!("group `{name}` has no single open chain"))),
+        };
+    }
     let found = s.contours(&|_, c| !c);
     if let Some(p) = found.branches.first() {
         return Err(bad(format!("it branches at point `{p}`")));
@@ -67,10 +79,22 @@ pub fn paths(s: &Placed) -> Vec<String> {
     s.contours(&|_, c| !c).paths.iter().map(|c| c[0].curve.to_string()).collect()
 }
 
-/// The two end points of the open chain curve `curve` of `s` lies on (none: it is on none), the
-/// one named first first: where a sheet's path may start.
-pub fn path_ends(s: &Placed, curve: &str) -> Option<[String; 2]> {
-    let c = chain(s, Some(curve)).ok()?;
+/// The name a sheet's path takes for the curve `curve` of `s`: the group holding it whose lines and
+/// arcs make one open chain through `curve`, the lowest-named such (a name that survives a rebuild
+/// of the group); else the curve itself.
+pub fn path_name(s: &Placed, curve: &str) -> String {
+    s.groups
+        .iter()
+        .filter(|(_, members)| members.iter().any(|m| m == curve))
+        .find(|(group, _)| chain(s, Some(group)).is_ok_and(|c| c.iter().any(|st| st.curve == curve)))
+        .map_or_else(|| curve.to_string(), |(group, _)| group.clone())
+}
+
+/// The two end points of the open chain the name `name` of `s` gives (a curve, or a group as
+/// [`chain`] takes one; none: it names no chain), the one named first first: where a sheet's path
+/// may start.
+pub fn path_ends(s: &Placed, name: &str) -> Option<[String; 2]> {
+    let c = chain(s, Some(name)).ok()?;
     Some([c[0].from.to_string(), c[c.len() - 1].to.to_string()])
 }
 
@@ -483,5 +507,105 @@ mod tests {
         let dims = Sheet { thickness: 1.0, radius: 2.0, side: Side::Left };
         let body = |start| sheet(feature, &joined, None, Some(start), dims, 0.0, 30.0).unwrap();
         assert_eq!(body("rr").hash(), body("r").hash());
+    }
+
+    /// A sketch placed from `json`: what the window's polygon on an arc leaves.
+    #[allow(clippy::unwrap_used)]
+    fn place(json: serde_json::Value) -> Placed {
+        let sketch: Sketch = serde_json::from_value(json).unwrap();
+        crate::sketch::place(&sketch, None, None, None, None, &BTreeMap::new(), &|_| unreachable!(), None).unwrap()
+    }
+
+    /// Three sides of a polygon on an arc `a`, its vertices held on it: the window's group
+    /// `polygon1`.
+    #[allow(clippy::unwrap_used)]
+    fn polygon_on_an_arc(sides: usize, tag: &str) -> Placed {
+        let vertices: Vec<serde_json::Value> = (0..=sides)
+            .map(|k| {
+                let (sn, cs) = libm::sincos(std::f64::consts::FRAC_PI_2 * k as f64 / sides as f64);
+                serde_json::json!([10.0 * cs, 10.0 * sn])
+            })
+            .collect();
+        let (p0, pn) = (format!("{tag}0"), format!("{tag}{sides}"));
+        let mut points = serde_json::Map::new();
+        points.insert("o".into(), serde_json::json!([0, 0]));
+        points.insert("s".into(), vertices[0].clone());
+        points.insert("t".into(), vertices[sides].clone());
+        for (k, v) in vertices.iter().enumerate() {
+            points.insert(format!("{tag}{k}"), v.clone());
+        }
+        let mut lines = serde_json::Map::new();
+        for k in 0..sides {
+            lines.insert(format!("l{tag}{k}"), serde_json::json!({"from": format!("{tag}{k}"), "to": format!("{tag}{}", k + 1)}));
+        }
+        let mut members: Vec<serde_json::Value> = (0..=sides).map(|k| serde_json::json!(format!("{tag}{k}"))).collect();
+        members.extend((0..sides).map(|k| serde_json::json!(format!("l{tag}{k}"))));
+        members.push(serde_json::json!("a"));
+        place(serde_json::json!({
+            "points": points,
+            "arcs": {"a": {"center": "o", "from": "s", "to": "t", "construction": true}},
+            "lines": lines,
+            "groups": {"polygon1": members},
+            "constraints": [
+                {"type": "fix", "point": "o"},
+                {"type": "coincident", "points": [p0, "s"]},
+                {"type": "coincident", "points": [pn, "t"]}
+            ]
+        }))
+    }
+
+    /// A sheet takes the group of a polygon on an arc as its path; the same name holds after the
+    /// group is rebuilt with fewer sides and new element names, and a curve of it gives the same
+    /// chain.
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_sheet_path_takes_a_group_across_its_rebuild() {
+        let feature = TopoId::derive("test.sheet").finish();
+        let dims = Sheet { thickness: 1.0, radius: 2.0, side: Side::Left };
+        let three = polygon_on_an_arc(3, "p");
+        let made = sheet(feature, &three, Some("polygon1"), None, dims, 0.0, 1.0).unwrap();
+        assert_eq!(path_ends(&three, "polygon1"), Some(["p0".to_string(), "p3".to_string()]));
+        // The curve it was chosen by names the same chain, and writes as its group.
+        assert_eq!(sheet(feature, &three, Some("lp1"), None, dims, 0.0, 1.0).unwrap().hash(), made.hash());
+        assert_eq!(path_name(&three, "lp1"), "polygon1");
+        // The group rebuilt with two sides, then one: new elements, the same group name.
+        let two = polygon_on_an_arc(2, "q");
+        let one = polygon_on_an_arc(1, "r");
+        for (s, sides) in [(&two, 2), (&one, 1)] {
+            assert!(sheet(feature, s, Some("polygon1"), None, dims, 0.0, 1.0).is_ok(), "{sides} sides");
+            // The old curve names are gone with the old sides: they name no chain now.
+            let gone = sheet(feature, s, Some("lp1"), None, dims, 0.0, 1.0).unwrap_err().to_string();
+            assert!(gone.contains("`lp1` is on no chain of the sketch"), "{sides} sides: {gone}");
+        }
+    }
+
+    /// A path that names a group no single open chain of it holds is refused by name: closed, two
+    /// chains or more, none, and an unknown group (which is looked for as a curve).
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_sheet_path_refuses_groups_that_are_no_single_open_chain() {
+        let s = place(serde_json::json!({
+            "points": {"a": [0, 0], "b": [10, 0], "c": [10, 10], "d": [0, 10], "e": [20, 0], "f": [30, 0], "g": [40, 0], "h": [50, 0], "k": [60, 0]},
+            "lines": {
+                "s1": {"from": "a", "to": "b"}, "s2": {"from": "b", "to": "c"}, "s3": {"from": "c", "to": "d"}, "s4": {"from": "d", "to": "a"},
+                "p1": {"from": "e", "to": "f"}, "p2": {"from": "g", "to": "h"}
+            },
+            "groups": {"ring": ["s1", "s2", "s3", "s4"], "both": ["p1", "p2"], "mixed": ["s1", "s2", "s3", "s4", "p1"], "vertices": ["k"]},
+            "constraints": [{"type": "fix", "point": "a"}]
+        }));
+        let feature = TopoId::derive("test.sheet").finish();
+        let dims = Sheet { thickness: 1.0, radius: 2.0, side: Side::Left };
+        let why = |path: &str| sheet(feature, &s, Some(path), None, dims, 0.0, 1.0).unwrap_err();
+        let closed = why("ring");
+        assert!(matches!(closed, BrepError::Unsupported(_)), "{closed:?}");
+        assert!(closed.to_string().contains("group `ring` is a closed contour; a closed path comes later"), "{closed}");
+        for group in ["both", "mixed", "vertices"] {
+            let e = why(group);
+            assert!(matches!(e, BrepError::Sketch(_)), "{group}: {e:?}");
+            assert!(e.to_string().contains(&format!("group `{group}` has no single open chain")), "{e}");
+        }
+        assert!(why("nope").to_string().contains("`nope` is on no chain of the sketch"));
+        // A curve of a closed group is still told to be closed, as before groups were taken.
+        assert!(why("s2").to_string().contains("`s2` is on a closed contour; a closed path comes later"));
     }
 }

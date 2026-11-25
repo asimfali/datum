@@ -222,6 +222,10 @@ pub struct Placed {
     pub face: Option<TopoId>,
     /// Where each projection's points stand now, in the order of [`Projection::at`].
     pub projected: BTreeMap<String, Vec<Vec2>>,
+    /// The groups of the sketch, by name: the elements each holds. A group's name is no element's
+    /// and outlives the elements a rebuild of it replaces, so it is a reference that
+    /// survives one.
+    pub groups: BTreeMap<String, Vec<String>>,
     /// The patterns, by name: their profiles are made with the sketch's own.
     pub patterns: Vec<Copies>,
     pub hash: [u8; 32],
@@ -1014,6 +1018,7 @@ pub fn place<'a>(
         point_aliases: point_aliases(sketch),
         circles: sketch.circles.clone(),
         ellipses,
+        groups: sketch.groups.clone(),
         tangent: sketch
             .constraints
             .iter()

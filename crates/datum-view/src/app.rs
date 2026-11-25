@@ -1408,7 +1408,8 @@ impl RevolveForm {
 /// What the form of E makes, decided when it opens.
 enum Kind {
     Extrusion,
-    /// Sheet metal from an open chain: a curve of it, and the end it starts at.
+    /// Sheet metal from an open chain: a group of the sketch or a curve of it, and the end it
+    /// starts at.
     Sheet(String, Option<String>),
     /// A face of sheet metal (a plate) from closed contours, by the toolbar's sheet rule.
     Face,
@@ -1651,9 +1652,10 @@ fn candidates(sk: &SketchEdit, p: &datum_ops::Placed) -> (usize, Vec<String>) {
     (regions, datum_ops::paths(p))
 }
 
-/// The open chain E makes sheet metal of, as the form takes it: a curve of it, and its end nearest
-/// `at` on screen (`view`: the viewport). It is the chain a selected curve lies on; with nothing
-/// selected, the sketch's only candidate, if a chain.
+/// The open chain E makes sheet metal of, as the form takes it: the path named (a group of the
+/// sketch whose curve was chosen: it survives the group's rebuild, else the curve), and its
+/// end nearest `at` on screen (`view`: the viewport). It is the chain a selected curve lies on;
+/// with nothing selected, the sketch's only candidate, if a chain.
 fn sheet_chain(sk: &SketchEdit, selected: &[String], at: egui::Pos2, view: egui::Rect) -> Option<(String, Option<String>)> {
     let p = sk.placed.as_ref().ok()?;
     let curve = match selected.iter().find(|n| datum_ops::path_ends(p, n).is_some()) {
@@ -1664,7 +1666,8 @@ fn sheet_chain(sk: &SketchEdit, selected: &[String], at: egui::Pos2, view: egui:
         },
         None => return None,
     };
-    let ends = datum_ops::path_ends(p, &curve)?;
+    let path = datum_ops::path_name(p, &curve);
+    let ends = datum_ops::path_ends(p, &path)?;
     let (h, dx, dy) = (f64::from(view.height()), f64::from(at.x - view.center().x), f64::from(at.y - view.center().y));
     let distance = |n: &String| {
         p.solved.points.get(n).map_or(f64::INFINITY, |v| {
@@ -1673,7 +1676,7 @@ fn sheet_chain(sk: &SketchEdit, selected: &[String], at: egui::Pos2, view: egui:
         })
     };
     let start = ends.iter().min_by(|a, b| distance(a).total_cmp(&distance(b))).cloned();
-    Some((curve, start))
+    Some((path, start))
 }
 
 /// A sheet's side in words.
@@ -6827,7 +6830,7 @@ impl Viewer {
                         ui.label(self.i18n.t("polygon-form-sides", "Sides"));
                         ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(sides).hint_text("—"));
                     });
-                    let count = crate::polygon::typed(sides);
+                    let count = crate::polygon::least_of(sk, group).and_then(|least| crate::polygon::typed(sides, least));
                     if let Some(e) = error.as_ref().filter(|_| !ui.ctx().text_edit_focused()) {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }
@@ -11908,6 +11911,36 @@ mod tests {
         h.run();
         let sheet = inbox.try_iter().find_map(|r| if let Request::Preview(Some(("sheet", p))) = r { Some(p) } else { None });
         assert_eq!(sheet.expect("a sheet preview")["path"], "a1");
+    }
+
+    /// E on a curve of a group asks for sheet metal of the group, not of the curve: its name
+    /// outlives the elements a rebuild of the group replaces.
+    #[test]
+    fn e_on_a_curve_of_a_group_makes_sheet_metal_of_the_group() {
+        let (mut h, inbox) = with_open_chain("l1", Some("Лист"));
+        // The chain's two curves in a group, as the window's polygon leaves its sides.
+        h.state_mut().docs[0].sketch.as_mut().unwrap().placed.as_mut().unwrap().groups.insert("polygon1".into(), vec!["l1".into(), "l2".into()]);
+        h.run();
+        h.key_press(egui::Key::E);
+        h.run();
+        let sheet = inbox.try_iter().find_map(|r| if let Request::Preview(Some(("sheet", p))) = r { Some(p) } else { None });
+        let sheet = sheet.expect("a sheet preview");
+        assert_eq!(sheet["path"], "polygon1");
+        assert!(matches!(sheet["start"].as_str(), Some("q1" | "q3")), "an end of the group's chain: {sheet}");
+    }
+
+    /// A sheet whose path is a group keeps that name when the form opens from its row: a change
+    /// of the width sends no path, so a rebuild of the group does not need the sheet edited.
+    #[test]
+    fn a_sheet_changed_from_its_row_keeps_the_group_of_its_path() {
+        let (mut v, _inbox) = viewer("sheet_panel.json");
+        let features = v.docs[v.active].model.as_mut().unwrap().inspect["features"].as_array_mut().unwrap();
+        features.iter_mut().find(|f| f["name"] == "panel").unwrap()["path"] = json!("polygon1");
+        v.reedit("panel");
+        let x = v.docs[v.active].extrusion.as_ref().expect("the form");
+        assert!(x.editing && matches!(&x.kind, Kind::Sheet(path, _) if path == "polygon1"), "the group kept");
+        let (_, params) = x.params("path", false, None);
+        assert!(params.get("path").is_none(), "the path is not sent again: {params}");
     }
 
     /// Without a sheet rule chosen the form refuses: no preview, and Enter makes nothing.
