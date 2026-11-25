@@ -47,7 +47,7 @@ use revolve::{RollDims, Span};
 pub use rib::{Formed, Imprint};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-pub use sheet::{Sheet, Side, path_ends, paths, sheet};
+pub use sheet::{Sheet, Side, path_ends, path_name, paths, sheet};
 pub use sketch::ChainPiece;
 pub use sketch::{
     Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
@@ -272,8 +272,9 @@ pub enum Op {
         side: Side,
         z0: Num,
         z1: Num,
-        /// A curve of the open chain to take (a skeleton sketch holds many, D191); none: the
-        /// sketch's only one.
+        /// A curve of the open chain to take, or the group of the sketch whose lines and arcs are
+        /// it (one open chain: its name outlives a rebuild of the group); none: the sketch's only
+        /// one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         path: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
