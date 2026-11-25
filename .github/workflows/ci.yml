@@ -41,7 +41,13 @@ jobs:
           # dependencies) then restored a "full match" built with other flags, and every
           # dependency was rebuilt on every run without the cache ever being refreshed.
           key: ${{ hashFiles('Cargo.toml') }}
-      # OpenCASCADE reads the STEP the reference models give back (D130), on Linux.
+      # OpenCASCADE reads the STEP the reference models give back (D130), on Linux. The wheel is
+      # ~150 MB: the pip download cache keeps it off every run.
+      - if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-cadquery-ocp-${{ hashFiles('.github/workflows/ci.yml') }}
       - if: runner.os == 'Linux'
         run: pip install --user cadquery-ocp
       - run: scripts/check.sh
