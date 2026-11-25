@@ -6830,7 +6830,7 @@ impl Viewer {
                         ui.label(self.i18n.t("polygon-form-sides", "Sides"));
                         ui.add_sized([90.0, ui.spacing().interact_size.y], egui::TextEdit::singleline(sides).hint_text("—"));
                     });
-                    let count = crate::polygon::typed(sides);
+                    let count = crate::polygon::least_of(sk, group).and_then(|least| crate::polygon::typed(sides, least));
                     if let Some(e) = error.as_ref().filter(|_| !ui.ctx().text_edit_focused()) {
                         ui.colored_label(ui.visuals().error_fg_color, e.as_str());
                     }

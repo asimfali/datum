@@ -1,11 +1,12 @@
 //! A regular polygon along a circle or arc: a circle or an arc selected, N, the number of sides
-//! typed, Enter. A full circle gets `n` vertices on it, the sides between them closed; an arc's
-//! length is cut into `n` equal pieces, `n + 1` vertices from its start to its end, the sides an
-//! open chain. The circle or arc turns construction, and its radius still holds the vertices,
-//! kept on it (`on`): changing the radius moves the polygon with it. Neighbouring sides are equal,
-//! so the polygon stays regular as it is dragged (a closed one turns, one free degree; an open
-//! chain is pinned to the arc's ends and holds still). The vertices, the sides and the curve are
-//! one group of the sketch, named `polygonN`: its badge gives the sides count to change.
+//! typed, Enter. A full circle gets `n` vertices on it, the sides between them closed, three sides
+//! at least; an arc's length is cut into `n` equal pieces, `n + 1` vertices from its start to its
+//! end, the sides an open chain, one side at least (the chord between the arc's ends). The circle
+//! or arc turns construction, and its radius still holds the vertices, kept on it (`on`): changing
+//! the radius moves the polygon with it. Neighbouring sides are equal, so the polygon stays regular
+//! as it is dragged (a closed one turns, one free degree; an open chain is pinned to the arc's ends
+//! and holds still). The vertices, the sides and the curve are one group of the sketch, named
+//! `polygonN`: its badge gives the sides count to change.
 
 use serde_json::{Map, Value as Json, json};
 
@@ -18,6 +19,7 @@ struct Held {
     curve: String,
     points: Vec<String>,
     sides: usize,
+    closed: bool,
 }
 
 /// The circle or arc of the selection the polygon goes on: the first, in the order selected.
@@ -30,18 +32,18 @@ pub(crate) fn curve(edit: &SketchEdit) -> Option<String> {
 }
 
 /// The patch putting the polygon of `typed` sides (as typed and its value) on the selected curve;
-/// none without a whole count of three or more, or with no circle or arc selected, or with one
-/// already holding a polygon.
+/// none without a whole count of the least for that curve, or with no circle or arc selected, or
+/// with one already holding a polygon.
 pub(crate) fn plan(edit: &SketchEdit, typed: &(Json, f64)) -> Option<Map<String, Json>> {
-    let n = whole(typed.1)?;
     let name = curve(edit)?;
     let p = edit.placed.as_ref().ok()?;
     let s = Shape::of(p, &name)?;
+    let closed = p.circles.contains_key(&name);
+    let n = whole(typed.1, least(closed))?;
     // One polygon to a curve: it has it already.
     if group_on(&edit.json["sketch"], &name).is_some() {
         return None;
     }
-    let closed = p.circles.contains_key(&name);
     let mut patch = Patch::new(edit);
     let group = patch.fresh("polygon");
     let members = put(&mut patch, edit, &name, closed, s, n);
@@ -53,18 +55,17 @@ pub(crate) fn plan(edit: &SketchEdit, typed: &(Json, f64)) -> Option<Map<String,
 /// vertices go, and with them the sides and constraints on them; new ones are put as [`plan`]
 /// puts them.
 pub(crate) fn reedit(edit: &SketchEdit, group: &str, n: usize) -> Option<Map<String, Json>> {
-    if n < 3 {
+    let held = held(&edit.json["sketch"], group)?;
+    if n < least(held.closed) {
         return None;
     }
-    let held = held(&edit.json["sketch"], group)?;
     let p = edit.placed.as_ref().ok()?;
     let s = Shape::of(p, &held.curve)?;
-    let closed = p.circles.contains_key(&held.curve);
     let mut patch = Patch::new(edit);
     for q in &held.points {
         patch.set("points", q, Json::Null);
     }
-    let members = put(&mut patch, edit, &held.curve, closed, s, n);
+    let members = put(&mut patch, edit, &held.curve, held.closed, s, n);
     patch.set("groups", group, json!(members));
     patch.done()
 }
@@ -74,14 +75,26 @@ pub(crate) fn sides_of(edit: &SketchEdit, group: &str) -> Option<usize> {
     held(&edit.json["sketch"], group).map(|h| h.sides)
 }
 
-/// The sides count as typed into the group's form: a whole number of three or more.
-pub(crate) fn typed(text: &str) -> Option<usize> {
-    text.trim().parse::<f64>().ok().and_then(whole)
+/// The sides count as typed into the group's form: a whole number of `least` or more.
+pub(crate) fn typed(text: &str, least: usize) -> Option<usize> {
+    text.trim().parse::<f64>().ok().and_then(|v| whole(v, least))
 }
 
-/// A count as it must be: a whole number of three or more.
-fn whole(v: f64) -> Option<usize> {
-    (v.fract() == 0.0 && v >= 3.0).then_some(v as usize)
+/// The fewest sides a polygon has on its curve: three on a circle, whose chain is closed; one on
+/// an arc, whose chain is open (the chord between its ends is a side already).
+fn least(closed: bool) -> usize {
+    if closed { 3 } else { 1 }
+}
+
+/// The fewest sides the polygon group `group` takes, if it is one: three on a circle, one on an
+/// arc. Its form asks for no fewer.
+pub(crate) fn least_of(edit: &SketchEdit, group: &str) -> Option<usize> {
+    held(&edit.json["sketch"], group).map(|h| least(h.closed))
+}
+
+/// A count as it must be: a whole number of `least` or more.
+fn whole(v: f64, least: usize) -> Option<usize> {
+    (v.fract() == 0.0 && v >= least as f64).then_some(v as usize)
 }
 
 /// The polygon `sketch` puts in group `group`, if the group is one: one construction circle or
@@ -97,7 +110,7 @@ fn held(sketch: &Json, group: &str) -> Option<Held> {
     let points: Vec<String> = members.iter().copied().filter(|n| sketch["points"].get(*n).is_some()).map(String::from).collect();
     let lines: Vec<&str> = members.iter().copied().filter(|n| sketch["lines"].get(*n).is_some()).collect();
     let sides = lines.len();
-    if sides < 3 || points.len() != if closed { sides } else { sides + 1 } || points.len() + sides + 1 != members.len() {
+    if sides < least(closed) || points.len() != if closed { sides } else { sides + 1 } || points.len() + sides + 1 != members.len() {
         return None;
     }
     let none = Vec::new();
@@ -108,7 +121,7 @@ fn held(sketch: &Json, group: &str) -> Option<Held> {
         let line = &sketch["lines"][*l];
         vertex(&line["from"]) && vertex(&line["to"])
     });
-    (points.iter().all(|q| on(q)) && joined).then(|| Held { curve: curve.to_string(), points, sides })
+    (points.iter().all(|q| on(q)) && joined).then(|| Held { curve: curve.to_string(), points, sides, closed })
 }
 
 /// The group of the polygon standing on `curve`, if there is one.
@@ -228,7 +241,7 @@ mod tests {
                 libm::hypot(b.x - a.x, b.y - a.y)
             })
             .collect();
-        lengths.len() >= 3 && lengths.iter().all(|l| (l - lengths[0]).abs() < 1e-6)
+        !lengths.is_empty() && lengths.iter().all(|l| (l - lengths[0]).abs() < 1e-6)
     }
 
     /// How far apart points `a` and `b` are solved.
@@ -312,6 +325,116 @@ mod tests {
         assert!(e.json["sketch"]["constraints"].as_array().unwrap().contains(&json!({"type": "coincident", "points": [points[4], "t"]})));
     }
 
+    /// An arc takes one side: a single chord from its start to its end, both the arc's.
+    #[test]
+    fn an_arc_takes_one_side() {
+        let mut e = arc();
+        let before = e.json["sketch"].clone();
+        e.draft.typed = Some((json!(1), 1.0));
+        let p = click_at(&mut e, [0.0, 0.0], false).unwrap();
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+        let points = new_ones(&e, "points", &before);
+        let lines = new_ones(&e, "lines", &before);
+        assert_eq!(points.len(), 2, "{p}");
+        assert_eq!(lines.len(), 1, "{p}");
+        // One chord from the arc's start to its end.
+        assert_eq!(at(&e, &points[0]), [10.0, 0.0]);
+        assert_eq!(at(&e, &points[1]), [0.0, 10.0]);
+        assert_eq!(e.json["sketch"]["lines"][&lines[0]]["from"], json!(points[0]));
+        assert_eq!(e.json["sketch"]["lines"][&lines[0]]["to"], json!(points[1]));
+        // The chord's ends are the arc's; one side has none to be equal to.
+        let constraints = e.json["sketch"]["constraints"].as_array().unwrap();
+        assert!(constraints.contains(&json!({"type": "coincident", "points": [points[0], "s"]})));
+        assert!(constraints.contains(&json!({"type": "coincident", "points": [points[1], "t"]})));
+        assert_eq!(constraints.iter().filter(|c| c["type"] == "equal").count(), 0, "one side, nothing to compare");
+        // The group is the polygon's, the arc construction.
+        let (g, members) = group(&e);
+        assert_eq!(g, "polygon1");
+        assert_eq!(members.len(), 4, "two vertices, one side, the arc");
+        assert_eq!(e.json["sketch"]["arcs"]["a"]["construction"], json!(true));
+        assert_eq!(sides_of(&e, &g), Some(1));
+        assert!(regular(&e));
+    }
+
+    /// An arc takes two sides: a middle vertex on it, the two chords from the arc's ends equal.
+    #[test]
+    fn an_arc_takes_two_sides() {
+        let mut e = arc();
+        let before = e.json["sketch"].clone();
+        e.draft.typed = Some((json!(2), 2.0));
+        let p = click_at(&mut e, [0.0, 0.0], false).unwrap();
+        assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+        let points = new_ones(&e, "points", &before);
+        let lines = new_ones(&e, "lines", &before);
+        assert_eq!(points.len(), 3, "{p}");
+        assert_eq!(lines.len(), 2, "{p}");
+        // The arc's quarter turn cut into two: 0, 45 and 90 degrees.
+        for (k, q) in points.iter().enumerate() {
+            let a = std::f64::consts::FRAC_PI_2 * k as f64 / 2.0;
+            let (sn, cs) = libm::sincos(a);
+            let want = [(10.0 * cs * 1e6).round() / 1e6, (10.0 * sn * 1e6).round() / 1e6];
+            assert_eq!(at(&e, q), want, "{q}");
+        }
+        // The middle vertex is on the arc, the chain's ends the arc's own.
+        let constraints = e.json["sketch"]["constraints"].as_array().unwrap();
+        assert!(constraints.contains(&json!({"type": "coincident", "points": [points[0], "s"]})));
+        assert!(constraints.contains(&json!({"type": "coincident", "points": [points[2], "t"]})));
+        assert_eq!(constraints.iter().filter(|c| c["type"] == "equal").count(), 1, "the two sides equal");
+        let (g, members) = group(&e);
+        assert_eq!(g, "polygon1");
+        assert_eq!(members.len(), 6, "three vertices, two sides, the arc");
+        assert_eq!(sides_of(&e, &g), Some(2));
+        assert!(regular(&e));
+    }
+
+    /// The fewest sides the form takes follows the curve: three on a circle, one on an arc.
+    #[test]
+    fn the_fewest_sides_follow_the_curve() {
+        let mut e = circle();
+        e.draft.typed = Some((json!(4), 4.0));
+        click_at(&mut e, [0.0, 0.0], false).unwrap();
+        let (g, _) = group(&e);
+        assert_eq!(least_of(&e, &g), Some(3));
+        assert_eq!(typed("3", 3), Some(3), "three on a circle");
+        assert_eq!(typed("2", 3), None, "two on a circle is none");
+        assert!(reedit(&e, &g, 2).is_none(), "no two-sided polygon on a circle");
+        assert!(reedit(&e, &g, 1).is_none(), "no one-sided polygon on a circle");
+        let mut e = arc();
+        e.draft.typed = Some((json!(4), 4.0));
+        click_at(&mut e, [0.0, 0.0], false).unwrap();
+        let (g, _) = group(&e);
+        assert_eq!(least_of(&e, &g), Some(1));
+        assert_eq!(typed("1", 1), Some(1), "one on an arc");
+        assert_eq!(typed("0", 1), None, "none on an arc");
+    }
+
+    /// The sides of an arc's polygon changed through its group: three, then two, then one, in the
+    /// same group and under the same name, the arc still construction.
+    #[test]
+    fn an_arc_polygon_changes_its_sides_through_the_group() {
+        let mut e = arc();
+        e.draft.typed = Some((json!(3), 3.0));
+        click_at(&mut e, [0.0, 0.0], false).unwrap();
+        let (name, _) = group(&e);
+        assert_eq!(name, "polygon1");
+        for n in [2usize, 1] {
+            let p = reedit(&e, &name, n).unwrap_or_else(|| panic!("{n} sides on the arc"));
+            e.apply(p);
+            assert!(e.placed.is_ok(), "{:?}", e.placed.as_ref().err());
+            let (again, members) = group(&e);
+            assert_eq!(again, name, "the same group");
+            assert_eq!(e.json["sketch"]["groups"].as_object().unwrap().len(), 1);
+            let count = |key: &str| members.iter().filter(|m| e.json["sketch"][key].get(*m).is_some()).count();
+            assert_eq!((count("points"), count("lines"), count("arcs")), (n + 1, n, 1), "{members:?}");
+            assert_eq!(e.json["sketch"]["points"].as_object().unwrap().len(), n + 4, "the arc's ends, the centre and the vertices");
+            let equals = e.json["sketch"]["constraints"].as_array().unwrap().iter().filter(|c| c["type"] == "equal").count();
+            assert_eq!(equals, n - 1, "the old sides' equalities are gone with them");
+            assert_eq!(sides_of(&e, &name), Some(n));
+            assert_eq!(e.json["sketch"]["arcs"]["a"]["construction"], json!(true));
+            assert!(regular(&e));
+        }
+    }
+
     /// The circle turns construction; every vertex stands on it (`on`), so its radius holds the
     /// polygon.
     #[test]
@@ -329,12 +452,12 @@ mod tests {
         }
     }
 
-    /// No count typed, or one that is not a whole number of three or more: nothing is made, as
-    /// the fillet makes nothing without its size.
+    /// The circle's polygon is a whole number of three or more sides: fewer is none there. An
+    /// arc takes fewer (see the arc's own tests).
     #[test]
-    fn a_whole_count_of_three_or_more_is_needed() {
+    fn a_circle_needs_a_whole_count_of_three_or_more() {
         let mut e = circle();
-        for count in [None, Some((json!(0), 0.0)), Some((json!(2), 2.0)), Some((json!(4.5), 4.5))] {
+        for count in [None, Some((json!(0), 0.0)), Some((json!(1), 1.0)), Some((json!(2), 2.0)), Some((json!(4.5), 4.5))] {
             let why = format!("{count:?}");
             e.draft.typed = count;
             assert!(click_at(&mut e, [0.0, 0.0], false).is_none(), "{why}");
