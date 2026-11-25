@@ -41,6 +41,13 @@ jobs:
           # dependencies) then restored a "full match" built with other flags, and every
           # dependency was rebuilt on every run without the cache ever being refreshed.
           key: ${{ hashFiles('Cargo.toml') }}
+      # Apply this after the cache restore to reuse the existing third-party dependency cache.
+      - name: Use opt-level 1 for datum-ops on Windows
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          sed -i '/^\[profile.dev.package.datum-ops\]$/{n;s/^opt-level = 2$/opt-level = 1/;}' Cargo.toml
+          grep -A1 '^\[profile.dev.package.datum-ops\]$' Cargo.toml | grep -Fx 'opt-level = 1'
       # OpenCASCADE reads the STEP the reference models give back (D130), on Linux. The wheel is
       # ~150 MB: the pip download cache keeps it off every run.
       - if: runner.os == 'Linux'
