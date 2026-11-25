@@ -15,8 +15,12 @@ if command -v ctx-cost >/dev/null; then
     ctx-cost --cap 2000 AGENTS.md HANDOFF.md
 fi
 
-cargo fmt --all ${CI:+-- --check}
-cargo clippy --workspace --all-targets -- -D warnings
+# Windows CI proves cross-platform determinism only: fmt and clippy are OS-independent, and
+# Linux runs them (compiling the workspace twice is most of a run). A local Windows keeps them.
+if [[ ${CI:-} != true || $(uname) == Linux ]]; then
+    cargo fmt --all ${CI:+-- --check}
+    cargo clippy --workspace --all-targets -- -D warnings
+fi
 cargo test --workspace
 
 # The dev profile the tests just built (the kernel at opt-level 2): a release build of its own
