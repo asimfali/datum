@@ -648,7 +648,8 @@ impl Value {
     }
 
     pub fn has_stamp(&self) -> bool {
-        matches!(self, Self::Formed(f) if !f.stamp_cuts.is_empty())
+        // Two-sketch stamps have no rib imprints to replay on an edited blank.
+        matches!(self, Self::Formed(f) if f.imprints.is_empty())
     }
 
     /// Add the stamp's open cuts on the sheet blank.

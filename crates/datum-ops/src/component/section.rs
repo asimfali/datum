@@ -66,7 +66,7 @@ pub(super) fn rounded(
     Ok((ring, length, cross.x))
 }
 
-fn root_cross_offset(radius: f64, thickness: f64) -> f64 {
+pub(super) fn root_cross_offset(radius: f64, thickness: f64) -> f64 {
     libm::sqrt(thickness * (2.0 * radius + thickness))
 }
 
