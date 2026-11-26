@@ -647,3 +647,49 @@ fn a_rounded_slot_uses_the_sheet_radius_at_all_four_bends() {
     let reply = add_stamp(&mut session, &too_tight);
     assert!(reply.to_string().contains("the bends do not fit"), "{reply}");
 }
+
+#[test]
+fn rounded_slot_rebuilds_with_the_open_projects_sheet_rule() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("slot_project_{}", std::process::id()));
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("datum-project.json"), r#"{"folders":{"library":"Библиотека"}}"#).unwrap();
+    let path = root.join("stamp-slot-rounded.json");
+    std::fs::write(&path, include_str!("../../../tests/models/stamp-slot-rounded.json")).unwrap();
+
+    let mut session = Session::default();
+    run(&mut session, "open", json!({"path": path, "project": project}));
+    run(&mut session, "put_library", json!({"level": "material", "element": {"name": "Steel", "density": 7850}}));
+    let check = |session: &Session, thickness: f64, radius: f64| {
+        let plate = session.value("plate").unwrap().body().unwrap();
+        close(plate.volume(), 20_000.0 * thickness);
+        let slot = session.value("stamp").unwrap().body().unwrap();
+        slot.validate().unwrap();
+        let bends: Vec<_> = slot
+            .faces()
+            .iter()
+            .filter_map(|face| match face.surface {
+                Surface::Cylinder(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bends.len(), 8);
+        for bend in bends {
+            close(bend.radius, if bend.convex { radius + thickness } else { radius });
+        }
+        slot.hash()
+    };
+
+    let initial = check(&session, 1.0, 0.4);
+    let rule = "Лист 0.5 мм";
+    put_sheet_rule(&mut session, rule, 0.5);
+    assert!(project.join("Библиотека/rule/Лист 0.5 мм.json").is_file());
+    let reply = run(&mut session, "set_part", json!({"body": "plate", "rule": rule}));
+    assert_eq!(reply["parts"][0]["rule"], rule);
+    let thin = check(&session, 0.5, 0.5);
+    assert_ne!(initial, thin);
+
+    put_sheet_rule(&mut session, rule, 0.75);
+    assert_ne!(thin, check(&session, 0.75, 0.75));
+    std::fs::remove_dir_all(root).unwrap();
+}
