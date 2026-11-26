@@ -8,9 +8,35 @@ use datum_brep::BrepError;
 use datum_graph::{EvalError, Evaluator, Graph, GraphError, Op};
 use datum_math::expr::Num;
 use datum_math::{Vec2, Vec3};
+use datum_ops::{BendPosition, BendRelief, Closing, Extent, FaceTo, Relief, WallTo};
 
 fn hashes(g: &Graph, ev: &Evaluator) -> Vec<[u8; 32]> {
     ev.evaluate(g).results.into_iter().map(|r| r.unwrap().hash()).collect()
+}
+
+/// A flange on its sheet reaching a face of the body named `from` (D305).
+fn flange_to_face(from: &str) -> Op {
+    Op::Flange {
+        edges: Vec::new(),
+        height: Some(5.0.into()),
+        height_along: false,
+        angle: 90.0.into(),
+        radius: None,
+        flip: false,
+        relief: Relief::Square,
+        relief_diameter: None,
+        k_factor: None,
+        corner: Closing::Open,
+        corner_gap: None,
+        level_walls: false,
+        extent: Extent::Edge,
+        bend_relief: BendRelief::None,
+        bend_relief_width: None,
+        bend_relief_depth: None,
+        bend_position: BendPosition::Outside,
+        to: WallTo::default(),
+        to_face: Some(FaceTo { face: "0123456789abcdef0123456789abcdef".into(), from: from.into(), gap: 0.0.into() }),
+    }
 }
 
 #[test]
@@ -78,6 +104,19 @@ fn a_failure_shows_the_last_good_state() {
     assert!(e.results[b as usize].is_err() && e.results[d as usize].is_err());
     // `b` failed through `a`: `p` stands for it; `q` goes on in `c`, so `d` shows nothing.
     assert_eq!(e.last_good(&g), [(p, b), (c, c)]);
+}
+
+/// A flange reads the face of another body, it does not take it apart (D305): the body stays what
+/// the model ends in, as the body a work plane is on does.
+#[test]
+fn a_flange_to_a_face_leaves_the_body_it_reads_a_final() {
+    let mut g = Graph::default();
+    let sheet = g.add("sheet", prism(ngon(4, 10.0)), &[]).unwrap();
+    let other = g.add("other", prism(ngon(4, 10.0)), &[]).unwrap();
+    let f = g.add("flange", flange_to_face("other"), &[sheet, other]).unwrap();
+    assert!(g.users()[other as usize].is_empty());
+    assert_eq!(g.users()[sheet as usize], [f]);
+    assert_eq!(g.finals(), [other, f]);
 }
 
 #[test]

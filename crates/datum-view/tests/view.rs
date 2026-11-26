@@ -93,6 +93,16 @@ fn pattern_copies_are_drawn_with_the_sketch() {
     assert!((right - 22.0).abs() < 1e-9, "{right}");
 }
 
+/// A flange reads the face of another body, it does not take it apart (D305): both parts stay on
+/// the screen, the flange and the body its wall reaches.
+#[test]
+fn a_flange_to_a_face_leaves_both_bodies_shown() {
+    let (g, e) = model("flange-to-face.json");
+    let shown: Vec<&str> = e.last_good(&g).into_iter().map(|(i, _)| g.nodes()[i as usize].name.as_str()).collect();
+    assert_eq!(shown, ["sheet1", "flange1"]);
+    assert_eq!(scene("flange-to-face.json").bodies.len(), 2);
+}
+
 /// Clip coordinates of `p` (relative to the anchor) under the column-major matrix `m`.
 fn project(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
     let c = |r: usize| m[r] * p[0] + m[4 + r] * p[1] + m[8 + r] * p[2] + m[12 + r];

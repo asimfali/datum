@@ -151,7 +151,7 @@ impl Graph {
     }
 
     /// The features that use each node up, in node order (see [`Evaluation::final_values`]: an
-    /// unfold, a sketch, a work plane or a mirror uses nothing up).
+    /// unfold, a sketch, a work plane, a mirror or a body a flange reads a face of uses nothing up).
     pub fn users(&self) -> Vec<Vec<NodeIx>> {
         let mut users = vec![Vec::new(); self.nodes.len()];
         for (k, n) in self
@@ -160,8 +160,17 @@ impl Graph {
             .enumerate()
             .filter(|(_, n)| !matches!(n.op, Op::Unfold { .. } | Op::Sketch { .. } | Op::Plane { .. } | Op::Mirror { .. }))
         {
-            for &i in &n.inputs {
-                users[i as usize].push(k as NodeIx);
+            // The flange reads the face, it does not take the body apart (D305): that body, named in
+            // `to_face`, stays what the model shows, as the body a work plane is on does. The first
+            // input is always the sheet, and a flange to a face of its own sheet still uses it up.
+            let read = match &n.op {
+                Op::Flange { to_face: Some(t), .. } => n.inputs.iter().skip(1).position(|&i| self.nodes[i as usize].name == t.from).map(|j| j + 1),
+                _ => None,
+            };
+            for (j, &i) in n.inputs.iter().enumerate() {
+                if Some(j) != read {
+                    users[i as usize].push(k as NodeIx);
+                }
             }
         }
         users
