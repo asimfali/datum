@@ -718,3 +718,98 @@ fn rounded_slot_rebuilds_with_the_open_projects_sheet_rule() {
     assert_eq!(flat_line_ends(&mut session, "stamp"), flat);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn pocket_rounds_both_bends_at_each_corner_and_preserves_one_slit() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-pocket.json")).unwrap();
+    let mut original_cut = None;
+    for radius in [0.5, 0.75] {
+        let mut model = model.clone();
+        model["features"][3]["radius"] = json!(radius);
+        let mut session = Session::default();
+        let blank_volume = add_base(&mut session, &model);
+        let reply = add_stamp(&mut session, &model);
+        assert_eq!(reply["failed"], json!([]), "{reply}");
+        let body = session.value("stamp").unwrap().body().unwrap();
+        body.validate().unwrap();
+        datum_brep::tessellate(body).unwrap();
+        check_torus_tangencies(body);
+        assert!(body.volume() > blank_volume, "{}", body.volume());
+
+        let tori: Vec<_> = body
+            .faces()
+            .iter()
+            .filter_map(|f| match f.surface {
+                Surface::Torus(torus) => Some(torus),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tori.len(), 12);
+        for inner in tori.iter().filter(|t| !t.convex) {
+            close(inner.minor, radius);
+            assert!(inner.major > 0.0);
+            let outer = tori.iter().find(|t| t.convex && t.center == inner.center && t.major == inner.major).unwrap();
+            close(outer.minor, radius + 0.5);
+        }
+        let step = datum_brep::step(&[body], "formed pocket", false).unwrap();
+        assert_eq!(step.text.matches("TOROIDAL_SURFACE").count() + step.text.matches("SURFACE_OF_REVOLUTION").count(), 12);
+        let slit = flat_line_ends(&mut session, "stamp");
+        assert_eq!(slit.len(), 1);
+        if let Some(original) = &original_cut {
+            assert_eq!(&slit, original);
+        }
+        original_cut = Some(slit);
+    }
+
+    let mut model = model;
+    model["features"][3]["radius"] = json!(1.5);
+    let mut session = Session::default();
+    add_base(&mut session, &model);
+    let reply = add_stamp(&mut session, &model);
+    assert!(reply.to_string().contains("room for both bends"), "{reply}");
+}
+
+fn check_torus_tangencies(body: &datum_brep::Body) {
+    for edge in body.edges() {
+        let half = body.half_edges()[edge.half as usize];
+        let twin = body.half_edges()[half.twin as usize];
+        let surfaces = [half, twin].map(|he| body.faces()[body.loops()[he.loop_ix as usize].face as usize].surface);
+        if surfaces.iter().any(|s| matches!(s, Surface::Torus(_))) {
+            for p in [half, twin].map(|he| body.point(he.origin)) {
+                close(surfaces[0].normal_at(p).dot(surfaces[1].normal_at(p)), 1.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_emboss_uses_the_section_slope_and_leaves_the_blank_uncut() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-emboss.json")).unwrap();
+    for (thickness, radius) in [(0.5, 0.5), (0.65, 0.75)] {
+        let mut model = model.clone();
+        model["features"][1]["thickness"] = json!(thickness);
+        model["features"][3]["thickness"] = json!(thickness);
+        model["features"][3]["radius"] = json!(radius);
+        let mut session = Session::default();
+        add_base(&mut session, &model);
+        let reply = add_stamp(&mut session, &model);
+        assert_eq!(reply["failed"], json!([]), "{reply}");
+        let value = session.value("stamp").unwrap();
+        assert!(value.has_stamp());
+        let body = value.body().unwrap();
+        body.validate().unwrap();
+        datum_brep::tessellate(body).unwrap();
+        check_torus_tangencies(body);
+        close(body.bounds().1.z, thickness + 3.0);
+        let torus_count = body.faces().iter().filter(|face| matches!(face.surface, Surface::Torus(_))).count();
+        assert_eq!(torus_count, 20);
+        for face in body.faces() {
+            if let Surface::Cone(cone) = face.surface {
+                close(cone.slope.abs(), 2.5 / 3.0);
+            }
+        }
+        assert_eq!(body.faces().iter().filter(|face| matches!(face.surface, Surface::Cone(_))).count(), 10);
+        datum_brep::step(&[body], "closed emboss", false).unwrap();
+        assert!(flat_line_ends(&mut session, "stamp").is_empty());
+    }
+}

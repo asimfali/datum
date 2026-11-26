@@ -18,6 +18,7 @@ use crate::sketch::{Placed, nearly_parallel, open_chains_named, within_rounding}
 use crate::{LineOf, Placement, Value, describe_arity, input_sketch, line_ends, num, sketch_point};
 
 mod bridge;
+mod pocket;
 mod section;
 mod stitch;
 mod tongue;

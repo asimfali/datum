@@ -170,6 +170,29 @@ pub(super) fn wall_faces(
     [sides, [start, end]]: [[f64; 2]; 2],
     bad: impl Fn() -> BrepError,
 ) -> Result<(usize, usize), BrepError> {
+    let local = Rigid::into_frame(
+        to_world.apply(Vec3::ZERO),
+        to_world.apply_vector(Vec3::new(1.0, 0.0, 0.0)),
+        to_world.apply_vector(Vec3::new(0.0, 1.0, 0.0)),
+        to_world.apply_vector(Vec3::new(0.0, 0.0, 1.0)),
+    );
+    let (lo, hi) = (0..strip.faces().len() as Ix)
+        .map(|i| strip.face_bounds(i, &local))
+        .fold((Vec3::new(start, sides[0], -t), Vec3::new(end, sides[1], 0.0)), |(lo, hi), (a, b)| {
+            (Vec3::new(lo.x.min(a.x), lo.y.min(a.y), lo.z.min(a.z)), Vec3::new(hi.x.max(b.x), hi.y.max(b.y), hi.z.max(b.z)))
+        });
+    wall_faces_in(wall, face, t, to_world, [[sides[0], sides[1]], [start, end]], (lo, hi), bad)
+}
+
+pub(super) fn wall_faces_in(
+    wall: &Body,
+    face: TopoId,
+    t: f64,
+    to_world: Rigid,
+    [sides, [start, end]]: [[f64; 2]; 2],
+    (lo, hi): (Vec3, Vec3),
+    bad: impl Fn() -> BrepError,
+) -> Result<(usize, usize), BrepError> {
     let top = wall.faces().iter().position(|f| f.id == face).ok_or_else(&bad)?;
     let o = to_world.apply(Vec3::ZERO);
     let x = to_world.apply_vector(Vec3::new(1.0, 0.0, 0.0));
@@ -210,11 +233,6 @@ pub(super) fn wall_faces(
     // Check the volume swept by the window and raised strip against other faces. Where folding
     // turns a curved boundary away from the frame, its enclosing box must establish clearance.
     let local = Rigid::into_frame(o, x, y, z);
-    let (lo, hi) = (0..strip.faces().len() as Ix)
-        .map(|i| strip.face_bounds(i, &local))
-        .fold((Vec3::new(start, sides[0], -t), Vec3::new(end, sides[1], 0.0)), |(lo, hi), (a, b)| {
-            (Vec3::new(lo.x.min(a.x), lo.y.min(a.y), lo.z.min(a.z)), Vec3::new(hi.x.max(b.x), hi.y.max(b.y), hi.z.max(b.z)))
-        });
     let footprint = rectangle(Vec2::new(lo.x, lo.y), Vec2::new(hi.x, hi.y));
     for (i, f) in wall.faces().iter().enumerate() {
         if i == top || i == bottom || !crate::bounds::overlap((lo, hi), wall.face_bounds(i as Ix, &local)) {

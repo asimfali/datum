@@ -216,22 +216,55 @@ pub(crate) fn form(
     let solved = |i: usize| made[i].sketch().ok_or_else(|| invalid(format!("feature `{}` is no sketch", def.features[i].name)));
     let profile = solved(profile_i)?;
     let boundary = solved(boundary_i)?;
+    let anchor = def.anchor()?;
+    let origin = at(def, placement, values)?;
+    let [_o, bx, by, bz] = boundary.frame;
+    let [_, wx, wy, wz] = on.frame;
+    let onto_wall = Rigid::into_frame(Vec3::ZERO, bx, by, bz).then(Rigid::frame(origin, wx, wy, wz));
+    let face = on.face.ok_or_else(|| invalid("a form needs a placement face"))?;
+    let role = |s: &Step<'_>| boundary_def.metadata.get(s.curve).and_then(|m| m.get(STAMP_ROLE)).and_then(serde_json::Value::as_str);
+    if forming.round_section && forming.section_side == SectionSide::Outer {
+        let contours = boundary.contours(&|_, construction| !construction);
+        if let [path] = contours.loops.as_slice()
+            && path.len() >= 3
+            && contours.paths.is_empty()
+            && contours.branches.is_empty()
+            && boundary.patterns.is_empty()
+            && boundary.circles.values().all(|c| c.construction)
+            && boundary.ellipses.values().all(|e| e.construction)
+            && path.iter().all(|s| boundary.lines.contains_key(s.curve))
+        {
+            let cut = path.iter().position(|s| role(s) == Some("cut"));
+            let transitions = cut.map_or_else(|| path.clone(), |i| path[i + 1..].iter().chain(&path[..i]).copied().collect());
+            if transitions.len() >= 3 && transitions.iter().all(|s| role(s) == Some("transition")) {
+                return super::pocket::form(
+                    feature,
+                    super::pocket::Pocket {
+                        wall,
+                        face,
+                        frame: onto_wall,
+                        section: profile,
+                        boundary,
+                        anchor,
+                        cut: cut.map(|i| path[i].curve),
+                        transitions,
+                        thickness: t,
+                        radius: num(radius.ok_or_else(|| invalid("a rounded stamp needs a bend radius from the sheet rule"))?)?,
+                    },
+                );
+            }
+        }
+    }
     let Boundary { corners, sides: [root, side_b, tip, side_a], rounds, bridge } =
         boundary_loop(&forming.boundary, boundary, &boundary_def.metadata)?;
 
-    let anchor = def.anchor()?;
     let [b0, b1, b2, b3] = corners.map(|p| to_part(boundary, p) - anchor);
     let z = boundary.frame[3];
     let y = unit(b1 - b0);
     let toward_tip = b3 - b0;
     let x = if y.cross(z).dot(toward_tip) > 0.0 { y.cross(z) } else { z.cross(y) };
     let width = z.cross(x);
-    let origin = at(def, placement, values)?;
-    let [_, bx, by, bz] = boundary.frame;
-    let [_, wx, wy, wz] = on.frame;
-    let onto_wall = Rigid::into_frame(Vec3::ZERO, bx, by, bz).then(Rigid::frame(origin, wx, wy, wz));
     let to_world = Rigid::frame(Vec3::ZERO, x, width, z).then(onto_wall);
-    let face = on.face.ok_or_else(|| invalid("a form needs a placement face"))?;
     if bridge {
         return super::bridge::form(
             feature,
