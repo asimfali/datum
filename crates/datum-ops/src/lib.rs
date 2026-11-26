@@ -626,12 +626,13 @@ impl Value {
 
     /// Add the pre-cut corresponding to the opening left by a formed tongue.
     pub fn with_stamp_cut(&self, flat: Flat) -> Result<Flat, BrepError> {
-        if let Self::Formed(f) = self
-            && let Some(cut) = &f.stamp
-        {
-            flat.with_stamp_cut(cut)
-        } else {
-            Ok(flat)
+        match self {
+            Self::Formed(f) => match &f.stamp {
+                Some(rib::StampBlank::Cut(cut)) => flat.with_stamp_cut(cut),
+                Some(rib::StampBlank::Unsupported) => Err(BrepError::Unsupported("the formed slot has no production blank".into())),
+                None => Ok(flat),
+            },
+            _ => Ok(flat),
         }
     }
 
@@ -1000,7 +1001,12 @@ impl Op {
                     return Ok(Value::Flat(Box::new(flat)));
                 }
                 Self::Plane { .. } | Self::Sketch { flat: None, .. } => {}
-                _ => return Err(BrepError::Unsupported(format!("{}: applying this operation to a sheet with a tongue comes later", self.kind()))),
+                _ => {
+                    return Err(BrepError::Unsupported(format!(
+                        "{}: applying this operation to a sheet with a formed stamp comes later",
+                        self.kind()
+                    )));
+                }
             }
         }
         if let (Some(Value::Formed(f)), true) = (values.first(), self.reads_blank()) {
@@ -1150,7 +1156,7 @@ impl Op {
             Self::Component { part, params, placements, thickness, radius, k_factor, .. } => {
                 return if let Some(forming) = &part.forming {
                     let rule = [thickness.as_ref(), radius.as_ref(), k_factor.as_ref()];
-                    component::form_tongue(feature, part, forming, params, placements, rule, values)
+                    component::form_from_sketches(feature, part, forming, params, placements, rule, values)
                 } else if part.roles.form.is_some() {
                     component::form(feature, part, params, placements, thickness.clone(), radius.clone(), values)
                 } else {

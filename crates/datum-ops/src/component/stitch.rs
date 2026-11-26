@@ -45,77 +45,9 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
     {
         return Err(bad());
     }
-    let top = wall.faces().iter().position(|f| f.id == face).ok_or_else(bad)?;
-    let o = to_world.apply(Vec3::ZERO);
-    let x = to_world.apply_vector(Vec3::new(1.0, 0.0, 0.0));
-    let y = to_world.apply_vector(Vec3::new(0.0, 1.0, 0.0));
+    let (top, bottom) = wall_faces(wall, strip, face, t, to_world, [sides, [outer_root, far]], bad)?;
+    let at = |a, b, c| to_world.apply(Vec3::new(a, b, c));
     let z = to_world.apply_vector(Vec3::new(0.0, 0.0, 1.0));
-    let frame = Frame::Plane { o, x, y, z };
-    let at = |a: f64, b: f64, c: f64| to_world.apply(Vec3::new(a, b, c));
-    let size = wall
-        .vertices()
-        .iter()
-        .fold(t.max(o.x.abs()).max(o.y.abs()).max(o.z.abs()), |s, v| s.max(v.point.x.abs()).max(v.point.y.abs()).max(v.point.z.abs()));
-    let top_plane = wall.faces()[top].surface.plane().ok_or_else(bad)?;
-    let top_normal = top_plane.normal * (1.0 / top_plane.normal.dot(top_plane.normal).sqrt());
-    if top_normal.dot(z) <= 0.0 || !nearly_parallel(top_normal, z) || !within_rounding((o - top_plane.origin).dot(top_normal), size) {
-        return Err(bad());
-    }
-    let ring = rectangle(Vec2::new(outer_root, sides[0]), Vec2::new(far, sides[1]));
-    let holds = |f| {
-        let loops = crate::cut::outline(wall, f, &frame)?;
-        Ok::<_, BrepError>(
-            !loops.iter().any(|l| ring.touches(l) || ring.winding(l.points[0]) != 0)
-                && loops.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() != 0,
-        )
-    };
-    if !holds(top as Ix)? {
-        return Err(bad());
-    }
-    let inside = at(0.0, 0.0, -t);
-    let mut bottom = None;
-    for (i, f) in wall.faces().iter().enumerate() {
-        let Some(p) = f.surface.plane().filter(|p| p.normal.dot(z) < 0.0 && nearly_parallel(p.normal, z)) else { continue };
-        let normal = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
-        if within_rounding((inside - p.origin).dot(normal), size) && holds(i as Ix)? && bottom.replace(i).is_some() {
-            return Err(bad());
-        }
-    }
-    let bottom = bottom.ok_or_else(bad)?;
-    // Check the volume swept by the window and raised strip against other faces. Where folding
-    // turns a curved boundary away from the frame, its enclosing box must establish clearance.
-    let local = Rigid::into_frame(o, x, y, z);
-    let (lo, hi) = (0..strip.faces().len() as Ix)
-        .map(|i| strip.face_bounds(i, &local))
-        .fold((Vec3::new(outer_root, sides[0], -t), Vec3::new(far, sides[1], 0.0)), |(lo, hi), (a, b)| {
-            (Vec3::new(lo.x.min(a.x), lo.y.min(a.y), lo.z.min(a.z)), Vec3::new(hi.x.max(b.x), hi.y.max(b.y), hi.z.max(b.z)))
-        });
-    let footprint = rectangle(Vec2::new(lo.x, lo.y), Vec2::new(hi.x, hi.y));
-    for (i, f) in wall.faces().iter().enumerate() {
-        if i == top || i == bottom || !crate::bounds::overlap((lo, hi), wall.face_bounds(i as Ix, &local)) {
-            continue;
-        }
-        let exact = match &f.surface {
-            Surface::Plane(p) => {
-                nearly_parallel(p.normal, z)
-                    || wall
-                        .face_loops(i as Ix)
-                        .flat_map(|l| wall.loop_half_edges(l))
-                        .all(|h| wall.edge_curve(&wall.edges()[wall.half_edges()[h as usize].edge as usize]).is_none())
-            }
-            Surface::Cylinder(c) => nearly_parallel(c.axis, z),
-            _ => false,
-        };
-        if !exact {
-            return Err(bad());
-        }
-        let loops = crate::cut::outline(wall, i as Ix, &frame)?;
-        if loops.iter().any(|l| footprint.touches(l) || footprint.winding(l.points[0]) != 0)
-            || loops.iter().map(|l| l.winding(footprint.points[0])).sum::<i32>() != 0
-        {
-            return Err(bad());
-        }
-    }
     let cap = strip.faces().iter().position(|f| f.id == root).ok_or_else(bad)?;
     let names = ["top.left.tip", "top.right.tip", "bottom.left.root", "bottom.left.tip", "bottom.right.tip", "bottom.right.root"];
     let id = |k: usize| TopoId::derive("stamp.window.vertex").id(feature).tag(names[k]).finish();
@@ -220,6 +152,89 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         faces.push(FaceSpec { id, surface, loops: vec![vec![upper[k], upper[next], lower[next], lower[k]]] });
     }
     Ok((build_with_curves(vertices, faces, curves)?, wall.faces()[bottom].id))
+}
+
+pub(super) fn wall_faces(
+    wall: &Body,
+    strip: &Body,
+    face: TopoId,
+    t: f64,
+    to_world: Rigid,
+    [sides, [start, end]]: [[f64; 2]; 2],
+    bad: impl Fn() -> BrepError,
+) -> Result<(usize, usize), BrepError> {
+    let top = wall.faces().iter().position(|f| f.id == face).ok_or_else(&bad)?;
+    let o = to_world.apply(Vec3::ZERO);
+    let x = to_world.apply_vector(Vec3::new(1.0, 0.0, 0.0));
+    let y = to_world.apply_vector(Vec3::new(0.0, 1.0, 0.0));
+    let z = to_world.apply_vector(Vec3::new(0.0, 0.0, 1.0));
+    let frame = Frame::Plane { o, x, y, z };
+    let at = |a: f64, b: f64, c: f64| to_world.apply(Vec3::new(a, b, c));
+    let size = wall
+        .vertices()
+        .iter()
+        .fold(t.max(o.x.abs()).max(o.y.abs()).max(o.z.abs()), |s, v| s.max(v.point.x.abs()).max(v.point.y.abs()).max(v.point.z.abs()));
+    let top_plane = wall.faces()[top].surface.plane().ok_or_else(&bad)?;
+    let top_normal = top_plane.normal * (1.0 / top_plane.normal.dot(top_plane.normal).sqrt());
+    if top_normal.dot(z) <= 0.0 || !nearly_parallel(top_normal, z) || !within_rounding((o - top_plane.origin).dot(top_normal), size) {
+        return Err(bad());
+    }
+    let ring = rectangle(Vec2::new(start, sides[0]), Vec2::new(end, sides[1]));
+    let holds = |f| {
+        let loops = crate::cut::outline(wall, f, &frame)?;
+        Ok::<_, BrepError>(
+            !loops.iter().any(|l| ring.touches(l) || ring.winding(l.points[0]) != 0)
+                && loops.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() != 0,
+        )
+    };
+    if !holds(top as Ix)? {
+        return Err(bad());
+    }
+    let inside = at(0.0, 0.0, -t);
+    let mut bottom = None;
+    for (i, f) in wall.faces().iter().enumerate() {
+        let Some(p) = f.surface.plane().filter(|p| p.normal.dot(z) < 0.0 && nearly_parallel(p.normal, z)) else { continue };
+        let normal = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+        if within_rounding((inside - p.origin).dot(normal), size) && holds(i as Ix)? && bottom.replace(i).is_some() {
+            return Err(bad());
+        }
+    }
+    let bottom = bottom.ok_or_else(&bad)?;
+    // Check the volume swept by the window and raised strip against other faces. Where folding
+    // turns a curved boundary away from the frame, its enclosing box must establish clearance.
+    let local = Rigid::into_frame(o, x, y, z);
+    let (lo, hi) = (0..strip.faces().len() as Ix)
+        .map(|i| strip.face_bounds(i, &local))
+        .fold((Vec3::new(start, sides[0], -t), Vec3::new(end, sides[1], 0.0)), |(lo, hi), (a, b)| {
+            (Vec3::new(lo.x.min(a.x), lo.y.min(a.y), lo.z.min(a.z)), Vec3::new(hi.x.max(b.x), hi.y.max(b.y), hi.z.max(b.z)))
+        });
+    let footprint = rectangle(Vec2::new(lo.x, lo.y), Vec2::new(hi.x, hi.y));
+    for (i, f) in wall.faces().iter().enumerate() {
+        if i == top || i == bottom || !crate::bounds::overlap((lo, hi), wall.face_bounds(i as Ix, &local)) {
+            continue;
+        }
+        let exact = match &f.surface {
+            Surface::Plane(p) => {
+                nearly_parallel(p.normal, z)
+                    || wall
+                        .face_loops(i as Ix)
+                        .flat_map(|l| wall.loop_half_edges(l))
+                        .all(|h| wall.edge_curve(&wall.edges()[wall.half_edges()[h as usize].edge as usize]).is_none())
+            }
+            Surface::Cylinder(c) => nearly_parallel(c.axis, z),
+            _ => false,
+        };
+        if !exact {
+            return Err(bad());
+        }
+        let loops = crate::cut::outline(wall, i as Ix, &frame)?;
+        if loops.iter().any(|l| footprint.touches(l) || footprint.winding(l.points[0]) != 0)
+            || loops.iter().map(|l| l.winding(footprint.points[0])).sum::<i32>() != 0
+        {
+            return Err(bad());
+        }
+    }
+    Ok((top, bottom))
 }
 
 fn rectangle(lo: Vec2, hi: Vec2) -> ProfileLoop {

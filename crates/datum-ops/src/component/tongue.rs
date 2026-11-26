@@ -1,8 +1,8 @@
-//! The first two-sketch stamp (D279–D281): a straight tongue on a plane wall.
+//! Two-sketch stamp placement and straight tongue construction (D279–D281).
 
 use std::collections::BTreeMap;
 
-use datum_brep::{Body, BrepError, ProfileLoop, Region, TopoId, extrude, segments_touch};
+use datum_brep::{BrepError, ProfileLoop, Region, TopoId, extrude, segments_touch};
 use datum_math::expr::Num;
 use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
 use datum_sketch::Step;
@@ -10,7 +10,7 @@ use datum_sketch::Step;
 use super::stitch::{FreeBoundary, Window, stitch};
 use super::{Forming, PartDef, STAMP_ROLE, SectionSide, at, evaluate_features, on_wall, section, unit};
 use crate::edge_finish::{EdgeMode, corner, finish};
-use crate::rib::Formed;
+use crate::rib::{Formed, StampBlank};
 use crate::sheet::{Sheet, Side};
 use crate::sketch::{Placed, within_rounding};
 use crate::unfold::StampCut;
@@ -28,7 +28,7 @@ fn points<const N: usize>(sketch: &Placed, names: [&str; N]) -> [Vec2; N] {
     names.map(|n| sketch.solved.points[n])
 }
 
-fn to_part(sketch: &Placed, p: Vec2) -> Vec3 {
+pub(super) fn to_part(sketch: &Placed, p: Vec2) -> Vec3 {
     let [o, x, y, _] = sketch.frame;
     o + x * p.x + y * p.y
 }
@@ -38,6 +38,7 @@ struct Boundary<'a> {
     corners: [Vec2; 4],
     sides: [&'a str; 4],
     rounds: Option<[(&'a str, f64); 2]>,
+    bridge: bool,
 }
 
 fn boundary_loop<'a>(
@@ -71,7 +72,9 @@ fn boundary_loop<'a>(
     let ring: Vec<_> = path[start..].iter().chain(&path[..start]).copied().collect();
     let roots = ring.iter().take_while(|s| transition(s.curve)).count();
     let (root, cuts) = ring.split_at(roots);
-    if cuts.iter().any(|s| transition(s.curve)) {
+    // The second transition lies opposite the first, between the two free sides.
+    let bridge = matches!((root, cuts), ([_], [a, b, c]) if !transition(a.curve) && transition(b.curve) && !transition(c.curve));
+    if !bridge && cuts.iter().any(|s| transition(s.curve)) {
         return Err(bad());
     }
     let point = |p: &str| sketch.solved.points[p];
@@ -124,7 +127,7 @@ fn boundary_loop<'a>(
     } else {
         None
     };
-    Ok(Boundary { corners, sides: [root[0].curve, side_b.curve, tip[0].curve, side_a.curve], rounds })
+    Ok(Boundary { corners, sides: [root[0].curve, side_b.curve, tip[0].curve, side_a.curve], rounds, bridge })
 }
 
 fn collinear(steps: &[Step<'_>], sketch: &Placed) -> bool {
@@ -172,50 +175,25 @@ fn section_chain<'a>(name: &str, sketch: &'a Placed) -> Result<[Step<'a>; 3], Br
     Ok(path)
 }
 
-/// Replace the material of a plane wall by the tongue (D290–D291).
+/// Evaluate and place a two-sketch stamp on a plane wall.
 pub(crate) fn form(
     feature: TopoId,
     def: &PartDef,
     forming: &Forming,
     params: &BTreeMap<String, Num>,
     placements: &[Placement],
-    rule: [Option<&Num>; 3],
+    [thickness, radius, k_factor]: [Option<&Num>; 3],
     values: &[&Value],
 ) -> Result<Value, BrepError> {
-    let (wall, strip, window) = prepare(feature, def, forming, params, placements, rule, values)?;
-    let (body, opposite) = stitch(feature, wall, &strip, &window)?;
-    validated(&body)?;
-    let at_wall = |p: Vec2| window.to_world.apply(Vec3::new(p.x, p.y, 0.0));
-    let outline = window.outline;
-    let cut = StampCut {
-        faces: [window.face, opposite],
-        points: outline.points.into_iter().map(at_wall).collect(),
-        normal: window.to_world.apply_vector(Vec3::new(0.0, 0.0, 1.0)),
-        ids: outline.ids,
-        arcs: outline.arcs.into_iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
-    };
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp: Some(cut) })))
-}
-
-/// Evaluate the raised strip and the opening that supplies its metal.
-fn prepare<'a>(
-    feature: TopoId,
-    def: &PartDef,
-    forming: &Forming,
-    params: &BTreeMap<String, Num>,
-    placements: &[Placement],
-    [thickness, radius, k_factor]: [Option<&Num>; 3],
-    values: &[&'a Value],
-) -> Result<(&'a Body, Body, Window), BrepError> {
     let [Placement::Point(placement)] = placements else {
-        return Err(unsupported(format!("a straight tongue needs one point placement: part `{}`", def.name)));
+        return Err(unsupported(format!("a formed stamp needs one point placement: part `{}`", def.name)));
     };
-    let [Value::Body(wall), _] = values else { return Err(unsupported("a straight tongue needs an unformed sheet and a placement sketch")) };
-    let on = input_sketch(values, placement.input, "a straight tongue's placement")?;
-    on_wall(def, wall, on, "tongue")?;
-    let t = num(thickness.ok_or_else(|| invalid("a straight tongue needs a thickness from the sheet rule"))?)?;
+    let [Value::Body(wall), _] = values else { return Err(unsupported("a formed stamp needs an unformed sheet and a placement sketch")) };
+    let on = input_sketch(values, placement.input, "formed stamp placement")?;
+    on_wall(def, wall, on, "formed stamp")?;
+    let t = num(thickness.ok_or_else(|| invalid("a formed stamp needs a thickness from the sheet rule"))?)?;
     if t <= 0.0 || !t.is_finite() {
-        return Err(invalid("a straight tongue needs positive sheet thickness"));
+        return Err(invalid("a formed stamp needs positive sheet thickness"));
     }
     if let Some(range) = &def.thickness
         && !(num(&range[0])?..=num(&range[1])?).contains(&t)
@@ -238,8 +216,9 @@ fn prepare<'a>(
     let solved = |i: usize| made[i].sketch().ok_or_else(|| invalid(format!("feature `{}` is no sketch", def.features[i].name)));
     let profile = solved(profile_i)?;
     let boundary = solved(boundary_i)?;
-    let Boundary { corners, sides: [root, side_b, tip, side_a], rounds } = boundary_loop(&forming.boundary, boundary, &boundary_def.metadata)?;
-    let mut chain = section_chain(&forming.section, profile)?;
+    let Boundary { corners, sides: [root, side_b, tip, side_a], rounds, bridge } =
+        boundary_loop(&forming.boundary, boundary, &boundary_def.metadata)?;
+
     let anchor = def.anchor()?;
     let [b0, b1, b2, b3] = corners.map(|p| to_part(boundary, p) - anchor);
     let z = boundary.frame[3];
@@ -247,6 +226,30 @@ fn prepare<'a>(
     let toward_tip = b3 - b0;
     let x = if y.cross(z).dot(toward_tip) > 0.0 { y.cross(z) } else { z.cross(y) };
     let width = z.cross(x);
+    let origin = at(def, placement, values)?;
+    let [_, bx, by, bz] = boundary.frame;
+    let [_, wx, wy, wz] = on.frame;
+    let onto_wall = Rigid::into_frame(Vec3::ZERO, bx, by, bz).then(Rigid::frame(origin, wx, wy, wz));
+    let to_world = Rigid::frame(Vec3::ZERO, x, width, z).then(onto_wall);
+    let face = on.face.ok_or_else(|| invalid("a form needs a placement face"))?;
+    if bridge {
+        return super::bridge::form(
+            feature,
+            forming,
+            profile,
+            super::bridge::Bridge {
+                wall,
+                face,
+                thickness: t,
+                frame: to_world,
+                axes: [x, width, z],
+                anchor,
+                corners: [b0, b1, b2, b3],
+                sides: [root, side_b, tip, side_a],
+            },
+        );
+    }
+    let mut chain = section_chain(&forming.section, profile)?;
     let run = b3.dot(x);
     let lo = b0.dot(width).min(b1.dot(width));
     let hi = b0.dot(width).max(b1.dot(width));
@@ -320,17 +323,22 @@ fn prepare<'a>(
             strip = finish(id("stamp.nose", "", name), &strip, edge, radius, EdgeMode::Fillet)?;
         }
     }
-    let origin = at(def, placement, values)?;
-    let [_, bx, by, bz] = boundary.frame;
-    let [_, wx, wy, wz] = on.frame;
-    let onto_wall = Rigid::into_frame(Vec3::ZERO, bx, by, bz).then(Rigid::frame(origin, wx, wy, wz));
     let strip = strip.transformed(&Rigid::frame(Vec3::ZERO, x, z, -width).then(onto_wall));
     validated(&strip)?;
-    let to_world = Rigid::frame(Vec3::ZERO, x, width, z).then(onto_wall);
-    let face = on.face.ok_or_else(|| invalid("a tongue needs a placement face"))?;
     let outline = free_boundary(feature, [inner_root, far], [lo, hi], [left, tip, right], rounds)?;
     let window = Window { face, thickness: t, root_cap, root_ids, root_cross, to_world, sides: [lo, hi], inner_root, outer_root, far, outline };
-    Ok((wall, strip, window))
+    let (body, opposite) = stitch(feature, wall, &strip, &window)?;
+    validated(&body)?;
+    let at_wall = |p: Vec2| window.to_world.apply(Vec3::new(p.x, p.y, 0.0));
+    let outline = window.outline;
+    let cut = StampCut {
+        faces: [window.face, opposite],
+        points: outline.points.into_iter().map(at_wall).collect(),
+        normal: window.to_world.apply_vector(Vec3::new(0.0, 0.0, 1.0)),
+        ids: outline.ids,
+        arcs: outline.arcs.into_iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
+    };
+    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp: Some(StampBlank::Cut(cut)) })))
 }
 
 fn free_boundary(
@@ -456,20 +464,13 @@ mod tests {
             json["part"]["forming"]["section_side"] = json!(side);
             json["thickness"] = json!(t);
             let op = serde_json::from_value::<Op>(json.clone()).unwrap();
-            let Op::Component { part, params, placements, thickness, .. } = &op else { panic!("expected component") };
-            part.validate().unwrap();
-            let (_, body, _) =
-                prepare(stamp(), part, part.forming.as_ref().unwrap(), params, placements, [thickness.as_ref(), None, None], &inputs).unwrap();
-            body.validate().unwrap();
-            datum_brep::tessellate(&body).unwrap();
-            datum_brep::step(&[&body], "tongue", false).unwrap();
-            assert!(body.volume() > 0.0);
+            let Value::Formed(formed) = op.eval(stamp(), &inputs).unwrap() else { panic!("expected formed sheet") };
+            let body = &formed.body;
             let reference = TopoId::derive("stamp.surface").id(stamp()).tag("reference").tag("shelf").finish();
             let offset = TopoId::derive("stamp.surface").id(stamp()).tag("offset").tag("shelf").finish();
             let z = |id| body.faces().iter().find(|f| f.id == id).unwrap().surface.plane().unwrap().origin.z;
             assert_eq!(z(reference), if side == "inner" { top + 3.0 - t } else { top + 3.0 });
             assert_eq!((z(reference) - z(offset)).abs(), t);
-            let Value::Formed(formed) = op.eval(stamp(), &inputs).unwrap() else { panic!("expected formed sheet") };
             formed.body.validate().unwrap();
             datum_brep::tessellate(&formed.body).unwrap();
             datum_brep::step(&[&formed.body], "stamped plate", false).unwrap();
@@ -494,7 +495,8 @@ mod tests {
             let value = op.eval(stamp(), &inputs).unwrap();
             let Value::Formed(formed) = value else { panic!("expected formed sheet") };
             let body = &formed.body;
-            for &point in &formed.stamp.as_ref().unwrap().points {
+            let Some(StampBlank::Cut(cut)) = &formed.stamp else { panic!("expected tongue cut") };
+            for &point in &cut.points {
                 assert!(body.vertices().iter().any(|v| within_rounding(length(v.point - point), t)));
             }
             body.validate().unwrap();

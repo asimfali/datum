@@ -17,11 +17,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::sketch::{Placed, nearly_parallel, open_chains_named, within_rounding};
 use crate::{LineOf, Placement, Value, describe_arity, input_sketch, line_ends, num, sketch_point};
 
+mod bridge;
 mod section;
 mod stitch;
 mod tongue;
 
-pub(crate) use tongue::form as form_tongue;
+pub(crate) use tongue::form as form_from_sketches;
 pub(crate) const STAMP_ROLE: &str = "stamp.role";
 
 /// A part of the library (D256, D260), written into the model: its `kind` (`stamp` so far), the

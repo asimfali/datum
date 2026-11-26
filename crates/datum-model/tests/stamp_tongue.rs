@@ -537,3 +537,72 @@ fn nose_fillet_contour_moves_with_the_sheet_rule_and_keeps_its_radius() {
     let updated = nose_cut_end(&session.flat_of("stamp").unwrap());
     assert!((updated - original).abs() > 1e-9);
 }
+
+#[test]
+fn formed_slot_leaves_two_side_openings_and_joins_both_ends_to_the_plate() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot.json")).unwrap();
+    let mut session = Session::default();
+    add_base(&mut session, &model);
+    let reply = add_stamp(&mut session, &model);
+    assert_eq!(reply["failed"], json!([]), "{reply}");
+    {
+        let original = session.value("plate").unwrap().body().unwrap();
+        let slot = session.value("stamp").unwrap().body().unwrap();
+        slot.validate().unwrap();
+        datum_brep::tessellate(slot).unwrap();
+        datum_brep::step(&[slot], "formed slot", false).unwrap();
+
+        // Both plate skins still exist, with an inner loop where the strip joins them.
+        let pierced_skins = original
+            .faces()
+            .iter()
+            .filter(|face| slot.faces().iter().position(|f| f.id == face.id).is_some_and(|i| slot.face_loops(i as datum_brep::Ix).count() == 2))
+            .count();
+        assert_eq!(pierced_skins, 2);
+        let height = |up| {
+            slot.faces()
+                .iter()
+                .filter_map(|f| f.surface.plane())
+                .filter(|p| p.normal.z.signum() == up && p.normal.x == 0.0 && p.normal.y == 0.0)
+                .map(|p| p.origin.z)
+                .reduce(f64::max)
+                .unwrap()
+        };
+        close(height(1.0) - height(-1.0), 1.0);
+    }
+    let error = session.flat_of("stamp").unwrap_err();
+    assert!(error.to_string().contains("no production blank"), "{error}");
+}
+
+#[test]
+fn a_thin_tongue_clears_the_independent_slot_in_its_working_position() {
+    use datum_brep::BrepError;
+    use datum_math::Rigid;
+    use datum_ops::{BooleanKind, boolean};
+
+    let mut tongue = model();
+    tongue["features"][1]["thickness"] = json!(0.5);
+    tongue["features"][3]["thickness"] = json!(0.5);
+    let mut tongue_session = Session::default();
+    add_base(&mut tongue_session, &tongue);
+    add_stamp(&mut tongue_session, &tongue);
+    let tongue = tongue_session.value("stamp").unwrap().body().unwrap();
+
+    let mut slot: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot.json")).unwrap();
+    slot["features"][2]["sketch"]["points"]["p1"][0] = json!(5.0);
+    let mut slot_session = Session::default();
+    add_base(&mut slot_session, &slot);
+    add_stamp(&mut slot_session, &slot);
+    let slot = slot_session.value("stamp").unwrap().body().unwrap();
+
+    let intersection = |z| {
+        let positioned = slot.transformed(&Rigid::translation(Vec3::new(45.3, 0.0, z)));
+        boolean(datum_brep::TopoId::derive("slot.fit").finish(), BooleanKind::Intersection, None, &[tongue, &positioned])
+    };
+    // Check the working position and the two limits of a 0.1 mm vertical shift.
+    for z in [1.8, 1.9, 2.0] {
+        let result = intersection(z);
+        assert!(matches!(&result, Err(BrepError::Degenerate(message)) if message == "the result is empty"), "{result:?}");
+    }
+    assert!(intersection(1.7).unwrap().volume() > 0.0);
+}
