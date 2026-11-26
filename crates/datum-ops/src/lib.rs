@@ -621,17 +621,13 @@ impl Value {
     }
 
     pub fn has_stamp(&self) -> bool {
-        matches!(self, Self::Formed(f) if f.stamp.is_some())
+        matches!(self, Self::Formed(f) if !f.stamp_cuts.is_empty())
     }
 
-    /// Add the pre-cut corresponding to the opening left by a formed tongue.
-    pub fn with_stamp_cut(&self, flat: Flat) -> Result<Flat, BrepError> {
+    /// Add the stamp's open cuts on the sheet blank.
+    pub fn with_stamp_cuts(&self, flat: Flat) -> Result<Flat, BrepError> {
         match self {
-            Self::Formed(f) => match &f.stamp {
-                Some(rib::StampBlank::Cut(cut)) => flat.with_stamp_cut(cut),
-                Some(rib::StampBlank::Unsupported) => Err(BrepError::Unsupported("the formed slot has no production blank".into())),
-                None => Ok(flat),
-            },
+            Self::Formed(f) if !f.stamp_cuts.is_empty() => flat.with_stamp_cuts(&f.stamp_cuts),
             _ => Ok(flat),
         }
     }
@@ -997,7 +993,7 @@ impl Op {
             match self {
                 Self::Unfold { face, k_factor } => {
                     let body = values[0].blank().ok_or_else(|| BrepError::Sketch("unfold takes a sheet".into()))?;
-                    let flat = values[0].with_stamp_cut(unfold(body, face, num(k_factor)?)?)?;
+                    let flat = values[0].with_stamp_cuts(unfold(body, face, num(k_factor)?)?)?;
                     return Ok(Value::Flat(Box::new(flat)));
                 }
                 Self::Plane { .. } | Self::Sketch { flat: None, .. } => {}
@@ -1020,7 +1016,7 @@ impl Op {
                         laid = rib::imprint(&laid, i)?;
                     }
                     validated(&laid)?;
-                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone(), stamp: None })))
+                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone(), stamp_cuts: Vec::new() })))
                 }
                 other => Ok(other),
             };
@@ -1150,7 +1146,7 @@ impl Op {
                     _ => (body.clone(), Vec::new()),
                 };
                 imprints.push(i);
-                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, stamp: None })));
+                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, stamp_cuts: Vec::new() })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
             Self::Component { part, params, placements, thickness, radius, k_factor, .. } => {

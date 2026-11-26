@@ -47,13 +47,7 @@ pub struct Formed {
     pub body: Body,
     pub blank: Body,
     pub imprints: Vec<Imprint>,
-    pub(crate) stamp: Option<StampBlank>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum StampBlank {
-    Cut(crate::unfold::StampCut),
-    Unsupported,
+    pub(crate) stamp_cuts: Vec<crate::unfold::StampCut>,
 }
 
 fn unsupported(m: &str) -> BrepError {

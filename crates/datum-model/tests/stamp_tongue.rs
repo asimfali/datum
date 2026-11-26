@@ -538,6 +538,29 @@ fn nose_fillet_contour_moves_with_the_sheet_rule_and_keeps_its_radius() {
     assert!((updated - original).abs() > 1e-9);
 }
 
+fn check_slot_cuts(session: &mut Session, model: &Value) {
+    let reply = run(session, "add", model["features"][4].clone());
+    assert_eq!(reply["failed"], json!([]), "{reply}");
+    let preview = session.flat_of("stamp").unwrap();
+    let flat = session.flat_of("blank").unwrap();
+    assert_eq!(flat.pieces, preview.pieces);
+    assert_eq!(flat.ids, preview.ids);
+    assert!(flat.bends.is_empty());
+    assert_eq!(flat.outer.len(), 4);
+    assert_eq!(flat.pieces.len(), 6);
+    let cuts = flat_line_ends(session, "blank");
+    assert_eq!(cuts.len(), 2);
+    for x in [36.0, 44.0] {
+        assert!(
+            cuts.iter().any(|&[a, b]| {
+                let [lo, hi] = [Vec2::new(x, 20.0), Vec2::new(x, 40.0)];
+                (near(a, lo) && near(b, hi)) || (near(a, hi) && near(b, lo))
+            }),
+            "{cuts:?}"
+        );
+    }
+}
+
 #[test]
 fn formed_slot_leaves_two_side_openings_and_joins_both_ends_to_the_plate() {
     let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot.json")).unwrap();
@@ -570,8 +593,7 @@ fn formed_slot_leaves_two_side_openings_and_joins_both_ends_to_the_plate() {
         };
         close(height(1.0) - height(-1.0), 1.0);
     }
-    let error = session.flat_of("stamp").unwrap_err();
-    assert!(error.to_string().contains("no production blank"), "{error}");
+    check_slot_cuts(&mut session, &model);
 }
 
 #[test]
@@ -637,7 +659,7 @@ fn a_rounded_slot_uses_the_sheet_radius_at_all_four_bends() {
             close(outside.radius, radius + 1.0);
         }
         assert_eq!(cylinders.iter().filter(|c| !c.convex).count(), 4);
-        assert!(session.flat_of("stamp").unwrap_err().to_string().contains("no production blank"));
+        check_slot_cuts(&mut session, &model);
     }
 
     let mut too_tight = model;
@@ -681,6 +703,8 @@ fn rounded_slot_rebuilds_with_the_open_projects_sheet_rule() {
     };
 
     let initial = check(&session, 1.0, 0.4);
+    let flat = flat_line_ends(&mut session, "stamp");
+    assert_eq!(flat.len(), 2);
     let rule = "Лист 0.5 мм";
     put_sheet_rule(&mut session, rule, 0.5);
     assert!(project.join("Библиотека/rule/Лист 0.5 мм.json").is_file());
@@ -691,5 +715,6 @@ fn rounded_slot_rebuilds_with_the_open_projects_sheet_rule() {
 
     put_sheet_rule(&mut session, rule, 0.75);
     assert_ne!(thin, check(&session, 0.75, 0.75));
+    assert_eq!(flat_line_ends(&mut session, "stamp"), flat);
     std::fs::remove_dir_all(root).unwrap();
 }

@@ -8,8 +8,9 @@ use super::{
     stitch::{split_arc, trim_strip_face, wall_faces},
     tongue::to_part,
 };
-use crate::rib::{Formed, StampBlank};
+use crate::rib::Formed;
 use crate::sketch::{Placed, within_rounding};
+use crate::unfold::StampCut;
 use crate::{Value, validated};
 
 pub(super) struct Bridge<'a> {
@@ -166,5 +167,17 @@ pub(super) fn form(feature: TopoId, forming: &Forming, sketch: &Placed, bridge: 
     curves.extend(wall.curve_specs());
     let body = build_with_curves(points, faces, curves)?;
     validated(&body)?;
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp: Some(StampBlank::Unsupported) })))
+    // The slot is slit before forming. Its two cut lines are the sketch edges,
+    // independent of the tangencies and the 3D openings between them.
+    let stamp_cuts = [([b, c], sides[1]), ([d, a], sides[3])]
+        .into_iter()
+        .map(|(edge, name)| StampCut {
+            faces: [face, wall.faces()[bottom].id],
+            points: edge.map(|p| frame.apply(Vec3::new(p.dot(x), p.dot(y), 0.0))).into(),
+            normal: frame.apply_vector(Vec3::new(0.0, 0.0, 1.0)),
+            ids: vec![id("stamp.cut", "", name)],
+            arcs: vec![None],
+        })
+        .collect();
+    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts })))
 }

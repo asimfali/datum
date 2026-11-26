@@ -1726,7 +1726,7 @@ impl Session {
             }
             Arc::new(
                 datum_ops::unfold_side(&cut, settings.back, k)
-                    .and_then(|f| value.with_stamp_cut(f.with_lines_closed(&closed)))
+                    .and_then(|f| value.with_stamp_cuts(f.with_lines_closed(&closed)))
                     .map_err(|e| e.to_string()),
             )
         });

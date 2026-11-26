@@ -10,7 +10,7 @@ use datum_sketch::Step;
 use super::stitch::{FreeBoundary, Window, stitch};
 use super::{Forming, PartDef, STAMP_ROLE, SectionSide, at, evaluate_features, on_wall, section, unit};
 use crate::edge_finish::{EdgeMode, corner, finish};
-use crate::rib::{Formed, StampBlank};
+use crate::rib::Formed;
 use crate::sheet::{Sheet, Side};
 use crate::sketch::{Placed, within_rounding};
 use crate::unfold::StampCut;
@@ -339,7 +339,7 @@ pub(crate) fn form(
         ids: outline.ids,
         arcs: outline.arcs.into_iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
     };
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp: Some(StampBlank::Cut(cut)) })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts: vec![cut] })))
 }
 
 fn free_boundary(
@@ -496,7 +496,7 @@ mod tests {
             let value = op.eval(stamp(), &inputs).unwrap();
             let Value::Formed(formed) = value else { panic!("expected formed sheet") };
             let body = &formed.body;
-            let Some(StampBlank::Cut(cut)) = &formed.stamp else { panic!("expected tongue cut") };
+            let [cut] = formed.stamp_cuts.as_slice() else { panic!("expected tongue cut") };
             for &point in &cut.points {
                 assert!(body.vertices().iter().any(|v| within_rounding(length(v.point - point), t)));
             }
