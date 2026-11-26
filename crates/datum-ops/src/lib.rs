@@ -37,8 +37,8 @@ use datum_math::expr::{ExprError, Num};
 use datum_math::{Rigid, Vec2, Vec3};
 pub use edge_finish::{EdgeMode, edge_finish_caps, edge_finish_face, edge_finish_targets};
 pub use flange::{
-    BendPosition, BendRelief, Closing, Extent, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends, flange_loops,
-    flanges,
+    BendPosition, BendRelief, Closing, Extent, FaceTarget, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends,
+    flange_face_near, flange_loops, flanges,
 };
 pub use loft::{DEFAULT_LOFT_GAP, LoftDims, loft};
 pub use mirror::TurnAxis;
@@ -208,7 +208,11 @@ pub enum Op {
     /// sheet's, D205). The input: the sheet, then the work planes named in `to`.
     Flange {
         edges: Vec<String>,
-        height: Num,
+        /// The wall's height (D205): square to the sheet, up to its highest point. With `to_face`
+        /// (D305) it is still this height; a non-right angle there makes the wall's length along
+        /// the flange follow from it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<Num>,
         /// The height along the flange (D205), not square to the sheet (D229).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         height_along: bool,
@@ -257,6 +261,16 @@ pub enum Op {
         /// joint plane, not knowing of each other.
         #[serde(default, skip_serializing_if = "WallTo::is_empty")]
         to: WallTo<PlaneTo>,
+        /// The flange reaches a flat face of another body (D305): the wall's outer surface lies
+        /// parallel to it, `gap` from it — absolutely, `gap` zero when they touch — and the angle
+        /// and the wall's cross place (the bend's set-back) are derived from it. The body is an
+        /// input of the flange, as a work plane of `to` is: parts meet without knowing of each
+        /// other. Takes `height` (the usual D205 height, square to the sheet; a non-right angle
+        /// there makes the wall's length along the flange follow from it), one edge, no
+        /// `height_along`, no `angle` but a right one. `flip`: derived from the face, the field is
+        /// ignored.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_face: Option<FaceTo>,
     },
     /// Sheet metal from the input sketch's path: its lines and arcs (an open chain, from point
     /// `start` or else from its end named first) given `thickness` on `side` of the path (looking
@@ -489,6 +503,19 @@ fn zero3() -> [Num; 3] {
 pub struct PlaneTo {
     pub plane: String,
     #[serde(default = "zero")]
+    pub gap: Num,
+}
+
+/// A flat face another body a flange reaches (D305): the face's ID (hex), the body it is of, named
+/// among the flange's inputs, and the gap from it, zero when they touch. The wall's outer surface
+/// lies parallel to the face, `gap` from it; the angle and the wall's cross place are derived from
+/// the face, `height` stays the wall's own D205 height, square to the sheet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct FaceTo {
+    /// The face's ID, as a sketch names it.
+    pub face: String,
+    /// The input body the face is of.
+    pub from: String,
     pub gap: Num,
 }
 
@@ -850,9 +877,10 @@ impl Op {
                 bend_relief_depth,
                 bend_position,
                 to,
+                to_face,
             } => Self::Flange {
                 edges: edges.clone(),
-                height: r(height, "height")?,
+                height: height.as_ref().map(|n| r(n, "height")).transpose()?,
                 height_along: *height_along,
                 angle: r(angle, "angle")?,
                 radius: radius.as_ref().map(|n| r(n, "radius")).transpose()?,
@@ -869,6 +897,10 @@ impl Op {
                 bend_relief_depth: bend_relief_depth.as_ref().map(|n| r(n, "bend_relief_depth")).transpose()?,
                 bend_position: *bend_position,
                 to: to.map(|p| Ok::<_, String>(PlaneTo { plane: p.plane.clone(), gap: r(&p.gap, "to: gap")? }))?,
+                to_face: to_face
+                    .as_ref()
+                    .map(|f| Ok::<_, String>(FaceTo { face: f.face.clone(), from: f.from.clone(), gap: r(&f.gap, "to_face: gap")? }))
+                    .transpose()?,
             },
             // The definition keeps its own numbers: they resolve inside the tool, against its
             // parameters (D260). What the occurrence gives them, and where it is placed, are the
@@ -1241,6 +1273,7 @@ impl Op {
                 bend_relief_depth,
                 bend_position,
                 to,
+                to_face,
             } => {
                 let Some(radius) = radius else { return Err(BrepError::Invalid(NO_SHEET_RULE.into())) };
                 let round = match relief {
@@ -1261,14 +1294,50 @@ impl Op {
                         plane.ok_or_else(|| BrepError::Sketch(format!("a flange goes to `{}`, not a work plane among its inputs", p.plane)))?;
                     let gap = num(&p.gap)?;
                     if !(gap >= 0.0 && gap.is_finite()) {
-                        return Err(BrepError::Degenerate(format!("a flange's gap to a plane is not below zero, got {gap}")));
+                        return Err(BrepError::Degenerate(format!("a flange's gap to a plane is not zero or above, got {gap}")));
                     }
                     Ok(Limit { at: plane.origin, normal: plane.normal, gap })
                 })?;
+                // The face a flange reaches (D305): its body an input, as a work plane of `to` is,
+                // so that parts meet without knowing of each other.
+                let to_face = to_face
+                    .as_ref()
+                    .map(|f| {
+                        let body = names
+                            .iter()
+                            .position(|n| *n == f.from)
+                            .and_then(|k| values.get(k)?.body())
+                            .ok_or_else(|| BrepError::Sketch(format!("a flange reaches a face of `{}`, not a body among its inputs", f.from)))?;
+                        let plane = face_plane(body, &f.face)?;
+                        let gap = num(&f.gap)?;
+                        if !(gap >= 0.0 && gap.is_finite()) {
+                            return Err(BrepError::Degenerate(format!("a flange's gap to a face is not zero or above, got {gap}")));
+                        }
+                        Ok(FaceTarget { origin: plane.origin, normal: plane.normal, gap })
+                    })
+                    .transpose()?;
+                let angle = num(angle)?;
+                let height = if to_face.is_some() {
+                    if *height_along {
+                        return Err(BrepError::Sketch("a flange to a face takes no `height_along`: its height is square to the sheet (D205)".into()));
+                    }
+                    if angle != 90.0 {
+                        return Err(BrepError::Sketch("a flange to a face takes no `angle`: the face gives it".into()));
+                    }
+                    let Some(height) = height else {
+                        return Err(BrepError::Sketch("a flange to a face takes its `height`: the face gives only the angle and the gap".into()));
+                    };
+                    height
+                } else {
+                    let Some(height) = height else {
+                        return Err(BrepError::Sketch("a flange takes a `height`, or a `to_face` to reach".into()));
+                    };
+                    height
+                };
                 let dims = FlangeDims {
                     height: num(height)?,
                     along: *height_along,
-                    angle: num(angle)?,
+                    angle,
                     radius: num(radius)?,
                     flip: *flip,
                     round,
@@ -1278,6 +1347,8 @@ impl Op {
                     flush: *bend_position == BendPosition::Flush,
                     to,
                     level: *level_walls,
+                    to_face,
+                    recess_angle: None,
                     notch: match (bend_relief, bend_relief_width, bend_relief_depth) {
                         (BendRelief::None, ..) => None,
                         (shape, Some(w), Some(d)) => Some(Notch { round: *shape == BendRelief::Round, width: num(w)?, depth: num(d)? }),

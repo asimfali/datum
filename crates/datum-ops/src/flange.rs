@@ -42,6 +42,21 @@ pub struct FlangeDims {
     /// Walls meeting a neighbour of another angle (D238) brought level: the lower to the top of the
     /// higher.
     pub level: bool,
+    /// The flat face of another body the wall's outer surface lies parallel to, `gap` from it
+    /// (D305): the angle and the cross place are derived from it, its `height` is the wall's own
+    /// (D205, square to the sheet).
+    pub to_face: Option<FaceTarget>,
+    /// The angle a flush bend is set back by, when a face sets the wall's place (D305) instead of
+    /// the bend's own angle.
+    pub recess_angle: Option<f64>,
+}
+
+/// A flat face a flange reaches (D305): a point of its plane, its unit normal, and the gap from it.
+#[derive(Clone, Copy, Debug)]
+pub struct FaceTarget {
+    pub origin: Vec3,
+    pub normal: Vec3,
+    pub gap: f64,
 }
 
 /// What each of a flange's wall's three edges goes to (D229), none where it stays as it is: the
@@ -256,23 +271,52 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
     if edges.is_empty() {
         return Err(BrepError::Sketch("a flange takes the edges of the sheet it stands on: `edges`".into()));
     }
-    if !(dims.angle > 0.0 && dims.angle < 180.0) {
+    if dims.to_face.is_none() && !(dims.angle > 0.0 && dims.angle < 180.0) {
         return Err(BrepError::Degenerate(format!("a flange turns by more than 0° and less than 180°, got {}", dims.angle)));
     }
-    if !(dims.radius > 0.0 && dims.height > 0.0 && dims.radius.is_finite() && dims.height.is_finite()) {
+    if dims.to_face.is_none() && !(dims.radius > 0.0 && dims.height > 0.0 && dims.radius.is_finite() && dims.height.is_finite()) {
         return Err(BrepError::Degenerate("a flange needs a positive height and bend radius".into()));
     }
     let ids: Vec<TopoId> = edges
         .iter()
         .map(|e| u128::from_str_radix(e, 16).map(TopoId).map_err(|_| BrepError::Sketch(format!("`{e}` is not an edge ID"))))
         .collect::<Result<_, _>>()?;
+    // A face to reach (D305): each edge's flange derives its own angle, side and cross place from
+    // the face and the sheet's end there, its height from the input; then the usual bend, wall and
+    // blank follow. A sheet short of the face is lengthened at that end first, the bend standing on
+    // the new edge.
+    if let Some(face) = dims.to_face {
+        if !(dims.radius > 0.0 && dims.radius.is_finite()) {
+            return Err(BrepError::Degenerate("a flange needs a positive bend radius".into()));
+        }
+        if ids.len() > 1 {
+            return Err(BrepError::Unsupported("flange: a flange to a face takes one edge; several come later".into()));
+        }
+        if dims.to.top.is_some() {
+            return Err(BrepError::Sketch("a flange to a face takes no `to.top`: the face gives only the angle and the cross place".into()));
+        }
+        if !dims.corner.is_open() {
+            return Err(BrepError::Unsupported("flange: a wall reaching a face at a closed corner comes later".into()));
+        }
+        let mut body = target.clone();
+        for &e in &ids {
+            let (d, extension) = dims_for_face(&body, e, dims, face)?;
+            if extension > 0.0 {
+                body = extended(&body, e, extension)?;
+            }
+            body = flanges(feature, &body, &[format!("{e:?}")], d)?;
+        }
+        return Ok(body);
+    }
     let empty = BTreeSet::new();
     // Each flange by its edge: the way its width runs and the side it turns to, as the sheet has
     // them before any of it is divided.
     let firsts = ids.iter().map(|&e| Ok((start_way(target, e)?, base(target, e, dims.flip, &empty)?))).collect::<Result<Vec<_>, BrepError>>()?;
     // Narrower than its edge: the end divided first, the flange on its middle (D229). A wall's
-    // strip of the side face is made an end of its own first (D233).
-    if !dims.width.is_edge() || dims.flush {
+    // strip of the side face is made an end of its own first (D233). A face the wall reaches sets
+    // the bend back as well, through `recess_angle` (D305).
+    let flush = dims.recess_angle.map(|a| (dims.radius, a)).or_else(|| dims.flush.then_some((dims.radius, dims.angle)));
+    if !dims.width.is_edge() || flush.is_some() {
         let mut body = target.clone();
         // Each end once, by either of its long edges; by its face's ID, which stays as the ends
         // beside it are cut (their corners, flush, move).
@@ -285,7 +329,7 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
             if !first.end {
                 body = strip_as_end(&body, e)?;
             }
-            body = narrowed(feature, &body, first.key, dims.width, dims.notch, dims.flush.then_some((dims.radius, dims.angle)))?;
+            body = narrowed(feature, &body, first.key, dims.width, dims.notch, flush)?;
         }
         // Each middle by a long edge, once all are cut: it keeps its end's ID.
         let mut picks = Vec::new();
@@ -298,6 +342,230 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
     }
     let picks: Vec<(TopoId, Vec3, Vec3)> = ids.iter().zip(&firsts).map(|(&e, (way, first))| (e, *way, first.up)).collect();
     flanges_on(feature, target, &picks, dims)
+}
+
+/// The dims of a flange on edge `e` of `target` that reaches the flat face `face` (D305): the
+/// angle that lays the wall's outer surface parallel to the face, the side it turns to where the
+/// face lies, and the bend set back so that `gap` is left between them — absolutely, the wall's
+/// own length kept — with how much the sheet's flat part must be lengthened beyond `e` for the
+/// bend to stand there (D305: a sheet short of the face is extended to the line where its outer
+/// surface meets the face's plane, not refused). The face is a plane, so its normal's sign is
+/// chosen where the bend can reach it.
+fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -> Result<(FlangeDims, f64), BrepError> {
+    if !dims.width.is_edge() {
+        return Err(BrepError::Unsupported("flange: a flange to a face narrower than its edge comes later".into()));
+    }
+    let Some(c) = bend_to_face(target, e, face)? else {
+        return Err(BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()));
+    };
+    let (absolute, extension) = c.setback(target, face, dims.radius, dims.flush)?;
+    let recess_angle = (absolute > 0.0).then(|| 2.0 * libm::atan(absolute / (dims.radius + c.t)).to_degrees());
+    Ok((
+        FlangeDims {
+            height: dims.height,
+            along: false,
+            angle: c.a,
+            radius: dims.radius,
+            flip: c.flip,
+            round: dims.round,
+            corner: Closing::Open,
+            gap: dims.gap,
+            width: dims.width,
+            notch: dims.notch,
+            flush: false,
+            to: dims.to,
+            level: dims.level,
+            to_face: None,
+            recess_angle,
+        },
+        extension,
+    ))
+}
+
+/// The bend a flange on edge `e` of `target` makes to reach the flat face `face` (D305), if the
+/// sheet can turn to it: where the bend's side, its normal as it is met, its angle and the
+/// sheet's thickness are, and the end the bend stands on. None: the face lies in the sheet's own
+/// plane, or the bend cannot turn to it.
+struct FaceBend {
+    flip: bool,
+    /// The face's normal as it is met.
+    n: Vec3,
+    out: Vec3,
+    /// The angle, degrees.
+    a: f64,
+    /// The sheet's thickness.
+    t: f64,
+    base: Base,
+}
+
+impl FaceBend {
+    /// Where the wall's outer surface is `recess` behind the sheet's edge (D305): the point its
+    /// distance to the face's plane is measured at.
+    fn outer(&self, target: &Body, radius: f64, recess: f64) -> Result<Vec3, BrepError> {
+        let shape = Shape::at(target, &self.base, radius, self.a, recess)?;
+        Ok(shape.turned(target.point(self.base.outer[0]) - self.out * recess))
+    }
+
+    /// The bend set back so that the wall's outer surface is `gap` from the face's plane, and how
+    /// much the sheet's flat part is lengthened beyond its edge for the bend to stand there (0:
+    /// not); refused where the sheet gives no bend place (D305).
+    fn setback(&self, target: &Body, face: FaceTarget, radius: f64, flush: bool) -> Result<(f64, f64), BrepError> {
+        let base_recess = if flush { flush_recess(radius, self.t, self.a) } else { 0.0 };
+        let o0 = self.outer(target, radius, base_recess)?;
+        let d = (o0 - face.origin).dot(self.n);
+        // The gap is absolute: the wall's outer surface is set `gap` from the face's plane. The
+        // bend moves along the sheet's end normal, which moves that surface along the face's
+        // normal, so the setback it needs is `(d − gap) / (out·n)`. A negative one puts the bend
+        // beyond the sheet's edge: the flat part of the sheet is lengthened by that much, and the
+        // bend stands on the new edge (D305, the line where the sheet's outer surface meets the
+        // face's plane set `gap` off).
+        let shift = (d - face.gap) / self.out.dot(self.n);
+        let absolute = base_recess + shift;
+        if !absolute.is_finite() {
+            return Err(BrepError::Degenerate(format!("flange: a wall cannot be {} from the face: the sheet gives no bend place", face.gap)));
+        }
+        let extension = if absolute < 0.0 { -absolute } else { 0.0 };
+        // Moving away from the face sets the bend back into the sheet: it must stay short of the
+        // sheet's far end.
+        let end = target.point(self.base.inner[0]);
+        let mut extent: f64 = 0.0;
+        for (k, _) in target.vertices().iter().enumerate() {
+            extent = extent.max((end - target.point(k as u32)).dot(self.out));
+        }
+        if absolute >= extent {
+            return Err(BrepError::Degenerate(format!(
+                "flange: a wall cannot be {} from the face: the bend would lie beyond the sheet's far end",
+                face.gap
+            )));
+        }
+        Ok((absolute, extension))
+    }
+}
+
+/// The bend a flange on edge `e` of `target` needs to reach the flat face `face` (D305): its
+/// normal goes across the edge and the bend turns out of the sheet toward it (`sin a > 0`).
+fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<FaceBend>, BrepError> {
+    let empty = BTreeSet::new();
+    let f = unit(face.normal);
+    // The base of the edge on either side of the sheet, each tried once: the face picks between
+    // them.
+    let mut bases: [Option<Base>; 2] = [None, None];
+    // The best candidate: the side, the face's normal as it is met, the angle and the thickness.
+    struct Candidate {
+        flip: bool,
+        n: Vec3,
+        out: Vec3,
+        up: Vec3,
+        a: f64,
+        t: f64,
+    }
+    let mut best: Option<Candidate> = None;
+    for sign in [1.0, -1.0] {
+        let n = f * sign;
+        for flip in [false, true] {
+            if bases[usize::from(flip)].is_none() {
+                bases[usize::from(flip)] = Some(base(target, e, flip, &empty)?);
+            }
+            let base = bases[usize::from(flip)].as_ref().ok_or_else(|| BrepError::Invalid("flange: the edge's base was not tried".into()))?;
+            if !base.end {
+                return Err(BrepError::Unsupported("flange: a flange to a face on a wall's edge comes later".into()));
+            }
+            let (out, up) = (base.out, base.up);
+            let w = unit(target.point(base.inner[1]) - target.point(base.inner[0]));
+            // The face's normal goes across the edge: the wall lies in a plane along it.
+            if !within_rounding(n.dot(w), 1.0) {
+                continue;
+            }
+            // The bend turns `out` toward `up`: its outer surface's normal after the turn is
+            // `out·sin a − up·cos a`, parallel to the face when `sin a = −n·out`, `cos a = n·up`.
+            let sin = -n.dot(out);
+            if !(sin.is_finite() && sin > 0.0) {
+                continue;
+            }
+            let a = libm::atan2(sin, n.dot(up)).to_degrees();
+            if !(a > 0.0 && a < 180.0) {
+                continue;
+            }
+            let t = (target.point(base.inner[0]) - target.point(base.outer[0])).dot(up);
+            if !(t.is_finite() && t > 0.0) {
+                continue;
+            }
+            // The side the bend turns toward the face: its `up` along the face's normal; a right
+            // angle apart either way, the sheet's own front (not `flip`).
+            let toward = up.dot(n);
+            let better = match &best {
+                None => true,
+                Some(b) => {
+                    let was = b.up.dot(b.n);
+                    if within_rounding(toward - was, 1.0) { !flip && b.flip } else { toward > was }
+                }
+            };
+            if better {
+                best = Some(Candidate { flip, n, out, up, a, t });
+            }
+        }
+    }
+    let Some(c) = best else { return Ok(None) };
+    let base = bases[usize::from(c.flip)].take().ok_or_else(|| BrepError::Invalid("flange: the edge's base was not tried".into()))?;
+    Ok(Some(FaceBend { flip: c.flip, n: c.n, out: c.out, a: c.a, t: c.t, base }))
+}
+
+/// The nearest flat face of another body that a flange on edge `e` of `sheet` reaches (D305),
+/// among the bodies of `bodies` — their names, in the order the view shows them: one whose normal
+/// goes across the edge and that the bend can turn to, with the bend inside the sheet at the gap
+/// zero. The distance is from the middle of the end's outer edge to the face's plane; an equal one
+/// keeps the lower face ID.
+pub fn flange_face_near(sheet: &Body, e: TopoId, bodies: &[(&str, &Body)]) -> Option<(String, TopoId)> {
+    let mut best: Option<(f64, &str, TopoId)> = None;
+    for &(name, body) in bodies {
+        // The faces come in ID order: an equal distance keeps the lower.
+        for face in body.faces() {
+            let Surface::Plane(plane) = face.surface else { continue };
+            let target = FaceTarget { origin: plane.origin, normal: plane.normal, gap: 0.0 };
+            let Ok(Some(bend)) = bend_to_face(sheet, e, target) else { continue };
+            // The sheet's rule is not in the body: the bend's place is checked at no radius of its
+            // own, where the flange's build may still find it short of the sheet's far end (D305).
+            if bend.setback(sheet, target, 0.0, false).is_err() {
+                continue;
+            }
+            let [p, q] = bend.base.outer;
+            let middle = (sheet.point(p) + sheet.point(q)) * 0.5;
+            let d = (middle - plane.origin).dot(unit(plane.normal)).abs();
+            let better = best.is_none_or(|(was, _, id)| d.total_cmp(&was).then(face.id.cmp(&id)).is_lt());
+            if better {
+                best = Some((d, name, face.id));
+            }
+        }
+    }
+    best.map(|(_, name, id)| (name.to_string(), id))
+}
+
+/// Where the outer faces of the sheet and a flange turned `angle` degrees meet, set back from the
+/// edge: `(r + t)·tan(a/2)`, at a right angle exactly `r + t`.
+fn flush_recess(radius: f64, thickness: f64, angle: f64) -> f64 {
+    (radius + thickness) * if angle == 90.0 { 1.0 } else { libm::tan(0.5 * angle.to_radians()) }
+}
+
+/// `body` with the flat part of the sheet at the end of edge `e` grown `ext` outward (D305): the
+/// end face moved along its own normal, the faces beside it stretching with it. A flange whose
+/// bend lies beyond the sheet's edge stands on the end this makes (the sheet reaches the line
+/// where its outer surface meets the face's plane, `flush_recess` short of the bend's place).
+fn extended(body: &Body, e: TopoId, ext: f64) -> Result<Body, BrepError> {
+    if !(ext > 0.0 && ext.is_finite()) {
+        return Err(BrepError::Degenerate(format!("flange: the sheet's end grows by {ext}, not a length")));
+    }
+    let Base { out, gone, .. } = base(body, e, false, &BTreeSet::new())?;
+    let moved: BTreeSet<TopoId> = body.face_spec(gone[0]).loops.concat().into_iter().collect();
+    let mut vertices = body.vertices().to_vec();
+    for v in &mut vertices {
+        if moved.contains(&v.id) {
+            v.point = v.point + out * ext;
+        }
+    }
+    // The flat faces beside the end stretch along the end's normal, the square ones across it:
+    // both stay flat.
+    let faces = (0..body.faces().len() as Ix).map(|x| body.face_spec(x)).collect();
+    build_with_curves(vertices, faces, body.curve_specs())
 }
 
 /// `body` with the strip of the side face over the wall of edge `e` a face of its own, an end a
@@ -994,7 +1262,7 @@ fn narrowed(
     let t = across.dot(across).sqrt();
     // Flush: back by where the outer faces of the sheet and the flange meet, `(r + t)·tan(a/2)`
     // (at a right angle exactly `r + t`).
-    let recess = flush.map_or(0.0, |(r, a)| (r + t) * if a == 90.0 { 1.0 } else { libm::tan(0.5 * a.to_radians()) });
+    let recess = flush.map_or(0.0, |(r, a)| flush_recess(r, t, a));
     // Flush and narrower than its edge, the bend would sit against the sheet's rest beside it:
     // only a relief makes room (as bending it does).
     if recess > 0.0 && notch.is_none() && (low || high) {
@@ -1467,41 +1735,49 @@ struct Shape {
 }
 
 impl Shape {
-    fn of(target: &Body, base: &Base, dims: FlangeDims) -> Result<Self, BrepError> {
+    /// The bend of `base` on `target`: inner `radius`, turned `angle` degrees, its end set back
+    /// `recess` into the sheet. The wall's height is not known here; [`Shape::of`] sets it.
+    fn at(target: &Body, base: &Base, radius: f64, angle: f64, recess: f64) -> Result<Self, BrepError> {
         let ([i0, i1], o0, n, up) = (base.inner, base.outer[0], base.out, base.up);
         let w = unit(target.point(i1) - target.point(i0));
         let t = (target.point(i0) - target.point(o0)).dot(up);
         if t.is_nan() || t <= 0.0 {
             return Err(BrepError::Invalid("flange: the inner edge is not inside the sheet's thickness".into()));
         }
-        let (r, a) = (dims.radius, dims.angle.to_radians());
-        let turn = libm::sincos(a);
+        let turn = libm::sincos(angle.to_radians());
         // Turning `n` toward `up`: about `w` or `-w`.
         let axis = if w.cross(n).dot(up) > 0.0 { w } else { w * -1.0 };
-        let along = turned(n, axis, turn);
+        // One axis for the bend's both sides, through the inner edge's start `radius` up, the end
+        // set back `recess` into the sheet: both sides turn about it, so the two cylinders are
+        // coaxial exactly (made apart, they part in the last bits, and the bend has no face across
+        // it).
+        let c_in = target.point(i0) - n * recess + up * radius;
+        Ok(Self { w, axis, turn, c_in, along: turned(n, axis, turn), wall: 0.0, t, inner_normal: turned(up, axis, turn) })
+    }
+
+    fn of(target: &Body, base: &Base, dims: FlangeDims) -> Result<Self, BrepError> {
+        let (r, a) = (dims.radius, dims.angle.to_radians());
+        let mut shape = Self::at(target, base, r, dims.angle, 0.0)?;
         // At a right angle exactly `r + t` either way: tan 45° and cos 90° in floating point are
         // not quite 1 and 0, and a flange as high as its bend would come out a sliver instead of
         // refused. Square to the sheet: the bend rises `R − c·cos a` to the wall's highest face
         // (`c` the inner radius leaning out, the outer leaning in), the wall `sin a` a unit.
-        let big = r + t;
+        let big = r + shape.t;
         let (wall, bend) = if dims.angle == 90.0 {
             (dims.height - big, big)
         } else if dims.along {
             let set_back = big * libm::tan(0.5 * a);
             (dims.height - set_back, set_back)
         } else {
-            let (sn, cs) = turn;
+            let (sn, cs) = shape.turn;
             let rise = big - if cs >= 0.0 { r } else { big } * cs;
             ((dims.height - rise) / sn, rise)
         };
         if dims.to.top.is_none() && (wall.is_nan() || wall <= 0.0) {
             return Err(BrepError::Degenerate(format!("a flange {} high is no higher than its bend ({bend:.3})", dims.height)));
         }
-        // One axis for the bend's both sides, through the inner edge's start `r` up: both sides
-        // turn about it, so the two cylinders are coaxial exactly (made apart, they part in the
-        // last bits, and the bend has no face across it).
-        let c_in = target.point(i0) + up * r;
-        Ok(Self { w, axis, turn, c_in, along, wall, t, inner_normal: turned(up, axis, turn) })
+        shape.wall = wall;
+        Ok(shape)
     }
 
     /// Where point `p` of the end goes as the bend turns it: where the bend ends, at the wall.

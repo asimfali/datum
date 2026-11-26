@@ -24,8 +24,10 @@ pub struct Uses {
     pub inputs: Vec<String>,
     /// What it uses and a click does not change: an axis, a path, a body it meets.
     pub lines: Vec<[Vec3; 2]>,
-    /// Its work planes.
+    /// The work planes it goes to.
     pub planes: Vec<String>,
+    /// The faces of other bodies it reaches (D305): the body's feature, the face.
+    pub faces: Vec<(String, TopoId)>,
     /// A flange's edges: all it may stand on, those it stands on among them.
     pub edges: Vec<([Vec3; 2], TopoId)>,
     pub used_edges: Vec<TopoId>,
@@ -128,7 +130,7 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
                 }
             }
         }
-        Op::Flange { edges, .. } => {
+        Op::Flange { edges, to_face, .. } => {
             let b = input(0).and_then(|v| v.body())?;
             u.edges = datum_ops::flange_edges(b).into_iter().map(|(id, ends)| (ends, id)).collect();
             if node.inputs.first().is_some_and(|&i| sheet_metal(graph, i as usize)) {
@@ -141,6 +143,15 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
                 {
                     u.edges.push((ends, id));
                 }
+            }
+            // The flat face of another body the wall reaches (D305), the body an input of it.
+            if let Some(t) = to_face
+                && let Some(i) = node.inputs.iter().position(|&i| graph.nodes()[i as usize].name == t.from)
+                && let Some(face_of) = evaluation.results[i].as_ref().ok().and_then(|v| v.body())
+                && let Some(face) = TopoId::parse(&t.face)
+                && face_of.faces().binary_search_by_key(&face, |f| f.id).is_ok()
+            {
+                u.faces.push((t.from.clone(), face));
             }
         }
         Op::Revolve { axis, .. } | Op::Rolled { axis, .. } => {
@@ -338,6 +349,23 @@ mod tests {
         let u = uses_in(&s, "grown").unwrap();
         assert_eq!(u.inputs, ["plate", "joint", "lid"]);
         assert_eq!(u.planes, ["joint", "lid"]);
+    }
+
+    /// A flange to a face lists the other body and the face it reaches; a face edited is the one
+    /// it then says.
+    #[test]
+    fn a_flange_to_a_face_lists_the_body() {
+        let mut s = open("flange-to-face.json");
+        let u = uses_in(&s, "flange1").unwrap();
+        assert_eq!(u.inputs, ["sheet2", "sheet1"]);
+        let ix = s.graph().find("flange1").unwrap() as usize;
+        let Op::Flange { to_face: Some(t), .. } = &s.graph().nodes()[ix].op else { panic!("a flange to a face") };
+        assert_eq!(u.faces, [(t.from.clone(), TopoId::parse(&t.face).unwrap())]);
+        // Another face of that body, the use follows the change.
+        let body = s.evaluation().results[s.graph().find("sheet1").unwrap() as usize].as_ref().unwrap().body().unwrap();
+        let other = body.faces().iter().map(|f| f.id).find(|id| *id != u.faces[0].1).unwrap();
+        s.execute("edit", &json!({"name": "flange1", "to_face": {"face": format!("{other:?}"), "from": "sheet1", "gap": 0.0}})).unwrap();
+        assert_eq!(uses_in(&s, "flange1").unwrap().faces, [("sheet1".to_string(), other)]);
     }
 
     /// An extrusion on one profile of two uses it and its sketch only; on none named, both.
