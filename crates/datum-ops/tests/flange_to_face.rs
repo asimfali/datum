@@ -199,15 +199,137 @@ fn the_gap_is_absolute_with_a_natural_clearance() {
     assert!(close(distance(o1, nn1, at1), 1.0), "{}", distance(o1, nn1, at1));
 }
 
-#[test]
-fn an_unreachable_gap_is_refused() {
+/// The corner of the sheet's outer surface (its longest flat face across `m`) furthest along
+/// `out`: the end a flange stands on.
+fn outer_corner(a: &Body, m: Vec3, out: Vec3) -> Vec3 {
+    let x = (0..a.faces().len())
+        .filter(|&x| {
+            a.faces()[x].surface.plane().is_some_and(|p| {
+                let u = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+                close(u.dot(m), 1.0)
+            })
+        })
+        .max_by(|&x, &y| a.face_area(x as u32).total_cmp(&a.face_area(y as u32)))
+        .unwrap();
+    a.face_loops(x as u32)
+        .flat_map(|l| a.loop_half_edges(l))
+        .map(|h| a.point(a.half_edges()[h as usize].origin))
+        .max_by(|p, q| p.dot(out).total_cmp(&q.dot(out)))
+        .unwrap()
+}
+
+/// How much the flat part of `a` must grow for a flange reaching the face `at`/`n` at `gap` (D305):
+/// the distance along the end's normal `out` from the sheet's end to the line where the outer
+/// surface across `m` meets the face's plane, `flush_recess` short of it.
+fn extension_needed(a: &Body, m: Vec3, out: Vec3, at: Vec3, n: Vec3, gap: f64, degrees: f64) -> f64 {
+    let end = outer_corner(a, m, out);
+    (gap - (end - at).dot(n)) / out.dot(n) - (R + T) * libm::tan(0.5 * degrees.to_radians())
+}
+
+/// The sheet and the face `q` at 45° that it stops short of: the author's case of the acceptance,
+/// the plane passing below the sheet's outer surface.
+fn short_sheet() -> (Body, Body, String) {
     let a = flange_sheet();
     let n = [-libm::sin(45.0f64.to_radians()), libm::cos(45.0f64.to_radians())];
     let q = [-2.0 * n[0], 37.0 - 2.0 * n[1]];
     let b = target_sheet(q, 45.0);
     let face = face_through(&b, q);
-    let e = reach(&a, &b, &face, 0.0, serde_json::json!({"bend_position": "flush"})).unwrap_err();
-    assert!(matches!(e, BrepError::Degenerate(_)), "{e:?}");
+    (a, b, face)
+}
+
+#[test]
+fn a_sheet_short_of_the_face_is_lengthened_to_it() {
+    let (a, b, face) = short_sheet();
+    // `gap` 0 is touching, and the sheet is short of the face: the ordinary case now (D305).
+    let (out, at, n) = reach(&a, &b, &face, 0.0, serde_json::json!({"bend_position": "flush"})).unwrap();
+    let (o, w) = new_face_across(&a, &out, at, n);
+    assert!(close(w.dot(n).abs(), 1.0), "the wall is parallel to the face");
+    assert!(close(distance(o, n, at), 0.0), "the wall touches the face: {}", distance(o, n, at));
+    // The flat part is lengthened: its outer surface (the sheet's lower face) reaches past the old
+    // end to the line where it meets the face's plane, `flush_recess` short of it.
+    let (outer, out_x) = (Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+    let ext = extension_needed(&a, outer, out_x, at, n, 0.0, 45.0);
+    assert!(ext > 0.0, "the sheet is short: {ext}");
+    let reach_out = (outer_corner(&out, outer, out_x) - outer_corner(&a, outer, out_x)).dot(out_x);
+    assert!(close(reach_out, ext), "the sheet reaches {reach_out} past its old end, not {ext}");
+    // The strip is part of the sheet: against the same flange at the edge of the sheet as it was
+    // (the bend outside it, nothing set back), the volume grows by `ext · width · thickness`.
+    let manual = op(serde_json::json!({"op": "flange", "edges": [end_edge(&a, 0.0)], "height": 20.0, "angle": 45.0, "radius": R}))
+        .eval(id("manual"), &[&Value::Body(a.clone())])
+        .unwrap()
+        .body()
+        .unwrap()
+        .clone();
+    assert!(close(out.volume() - manual.volume(), ext * 30.0 * T), "{}", out.volume() - manual.volume());
+}
+
+/// The author's own shape: a sheet whose end is 10 short of a plate's face across it (`test9`).
+#[test]
+fn a_sheet_short_of_a_face_across_it_is_lengthened() {
+    let a = flange_sheet();
+    let b = target_sheet([10.0, 37.0], 90.0);
+    let face = face_through(&b, [10.0, 37.0]);
+    let (out, at, n) = reach(&a, &b, &face, 0.0, serde_json::json!({"bend_position": "flush"})).unwrap();
+    let (o, w) = new_face_across(&a, &out, at, n);
+    assert!(close(w.dot(n).abs(), 1.0), "the wall is parallel to the face");
+    assert!(close(distance(o, n, at), 0.0), "the wall touches the face: {}", distance(o, n, at));
+    // A right angle: the flat part grows by the 10 less the flush setback `r + t`.
+    let outer = Vec3::new(0.0, -1.0, 0.0);
+    let out_x = Vec3::new(1.0, 0.0, 0.0);
+    let ext = extension_needed(&a, outer, out_x, at, n, 0.0, 90.0);
+    assert!(close(ext, 10.0 - (R + T)), "{ext}");
+    let reach_out = (outer_corner(&out, outer, out_x) - outer_corner(&a, outer, out_x)).dot(out_x);
+    assert!(close(reach_out, ext), "the sheet reaches {reach_out} past its old end, not {ext}");
+    let manual = op(serde_json::json!({"op": "flange", "edges": [end_edge(&a, 0.0)], "height": 20.0, "angle": 90.0, "radius": R}))
+        .eval(id("manual"), &[&Value::Body(a.clone())])
+        .unwrap()
+        .body()
+        .unwrap()
+        .clone();
+    assert!(close(out.volume() - manual.volume(), ext * 30.0 * T), "{}", out.volume() - manual.volume());
+}
+
+#[test]
+fn a_lengthened_sheet_leaves_exactly_the_gap() {
+    let (a, b, face) = short_sheet();
+    for gap in [0.5, 2.0] {
+        let (out, at, n) = reach(&a, &b, &face, gap, serde_json::json!({"bend_position": "flush"})).unwrap();
+        let (o, _) = new_face_across(&a, &out, at, n);
+        assert!(close(distance(o, n, at), gap), "the gap is exactly {gap}: {}", distance(o, n, at));
+        let (outer, out_x) = (Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 0.0, 0.0));
+        let ext = extension_needed(&a, outer, out_x, at, n, gap, 45.0);
+        let reach_out = (outer_corner(&out, outer, out_x) - outer_corner(&a, outer, out_x)).dot(out_x);
+        assert!(close(reach_out, ext), "at {gap}: reaches {reach_out}, not {ext}");
+    }
+}
+
+#[test]
+fn a_lengthened_sheet_comes_out_longer_flat() {
+    let (a, b, face) = short_sheet();
+    let (out, at, n) = reach(&a, &b, &face, 0.0, serde_json::json!({"bend_position": "flush"})).unwrap();
+    // The blank laid from the sheet's outer face, the one the wall's outer surface goes on from.
+    let home = (0..a.faces().len())
+        .filter(|&x| a.faces()[x].surface.plane().is_some_and(|p| p.normal.y < -0.99))
+        .max_by(|&x, &y| a.face_area(x as u32).total_cmp(&a.face_area(y as u32)))
+        .unwrap();
+    let blank = |body: &Body| {
+        let flat = op(serde_json::json!({"op": "unfold", "face": format!("{:?}", a.faces()[home].id), "k_factor": 0.44}))
+            .eval(id("flat"), &[&Value::Body(body.clone())])
+            .unwrap();
+        flat.flat().unwrap().size
+    };
+    // The same flange at the edge of the sheet as it was (the bend outside it): the blank of the
+    // lengthened sheet is longer by the strip sewn on, `ext`, and no other way.
+    let manual = op(serde_json::json!({"op": "flange", "edges": [end_edge(&a, 0.0)], "height": 20.0, "angle": 45.0, "radius": R}))
+        .eval(id("manual"), &[&Value::Body(a.clone())])
+        .unwrap()
+        .body()
+        .unwrap()
+        .clone();
+    let ext = extension_needed(&a, Vec3::new(0.0, -1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), at, n, 0.0, 45.0);
+    let (grown, was) = (blank(&out), blank(&manual));
+    assert!(close(grown.x - was.x, ext), "the blank grew {} not {ext}", grown.x - was.x);
+    assert!(close(grown.y, was.y), "{grown:?} and {was:?}");
 }
 
 #[test]
