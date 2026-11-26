@@ -606,3 +606,44 @@ fn a_thin_tongue_clears_the_independent_slot_in_its_working_position() {
     }
     assert!(intersection(1.7).unwrap().volume() > 0.0);
 }
+
+#[test]
+fn a_rounded_slot_uses_the_sheet_radius_at_all_four_bends() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot-rounded.json")).unwrap();
+    for radius in [0.4, 0.6] {
+        let mut model = model.clone();
+        model["features"][3]["radius"] = json!(radius);
+        let mut session = Session::default();
+        add_base(&mut session, &model);
+        let reply = add_stamp(&mut session, &model);
+        assert_eq!(reply["failed"], json!([]), "{reply}");
+        let body = session.value("stamp").unwrap().body().unwrap();
+        body.validate().unwrap();
+        datum_brep::tessellate(body).unwrap();
+        datum_brep::step(&[body], "formed slot", false).unwrap();
+
+        let cylinders: Vec<_> = body
+            .faces()
+            .iter()
+            .filter_map(|f| match f.surface {
+                Surface::Cylinder(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cylinders.len(), 8);
+        for inside in cylinders.iter().filter(|c| !c.convex) {
+            close(inside.radius, radius);
+            let outside = cylinders.iter().find(|c| c.convex && c.origin == inside.origin).unwrap();
+            close(outside.radius, radius + 1.0);
+        }
+        assert_eq!(cylinders.iter().filter(|c| !c.convex).count(), 4);
+        assert!(session.flat_of("stamp").unwrap_err().to_string().contains("no production blank"));
+    }
+
+    let mut too_tight = model;
+    too_tight["features"][3]["radius"] = json!(1.1);
+    let mut session = Session::default();
+    add_base(&mut session, &too_tight);
+    let reply = add_stamp(&mut session, &too_tight);
+    assert!(reply.to_string().contains("the bends do not fit"), "{reply}");
+}

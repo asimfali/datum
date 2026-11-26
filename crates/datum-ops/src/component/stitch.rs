@@ -66,11 +66,7 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         let crosses = ["left", "right"].map(|side| TopoId::derive("stamp.window.cross").id(feature).tag(side).finish());
         for ((bottom, cross), y) in [bottom_left, bottom_right].into_iter().zip(crosses).zip(sides) {
             vertices.push(Vertex { id: cross, point: at(x, y, 0.0) });
-            let arc = strip_curves.iter_mut().find(|arc| arc.from == bottom || arc.to == bottom).ok_or_else(bad)?;
-            let end = *arc;
-            split_edges.push((end.from, end.to, cross));
-            arc.to = cross;
-            strip_curves.push(datum_brep::CurveSpec { from: cross, ..end });
+            split_edges.push(split_arc(&mut strip_curves, bottom, cross).ok_or_else(bad)?);
         }
         crosses
     } else {
@@ -98,22 +94,7 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
     faces.extend((0..strip.faces().len()).filter(|&i| i != cap).map(|i| {
         let mut face = strip.face_spec(i as Ix);
         if root_cross.is_some() {
-            let boundary = &mut face.loops[0];
-            for &(from, to, cross) in &split_edges {
-                if let Some(i) = (0..boundary.len()).find(|&i| {
-                    let edge = [boundary[i], boundary[(i + 1) % boundary.len()]];
-                    edge == [from, to] || edge == [to, from]
-                }) {
-                    boundary.insert(i + 1, cross);
-                }
-            }
-            // The part of either side cap below the plate's top is internal. The lower
-            // part of the split arc belongs to the corresponding wall of the opening.
-            for (top, bottom) in [(top_left, bottom_left), (top_right, bottom_right)] {
-                if boundary.contains(&top) {
-                    boundary.retain(|&v| v != bottom);
-                }
-            }
+            trim_strip_face(&mut face, &split_edges, &[(top_left, bottom_left), (top_right, bottom_right)]);
         }
         face
     }));
@@ -152,6 +133,32 @@ pub(super) fn stitch(feature: TopoId, wall: &Body, strip: &Body, window: &Window
         faces.push(FaceSpec { id, surface, loops: vec![vec![upper[k], upper[next], lower[next], lower[k]]] });
     }
     Ok((build_with_curves(vertices, faces, curves)?, wall.faces()[bottom].id))
+}
+
+pub(super) fn split_arc(curves: &mut Vec<CurveSpec>, bottom: TopoId, cross: TopoId) -> Option<(TopoId, TopoId, TopoId)> {
+    let arc = curves.iter_mut().find(|arc| arc.from == bottom || arc.to == bottom)?;
+    let end = *arc;
+    arc.to = cross;
+    curves.push(CurveSpec { from: cross, ..end });
+    Some((end.from, end.to, cross))
+}
+
+/// Split the cylindrical edge and trim the buried part from the adjacent strip side.
+pub(super) fn trim_strip_face(face: &mut FaceSpec, splits: &[(TopoId, TopoId, TopoId)], roots: &[(TopoId, TopoId)]) {
+    let boundary = &mut face.loops[0];
+    for &(from, to, cross) in splits {
+        if let Some(i) = (0..boundary.len()).find(|&i| {
+            let edge = [boundary[i], boundary[(i + 1) % boundary.len()]];
+            edge == [from, to] || edge == [to, from]
+        }) {
+            boundary.insert(i + 1, cross);
+        }
+    }
+    for &(top, bottom) in roots {
+        if boundary.contains(&top) {
+            boundary.retain(|&v| v != bottom);
+        }
+    }
 }
 
 pub(super) fn wall_faces(

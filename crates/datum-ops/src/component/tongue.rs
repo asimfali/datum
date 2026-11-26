@@ -241,6 +241,7 @@ pub(crate) fn form(
                 wall,
                 face,
                 thickness: t,
+                radius: radius.filter(|_| forming.round_section).map(num).transpose()?,
                 frame: to_world,
                 axes: [x, width, z],
                 anchor,

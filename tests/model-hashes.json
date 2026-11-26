@@ -485,6 +485,12 @@
     "pocket": "a5cf4357502ca0a6d0758843ca25e3884e2c864bed2679b3ce2e8b022b037267",
     "pocket_sketch": "a0f71a762196d90768a8bd80916299b1165fff8b1d006f9fe1579181c8e48f1c"
   },
+  "stamp-slot-rounded.json": {
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "places": "3d9162bc3a0c3e30e0cfaa9c7506219562ed859642408a25aedc9b02ace1786d",
+    "plate": "7a21ef7b280c18b858ca405d01cff918e2690c3dae8256b182f37392473c5d06",
+    "stamp": "dacb4cad68e023828b58e9d4fecf93ae399aba239a2bfa110975f6b5580c97c9"
+  },
   "stamp-slot.json": {
     "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
     "places": "3d9162bc3a0c3e30e0cfaa9c7506219562ed859642408a25aedc9b02ace1786d",
