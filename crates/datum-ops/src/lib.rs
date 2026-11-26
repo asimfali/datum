@@ -38,7 +38,7 @@ use datum_math::{Rigid, Vec2, Vec3};
 pub use edge_finish::{EdgeMode, edge_finish_caps, edge_finish_face, edge_finish_targets};
 pub use flange::{
     BendPosition, BendRelief, Closing, Extent, FaceTarget, FlangeDims, FlangeLoop, Limit, Notch, Relief, WallTo, Width, flange_edges, flange_ends,
-    flange_loops, flanges,
+    flange_face_near, flange_loops, flanges,
 };
 pub use loft::{DEFAULT_LOFT_GAP, LoftDims, loft};
 pub use mirror::TurnAxis;

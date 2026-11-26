@@ -355,13 +355,102 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
     if !dims.width.is_edge() {
         return Err(BrepError::Unsupported("flange: a flange to a face narrower than its edge comes later".into()));
     }
+    let Some(c) = bend_to_face(target, e, face)? else {
+        return Err(BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()));
+    };
+    let (absolute, extension) = c.setback(target, face, dims.radius, dims.flush)?;
+    let recess_angle = (absolute > 0.0).then(|| 2.0 * libm::atan(absolute / (dims.radius + c.t)).to_degrees());
+    Ok((
+        FlangeDims {
+            height: dims.height,
+            along: false,
+            angle: c.a,
+            radius: dims.radius,
+            flip: c.flip,
+            round: dims.round,
+            corner: Closing::Open,
+            gap: dims.gap,
+            width: dims.width,
+            notch: dims.notch,
+            flush: false,
+            to: dims.to,
+            level: dims.level,
+            to_face: None,
+            recess_angle,
+        },
+        extension,
+    ))
+}
+
+/// The bend a flange on edge `e` of `target` makes to reach the flat face `face` (D305), if the
+/// sheet can turn to it: where the bend's side, its normal as it is met, its angle and the
+/// sheet's thickness are, and the end the bend stands on. None: the face lies in the sheet's own
+/// plane, or the bend cannot turn to it.
+struct FaceBend {
+    flip: bool,
+    /// The face's normal as it is met.
+    n: Vec3,
+    out: Vec3,
+    /// The angle, degrees.
+    a: f64,
+    /// The sheet's thickness.
+    t: f64,
+    base: Base,
+}
+
+impl FaceBend {
+    /// Where the wall's outer surface is `recess` behind the sheet's edge (D305): the point its
+    /// distance to the face's plane is measured at.
+    fn outer(&self, target: &Body, radius: f64, recess: f64) -> Result<Vec3, BrepError> {
+        let shape = Shape::at(target, &self.base, radius, self.a, recess)?;
+        Ok(shape.turned(target.point(self.base.outer[0]) - self.out * recess))
+    }
+
+    /// The bend set back so that the wall's outer surface is `gap` from the face's plane, and how
+    /// much the sheet's flat part is lengthened beyond its edge for the bend to stand there (0:
+    /// not); refused where the sheet gives no bend place (D305).
+    fn setback(&self, target: &Body, face: FaceTarget, radius: f64, flush: bool) -> Result<(f64, f64), BrepError> {
+        let base_recess = if flush { flush_recess(radius, self.t, self.a) } else { 0.0 };
+        let o0 = self.outer(target, radius, base_recess)?;
+        let d = (o0 - face.origin).dot(self.n);
+        // The gap is absolute: the wall's outer surface is set `gap` from the face's plane. The
+        // bend moves along the sheet's end normal, which moves that surface along the face's
+        // normal, so the setback it needs is `(d − gap) / (out·n)`. A negative one puts the bend
+        // beyond the sheet's edge: the flat part of the sheet is lengthened by that much, and the
+        // bend stands on the new edge (D305, the line where the sheet's outer surface meets the
+        // face's plane set `gap` off).
+        let shift = (d - face.gap) / self.out.dot(self.n);
+        let absolute = base_recess + shift;
+        if !absolute.is_finite() {
+            return Err(BrepError::Degenerate(format!("flange: a wall cannot be {} from the face: the sheet gives no bend place", face.gap)));
+        }
+        let extension = if absolute < 0.0 { -absolute } else { 0.0 };
+        // Moving away from the face sets the bend back into the sheet: it must stay short of the
+        // sheet's far end.
+        let end = target.point(self.base.inner[0]);
+        let mut extent: f64 = 0.0;
+        for (k, _) in target.vertices().iter().enumerate() {
+            extent = extent.max((end - target.point(k as u32)).dot(self.out));
+        }
+        if absolute >= extent {
+            return Err(BrepError::Degenerate(format!(
+                "flange: a wall cannot be {} from the face: the bend would lie beyond the sheet's far end",
+                face.gap
+            )));
+        }
+        Ok((absolute, extension))
+    }
+}
+
+/// The bend a flange on edge `e` of `target` needs to reach the flat face `face` (D305): its
+/// normal goes across the edge and the bend turns out of the sheet toward it (`sin a > 0`).
+fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<FaceBend>, BrepError> {
     let empty = BTreeSet::new();
     let f = unit(face.normal);
     // The base of the edge on either side of the sheet, each tried once: the face picks between
     // them.
-    let mut bases: [Option<Result<Base, BrepError>>; 2] = [None, None];
-    // A candidate: the side, the face's normal as it is met, the angle, the sheet's thickness, the
-    // bend's setback at its base, and the wall's outer surface from the face's plane.
+    let mut bases: [Option<Base>; 2] = [None, None];
+    // The best candidate: the side, the face's normal as it is met, the angle and the thickness.
     struct Candidate {
         flip: bool,
         n: Vec3,
@@ -369,17 +458,15 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
         up: Vec3,
         a: f64,
         t: f64,
-        base_recess: f64,
-        d: f64,
     }
     let mut best: Option<Candidate> = None;
     for sign in [1.0, -1.0] {
         let n = f * sign;
         for flip in [false, true] {
-            let base = match bases[usize::from(flip)].get_or_insert_with(|| base(target, e, flip, &empty)) {
-                Ok(base) => base,
-                Err(e) => return Err(e.clone()),
-            };
+            if bases[usize::from(flip)].is_none() {
+                bases[usize::from(flip)] = Some(base(target, e, flip, &empty)?);
+            }
+            let base = bases[usize::from(flip)].as_ref().ok_or_else(|| BrepError::Invalid("flange: the edge's base was not tried".into()))?;
             if !base.end {
                 return Err(BrepError::Unsupported("flange: a flange to a face on a wall's edge comes later".into()));
             }
@@ -403,9 +490,6 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
             if !(t.is_finite() && t > 0.0) {
                 continue;
             }
-            let base_recess = if dims.flush { flush_recess(dims.radius, t, a) } else { 0.0 };
-            let o0 = Shape::at(target, base, dims.radius, a, base_recess)?.turned(target.point(base.outer[0]) - out * base_recess);
-            let d = (o0 - face.origin).dot(n);
             // The side the bend turns toward the face: its `up` along the face's normal; a right
             // angle apart either way, the sheet's own front (not `flip`).
             let toward = up.dot(n);
@@ -417,63 +501,43 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
                 }
             };
             if better {
-                best = Some(Candidate { flip, n, out, up, a, t, base_recess, d });
+                best = Some(Candidate { flip, n, out, up, a, t });
             }
         }
     }
-    let Some(c) = best else {
-        return Err(BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()));
-    };
-    // The gap is absolute: the wall's outer surface is set `gap` from the face's plane. The bend
-    // moves along the sheet's end normal, which moves that surface along the face's normal, so the
-    // setback it needs is `(d − gap) / (out·n)`. A negative one puts the bend beyond the sheet's
-    // edge: the flat part of the sheet is lengthened by that much, and the bend stands on the new
-    // edge (D305, the line where the sheet's outer surface meets the face's plane set `gap` off).
-    let shift = (c.d - face.gap) / c.out.dot(c.n);
-    let absolute = c.base_recess + shift;
-    if !absolute.is_finite() {
-        return Err(BrepError::Degenerate(format!("flange: a wall cannot be {} from the face: the sheet gives no bend place", face.gap)));
+    let Some(c) = best else { return Ok(None) };
+    let base = bases[usize::from(c.flip)].take().ok_or_else(|| BrepError::Invalid("flange: the edge's base was not tried".into()))?;
+    Ok(Some(FaceBend { flip: c.flip, n: c.n, out: c.out, a: c.a, t: c.t, base }))
+}
+
+/// The nearest flat face of another body that a flange on edge `e` of `sheet` reaches (D305),
+/// among the bodies of `bodies` — their names, in the order the view shows them: one whose normal
+/// goes across the edge and that the bend can turn to, with the bend inside the sheet at the gap
+/// zero. The distance is from the middle of the end's outer edge to the face's plane; an equal one
+/// keeps the lower face ID.
+pub fn flange_face_near(sheet: &Body, e: TopoId, bodies: &[(&str, &Body)]) -> Option<(String, TopoId)> {
+    let mut best: Option<(f64, &str, TopoId)> = None;
+    for &(name, body) in bodies {
+        // The faces come in ID order: an equal distance keeps the lower.
+        for face in body.faces() {
+            let Surface::Plane(plane) = face.surface else { continue };
+            let target = FaceTarget { origin: plane.origin, normal: plane.normal, gap: 0.0 };
+            let Ok(Some(bend)) = bend_to_face(sheet, e, target) else { continue };
+            // The sheet's rule is not in the body: the bend's place is checked at no radius of its
+            // own, where the flange's build may still find it short of the sheet's far end (D305).
+            if bend.setback(sheet, target, 0.0, false).is_err() {
+                continue;
+            }
+            let [p, q] = bend.base.outer;
+            let middle = (sheet.point(p) + sheet.point(q)) * 0.5;
+            let d = (middle - plane.origin).dot(unit(plane.normal)).abs();
+            let better = best.is_none_or(|(was, _, id)| d.total_cmp(&was).then(face.id.cmp(&id)).is_lt());
+            if better {
+                best = Some((d, name, face.id));
+            }
+        }
     }
-    let extension = if absolute < 0.0 { -absolute } else { 0.0 };
-    // Moving away from the face sets the bend back into the sheet: it must stay short of the
-    // sheet's far end.
-    let base = match &bases[usize::from(c.flip)] {
-        Some(Ok(base)) => base,
-        Some(Err(e)) => return Err(e.clone()),
-        None => return Err(BrepError::Invalid("flange: the edge's base was not tried".into())),
-    };
-    let end = target.point(base.inner[0]);
-    let mut extent: f64 = 0.0;
-    for (k, _) in target.vertices().iter().enumerate() {
-        extent = extent.max((end - target.point(k as u32)).dot(c.out));
-    }
-    if absolute >= extent {
-        return Err(BrepError::Degenerate(format!(
-            "flange: a wall cannot be {} from the face: the bend would lie beyond the sheet's far end",
-            face.gap
-        )));
-    }
-    let recess_angle = (absolute > 0.0).then(|| 2.0 * libm::atan(absolute / (dims.radius + c.t)).to_degrees());
-    Ok((
-        FlangeDims {
-            height: dims.height,
-            along: false,
-            angle: c.a,
-            radius: dims.radius,
-            flip: c.flip,
-            round: dims.round,
-            corner: Closing::Open,
-            gap: dims.gap,
-            width: dims.width,
-            notch: dims.notch,
-            flush: false,
-            to: dims.to,
-            level: dims.level,
-            to_face: None,
-            recess_angle,
-        },
-        extension,
-    ))
+    best.map(|(_, name, id)| (name.to_string(), id))
 }
 
 /// Where the outer faces of the sheet and a flange turned `angle` degrees meet, set back from the

@@ -5,7 +5,7 @@
 
 use datum_brep::{Body, BrepError, Surface, TopoId};
 use datum_math::Vec3;
-use datum_ops::{Op, Value, flange_edges};
+use datum_ops::{Op, Value, flange_edges, flange_face_near};
 
 const T: f64 = 2.0;
 const R: f64 = 2.0;
@@ -38,9 +38,21 @@ fn flange_sheet() -> Body {
 /// Another sheet whose path plane goes through `q` at `degrees` to the horizontal, so its big
 /// face there is the target.
 fn target_sheet(q: [f64; 2], degrees: f64) -> Body {
+    target_sheet_named("b", q, degrees)
+}
+
+/// [`target_sheet`] named `tag` for its IDs: two alike in place, apart in ID.
+fn target_sheet_named(tag: &str, q: [f64; 2], degrees: f64) -> Body {
     let (s, c) = (libm::sin(degrees.to_radians()), libm::cos(degrees.to_radians()));
     let d = [c, s];
-    sheet("b", [q[0] - 30.0 * d[0], q[1] - 30.0 * d[1]], [q[0] + 30.0 * d[0], q[1] + 30.0 * d[1]], "left", "p2", 40.0)
+    sheet(tag, [q[0] - 30.0 * d[0], q[1] - 30.0 * d[1]], [q[0] + 30.0 * d[0], q[1] + 30.0 * d[1]], "left", "p2", 40.0)
+}
+
+/// A round post along `Z` at `center` (a cylinder's flat caps are along the flange's edge).
+fn post(center: [f64; 2], diameter: f64, z1: f64) -> Body {
+    let sketch = serde_json::json!({"points": {"h": center}, "circles": {"c": {"center": "h", "diameter": diameter}}});
+    let p = op(serde_json::json!({"op": "sketch", "sketch": sketch})).eval(id("post.sketch"), &[]).unwrap();
+    op(serde_json::json!({"op": "extrude", "z0": 0.0, "z1": z1})).eval(id("post"), &[&p]).unwrap().body().unwrap().clone()
 }
 
 /// The ID of the largest flat face of `b` whose plane contains `q`.
@@ -587,4 +599,58 @@ fn an_unfold_has_the_derived_bend() {
         .eval(id("flat"), &[&Value::Body(out.clone())])
         .unwrap();
     assert!(flat.flat().is_some());
+}
+
+/// The end of `a` as the search takes it.
+fn end_of(a: &Body) -> TopoId {
+    TopoId::parse(&end_edge(a, 0.0)).unwrap()
+}
+
+#[test]
+fn the_nearest_face_of_another_body_is_taken() {
+    let a = flange_sheet();
+    let near = target_sheet([10.0, 37.0], 90.0);
+    let far = target_sheet_named("far", [40.0, 37.0], 90.0);
+    // The bodies come in the view's order; the nearer face wins over it.
+    let (name, face) = flange_face_near(&a, end_of(&a), &[("far", &far), ("near", &near)]).unwrap();
+    assert_eq!(name, "near");
+    // A flat face across the edge, not the target's end along it.
+    let plane = near.faces().iter().find(|f| f.id == face).unwrap().surface.plane().copied().unwrap();
+    assert!(plane.normal.x.abs() > 0.99, "{plane:?}");
+    // The flange on that face is made: the nearest is a face the bend reaches.
+    let (out, ..) = reach_edge(&a, &near, &end_edge(&a, 0.0), &format!("{face:?}"), 0.0, serde_json::json!({})).unwrap();
+    out.validate().unwrap();
+}
+
+#[test]
+fn a_face_the_bend_cannot_reach_is_skipped() {
+    let a = flange_sheet();
+    // Behind the sheet's far end: the bend would lie past it.
+    let behind = target_sheet_named("behind", [-150.0, 37.0], 90.0);
+    assert_eq!(flange_face_near(&a, end_of(&a), &[("behind", &behind)]), None);
+    let ahead = target_sheet([10.0, 37.0], 90.0);
+    assert_eq!(flange_face_near(&a, end_of(&a), &[("behind", &behind), ("ahead", &ahead)]).unwrap().0, "ahead");
+}
+
+#[test]
+fn a_face_along_the_edge_is_no_face_to_reach() {
+    let a = flange_sheet();
+    // A round post's flat caps are along the edge, its side round: no face across the edge.
+    let post = post([10.0, 37.0], 20.0, 40.0);
+    assert_eq!(flange_face_near(&a, end_of(&a), &[("post", &post)]), None);
+    let plate = target_sheet([10.0, 37.0], 90.0);
+    assert_eq!(flange_face_near(&a, end_of(&a), &[("post", &post), ("plate", &plate)]).unwrap().0, "plate");
+}
+
+#[test]
+fn an_equal_distance_keeps_the_lower_face_id() {
+    let a = flange_sheet();
+    let b1 = target_sheet_named("b1", [10.0, 37.0], 90.0);
+    let b2 = target_sheet_named("b2", [10.0, 37.0], 90.0);
+    let alone = |b: &Body, name: &str| flange_face_near(&a, end_of(&a), &[(name, b)]).unwrap().1;
+    let (f1, f2) = (alone(&b1, "b1"), alone(&b2, "b2"));
+    let first = flange_face_near(&a, end_of(&a), &[("b1", &b1), ("b2", &b2)]).unwrap();
+    let second = flange_face_near(&a, end_of(&a), &[("b2", &b2), ("b1", &b1)]).unwrap();
+    assert_eq!(first, second, "the order of the bodies does not decide");
+    assert_eq!(first.1, f1.min(f2), "the same distance keeps the lower face ID");
 }

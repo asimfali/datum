@@ -330,6 +330,9 @@ struct Model {
     /// The feature each body of the scene is of, and the feature that began it: its part's key.
     bodies: Vec<String>,
     begun: Vec<String>,
+    /// The bodies by feature — the scene's and what a preview takes in (D305) — for a form to
+    /// look a face of one up.
+    solids: Vec<(String, datum_graph::ValueRef)>,
     /// The flat blanks of what the level worked in makes, by feature, or why there is none (D164).
     flats: Vec<(String, Result<Arc<datum_ops::Flat>, String>)>,
     /// The sketch being edited (left out of the scene: the window draws it) and its context.
@@ -394,6 +397,7 @@ struct Picture {
     geometry: Arc<Geometry>,
     bodies: Vec<String>,
     begun: Vec<String>,
+    solids: Vec<(String, datum_graph::ValueRef)>,
     editing: Option<(String, Context)>,
     inspect: Json,
     spots: Vec<(Json, datum_math::Vec3)>,
@@ -596,7 +600,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             (*command == "add" && params["op"] == "edge_finish")
                 || (*command == "edit" && base.edit.as_ref().is_some_and(|(name, _)| params["name"] == *name))
         });
-        let (picture, preview) = match &previewing {
+        let (mut picture, preview) = match &previewing {
             None => (committed(&session, &mut meshes), None),
             Some((command, params)) => match session.trial(command, params, |s, reply| (picture(s, &mut meshes), reply.clone())) {
                 Ok((p, reply)) => {
@@ -607,8 +611,14 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 Err(e) => (committed(&session, &mut meshes), Some((params.clone(), Err(e)))),
             },
         };
+        // What a preview takes in is shown as its result, not itself: a flange form looks a face
+        // of one of them up by its body (D305), so they come too.
+        if let Some((params, _)) = &preview {
+            preview_bodies(&session, &params["inputs"], &mut picture);
+        }
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } = picture;
+        let Picture { scene, geometry, bodies, begun, solids, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } =
+            picture;
         let forming_edit =
             forming_edit.as_ref().and_then(|(component, sketch)| Some((component.clone(), session.forming_sketch(component, sketch)?)));
         if models
@@ -626,6 +636,7 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 scene_ms,
                 bodies,
                 begun,
+                solids,
                 flats,
                 editing: context,
                 forming_edit,
@@ -758,6 +769,9 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         .collect();
     let finals: Vec<&datum_graph::Value> = shown.iter().map(|(_, v)| *v).collect();
     let bodies: Vec<String> = shown.iter().filter(|(_, v)| v.body().is_some()).map(|(n, _)| n.to_string()).collect();
+    // The bodies by feature, as a form looking a face up finds them (D305).
+    let solids: Vec<(String, datum_graph::ValueRef)> =
+        bodies.iter().filter_map(|n| Some((n.clone(), evaluation.results[graph.find(n)? as usize].as_ref().ok()?.clone()))).collect();
     let chains = datum_model::levels::bodies(graph);
     let begun = bodies.iter().map(|b| chains.iter().find(|(_, last)| last == b).map_or_else(|| b.clone(), |(first, _)| first.clone())).collect();
     let around: Vec<datum_graph::ValueRef> = product
@@ -838,7 +852,24 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         })
         .collect();
     let uses = using.and_then(|name| crate::uses::uses(graph, evaluation, name, meshes));
-    Picture { scene, geometry, bodies, begun, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours }
+    Picture { scene, geometry, bodies, begun, solids, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours }
+}
+
+/// The bodies a preview takes in, which it shows as its result: a form looking up a face of one of
+/// them gets it as the picture hands it the rest (D305).
+fn preview_bodies(session: &Session, inputs: &Json, picture: &mut Picture) {
+    let (graph, evaluation) = (session.graph(), session.evaluation());
+    for name in inputs.as_array().into_iter().flatten().filter_map(Json::as_str) {
+        if picture.solids.iter().any(|(s, _)| s == name) {
+            continue;
+        }
+        if let Some(i) = graph.find(name)
+            && let Ok(v) = &evaluation.results[i as usize]
+            && v.body().is_some()
+        {
+            picture.solids.push((name.to_string(), v.clone()));
+        }
+    }
 }
 
 /// The features the view shows: what the model ends in, but the sketch being edited (the window
@@ -1173,8 +1204,8 @@ struct FlangeForm {
     /// The body and the flat face of it the flange reaches (D305): the body's feature and the
     /// face's ID. None: the wall goes by its height and angle.
     face: Option<(String, String)>,
-    /// The flange reaches that face (D305): the wall's angle and cross place come from it. Checked
-    /// before a face is picked, nothing is previewed.
+    /// The flange reaches that face (D305): the wall's angle and cross place come from it. Checked,
+    /// the nearest face of another body is taken by itself; with none, nothing is previewed.
     reaches: bool,
     /// The gap from that face to the wall's outer surface, as typed (D305): absolute, zero touches.
     gap: String,
@@ -1257,6 +1288,22 @@ fn wall_edge_label<'a>(i18n: &'a crate::i18n::I18n, e: &str) -> &'a str {
         "end" => i18n.t("flange-to-end", "Wall's end"),
         _ => i18n.t("flange-to-top", "Wall's free edge"),
     }
+}
+
+/// The nearest flat face of another body a flange on the edge picked reaches (D305), as the form
+/// says one: the sheet is the body of that edge, the others are the bodies of the picture in the
+/// order it shows them, the sheet and the flange's own result left out.
+fn nearest_face(edges: &[(String, datum_brep::TopoId)], model: Option<&Model>, flange: &str) -> Option<(String, String)> {
+    let (sheet_name, edge) = edges.first()?;
+    let m = model?;
+    let body = |n: &str| m.solids.iter().find(|(s, _)| s == n).and_then(|(_, v)| v.body());
+    let sheet = body(sheet_name)?;
+    // The others in the order the scene shows them: the sheet is no body to reach a face of, and
+    // neither is what the form previews.
+    let others: Vec<(&str, &datum_brep::Body)> =
+        m.bodies.iter().filter(|n| n.as_str() != sheet_name && n.as_str() != flange).filter_map(|n| Some((n.as_str(), body(n)?))).collect();
+    let (name, face) = datum_ops::flange_face_near(sheet, *edge, &others)?;
+    Some((name, format!("{face:?}")))
 }
 
 /// How much of its edge a flange takes (D229), as the feature says it.
@@ -6274,7 +6321,7 @@ impl Viewer {
                     }
                 });
                 // The face of another body the flange reaches (D305): its angle and cross place
-                // come from it; the face is picked in the picture.
+                // come from it; the nearest one is taken, the picture or the button picks another.
                 ui.horizontal(|ui| {
                     let changed = ui.checkbox(&mut f.reaches, self.i18n.t("flange-to-face", "Reach a face of another body")).changed();
                     if changed {
@@ -6285,8 +6332,9 @@ impl Viewer {
                             // One edge to a face: no width to take, no corner to close.
                             f.extent = "edge";
                             f.corner = "open";
-                            // A face just asked for is picked at once; the button re-picks one (D305).
-                            pick = true;
+                            // The nearest face of another body the flange can reach: shown at
+                            // once; the picture or the button picks another (D305).
+                            f.face = nearest_face(&d.flange_edges, d.model.as_ref(), &f.name);
                         }
                     }
                     if f.reaches {
@@ -8780,6 +8828,7 @@ mod tests {
                 scene_ms: 0.0,
                 bodies: Vec::new(),
                 begun: Vec::new(),
+                solids: Vec::new(),
                 flats: Vec::new(),
                 editing: None,
                 forming_edit: None,
@@ -8842,6 +8891,15 @@ mod tests {
             blank_fitted: false,
         };
         (doc, inbox)
+    }
+
+    /// The bodies of reference model `model` by feature, as the picture hands them to a form (D305).
+    fn solids_of(model: &str, names: &[&str]) -> Vec<(String, datum_graph::ValueRef)> {
+        let mut session = Session::default();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models").join(model);
+        session.execute("open", &json!({"path": path.display().to_string()})).unwrap();
+        let (graph, evaluation) = (session.graph(), session.evaluation());
+        names.iter().map(|n| (n.to_string(), evaluation.results[graph.find(n).unwrap() as usize].as_ref().unwrap().clone())).collect()
     }
 
     /// A viewer showing reference model `model`, and the requests it sends.
@@ -12099,19 +12157,50 @@ mod tests {
         assert_eq!(d.flange_edges, ends, "the ends stay");
     }
 
-    /// A flange form reaching a face previews nothing until one is picked; then the body is its
-    /// second input and the angle a right one (D305).
+    /// A flange form turned to a face takes the nearest face of another body by itself: the form
+    /// shows it and previews at once, the body after the sheet, the angle a right one (D305).
     #[test]
-    fn a_flange_to_a_face_waits_for_the_face() {
+    fn a_flange_to_a_face_takes_the_nearest_face() {
         let (mut v, inbox) = viewer("symmetric_plate.json");
-        v.docs[v.active].flange_edges = vec![("plate".into(), datum_brep::TopoId(0xab))];
+        // The picture of the two bodies: the harness's fixture holds none; the sheet is its own
+        // (a preview shows its result, not it).
+        let m = v.docs[0].model.as_mut().unwrap();
+        (m.bodies, m.solids) = (vec!["sheet1".into()], solids_of("flange-to-face.json", &["sheet2", "sheet1"]));
+        // The end the model's own flange reaches a face of `sheet1` from.
+        let edge = datum_brep::TopoId::parse("17206c597981549f936005f253d53241").unwrap();
+        v.docs[v.active].flange_edges = vec![("sheet2".into(), edge)];
         v.open_flange();
         let mut h = form_harness(v);
         h.run();
         inbox.try_iter().for_each(drop);
         h.get_by_label("Reach a face of another body").click();
         h.run();
-        assert!(h.state().docs[h.state().active].flange.as_ref().unwrap().reaches);
+        let form = h.state().docs[h.state().active].flange.as_ref().unwrap();
+        assert!(form.reaches);
+        // The face the model's own flange reaches there.
+        assert_eq!(form.face, Some(("sheet1".to_string(), "221cb04492bc43285fa46a76f3d3f05a".to_string())), "the nearest face is taken");
+        let want = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).last();
+        let want = want.expect("a preview of the face taken");
+        assert_eq!((&want["inputs"], &want["to_face"]["from"], &want["angle"]), (&json!(["sheet2", "sheet1"]), &json!("sheet1"), &json!(90.0)));
+    }
+
+    /// With no face of another body to reach, the form waits for one to be picked; then the body
+    /// is its second input and the angle a right one (D305).
+    #[test]
+    fn a_flange_to_a_face_waits_with_no_face_to_reach() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        // The sheet alone: no other body in the picture to reach.
+        v.docs[0].model.as_mut().unwrap().solids = solids_of("flange-to-face.json", &["sheet2"]);
+        let edge = datum_brep::TopoId::parse("17206c597981549f936005f253d53241").unwrap();
+        v.docs[v.active].flange_edges = vec![("sheet2".into(), edge)];
+        v.open_flange();
+        let mut h = form_harness(v);
+        h.run();
+        inbox.try_iter().for_each(drop);
+        h.get_by_label("Reach a face of another body").click();
+        h.run();
+        let form = h.state().docs[h.state().active].flange.as_ref().unwrap();
+        assert!(form.reaches && form.face.is_none(), "no face is taken by itself");
         assert!(inbox.try_iter().all(|r| !matches!(r, Request::Preview(Some(_)))), "nothing to preview before a face");
         h.get_by_label("no face picked");
         // The face picked, the flange reaches it: the body comes after the sheet.
@@ -12119,7 +12208,7 @@ mod tests {
         h.run();
         let want = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).last();
         let want = want.expect("a preview");
-        assert_eq!((&want["inputs"], &want["to_face"]["from"], &want["angle"]), (&json!(["plate", "target"]), &json!("target"), &json!(90.0)));
+        assert_eq!((&want["inputs"], &want["to_face"]["from"], &want["angle"]), (&json!(["sheet2", "target"]), &json!("target"), &json!(90.0)));
     }
 
     /// Esc while a face is picked for the flange form keeps the form and the ends it stands on
@@ -12406,6 +12495,20 @@ mod tests {
         // The whole skeleton in the view: its middle in the middle, all of it within the height.
         assert_eq!(sk.camera.center, [200.0, 150.0]);
         assert!(sk.camera.half_height >= 200.0, "{}", sk.camera.half_height);
+    }
+
+    /// A preview shows what it makes, not the bodies it takes: the picture hands those along too,
+    /// for a flange form to look a face up on one (D305).
+    #[test]
+    fn a_preview_hands_the_bodies_it_takes() {
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/flange-to-face.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let mut p = picture(&session, None, None, &mut MeshCache::default());
+        assert!(!p.bodies.iter().any(|b| b == "sheet2"), "the flange shows the sheet as its result: {:?}", p.bodies);
+        preview_bodies(&session, &json!(["sheet2", "sheet1"]), &mut p);
+        assert!(p.solids.iter().any(|(n, _)| n == "sheet2"), "the sheet the flange takes comes along");
+        assert_eq!(p.solids.iter().filter(|(n, _)| n == "sheet1").count(), 1, "a body shown once is not twice");
     }
 
     /// Surroundings are listed after the parts, hidden as parts are and kept in sets (D247).
