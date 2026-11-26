@@ -1,0 +1,74 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "sketch1",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [
+          {"line": "l1", "type": "length", "value": 100.0},
+          {"line": "l2", "type": "horizontal"},
+          {"degrees": 45.0, "lines": ["l2", "l1"], "type": "angle"}
+        ],
+        "lines": {
+          "l1": {"from": "origin", "to": "p1"},
+          "l2": {"construction": true, "from": "origin", "to": "p2"}
+        },
+        "points": {
+          "p1": [85.40243016445318, 52.02331133257183],
+          "p2": [24.407478190234883, 0.0]
+        }
+      }
+    },
+    {
+      "name": "sheet1",
+      "op": "sheet",
+      "inputs": ["sketch1"],
+      "thickness": 2,
+      "radius": 2,
+      "path": "l1",
+      "side": "left",
+      "start": "p1",
+      "z0": 0.0,
+      "z1": 50.0
+    },
+    {
+      "name": "sketch2",
+      "op": "sketch",
+      "sketch": {
+        "constraints": [{"line": "l1", "type": "horizontal"}],
+        "lines": {"l1": {"from": "p1", "to": "p2"}},
+        "points": {
+          "p1": [-62.64616890505148, 36.99707274014928],
+          "p2": [35.8050347760726, 36.99707274014928]
+        }
+      }
+    },
+    {
+      "name": "sheet2",
+      "op": "sheet",
+      "inputs": ["sketch2"],
+      "thickness": 2,
+      "radius": 2,
+      "path": "l1",
+      "side": "right",
+      "start": "p2",
+      "z0": 0.0,
+      "z1": 30.0
+    },
+    {
+      "name": "flange1",
+      "op": "flange",
+      "inputs": ["sheet2", "sheet1"],
+      "edges": ["17206c597981549f936005f253d53241"],
+      "height": 20,
+      "radius": 2,
+      "bend_position": "flush",
+      "to_face": {
+        "face": "221cb04492bc43285fa46a76f3d3f05a",
+        "from": "sheet1",
+        "gap": 0.0
+      }
+    }
+  ]
+}

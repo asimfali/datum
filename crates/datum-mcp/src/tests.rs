@@ -357,6 +357,36 @@ fn rename_follows_into_a_sheet() {
     assert!(tool(&mut s, "execute", json!({"command": "rename_in_sketch", "params": {"name": "path", "from": "b", "to": "origin"}})).0);
 }
 
+/// A flange reaches a flat face of another body (D305): `add` resolves the body named in
+/// `to_face.from`, and an `edit` keeps it an input and rebuilds.
+#[test]
+fn a_flange_reaches_a_face() {
+    let mut s = Server::default();
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/flange-to-face.json")).unwrap();
+    for f in model["features"].as_array().unwrap() {
+        let r = execute(&mut s, "add", f.clone());
+        assert_eq!(r["failed"], json!([]), "{}: {r}", f["name"]);
+    }
+    let before = tool(&mut s, "mass_properties", json!({"name": "flange1"})).1;
+    // Another height: the wall is longer, and the body it reaches stays an input.
+    let r = execute(&mut s, "edit", json!({"name": "flange1", "height": 30}));
+    assert_eq!(r["failed"], json!([]), "{r}");
+    let after = tool(&mut s, "mass_properties", json!({"name": "flange1"})).1;
+    assert_ne!(before["volume"], after["volume"]);
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "flange1")["inputs"], json!(["sheet2", "sheet1"]));
+    assert_eq!(feature(&m, "flange1")["to_face"]["from"], "sheet1");
+    // Clearing the mode: an edit with `to_face: null` drops the body from the inputs and builds
+    // the wall by `height` and `angle` again.
+    let r = execute(&mut s, "edit", json!({"name": "flange1", "to_face": null}));
+    assert_eq!(r["failed"], json!([]), "{r}");
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "flange1")["inputs"], json!(["sheet2"]));
+    assert!(feature(&m, "flange1")["to_face"].is_null());
+    let cleared = tool(&mut s, "mass_properties", json!({"name": "flange1"})).1;
+    assert!(cleared["volume"].as_f64().unwrap() > 0.0);
+}
+
 /// Each change is one step back; a command that fails changes nothing.
 #[test]
 fn undo_redo_and_whole_commands() {

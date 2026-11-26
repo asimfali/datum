@@ -226,6 +226,8 @@ enum Purpose {
     Plane,
     /// Ends of sheet metal a flange stands on (D205).
     Flange,
+    /// The flat face of another body a flange reaches (D305).
+    FlangeFace,
     /// A work plane a rolled sheet is trimmed by.
     Trim,
     /// The plane or plane face a part is mirrored across (D247).
@@ -1142,7 +1144,8 @@ struct Viewer {
 }
 
 /// The form of a flange: its name, height and angle as typed, the side, whether corners where
-/// flanges meet get round reliefs and how their walls close them (D229), the preview sent last.
+/// flanges meet get round reliefs and how their walls close them (D229), the face of another body
+/// it reaches (D305), the preview sent last.
 struct FlangeForm {
     name: String,
     height: String,
@@ -1167,6 +1170,14 @@ struct FlangeForm {
     /// The work plane each edge of the wall goes to (none: it stays where it is) and the gap short
     /// of it (D229), for each of [`WALL_EDGES`].
     to: [(String, String); 3],
+    /// The body and the flat face of it the flange reaches (D305): the body's feature and the
+    /// face's ID. None: the wall goes by its height and angle.
+    face: Option<(String, String)>,
+    /// The flange reaches that face (D305): the wall's angle and cross place come from it. Checked
+    /// before a face is picked, nothing is previewed.
+    reaches: bool,
+    /// The gap from that face to the wall's outer surface, as typed (D305): absolute, zero touches.
+    gap: String,
     /// The height is typed over at once, the first frame only.
     fresh: bool,
     sent: Option<Json>,
@@ -1188,13 +1199,30 @@ impl FlangeForm {
         };
         let mut to = json!({});
         for (edge, (plane, gap)) in WALL_EDGES.into_iter().zip(&self.to) {
-            if !plane.is_empty() {
+            // The face the wall reaches sets where its free edge goes (D305): `to.top` is refused.
+            if !plane.is_empty() && !(self.reaches && edge == "top") {
                 to[edge] = json!({"plane": plane, "gap": if gap.trim().is_empty() { json!(0.0) } else { value_of(gap) }});
             }
         }
-        json!({"name": self.name, "height": value_of(&self.height), "height_along": self.along, "angle": value_of(&self.angle), "flip": self.flip,
+        let mut j = json!({"name": self.name, "height": value_of(&self.height), "flip": self.flip,
             "relief": if self.round { "round" } else { "square" }, "corner": self.corner, "level_walls": self.level, "extent": extent, "bend_relief": self.bend,
-            "bend_position": if self.flush { "flush" } else { "outside" }, "to": to})
+            "bend_position": if self.flush { "flush" } else { "outside" }, "to": to});
+        if self.reaches {
+            // The face gives the angle and the cross place (D305): no `height_along`, a right angle.
+            let (body, face) = self.face.as_ref().map_or(("", ""), |(b, x)| (b.as_str(), x.as_str()));
+            j["height_along"] = json!(false);
+            j["angle"] = json!(90.0);
+            j["to_face"] = json!({"face": face, "from": body,
+                "gap": if self.gap.trim().is_empty() { json!(0.0) } else { value_of(&self.gap) }});
+        } else {
+            j["height_along"] = json!(self.along);
+            j["angle"] = json!(value_of(&self.angle));
+            // Null clears it on an edit that goes back to the height and angle.
+            if self.editing {
+                j["to_face"] = Json::Null;
+            }
+        }
+        j
     }
 
     /// The `flange` feature the form makes on edges `edges` of body `body`.
@@ -1202,10 +1230,16 @@ impl FlangeForm {
         let mut j = self.fields();
         j["op"] = json!("flange");
         let mut inputs = vec![body];
-        for (plane, _) in &self.to {
-            if !plane.is_empty() && !inputs.contains(&plane.as_str()) {
+        for (edge, (plane, _)) in WALL_EDGES.into_iter().zip(&self.to) {
+            if !plane.is_empty() && !(self.reaches && edge == "top") && !inputs.contains(&plane.as_str()) {
                 inputs.push(plane);
             }
+        }
+        // The body whose face the flange reaches is an input too, after the sheet (D305).
+        if let Some((from, _)) = &self.face
+            && !inputs.contains(&from.as_str())
+        {
+            inputs.push(from);
         }
         j["inputs"] = json!(inputs);
         j["edges"] = json!(edges);
@@ -4766,6 +4800,12 @@ impl Viewer {
                     tint(*face, body, 150);
                 }
             }
+            // The face of another body the open form reaches (D305).
+            if let Some((feature, face)) = self.docs[self.active].flange.as_ref().and_then(|f| f.face.as_ref())
+                && let (Some(body), Some(face)) = (m.bodies.iter().position(|b| b == feature), datum_brep::TopoId::parse(face))
+            {
+                tint(face, body, 150);
+            }
         }
         if let Some(Under::Face(f)) = self.docs[self.active].under.filter(|_| !sketched) {
             for &edge in &self.docs[self.active].contour {
@@ -4809,6 +4849,12 @@ impl Viewer {
             }
             for (_, square) in self.work_planes().iter().filter(|(n, _)| u.planes.contains(n)) {
                 crate::origin::paint(&painter, clip, screen, std::slice::from_ref(square), size, Some(0), true);
+            }
+            // The faces it reaches of other bodies (D305).
+            for (feature, face) in &u.faces {
+                if let Some(body) = m.bodies.iter().position(|b| b == feature) {
+                    tint(*face, body, 150);
+                }
             }
         }
         if (self.docs[self.active].picking.is_some() || self.waits_for_sketch())
@@ -4854,6 +4900,7 @@ impl Viewer {
                     "flange-pick",
                     "Click edges of the sheet for flanges, or a face for all its contour · Shift or Ctrl adds or removes · Enter: the flange · Esc: cancel",
                 ),
+                Purpose::FlangeFace => self.i18n.t("flange-face-pick-hint", "Click the flat face of the body the flange reaches · Esc: cancel"),
                 Purpose::Trim => "Click the work plane to trim the sheet by · Esc: cancel",
                 Purpose::Mirror => self.i18n.t("mirror-pick-plane", "Click the plane or plane face to mirror the part across · Esc: cancel"),
                 Purpose::Branch => {
@@ -5043,9 +5090,12 @@ impl Viewer {
                 chosen = Some((purpose, Under::Origin(crate::origin::FIRST)));
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                // Ends picked stay when a face of the flange's target was being picked (D305).
+                if purpose == Purpose::Flange {
+                    d.flange_edges.clear();
+                }
                 d.picking = None;
                 d.plane_points.clear();
-                d.flange_edges.clear();
                 d.branch_main = None;
             } else if d.picking == Some(Purpose::Flange) && !d.flange_edges.is_empty() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.open_flange();
@@ -5117,6 +5167,15 @@ impl Viewer {
                 crate::select::click(&mut self.docs[self.active].flange_edges, picks, adding);
             }
             Some((Purpose::Flange, _)) => {}
+            // A face of another body for the open flange form to reach (D305).
+            Some((Purpose::FlangeFace, Under::Face(f))) => {
+                let Some(feature) = body(self, f) else { return };
+                self.docs[self.active].picking = None;
+                if let Some(g) = self.docs[self.active].flange.as_mut() {
+                    g.face = Some((feature, format!("{:?}", f.face)));
+                }
+            }
+            Some((Purpose::FlangeFace, _)) => {}
             Some((Purpose::Trim, Under::Work(k))) => self.open_trim(work[k].0.clone()),
             Some((Purpose::Trim, _)) => {}
             Some((Purpose::Mirror, under)) => {
@@ -5637,6 +5696,9 @@ impl Viewer {
                             if to["gap"].is_null() { String::new() } else { definition(&to["gap"]) },
                         )
                     }),
+                    face: f["to_face"]["from"].as_str().zip(f["to_face"]["face"].as_str()).map(|(b, x)| (b.to_string(), x.to_string())),
+                    reaches: !f["to_face"].is_null(),
+                    gap: if f["to_face"]["gap"].is_null() { String::new() } else { definition(&f["to_face"]["gap"]) },
                     fresh: true,
                     sent: None,
                     editing: true,
@@ -6142,6 +6204,9 @@ impl Viewer {
             from_end: false,
             bend: "none",
             to: Default::default(),
+            face: None,
+            reaches: false,
+            gap: String::new(),
             fresh: true,
             sent: None,
             editing: false,
@@ -6165,6 +6230,9 @@ impl Viewer {
         let note = self.uses_note();
         let d = &mut self.docs[self.active];
         let Some(f) = &mut d.flange else { return };
+        let picking = d.picking == Some(Purpose::FlangeFace);
+        // Reaching a face needs the face picked before anything is previewed (D305).
+        let ready = !f.reaches || f.face.is_some();
         let edges: Vec<String> = d.flange_edges.iter().map(|(_, id)| format!("{id:?}")).collect();
         let (command, params) = match d.flange_edges.first() {
             _ if f.editing => {
@@ -6181,9 +6249,10 @@ impl Viewer {
             }
         };
         // The preview of what the form says now; until it comes, none.
-        let preview = d.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r);
+        let preview = if ready { d.model.as_ref().and_then(|m| m.preview.as_ref()).filter(|(p, _)| *p == params).map(|(_, r)| r) } else { None };
         let ok = preview.is_some_and(Result::is_ok);
         let (mut add, mut cancel) = (false, false);
+        let mut pick = false;
         egui::Window::new(self.i18n.label(Act::Flange))
             .collapsible(false)
             .resizable(false)
@@ -6204,17 +6273,48 @@ impl Viewer {
                         r.request_focus();
                     }
                 });
-                ui.checkbox(&mut f.along, self.i18n.t("flange-height-along", "Height along the flange"));
+                // The face of another body the flange reaches (D305): its angle and cross place
+                // come from it; the face is picked in the picture.
                 ui.horizontal(|ui| {
-                    ui.label(self.i18n.t("flange-angle", "Angle"));
-                    ui.add(
-                        egui::TextEdit::singleline(&mut f.angle)
-                            .desired_width(120.0)
-                            .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
-                    );
+                    let changed = ui.checkbox(&mut f.reaches, self.i18n.t("flange-to-face", "Reach a face of another body")).changed();
+                    if changed {
+                        // Off, no face; on, the wall's free edge is the face's, not a plane's.
+                        f.face = None;
+                        f.to[2].0.clear();
+                        if f.reaches {
+                            // One edge to a face: no width to take, no corner to close.
+                            f.extent = "edge";
+                            f.corner = "open";
+                        }
+                    }
+                    if f.reaches {
+                        let shown = f.face.as_ref().map_or_else(
+                            || self.i18n.t("flange-face-none", "no face picked").to_string(),
+                            |(body, _)| format!("{}: {body}", self.i18n.t("flange-face-body", "body")),
+                        );
+                        ui.label(shown);
+                        pick = ui.button(self.i18n.t("flange-face-pick", "Pick a face")).clicked();
+                    }
                 });
-                if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
-                    f.flip = !f.flip;
+                if f.reaches {
+                    let hint = self.i18n.t("plane-offset-hint", "number or formula");
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("flange-to-gap", "Gap"));
+                        ui.add(egui::TextEdit::singleline(&mut f.gap).desired_width(60.0).hint_text(hint));
+                    });
+                } else {
+                    ui.checkbox(&mut f.along, self.i18n.t("flange-height-along", "Height along the flange"));
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("flange-angle", "Angle"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut f.angle)
+                                .desired_width(120.0)
+                                .hint_text(self.i18n.t("plane-offset-hint", "number or formula")),
+                        );
+                    });
+                    if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
+                        f.flip = !f.flip;
+                    }
                 }
                 // Where the bend lies against the edge (D229): beyond it, or flush with it.
                 ui.horizontal(|ui| {
@@ -6229,46 +6329,53 @@ impl Viewer {
                     ui.radio_value(&mut f.round, false, self.i18n.t("flange-relief-square", "Square"));
                     ui.radio_value(&mut f.round, true, self.i18n.t("flange-relief-round", "Round"));
                 });
-                // How much of the edge: as Inventor's width extents.
-                ui.horizontal(|ui| {
-                    ui.label(self.i18n.t("flange-extent", "Width"));
-                    egui::ComboBox::from_id_salt("flange-extent").selected_text(extent_label(&self.i18n, f.extent)).show_ui(ui, |ui| {
-                        for e in EXTENTS {
-                            ui.selectable_value(&mut f.extent, e, extent_label(&self.i18n, e));
+                // How much of the edge: as Inventor's width extents. A face to reach takes all of
+                // one edge (D305).
+                ui.add_enabled_ui(!f.reaches, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("flange-extent", "Width"));
+                        egui::ComboBox::from_id_salt("flange-extent").selected_text(extent_label(&self.i18n, f.extent)).show_ui(ui, |ui| {
+                            for e in EXTENTS {
+                                ui.selectable_value(&mut f.extent, e, extent_label(&self.i18n, e));
+                            }
+                        });
+                    });
+                    let hint = self.i18n.t("plane-offset-hint", "number or formula");
+                    let field = |ui: &mut egui::Ui, label: &str, text: &mut String| {
+                        ui.horizontal(|ui| {
+                            ui.label(label);
+                            ui.add(egui::TextEdit::singleline(text).desired_width(120.0).hint_text(hint));
+                        });
+                    };
+                    match f.extent {
+                        "center" => field(ui, self.i18n.t("flange-width", "Width of the flange"), &mut f.a),
+                        "offset" => {
+                            field(ui, self.i18n.t("flange-offset", "Offset"), &mut f.a);
+                            field(ui, self.i18n.t("flange-width", "Width of the flange"), &mut f.b);
+                            ui.checkbox(&mut f.from_end, self.i18n.t("flange-from-end", "From the other end"));
                         }
-                    });
+                        "between" => {
+                            field(ui, self.i18n.t("flange-offset-1", "Offset 1"), &mut f.a);
+                            field(ui, self.i18n.t("flange-offset-2", "Offset 2"), &mut f.b);
+                        }
+                        _ => {}
+                    }
+                    // Narrower than its edge: the slot beside its bend, the rule's width and depth.
+                    if f.extent != "edge" {
+                        ui.horizontal(|ui| {
+                            ui.label(self.i18n.t("flange-bend-relief", "Bend relief"));
+                            ui.radio_value(&mut f.bend, "none", self.i18n.t("flange-bend-relief-none", "None"));
+                            ui.radio_value(&mut f.bend, "square", self.i18n.t("flange-bend-relief-square", "Square"));
+                            ui.radio_value(&mut f.bend, "round", self.i18n.t("flange-bend-relief-round", "Round"));
+                        });
+                    }
                 });
-                let hint = self.i18n.t("plane-offset-hint", "number or formula");
-                let field = |ui: &mut egui::Ui, label: &str, text: &mut String| {
-                    ui.horizontal(|ui| {
-                        ui.label(label);
-                        ui.add(egui::TextEdit::singleline(text).desired_width(120.0).hint_text(hint));
-                    });
-                };
-                match f.extent {
-                    "center" => field(ui, self.i18n.t("flange-width", "Width of the flange"), &mut f.a),
-                    "offset" => {
-                        field(ui, self.i18n.t("flange-offset", "Offset"), &mut f.a);
-                        field(ui, self.i18n.t("flange-width", "Width of the flange"), &mut f.b);
-                        ui.checkbox(&mut f.from_end, self.i18n.t("flange-from-end", "From the other end"));
-                    }
-                    "between" => {
-                        field(ui, self.i18n.t("flange-offset-1", "Offset 1"), &mut f.a);
-                        field(ui, self.i18n.t("flange-offset-2", "Offset 2"), &mut f.b);
-                    }
-                    _ => {}
-                }
-                // Narrower than its edge: the slot beside its bend, the rule's width and depth.
-                if f.extent != "edge" {
-                    ui.horizontal(|ui| {
-                        ui.label(self.i18n.t("flange-bend-relief", "Bend relief"));
-                        ui.radio_value(&mut f.bend, "none", self.i18n.t("flange-bend-relief-none", "None"));
-                        ui.radio_value(&mut f.bend, "square", self.i18n.t("flange-bend-relief-square", "Square"));
-                        ui.radio_value(&mut f.bend, "round", self.i18n.t("flange-bend-relief-round", "Round"));
-                    });
-                }
                 // Each edge of the wall: where it is, or at a work plane, a gap short of it (D229).
+                // The face the wall reaches sets its free edge, so that one goes (D305).
                 for (edge, (plane, gap)) in WALL_EDGES.into_iter().zip(&mut f.to) {
+                    if f.reaches && edge == "top" {
+                        continue;
+                    }
                     let by_edge = self.i18n.t("flange-to-edge", "By the edge");
                     ui.horizontal(|ui| {
                         ui.label(wall_edge_label(&self.i18n, edge));
@@ -6286,19 +6393,23 @@ impl Viewer {
                     });
                 }
                 // How the walls close a corner where flanges meet: 1 is along the first edge picked.
-                ui.horizontal(|ui| {
-                    ui.label(self.i18n.t("flange-corner", "Corner joint"));
-                    egui::ComboBox::from_id_salt("flange-corner").selected_text(corner_label(&self.i18n, f.corner)).show_ui(ui, |ui| {
-                        for c in CORNERS {
-                            ui.selectable_value(&mut f.corner, c, corner_label(&self.i18n, c));
-                        }
+                // One edge to a face leaves no corner (D305).
+                ui.add_enabled_ui(!f.reaches, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(self.i18n.t("flange-corner", "Corner joint"));
+                        egui::ComboBox::from_id_salt("flange-corner").selected_text(corner_label(&self.i18n, f.corner)).show_ui(ui, |ui| {
+                            for c in CORNERS {
+                                ui.selectable_value(&mut f.corner, c, corner_label(&self.i18n, c));
+                            }
+                        });
                     });
+                    if f.corner == "miter" {
+                        ui.checkbox(&mut f.level, self.i18n.t("flange-level", "Level the heights")).on_hover_text(
+                            self.i18n
+                                .t("flange-level-hint", "A wall of another angle meeting in a mitre: the lower goes up to the top of the higher"),
+                        );
+                    }
                 });
-                if f.corner == "miter" {
-                    ui.checkbox(&mut f.level, self.i18n.t("flange-level", "Level the heights")).on_hover_text(
-                        self.i18n.t("flange-level-hint", "A wall of another angle meeting in a mitre: the lower goes up to the top of the higher"),
-                    );
-                }
                 if let Some(Err(why)) = preview {
                     ui.colored_label(ui.visuals().error_fg_color, why);
                 }
@@ -6308,7 +6419,12 @@ impl Viewer {
                 });
             });
         let (enter, esc) = ctx.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
-        if cancel || esc {
+        // A face to pick in the picture, the form staying open (D305).
+        if pick && !cancel && !esc {
+            d.picking = Some(Purpose::FlangeFace);
+        }
+        // Esc first gives up a face being picked, the form staying; then it drops the form.
+        if cancel || (esc && !picking) {
             self.docs[self.active].flange = None;
             self.docs[self.active].flange_edges.clear();
             self.send(Request::Preview(None));
@@ -6317,6 +6433,11 @@ impl Viewer {
             self.docs[self.active].flange_edges.clear();
             self.send(Request::Preview(None));
             self.send(Request::Command(command, params));
+        } else if !ready {
+            // Nothing to preview until the face is picked; what was shown goes (D305).
+            if f.sent.take().is_some() {
+                self.send(Request::Preview(None));
+            }
         } else if f.sent.as_ref() != Some(&params) {
             f.sent = Some(params.clone());
             self.send(Request::Preview(Some((command, params))));
@@ -11860,6 +11981,9 @@ mod tests {
             from_end: false,
             bend: "round",
             to: [(String::new(), String::new()), ("joint".into(), "1".into()), ("joint".into(), String::new())],
+            face: None,
+            reaches: false,
+            gap: String::new(),
             fresh: false,
             sent: None,
             editing: false,
@@ -11871,6 +11995,48 @@ mod tests {
                 "flip": true, "relief": "round", "corner": "miter", "extent": {"kind": "center", "width": 30.0}, "bend_relief": "round", "bend_position": "flush",
                 "to": {"end": {"plane": "joint", "gap": 1.0}, "top": {"plane": "joint", "gap": 0.0}}})
         );
+    }
+
+    /// A flange to a face says the body and the face, takes its height (a right angle, no
+    /// `height_along`, no `to.top`) and sends the body second (D305); off again, an edit clears
+    /// the face.
+    #[test]
+    fn a_flange_to_a_face_takes_the_face_and_the_height() {
+        let face = format!("{:?}", datum_brep::TopoId(0xab));
+        let mut form = FlangeForm {
+            name: "flange1".into(),
+            height: "20".into(),
+            angle: "45".into(),
+            flip: true,
+            round: false,
+            flush: false,
+            corner: "open",
+            along: true,
+            level: false,
+            extent: "edge",
+            a: String::new(),
+            b: String::new(),
+            from_end: false,
+            bend: "none",
+            to: [("start".into(), String::new()), (String::new(), String::new()), ("joint".into(), String::new())],
+            face: Some(("sheet1".into(), face.clone())),
+            reaches: true,
+            gap: "0.5".into(),
+            fresh: false,
+            sent: None,
+            editing: false,
+            edges: None,
+        };
+        assert_eq!(
+            form.params("sheet2", std::slice::from_ref(&face)),
+            json!({"name": "flange1", "op": "flange", "inputs": ["sheet2", "start", "sheet1"], "edges": [face], "height": 20.0, "height_along": false,
+                "level_walls": false, "angle": 90.0, "flip": true, "relief": "square", "corner": "open", "extent": {"kind": "edge"}, "bend_relief": "none",
+                "bend_position": "outside", "to": {"start": {"plane": "start", "gap": 0.0}}, "to_face": {"face": face, "from": "sheet1", "gap": 0.5}})
+        );
+        // Back to the height and angle, an edit says the face is gone.
+        form.reaches = false;
+        form.editing = true;
+        assert_eq!(form.fields()["to_face"], Json::Null);
     }
 
     /// With ends picked, the flange form previews, and Enter on a fresh preview makes it.
@@ -11893,6 +12059,91 @@ mod tests {
         let made = sent.iter().find_map(|r| if let Request::Command("add", p) = r { Some(p) } else { None }).expect("the flange");
         assert_eq!((&made["op"], &made["edges"]), (&json!("flange"), &json!([format!("{face:?}")])));
         assert!(h.state().docs[h.state().active].flange.is_none() && h.state().docs[h.state().active].flange_edges.is_empty());
+    }
+
+    /// The face clicked for a flange's `to_face` is the body's and the face's under the cursor;
+    /// the flange's ends stay (D305).
+    #[test]
+    fn a_click_picks_the_face_a_flange_reaches() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        // The picture of the plate, the camera on it: the harness's fixture holds no bodies.
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        let p = picture(&session, None, None, &mut MeshCache::default());
+        let m = v.docs[v.active].model.as_mut().unwrap();
+        (m.scene, m.bodies) = (p.scene, p.bodies);
+        v.docs[v.active].camera.target = datum_math::Vec3::new(40.0, 20.0, 0.0);
+        v.docs[v.active].camera.distance = 200.0;
+        let ends = vec![("plate".to_string(), datum_brep::TopoId(0xab))];
+        v.docs[v.active].flange_edges = ends.clone();
+        v.open_flange();
+        v.docs[v.active].flange.as_mut().unwrap().reaches = true;
+        v.pick(Purpose::FlangeFace);
+        let at = screen_of(&v, datum_math::Vec3::new(40.0, 20.0, 0.0));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.pick_input(ui, rect, &r, offset);
+            },
+            v,
+        );
+        h.run();
+        click_with(&mut h, at, egui::Modifiers::NONE);
+        let d = &h.state().docs[h.state().active];
+        assert!(d.picking.is_none(), "the pick is done");
+        assert_eq!(d.flange.as_ref().and_then(|f| f.face.as_ref()).map(|(b, _)| b.as_str()), Some("plate"));
+        assert_eq!(d.flange_edges, ends, "the ends stay");
+    }
+
+    /// A flange form reaching a face previews nothing until one is picked; then the body is its
+    /// second input and the angle a right one (D305).
+    #[test]
+    fn a_flange_to_a_face_waits_for_the_face() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        v.docs[v.active].flange_edges = vec![("plate".into(), datum_brep::TopoId(0xab))];
+        v.open_flange();
+        let mut h = form_harness(v);
+        h.run();
+        inbox.try_iter().for_each(drop);
+        h.get_by_label("Reach a face of another body").click();
+        h.run();
+        assert!(h.state().docs[h.state().active].flange.as_ref().unwrap().reaches);
+        assert!(inbox.try_iter().all(|r| !matches!(r, Request::Preview(Some(_)))), "nothing to preview before a face");
+        h.get_by_label("no face picked");
+        // The face picked, the flange reaches it: the body comes after the sheet.
+        h.state_mut().docs[0].flange.as_mut().unwrap().face = Some(("target".into(), format!("{:?}", datum_brep::TopoId(0xcd))));
+        h.run();
+        let want = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).last();
+        let want = want.expect("a preview");
+        assert_eq!((&want["inputs"], &want["to_face"]["from"], &want["angle"]), (&json!(["plate", "target"]), &json!("target"), &json!(90.0)));
+    }
+
+    /// Esc while a face is picked for the flange form keeps the form and the ends it stands on
+    /// (D305): it only gives up the pick.
+    #[test]
+    fn escape_keeps_the_flange_whose_face_is_picked() {
+        let (mut v, _inbox) = viewer("symmetric_plate.json");
+        v.docs[v.active].flange_edges = vec![("plate".into(), datum_brep::TopoId(0xab))];
+        v.open_flange();
+        v.docs[v.active].flange.as_mut().unwrap().reaches = true;
+        v.pick(Purpose::FlangeFace);
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                v.flange_window(ui.ctx());
+                v.pick_input(ui, rect, &r, None);
+            },
+            v,
+        );
+        h.run();
+        h.key_press(egui::Key::Escape);
+        h.run();
+        let d = &h.state().docs[h.state().active];
+        assert!(d.picking.is_none(), "the pick is given up");
+        assert_eq!(d.flange_edges.len(), 1, "the ends stay");
+        assert!(d.flange.is_some(), "the form stays");
     }
 
     /// Esc while ends are picked for a flange drops them and stops picking.

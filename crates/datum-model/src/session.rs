@@ -374,9 +374,10 @@ const COMMANDS: &[Command] = &[
             fields.extend(p.iter().filter(|(k, _)| !matches!(k.as_str(), "name" | "enabled" | "inputs")).map(|(k, v)| (k.clone(), v.clone())));
             let mut op: Op = serde_json::from_value(Value::Object(fields)).map_err(|e| e.to_string())?;
             op.normalize_metadata().map_err(|e| format!("`{name}`: {e}"))?;
-            // A flange's inputs follow the planes its wall goes to (D229): the sheet, then those.
+            // A flange's inputs follow the planes its wall goes to (D229): the sheet, then those,
+            // then the body whose face it reaches (D305).
             let inputs = match &op {
-                Op::Flange { to, .. } => {
+                Op::Flange { to, to_face, .. } => {
                     let planes = to.iter().map(|p| match s.graph.find(&p.plane) {
                         Some(i) if i < ix => Ok(i),
                         _ => Err(format!("a flange goes to `{}`, not a feature before it", p.plane)),
@@ -386,6 +387,16 @@ const COMMANDS: &[Command] = &[
                         let plane = plane?;
                         if !all.contains(&plane) {
                             all.push(plane);
+                        }
+                    }
+                    if let Some(f) = to_face {
+                        match s.graph.find(&f.from) {
+                            Some(i) if i < ix => {
+                                if !all.contains(&i) {
+                                    all.push(i);
+                                }
+                            }
+                            _ => return Err(format!("a flange reaches a face of `{}`, not a feature before it", f.from)),
                         }
                     }
                     Some(all)
