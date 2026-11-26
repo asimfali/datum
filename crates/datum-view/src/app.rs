@@ -55,7 +55,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
             crate::log::write(&format!("window on {adapter}"));
             let maximized = cc.storage.and_then(|s| s.get_string(MAXIMIZED)).is_none_or(|m| m == "true");
             let kept = |key| cc.storage.and_then(|s| s.get_string(key)).unwrap_or_default();
-            let mut viewer = Viewer::new(path, cc.egui_ctx.clone(), adapter);
+            let project = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p));
+            let mut viewer = Viewer::new(path, project, cc.egui_ctx.clone(), adapter);
             viewer.maximized = maximized;
             viewer.native_windows = NativeWindows::load(cc.storage);
             viewer.recent = serde_json::from_str(&kept(RECENT)).unwrap_or_default();
@@ -72,9 +73,8 @@ pub fn run(path: Option<PathBuf>) -> Result<(), String> {
                 Some(pref) => viewer.set_theme(&cc.egui_ctx, pref),
                 None => cc.egui_ctx.set_theme(viewer.theme),
             }
-            // The project left open opens again, if it is still one (D142).
-            if let Some(p) = serde_json::from_str::<Option<PathBuf>>(&kept(PROJECT)).ok().flatten().filter(|p| is_project(p)) {
-                viewer.set_project(Some(p));
+            if let Some(project) = &viewer.project {
+                remember(&mut viewer.recent_projects, std::path::absolute(project).unwrap_or_else(|_| project.clone()));
             }
             Ok(Box::new(viewer))
         }),
@@ -131,7 +131,10 @@ fn title(project: Option<&std::path::Path>, path: Option<&std::path::Path>) -> S
 
 #[derive(Debug)]
 pub(crate) enum Request {
-    Open(PathBuf),
+    Open {
+        path: PathBuf,
+        project: Option<PathBuf>,
+    },
     /// No model any more: the session starts empty, the window shows none.
     Close,
     SetParameter(String, Json),
@@ -504,12 +507,12 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 edge_base = None;
             }
             match r {
-                Request::Open(p) => {
+                Request::Open { path, project } => {
                     latest.clear();
                     previewing = None;
                     (opened, closed) = (true, false);
-                    match journaled(&mut session, "open", &json!({"path": p.display().to_string()})) {
-                        Ok(_) => wrote = Some(p),
+                    match journaled(&mut session, "open", &json!({"path": path.display().to_string(), "project": project})) {
+                        Ok(_) => wrote = Some(path),
                         Err(e) => error = Some(e),
                     }
                 }
@@ -1701,7 +1704,7 @@ fn mode_name<'a>(i18n: &'a crate::i18n::I18n, mode: &'a str) -> &'a str {
 impl Document {
     /// A document on its own thread: its session's channels, its worker, and the model at `path`
     /// asked for once the thread runs.
-    fn spawn(path: Option<&Path>, perspective: bool, ctx: &egui::Context) -> Self {
+    fn spawn(path: Option<&Path>, project: Option<PathBuf>, perspective: bool, ctx: &egui::Context) -> Self {
         let (requests, inbox) = channel();
         let (outbox, models) = channel();
         let ctx = ctx.clone();
@@ -1761,7 +1764,7 @@ impl Document {
             blank_fitted: false,
         };
         if let Some(p) = path {
-            let _ = doc.requests.send(Request::Open(p.to_path_buf()));
+            let _ = doc.requests.send(Request::Open { path: p.to_path_buf(), project });
         }
         doc
     }
@@ -1817,8 +1820,8 @@ enum Quit {
 }
 
 impl Viewer {
-    fn new(path: Option<PathBuf>, ctx: egui::Context, adapter: String) -> Self {
-        let doc = Document::spawn(path.as_deref(), false, &ctx);
+    fn new(path: Option<PathBuf>, project: Option<PathBuf>, ctx: egui::Context, adapter: String) -> Self {
+        let doc = Document::spawn(path.as_deref(), project.clone(), false, &ctx);
         let settings = crate::settings::path();
         let crate::settings::Settings { keys, language, theme, table_zoom, fillet_presets, chamfer_presets, problems: settings_problems } =
             crate::settings::load(settings.as_deref());
@@ -1865,7 +1868,7 @@ impl Viewer {
             quitting_dialog: false,
             worked_in: None,
             recent: Vec::new(),
-            project: None,
+            project,
             recent_projects: Vec::new(),
             titled: String::new(),
             keys,
@@ -1887,11 +1890,13 @@ impl Viewer {
             own_records: Default::default(),
             spots: BTreeMap::new(),
         };
-        v.reload_library_records();
         if let Some(p) = path {
             v.leave();
             v.set_path(Some(p));
+        } else {
+            v.reload_library();
         }
+        v.reload_library_records();
         v
     }
 
@@ -1899,7 +1904,7 @@ impl Viewer {
         self.leave();
         self.set_path(Some(path.clone()));
         self.docs[self.active].file_state = None;
-        self.send(Request::Open(path));
+        self.send(Request::Open { path, project: self.project.clone() });
     }
 
     /// The model's file, and with it the project whose library elements are listed.
@@ -1927,10 +1932,12 @@ impl Viewer {
         self.project = folder;
         self.reload_library();
         self.reload_library_records();
-        // A model without a file works in the project open: its library, its rules.
-        if self.docs[self.active].model.is_some() {
-            let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
-            self.send(Request::Command("set_project", params));
+        let params = self.project.as_ref().map_or_else(|| json!({}), |p| json!({"project": p}));
+        for i in 0..self.docs.len() {
+            let doc = &self.docs[i];
+            if doc.model.is_some() || doc.path.is_some() {
+                self.send_to(i, Request::Command("set_project", params.clone()));
+            }
         }
     }
 
@@ -2179,12 +2186,14 @@ impl Viewer {
             self.drawn = None;
             // Its model may have brought the sketch while another tab was shown.
             self.sync_sketch(i);
+            self.reload_library();
+            self.reload_library_records();
         }
     }
 
     /// A new empty tab, activated: its own thread and channels.
     fn new_tab(&mut self, ctx: &egui::Context) {
-        self.docs.push(Document::spawn(None, self.docs[self.active].camera.perspective, ctx));
+        self.docs.push(Document::spawn(None, None, self.docs[self.active].camera.perspective, ctx));
         self.activate(self.docs.len() - 1);
     }
 
@@ -8974,7 +8983,7 @@ mod tests {
     /// The window as the engineer has it, with the worker: the repo's lessons in `project`.
     fn lesson_window_harness(project: &std::path::Path) -> egui_kittest::Harness<'static, Viewer> {
         let project = project.to_path_buf();
-        let mut v = Viewer::new(None, egui::Context::default(), "test".into());
+        let mut v = Viewer::new(None, None, egui::Context::default(), "test".into());
         v.i18n = crate::i18n::I18n::of("ru");
         v.lessons = crate::lessons::read(std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../lessons")));
         v.set_project(Some(project));
@@ -9209,6 +9218,17 @@ mod tests {
         v.docs[v.active].model = None;
         v.set_project(Some(root.clone()));
         assert!(sent(&inbox).is_empty(), "no model, nothing to tell");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn opening_a_file_tells_its_session_the_open_project() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let root = project_root("viewer_open_with_project");
+        v.project = Some(root.clone());
+        let path = reference_model("stamp-slot-rounded.json");
+        v.open(path.clone());
+        assert!(matches!(inbox.try_recv(), Ok(Request::Open { path: file, project: Some(project) }) if file == path && project == root));
         let _ = std::fs::remove_dir_all(&root);
     }
 

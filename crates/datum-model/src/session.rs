@@ -122,12 +122,15 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "open",
-        description: "Open a model file (.json).",
-        params: || json!({"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}),
+        description: "Open a model file (.json). If supplied, `project` sets the fallback project for files outside a project (null clears it).",
+        params: || json!({"type": "object", "properties": {"path": {"type": "string"}, "project": {"type": ["string", "null"]}}, "required": ["path"]}),
         run: |s, p| {
             let path = PathBuf::from(text(p, "path")?);
             let src = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
             let d = parse_doc(&src).map_err(|e| format!("{}: {e}", path.display()))?;
+            if let Some(project) = p.get("project") {
+                s.project = project.as_str().map(PathBuf::from);
+            }
             Ok(s.replace(d, Some(path)))
         },
     },
@@ -1723,7 +1726,7 @@ impl Session {
             }
             Arc::new(
                 datum_ops::unfold_side(&cut, settings.back, k)
-                    .and_then(|f| value.with_stamp_cut(f.with_lines_closed(&closed)))
+                    .and_then(|f| value.with_stamp_cuts(f.with_lines_closed(&closed)))
                     .map_err(|e| e.to_string()),
             )
         });

@@ -537,3 +537,184 @@ fn nose_fillet_contour_moves_with_the_sheet_rule_and_keeps_its_radius() {
     let updated = nose_cut_end(&session.flat_of("stamp").unwrap());
     assert!((updated - original).abs() > 1e-9);
 }
+
+fn check_slot_cuts(session: &mut Session, model: &Value) {
+    let reply = run(session, "add", model["features"][4].clone());
+    assert_eq!(reply["failed"], json!([]), "{reply}");
+    let preview = session.flat_of("stamp").unwrap();
+    let flat = session.flat_of("blank").unwrap();
+    assert_eq!(flat.pieces, preview.pieces);
+    assert_eq!(flat.ids, preview.ids);
+    assert!(flat.bends.is_empty());
+    assert_eq!(flat.outer.len(), 4);
+    assert_eq!(flat.pieces.len(), 6);
+    let cuts = flat_line_ends(session, "blank");
+    assert_eq!(cuts.len(), 2);
+    for x in [36.0, 44.0] {
+        assert!(
+            cuts.iter().any(|&[a, b]| {
+                let [lo, hi] = [Vec2::new(x, 20.0), Vec2::new(x, 40.0)];
+                (near(a, lo) && near(b, hi)) || (near(a, hi) && near(b, lo))
+            }),
+            "{cuts:?}"
+        );
+    }
+}
+
+#[test]
+fn formed_slot_leaves_two_side_openings_and_joins_both_ends_to_the_plate() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot.json")).unwrap();
+    let mut session = Session::default();
+    add_base(&mut session, &model);
+    let reply = add_stamp(&mut session, &model);
+    assert_eq!(reply["failed"], json!([]), "{reply}");
+    {
+        let original = session.value("plate").unwrap().body().unwrap();
+        let slot = session.value("stamp").unwrap().body().unwrap();
+        slot.validate().unwrap();
+        datum_brep::tessellate(slot).unwrap();
+        datum_brep::step(&[slot], "formed slot", false).unwrap();
+
+        // Both plate skins still exist, with an inner loop where the strip joins them.
+        let pierced_skins = original
+            .faces()
+            .iter()
+            .filter(|face| slot.faces().iter().position(|f| f.id == face.id).is_some_and(|i| slot.face_loops(i as datum_brep::Ix).count() == 2))
+            .count();
+        assert_eq!(pierced_skins, 2);
+        let height = |up| {
+            slot.faces()
+                .iter()
+                .filter_map(|f| f.surface.plane())
+                .filter(|p| p.normal.z.signum() == up && p.normal.x == 0.0 && p.normal.y == 0.0)
+                .map(|p| p.origin.z)
+                .reduce(f64::max)
+                .unwrap()
+        };
+        close(height(1.0) - height(-1.0), 1.0);
+    }
+    check_slot_cuts(&mut session, &model);
+}
+
+#[test]
+fn a_thin_tongue_clears_the_independent_slot_in_its_working_position() {
+    use datum_brep::BrepError;
+    use datum_math::Rigid;
+    use datum_ops::{BooleanKind, boolean};
+
+    let mut tongue = model();
+    tongue["features"][1]["thickness"] = json!(0.5);
+    tongue["features"][3]["thickness"] = json!(0.5);
+    let mut tongue_session = Session::default();
+    add_base(&mut tongue_session, &tongue);
+    add_stamp(&mut tongue_session, &tongue);
+    let tongue = tongue_session.value("stamp").unwrap().body().unwrap();
+
+    let mut slot: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot.json")).unwrap();
+    slot["features"][2]["sketch"]["points"]["p1"][0] = json!(5.0);
+    let mut slot_session = Session::default();
+    add_base(&mut slot_session, &slot);
+    add_stamp(&mut slot_session, &slot);
+    let slot = slot_session.value("stamp").unwrap().body().unwrap();
+
+    let intersection = |z| {
+        let positioned = slot.transformed(&Rigid::translation(Vec3::new(45.3, 0.0, z)));
+        boolean(datum_brep::TopoId::derive("slot.fit").finish(), BooleanKind::Intersection, None, &[tongue, &positioned])
+    };
+    // Check the working position and the two limits of a 0.1 mm vertical shift.
+    for z in [1.8, 1.9, 2.0] {
+        let result = intersection(z);
+        assert!(matches!(&result, Err(BrepError::Degenerate(message)) if message == "the result is empty"), "{result:?}");
+    }
+    assert!(intersection(1.7).unwrap().volume() > 0.0);
+}
+
+#[test]
+fn a_rounded_slot_uses_the_sheet_radius_at_all_four_bends() {
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamp-slot-rounded.json")).unwrap();
+    for radius in [0.4, 0.6] {
+        let mut model = model.clone();
+        model["features"][3]["radius"] = json!(radius);
+        let mut session = Session::default();
+        add_base(&mut session, &model);
+        let reply = add_stamp(&mut session, &model);
+        assert_eq!(reply["failed"], json!([]), "{reply}");
+        let body = session.value("stamp").unwrap().body().unwrap();
+        body.validate().unwrap();
+        datum_brep::tessellate(body).unwrap();
+        datum_brep::step(&[body], "formed slot", false).unwrap();
+
+        let cylinders: Vec<_> = body
+            .faces()
+            .iter()
+            .filter_map(|f| match f.surface {
+                Surface::Cylinder(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cylinders.len(), 8);
+        for inside in cylinders.iter().filter(|c| !c.convex) {
+            close(inside.radius, radius);
+            let outside = cylinders.iter().find(|c| c.convex && c.origin == inside.origin).unwrap();
+            close(outside.radius, radius + 1.0);
+        }
+        assert_eq!(cylinders.iter().filter(|c| !c.convex).count(), 4);
+        check_slot_cuts(&mut session, &model);
+    }
+
+    let mut too_tight = model;
+    too_tight["features"][3]["radius"] = json!(1.1);
+    let mut session = Session::default();
+    add_base(&mut session, &too_tight);
+    let reply = add_stamp(&mut session, &too_tight);
+    assert!(reply.to_string().contains("the bends do not fit"), "{reply}");
+}
+
+#[test]
+fn rounded_slot_rebuilds_with_the_open_projects_sheet_rule() {
+    let root = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!("slot_project_{}", std::process::id()));
+    let project = root.join("project");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("datum-project.json"), r#"{"folders":{"library":"Библиотека"}}"#).unwrap();
+    let path = root.join("stamp-slot-rounded.json");
+    std::fs::write(&path, include_str!("../../../tests/models/stamp-slot-rounded.json")).unwrap();
+
+    let mut session = Session::default();
+    run(&mut session, "open", json!({"path": path, "project": project}));
+    run(&mut session, "put_library", json!({"level": "material", "element": {"name": "Steel", "density": 7850}}));
+    let check = |session: &Session, thickness: f64, radius: f64| {
+        let plate = session.value("plate").unwrap().body().unwrap();
+        close(plate.volume(), 20_000.0 * thickness);
+        let slot = session.value("stamp").unwrap().body().unwrap();
+        slot.validate().unwrap();
+        let bends: Vec<_> = slot
+            .faces()
+            .iter()
+            .filter_map(|face| match face.surface {
+                Surface::Cylinder(c) => Some(c),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bends.len(), 8);
+        for bend in bends {
+            close(bend.radius, if bend.convex { radius + thickness } else { radius });
+        }
+        slot.hash()
+    };
+
+    let initial = check(&session, 1.0, 0.4);
+    let flat = flat_line_ends(&mut session, "stamp");
+    assert_eq!(flat.len(), 2);
+    let rule = "Лист 0.5 мм";
+    put_sheet_rule(&mut session, rule, 0.5);
+    assert!(project.join("Библиотека/rule/Лист 0.5 мм.json").is_file());
+    let reply = run(&mut session, "set_part", json!({"body": "plate", "rule": rule}));
+    assert_eq!(reply["parts"][0]["rule"], rule);
+    let thin = check(&session, 0.5, 0.5);
+    assert_ne!(initial, thin);
+
+    put_sheet_rule(&mut session, rule, 0.75);
+    assert_ne!(thin, check(&session, 0.75, 0.75));
+    assert_eq!(flat_line_ends(&mut session, "stamp"), flat);
+    std::fs::remove_dir_all(root).unwrap();
+}

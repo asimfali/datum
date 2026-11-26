@@ -51,7 +51,7 @@ pub(super) fn rounded(
         .sum();
     // The lower root arc crosses the top of the wall where the tongue's side meets the cut.
     let arc = ring.arcs[0].ok_or_else(|| BrepError::Degenerate("stamp: missing root bend".into()))?;
-    let cross = Vec2::new(arc.center.x + libm::sqrt(thickness * (2.0 * radius + thickness)), 0.0);
+    let cross = Vec2::new(arc.center.x + root_cross_offset(radius, thickness), 0.0);
     let tip = ring.points.iter().map(|p| p.x).fold(cross.x, f64::max);
     if ring.points[1..last].iter().any(|p| p.y <= 0.0)
         || (1..last - 1).any(|i| {
@@ -64,6 +64,49 @@ pub(super) fn rounded(
         return Err(BrepError::Degenerate("stamp: rounded section meets the wall beyond its root".into()));
     }
     Ok((ring, length, cross.x))
+}
+
+fn root_cross_offset(radius: f64, thickness: f64) -> f64 {
+    libm::sqrt(thickness * (2.0 * radius + thickness))
+}
+
+/// Use both flat leads to set up the root bends, then keep only the raised strip.
+pub(super) fn rounded_bridge(
+    feature: TopoId,
+    points: [Vec2; 4],
+    [a, b, c, d]: [&str; 4],
+    [left, bridge, right]: [&str; 3],
+    [near, far]: [TopoId; 2],
+    thickness: f64,
+    radius: f64,
+) -> Result<(ProfileLoop, [f64; 2]), BrepError> {
+    let lead = 2.0 * (radius + thickness);
+    let [p, q, r, s] = points;
+    let full = bend_profile(
+        feature,
+        SheetPath {
+            p: &[Vec2::new(p.x - lead, p.y), p, q, r, s, Vec2::new(s.x + lead, s.y)],
+            names: &[a, a, b, c, d, d],
+            lines: &["", left, bridge, right, ""],
+            arcs: &[None; 5],
+        },
+        Sheet { thickness, radius, side: Side::Right },
+        &|_, _| false,
+    )?;
+    let half = full.points.len() / 2;
+    let mut ring = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };
+    for i in (1..half - 1).chain(half + 1..full.points.len() - 1) {
+        ring.points.push(full.points[i]);
+        ring.vertices.push(full.vertices[i]);
+        ring.sides.push(full.sides[i]);
+        ring.arcs.push(full.arcs[i]);
+    }
+    let end = ring.points.len() / 2 - 1;
+    let last = ring.points.len() - 1;
+    ring.sides[end] = far;
+    ring.sides[last] = near;
+    let offset = root_cross_offset(radius, thickness);
+    Ok((ring, [full.points[1].x + offset, full.points[half - 2].x - offset]))
 }
 
 /// Offset a three-segment section to its left for positive thickness.

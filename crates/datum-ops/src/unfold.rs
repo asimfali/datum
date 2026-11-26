@@ -115,7 +115,7 @@ pub struct LineCut {
     pub arc: Option<(Vec3, bool)>,
 }
 
-/// The free boundary of the tongue's pre-cut window, in wall coordinates.
+/// One open stamp cut on the blank, in wall coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StampCut {
     /// The placement face followed by its opposite face across the sheet.
@@ -223,24 +223,26 @@ pub(crate) const ON_KERF: f64 = 1e-7;
 pub(crate) const KERF_PAST: f64 = 4.0;
 
 impl Flat {
-    /// Add the pre-cut to its developed wall, keeping the root intact.
-    pub(crate) fn with_stamp_cut(mut self, cut: &StampCut) -> Result<Self, BrepError> {
-        let &(_, wall) = self
-            .plane_faces
-            .iter()
-            .find(|(face, _)| cut.faces.contains(face))
-            .ok_or_else(|| BrepError::Unsupported("unfold: the stamped wall does not lie on this blank".into()))?;
-        let [origin, x, y, normal] = self.planes[wall];
-        let project = |p: Vec3| Vec2::new((p - origin).dot(x), (p - origin).dot(y));
-        let same_side = normal.dot(cut.normal) > 0.0;
-        self.pieces.extend(cut.points.windows(2).zip(&cut.arcs).map(|(edge, arc)| {
-            let (a, b) = (project(edge[0]), project(edge[1]));
-            match arc {
-                Some((center, ccw)) => arc_piece(project(*center), a, b, *ccw == same_side),
-                None => FlatPiece::Line(a, b),
-            }
-        }));
-        self.ids.extend(&cut.ids);
+    /// Add each open cut to its developed wall.
+    pub(crate) fn with_stamp_cuts(mut self, cuts: &[StampCut]) -> Result<Self, BrepError> {
+        for cut in cuts {
+            let &(_, wall) = self
+                .plane_faces
+                .iter()
+                .find(|(face, _)| cut.faces.contains(face))
+                .ok_or_else(|| BrepError::Unsupported("unfold: the stamped wall does not lie on this blank".into()))?;
+            let [origin, x, y, normal] = self.planes[wall];
+            let project = |p: Vec3| Vec2::new((p - origin).dot(x), (p - origin).dot(y));
+            let same_side = normal.dot(cut.normal) > 0.0;
+            self.pieces.extend(cut.points.windows(2).zip(&cut.arcs).map(|(edge, arc)| {
+                let (a, b) = (project(edge[0]), project(edge[1]));
+                match arc {
+                    Some((center, ccw)) => arc_piece(project(*center), a, b, *ccw == same_side),
+                    None => FlatPiece::Line(a, b),
+                }
+            }));
+            self.ids.extend(&cut.ids);
+        }
         Ok(Self {
             k_factor: self.k_factor,
             overlaps: self.overlaps,
@@ -1644,7 +1646,7 @@ mod tests {
         let up = Vec3::new(0.0, 1.0, 0.0);
         for face in [on_plane(-up, -40.0), on_plane(up, 42.0)] {
             let flat = unfold(body, &format!("{face:?}"), 0.5).unwrap();
-            let stamped = flat.clone().with_stamp_cut(&cut).unwrap();
+            let stamped = flat.clone().with_stamp_cuts(std::slice::from_ref(&cut)).unwrap();
             assert_eq!(stamped.bends, flat.bends);
             assert_eq!(&stamped.pieces[..flat.pieces.len()], flat.pieces.as_slice());
             let Some(FlatPiece::Line(a, b)) = stamped.pieces.last() else { panic!("expected the pre-cut line") };
