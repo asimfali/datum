@@ -6285,6 +6285,8 @@ impl Viewer {
                             // One edge to a face: no width to take, no corner to close.
                             f.extent = "edge";
                             f.corner = "open";
+                            // A face just asked for is picked at once; the button re-picks one (D305).
+                            pick = true;
                         }
                     }
                     if f.reaches {
