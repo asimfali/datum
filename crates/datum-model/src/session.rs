@@ -470,12 +470,17 @@ const COMMANDS: &[Command] = &[
         name: "query_metadata",
         description: "Properties of sketch feature `name`'s own points, lines, arcs and circles (D276): each `{\"element\": <name>, \"properties\": {…}}`, \
                       with `elements` those named (an unmarked element has no properties), without it every marked primitive of the sketch. \
-                      A name that is no sketch primitive is an error. Properties are any JSON values, as written.",
+                      With `target: feature`, return the properties of the feature itself. Properties are any JSON values.",
         params: || {
             json!({"type": "object", "properties": {"name": {"type": "string"},
-            "elements": {"type": "array", "items": {"type": "string"}}}, "required": ["name"], "additionalProperties": false})
+            "target": {"const": "feature"}, "elements": {"type": "array", "items": {"type": "string"}}}, "required": ["name"], "additionalProperties": false})
         },
         run: |s, p| {
+            if feature_metadata_target(p)? {
+                let name = text(p, "name")?;
+                let ix = s.find(name)?;
+                return Ok(json!({"name": name, "properties": s.graph.nodes()[ix as usize].metadata}));
+            }
             let elements: Option<Vec<String>> = match p.get("elements") {
                 None | Some(Value::Null) => None,
                 Some(v) => Some(serde_json::from_value(v.clone()).map_err(|e| format!("`elements`: {e}"))?),
@@ -489,16 +494,24 @@ const COMMANDS: &[Command] = &[
                       target the property (a JSON value; null is a value, not a removal), `remove` takes the properties away. Every target \
                       and property is checked first: an unknown primitive is an error, a missing property is not. Any property name and any \
                       JSON value is kept as written (D276); a preset the window offers is only a way to fill `set`. An element left with no \
-                      properties loses its entry. With `component`, `name` is its embedded forming section or boundary.",
+                      properties loses its entry. With `target: feature`, change the properties of the feature itself without `elements`. \
+                      With `component`, `name` is its embedded forming section or boundary.",
         params: || {
             json!({"type": "object", "properties": {"name": {"type": "string"}, "component": {"type": "string"},
-            "elements": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "target": {"const": "feature"}, "elements": {"type": "array", "items": {"type": "string"}, "minItems": 1},
             "set": {"type": "object", "additionalProperties": true},
-            "remove": {"type": "array", "items": {"type": "string"}}}, "required": ["name", "elements"], "additionalProperties": false})
+            "remove": {"type": "array", "items": {"type": "string"}}}, "required": ["name"], "oneOf": [{"required": ["elements"]}, {"required": ["target"]}], "additionalProperties": false})
         },
         run: |s, p| {
-            let elements: Vec<String> = serde_json::from_value(p.get("elements").cloned().unwrap_or(Value::Null))
-                .map_err(|e| format!("`elements` names the lines and arcs to change: {e}"))?;
+            let feature = feature_metadata_target(p)?;
+            let elements: Option<Vec<String>> = if feature {
+                None
+            } else {
+                Some(
+                    serde_json::from_value(p.get("elements").cloned().unwrap_or(Value::Null))
+                        .map_err(|e| format!("`elements` names the sketch primitives to change: {e}"))?,
+                )
+            };
             let set = match p.get("set") {
                 None | Some(Value::Null) => Map::new(),
                 Some(Value::Object(m)) => m.clone(),
@@ -508,7 +521,7 @@ const COMMANDS: &[Command] = &[
                 None | Some(Value::Null) => Vec::new(),
                 Some(v) => serde_json::from_value(v.clone()).map_err(|e| format!("`remove` lists property names: {e}"))?,
             };
-            s.edit_metadata(text(p, "name")?, component_scope(p)?, &elements, &set, &remove)
+            s.edit_metadata(text(p, "name")?, component_scope(p)?, elements.as_deref(), &set, &remove)
         },
     },
     Command {
@@ -1234,7 +1247,8 @@ fn feature_schema() -> Value {
     json!({
         "type": "object",
         "properties": {"name": {"type": "string"}, "inputs": {"type": "array", "items": {"type": "string"}},
-                       "enabled": {"type": ["boolean", "number", "string"], "description": "Off (false, 0 or a formula coming to 0): the feature passes its first input on unchanged"}},
+                       "enabled": {"type": ["boolean", "number", "string"], "description": "Off (false, 0 or a formula coming to 0): the feature passes its first input on unchanged"},
+                       "metadata": {"type": "object", "additionalProperties": true}},
         "required": ["name", "op"],
         "allOf": [schemars::schema_for!(Op)]
     })
@@ -1273,6 +1287,22 @@ fn apply_sketch_patch(op: &mut Op, name: &str, p: &Map<String, Value>) -> Result
     Ok(also)
 }
 
+fn feature_metadata_target(p: &Map<String, Value>) -> Result<bool, String> {
+    match p.get("target") {
+        None => Ok(false),
+        Some(Value::String(target)) if target == "feature" && !p.contains_key("elements") && !p.contains_key("component") => Ok(true),
+        _ => Err("`target` must be `feature` and used without `elements` or `component`".into()),
+    }
+}
+
+/// Applies a property patch, preserving JSON null as a value.
+fn apply_properties(properties: &mut BTreeMap<String, Value>, set: &Map<String, Value>, remove: &[String]) {
+    properties.extend(set.iter().map(|(k, v)| (k.clone(), v.clone())));
+    for k in remove {
+        properties.remove(k);
+    }
+}
+
 fn change_metadata(op: &mut Op, name: &str, elements: &[String], set: &Map<String, Value>, remove: &[String]) -> Result<bool, String> {
     let Op::Sketch { sketch, .. } = op else {
         return Err(format!("`{name}` is not a sketch"));
@@ -1286,12 +1316,7 @@ fn change_metadata(op: &mut Op, name: &str, elements: &[String], set: &Map<Strin
     for n in unique(elements) {
         let before = sketch.metadata.get(&n).cloned().unwrap_or_default();
         let mut props = before.clone();
-        for (k, v) in set {
-            props.insert(k.clone(), v.clone());
-        }
-        for k in remove {
-            props.remove(k);
-        }
+        apply_properties(&mut props, set, remove);
         if props.is_empty() {
             changed |= sketch.metadata.remove(&n).is_some();
         } else if props != before {
@@ -1476,13 +1501,10 @@ impl Session {
         &mut self,
         name: &str,
         component: Option<&str>,
-        elements: &[String],
+        elements: Option<&[String]>,
         set: &Map<String, Value>,
         remove: &[String],
     ) -> Result<Value, String> {
-        if elements.is_empty() {
-            return Err("`elements` names at least one line or arc to change".into());
-        }
         if set.is_empty() && remove.is_empty() {
             return Err("give `set` or `remove`: nothing would change".into());
         }
@@ -1491,6 +1513,19 @@ impl Session {
         }
         if let Some(k) = remove.iter().find(|k| k.is_empty()) {
             return Err(format!("`remove` has no empty property name (got `{k}`)"));
+        }
+        if set.keys().any(String::is_empty) {
+            return Err("`set` has an empty property name".into());
+        }
+        let Some(elements) = elements else {
+            let ix = self.find(name)?;
+            let mut props = self.graph.nodes()[ix as usize].metadata.clone();
+            apply_properties(&mut props, set, remove);
+            self.graph.set_metadata(ix, props);
+            return Ok(self.rebuild());
+        };
+        if elements.is_empty() {
+            return Err("`elements` names at least one sketch primitive to change".into());
         }
         let change = |op: &mut Op| change_metadata(op, name, elements, set, remove);
         if let Some(owner) = component {
@@ -2421,7 +2456,7 @@ fn unique(names: &[String]) -> Vec<String> {
 /// A curve's properties as written (D275, D276): an object, no empty property name. Any key and
 /// any JSON value is kept as it is; what a property means is for whoever reads it (a preset
 /// names `stamp.role`, the stamping reads it later).
-fn metadata_properties(what: &str, v: &Value) -> Result<Map<String, Value>, String> {
+pub(crate) fn metadata_properties(what: &str, v: &Value) -> Result<Map<String, Value>, String> {
     let props = v.as_object().ok_or_else(|| format!("{what}: an object of properties"))?;
     if props.keys().any(String::is_empty) {
         return Err(format!("{what}: an empty property name"));

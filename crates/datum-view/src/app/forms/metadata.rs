@@ -1,5 +1,4 @@
-//! The metadata editor of a sketch (D276): properties of the selected primitives, or of the
-//! curves the sketch already marks, chosen from a list; presets fill the properties in (D277).
+//! The metadata editor for a feature or its sketch primitives. Presets fill the properties in (D277).
 //! One Apply sends one `edit_metadata`, and one Undo takes it back; the window itself writes no
 //! JSON. It stays open while the sketch is used: a selection made there does not retarget an
 //! edit already begun.
@@ -10,6 +9,17 @@ use serde_json::{Map, Value as Json, json};
 
 use crate::actions::Act;
 use crate::app::{Request, Viewer};
+use crate::i18n::I18n;
+
+const STAMP_SIDE: &str = "stamp.section_side";
+const STAMP_CUT: &str = "stamp.cut";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    Primitives,
+    Feature,
+    SketchFeature,
+}
 
 /// A preset the window offers, its label in the window's language: a string, or a dictionary of
 /// languages (falling back to English, then the ID).
@@ -19,8 +29,9 @@ pub(in crate::app) struct Preset {
     pub(in crate::app) set: Map<String, Json>,
 }
 
-/// What F12 opened: the primitives being changed, the properties as typed, and the presets on offer.
+/// The target and draft properties of an F12 edit.
 pub(in crate::app) struct MetadataForm {
+    scope: Scope,
     pub(in crate::app) feature: String,
     /// The primitives the edit targets: those selected when F12 was pressed, or one picked from the
     /// marked list. Fixed while the form is open: a selection made in the sketch is not taken.
@@ -53,7 +64,9 @@ impl MetadataForm {
         let Some(p) = self.presets.iter().find(|p| p.id == id) else { return false };
         for (k, v) in &p.set {
             self.values.insert(k.clone(), serde_json::to_string(v).unwrap_or_default());
-            self.initial.remove(k);
+            if self.scope != Scope::SketchFeature || !matches!(k.as_str(), STAMP_SIDE | STAMP_CUT) {
+                self.initial.remove(k);
+            }
             self.mixed.remove(k);
             self.remove.remove(k);
         }
@@ -85,14 +98,23 @@ pub(in crate::app) fn selection(sk: &crate::sketch::SketchEdit) -> Vec<String> {
 }
 
 impl Viewer {
-    /// Opens the metadata editor on the open sketch: its selected primitives, or the list of
-    /// the primitives it marks (D276). A second F12 takes the selection a form without targets was
-    /// waiting for, and leaves a draft begun as it is.
+    pub(in crate::app) fn can_open_metadata(&self) -> bool {
+        let d = &self.docs[self.active];
+        d.sketch.is_some() || d.tree.selected.as_deref().is_some_and(|name| self.metadata_feature(name).is_some())
+    }
+
+    fn metadata_feature(&self, name: &str) -> Option<&Json> {
+        self.docs[self.active].model.as_ref()?.inspect["features"].as_array()?.iter().find(|f| f["name"] == name)
+    }
+
+    /// Opens the editor on the sketch selection or the selected tree feature.
+    /// F12 keeps an open draft and lets an empty primitive draft take the current selection.
     pub(in crate::app) fn open_metadata(&mut self) {
         {
             let d = &mut self.docs[self.active];
             if let Some(form) = &mut d.metadata {
-                if form.targets.is_empty()
+                if form.scope == Scope::Primitives
+                    && form.targets.is_empty()
                     && let Some(sk) = &d.sketch
                     && form.feature == sk.feature
                 {
@@ -104,16 +126,24 @@ impl Viewer {
                 return;
             }
         }
-        let (feature, targets, marked, presets, values, initial, mixed) = {
-            let Some(sk) = &self.docs[self.active].sketch else { return };
+        let d = &self.docs[self.active];
+        let (scope, feature, targets, marked, values, initial, mixed) = if let Some(sk) = &d.sketch {
             let targets = selection(sk);
-            let marked: Vec<String> =
+            let marked =
                 sk.json["sketch"]["metadata"].as_object().into_iter().flat_map(|m| m.keys()).filter(|n| primitive(&sk.json, n)).cloned().collect();
-            let presets = self.metadata_presets();
             let (values, initial, mixed) = draft(&sk.json, &targets);
-            (sk.feature.clone(), targets, marked, presets, values, initial, mixed)
+            (Scope::Primitives, sk.feature.clone(), targets, marked, values, initial, mixed)
+        } else {
+            let Some(name) = d.tree.selected.as_deref() else { return };
+            let Some(feature) = self.metadata_feature(name) else { return };
+            let scope = if feature["op"] == "sketch" { Scope::SketchFeature } else { Scope::Feature };
+            let values: BTreeMap<String, String> =
+                feature["metadata"].as_object().into_iter().flatten().map(|(key, value)| (key.clone(), value.to_string())).collect();
+            (scope, name.to_owned(), Vec::new(), Vec::new(), values.clone(), values, BTreeSet::new())
         };
+        let (presets, preset_problems) = self.metadata_presets();
         self.docs[self.active].metadata = Some(MetadataForm {
+            scope,
             feature,
             targets,
             marked,
@@ -123,8 +153,8 @@ impl Viewer {
             remove: BTreeSet::new(),
             new_key: String::new(),
             new_value: String::new(),
-            presets: presets.0,
-            preset_problems: presets.1,
+            presets,
+            preset_problems,
             notice: None,
         });
     }
@@ -150,29 +180,31 @@ impl Viewer {
         (presets, problems)
     }
 
-    /// The editor window, while a sketch is open: not in the way of the sketch, which can still be
-    /// selected in; Escape closes it without sending the draft.
+    /// Shows the draft while its target is available. Escape discards it.
     pub(in crate::app) fn metadata_window(&mut self, ctx: &egui::Context) {
+        let d = &self.docs[self.active];
+        let Some(form) = &d.metadata else { return };
+        let valid = match form.scope {
+            Scope::Primitives => d.sketch.as_ref().is_some_and(|sk| sk.feature == form.feature),
+            Scope::Feature | Scope::SketchFeature => d.sketch.is_none() && self.metadata_feature(&form.feature).is_some(),
+        };
+        if !valid {
+            self.docs[self.active].metadata = None;
+            return;
+        }
+        let d = &mut self.docs[self.active];
+        // An empty primitive draft waits for a selection in the sketch.
+        if let Some(form) = &mut d.metadata
+            && form.scope == Scope::Primitives
+            && form.targets.is_empty()
+            && let Some(sk) = &d.sketch
         {
-            let d = &mut self.docs[self.active];
-            let Some(form) = &d.metadata else { return };
-            if d.sketch.as_ref().is_none_or(|sk| sk.feature != form.feature) {
-                d.metadata = None;
-                return;
-            }
-            // Opened with nothing selected: a selection made in the sketch is what it waits for.
-            if d.metadata.as_ref().is_some_and(|f| f.targets.is_empty())
-                && let Some(sk) = &d.sketch
-            {
-                let targets = selection(sk);
-                if !targets.is_empty()
-                    && let Some(form) = &mut d.metadata
-                {
-                    form.set_targets(&sk.json, targets);
-                }
+            let targets = selection(sk);
+            if !targets.is_empty() {
+                form.set_targets(&sk.json, targets);
             }
         }
-        let mut open = self.docs[self.active].metadata.is_some();
+        let mut open = true;
         // A combo box's list takes Escape first; otherwise the editor closes without sending.
         let popup = ctx.any_popup_open();
         let mut close = !popup && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
@@ -186,7 +218,7 @@ impl Viewer {
             .show(ctx, |ui| {
                 let d = &mut self.docs[self.active];
                 let Some(form) = d.metadata.as_mut() else { return };
-                if form.targets.is_empty() {
+                if form.scope == Scope::Primitives && form.targets.is_empty() {
                     if form.marked.is_empty() {
                         ui.label(self.i18n.t("metadata-none-marked", "Select a point or curve in the sketch"));
                         if ui.button(self.i18n.t("cancel", "Cancel")).clicked() {
@@ -208,7 +240,11 @@ impl Viewer {
                     }
                     return;
                 }
-                ui.label(self.i18n.f("metadata-elements", "Elements: { $names }", &[("names", &form.targets.join(", "))]));
+                if form.scope == Scope::Primitives {
+                    ui.label(self.i18n.f("metadata-elements", "Elements: { $names }", &[("names", &form.targets.join(", "))]));
+                } else {
+                    ui.label(self.i18n.f("metadata-feature", "Feature: { $name }", &[("name", &form.feature)]));
+                }
                 let mut picked: Option<String> = None;
                 if !form.presets.is_empty() {
                     egui::ComboBox::from_id_salt("datum_metadata_preset").selected_text(self.i18n.t("metadata-preset", "Preset…")).show_ui(
@@ -225,9 +261,33 @@ impl Viewer {
                 if let Some(id) = picked {
                     form.use_preset(&id);
                 }
+                if form.scope == Scope::SketchFeature {
+                    stamp_choice(
+                        ui,
+                        &self.i18n,
+                        form,
+                        STAMP_SIDE,
+                        self.i18n.t("metadata-stamp-side", "Stamp side"),
+                        [("outer", self.i18n.t("metadata-stamp-outer", "Outside")), ("inner", self.i18n.t("metadata-stamp-inner", "Inside"))],
+                    );
+                    stamp_choice(
+                        ui,
+                        &self.i18n,
+                        form,
+                        STAMP_CUT,
+                        self.i18n.t("metadata-stamp-cut", "Stamp cut"),
+                        [
+                            ("tool", self.i18n.t("metadata-stamp-tool", "Cut by tool")),
+                            ("flat", self.i18n.t("metadata-stamp-flat", "Cuts on flat pattern")),
+                        ],
+                    );
+                }
                 egui::Grid::new("datum_metadata_props").num_columns(3).striped(true).show(ui, |ui| {
                     let keys: Vec<String> = form.values.keys().cloned().collect();
                     for k in keys {
+                        if form.scope == Scope::SketchFeature && matches!(k.as_str(), STAMP_SIDE | STAMP_CUT) {
+                            continue;
+                        }
                         let mut out = form.remove.contains(&k);
                         ui.checkbox(&mut out, "").on_hover_text(self.i18n.t("metadata-remove", "Take the property away"));
                         if out {
@@ -290,7 +350,9 @@ impl Viewer {
             set.insert(k.clone(), value);
         }
         if !form.new_key.is_empty() {
-            if form.values.contains_key(&form.new_key) {
+            if form.values.contains_key(&form.new_key)
+                || (form.scope == Scope::SketchFeature && matches!(form.new_key.as_str(), STAMP_SIDE | STAMP_CUT))
+            {
                 return Err(format!("`{}` is listed already: change its value here", form.new_key));
             }
             let value = serde_json::from_str::<Json>(&form.new_value).map_err(|e| format!("`{}`: {e}", form.new_key))?;
@@ -300,10 +362,53 @@ impl Viewer {
         if set.is_empty() && remove.is_empty() {
             return Err(self.i18n.t("metadata-nothing", "Nothing to change").to_string());
         }
-        let params = json!({"name": form.feature, "elements": form.targets, "set": set, "remove": remove});
+        let mut params = json!({"name": form.feature, "set": set, "remove": remove});
+        if form.scope == Scope::Primitives {
+            params["elements"] = json!(form.targets);
+        } else {
+            params["target"] = json!("feature");
+        }
         self.send(Request::Command("edit_metadata", params));
         self.docs[self.active].metadata = None;
         Ok(())
+    }
+}
+
+fn stamp_choice(ui: &mut egui::Ui, i18n: &I18n, form: &mut MetadataForm, key: &str, label: &str, options: [(&str, &str); 2]) {
+    let unset = i18n.t("metadata-stamp-unset", "Unspecified");
+    let current = form.values.get(key).filter(|_| !form.remove.contains(key));
+    let labels = options.map(|(value, label)| (json!(value).to_string(), label));
+    let selected = current.map_or(unset, |text| labels.iter().find(|(value, _)| value == text).map_or(text.as_str(), |(_, label)| *label));
+    let mut choice = None;
+    ui.horizontal(|ui| {
+        let label = ui.label(label);
+        egui::ComboBox::from_id_salt(key)
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                if ui.selectable_label(current.is_none(), unset).clicked() {
+                    choice = Some(None);
+                }
+                for (value, label) in &labels {
+                    if ui.selectable_label(current == Some(value), *label).clicked() {
+                        choice = Some(Some(value.clone()));
+                    }
+                }
+            })
+            .response
+            .labelled_by(label.id);
+    });
+    match choice {
+        Some(Some(value)) => {
+            form.values.insert(key.to_owned(), value);
+            form.remove.remove(key);
+        }
+        Some(None) => {
+            form.values.remove(key);
+            if form.initial.contains_key(key) {
+                form.remove.insert(key.to_owned());
+            }
+        }
+        None => {}
     }
 }
 

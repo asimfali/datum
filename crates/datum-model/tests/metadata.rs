@@ -251,3 +251,36 @@ fn an_opened_file_with_stale_metadata_is_cleaned() {
     assert!(e.contains("outline") && e.contains("empty property name"), "{e}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn feature_marks_round_trip_and_levels_override_individual_properties() {
+    let mut s = framed();
+    let edit = |s: &mut Session, set: Value, remove: Value| {
+        run(s, "edit_metadata", json!({"name": "outline", "target": "feature", "set": set, "remove": remove}))
+    };
+    let query = |s: &mut Session| run(s, "query_metadata", json!({"name": "outline", "target": "feature"}))["properties"].clone();
+    let stamp = json!({"stamp.section_side": "outer", "stamp.cut": "flat", "note": [1, null]});
+    assert_eq!(edit(&mut s, stamp.clone(), json!([]))["computed"], 0);
+    assert_eq!(feature(&mut s, "outline")["metadata"], stamp);
+    assert_eq!(run(&mut s, "query_metadata", json!({"name": "outline"}))["elements"], json!([]));
+
+    run(&mut s, "add_level", json!({"name": "variant", "part": "plate"}));
+    edit(&mut s, json!({"stamp.cut": "tool", "memo": null}), json!(["note"]));
+    assert_eq!(query(&mut s), json!({"stamp.section_side": "outer", "stamp.cut": "tool", "memo": null}));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(query(&mut s), stamp);
+    run(&mut s, "redo", json!({}));
+
+    run(&mut s, "activate", json!({"level": null}));
+    edit(&mut s, json!({"stamp.section_side": "inner", "note": "changed upstream"}), json!([]));
+    let dir = std::env::temp_dir().join(format!("datum-feature-metadata-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.json");
+    run(&mut s, "save", json!({"path": path}));
+    let mut reopened = Session::default();
+    run(&mut reopened, "open", json!({"path": path}));
+    assert_eq!(query(&mut reopened), json!({"stamp.section_side": "inner", "stamp.cut": "flat", "note": "changed upstream"}));
+    run(&mut reopened, "activate", json!({"level": "variant"}));
+    assert_eq!(query(&mut reopened), json!({"stamp.section_side": "inner", "stamp.cut": "tool", "memo": null}));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

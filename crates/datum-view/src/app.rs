@@ -1051,7 +1051,7 @@ struct Document {
     /// Something under the cursor for the Edge tool: an edge, or a flat cap with its corners.
     edge_hover: Option<forms::EdgeHover>,
     edge_finish: Option<EdgeFinishForm>,
-    /// Properties of the sketch's primitives being edited: the F12 editor.
+    /// Properties being edited in the F12 window.
     metadata: Option<MetadataForm>,
     loft: Option<LoftForm>,
     /// A mirror of a part being asked for: its form (D247).
@@ -8033,6 +8033,7 @@ impl Viewer {
                     || crate::dock::is_open(&self.dock, crate::dock::Pane::Flat)
             }
             Act::Rename => self.docs[self.active].tree.selected.is_some(),
+            Act::Metadata => self.can_open_metadata(),
             // A command of the whole window; for now it measures in a sketch only (D177).
             Act::Measure => self.docs[self.active].sketch.is_some(),
             Act::Rectangle => !self.library.is_empty(),
@@ -10598,6 +10599,38 @@ mod tests {
         drop(h);
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
         assert_eq!(v.docs[v.active].metadata.as_ref().unwrap().targets, ["bottom", "left_hole", "h1"]);
+    }
+
+    #[test]
+    fn f12_edits_stamp_settings_of_the_selected_sketch_feature() {
+        let (mut v, inbox) = viewer("symmetric_plate.json");
+        let d = &mut v.docs[v.active];
+        d.tree.selected = Some("outline".into());
+        d.model.as_mut().unwrap().inspect["features"][0]["metadata"] = json!({"stamp.section_side": "outer", "stamp.cut": "flat", "note": 42});
+        let mut h = egui_kittest::Harness::builder().with_size([700.0, 500.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                v.shortcuts(ui);
+                v.metadata_window(ui.ctx());
+            },
+            v,
+        );
+        press(&mut h, egui::Key::F12);
+        h.run();
+        h.get_by_value("Outside").click();
+        h.run();
+        h.get_by_label("Inside").click();
+        h.run();
+        h.get_by_value("Cuts on flat pattern").click();
+        h.run();
+        h.get_by_label("Cut by tool").click();
+        h.run();
+        h.get_by_label("OK").click();
+        h.run();
+        let sent: Vec<Json> = inbox.try_iter().filter_map(|r| if let Request::Command("edit_metadata", p) = r { Some(p) } else { None }).collect();
+        assert_eq!(
+            sent,
+            [json!({"name": "outline", "target": "feature", "set": {"stamp.section_side": "inner", "stamp.cut": "tool"}, "remove": []})]
+        );
     }
 
     /// On a clean sketch F12 opens a form that takes the selection made in the sketch while it is

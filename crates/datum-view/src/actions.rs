@@ -444,14 +444,7 @@ pub const ACTIONS: [Action; 65] = [
         plain(Key::Q),
         Sketch,
     ),
-    action(
-        Act::Metadata,
-        "sketch.metadata",
-        "Metadata",
-        "Properties of the selected lines and arcs, and of the marks on the sketch's curves without a selection; a preset fills them in, the values are saved in the model",
-        plain(Key::F12),
-        Sketch,
-    ),
+    action(Act::Metadata, "sketch.metadata", "Metadata", "Properties of the selected tree feature or sketch elements", plain(Key::F12), Anywhere),
     action(Act::NextTab, "view.next_tab", "Next tab", "The tab after this one: the window shows it", ctrl(Key::Tab), Anywhere),
     action(
         Act::PreviousTab,

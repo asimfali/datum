@@ -700,6 +700,7 @@ dependencies = [
  "datum-ops",
  "libm",
  "rayon",
+ "serde_json",
 ]
 
 [[package]]
