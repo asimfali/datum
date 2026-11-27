@@ -39,6 +39,8 @@ pub struct Node {
     /// What the engineer sees instead of the name, in any language; none: the name is shown. IDs
     /// never derive from it, so it may change freely.
     pub title: Option<String>,
+    /// Properties of this feature, separate from its geometry and evaluator key.
+    pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
 /// The model as a DAG. Inputs always precede the node, so the graph is acyclic by construction.
@@ -113,6 +115,7 @@ impl Graph {
             inputs: inputs.to_vec(),
             enabled: Num::Value(1.0),
             title: None,
+            metadata: BTreeMap::new(),
         });
         self.by_name.insert(name.into(), ix);
         Ok(ix)
@@ -142,6 +145,10 @@ impl Graph {
 
     pub fn set_title(&mut self, ix: NodeIx, title: Option<String>) {
         self.nodes[ix as usize].title = title;
+    }
+
+    pub fn set_metadata(&mut self, ix: NodeIx, metadata: BTreeMap<String, serde_json::Value>) {
+        self.nodes[ix as usize].metadata = metadata;
     }
 
     /// The features nothing else uses: what the model ends in (see [`Evaluation::final_values`]).

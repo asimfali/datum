@@ -1,4 +1,4 @@
-//! Properties of a sketch's own lines and arcs (D275, D276): by the curve's name, any JSON value,
+//! Properties of a sketch's own primitives (D275, D276): by element name, any JSON value,
 //! read and written through the common commands; they follow a rename, go with a removed curve,
 //! and change no geometry, hash or computation.
 #![allow(clippy::unwrap_used, clippy::panic)]
@@ -33,6 +33,30 @@ fn framed() -> Session {
     );
     run(&mut s, "add", json!({"name": "plate", "op": "extrude", "mode": "new", "inputs": ["outline"], "z0": 0, "z1": 2}));
     s
+}
+
+#[test]
+fn circle_transition_and_point_marks_survive_model_edits() {
+    let mut s = framed();
+    run(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline", "circles": {
+        "ring": {"center": "o", "diameter": 2, "construction": true}
+    }, "metadata": {"o": {"note": "center"}}}),
+    );
+    let result = run(
+        &mut s,
+        "edit_metadata",
+        json!({
+            "name": "outline", "elements": ["ring"], "set": {"stamp.role": "transition"}
+        }),
+    );
+    assert_eq!(result["computed"], 0);
+    run(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "ring", "to": "transition"}));
+    assert_eq!(properties(&mut s, "outline", &["transition", "o"]), json!([{"stamp.role": "transition"}, {"note": "center"}]));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "points": {"o": null}}));
+    assert_eq!(run(&mut s, "query_metadata", json!({"name": "outline"}))["elements"], json!([]));
 }
 
 /// The properties `elements` of sketch `name` say now.
@@ -197,7 +221,7 @@ fn direct_sketch_json_is_normalized() {
     );
     assert_eq!(feature(&mut s, "outline")["sketch"]["metadata"], json!({"bottom": {"stamp.role": "cut"}}));
     let e = s.execute("edit_sketch", &json!({"name": "outline", "metadata": {"nothing": {"x": 1}}})).unwrap_err();
-    assert!(e.contains("no line or arc"), "{e}");
+    assert!(e.contains("no sketch primitive"), "{e}");
 }
 
 /// A file with a stale property on a curve it does not have opens cleaned, so the name given
@@ -225,5 +249,38 @@ fn an_opened_file_with_stale_metadata_is_cleaned() {
     let mut u = Session::default();
     let e = u.execute("open", &json!({"path": path.display().to_string()})).unwrap_err();
     assert!(e.contains("outline") && e.contains("empty property name"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn feature_marks_round_trip_and_levels_override_individual_properties() {
+    let mut s = framed();
+    let edit = |s: &mut Session, set: Value, remove: Value| {
+        run(s, "edit_metadata", json!({"name": "outline", "target": "feature", "set": set, "remove": remove}))
+    };
+    let query = |s: &mut Session| run(s, "query_metadata", json!({"name": "outline", "target": "feature"}))["properties"].clone();
+    let stamp = json!({"stamp.section_side": "outer", "stamp.cut": "flat", "note": [1, null]});
+    assert_eq!(edit(&mut s, stamp.clone(), json!([]))["computed"], 0);
+    assert_eq!(feature(&mut s, "outline")["metadata"], stamp);
+    assert_eq!(run(&mut s, "query_metadata", json!({"name": "outline"}))["elements"], json!([]));
+
+    run(&mut s, "add_level", json!({"name": "variant", "part": "plate"}));
+    edit(&mut s, json!({"stamp.cut": "tool", "memo": null}), json!(["note"]));
+    assert_eq!(query(&mut s), json!({"stamp.section_side": "outer", "stamp.cut": "tool", "memo": null}));
+    run(&mut s, "undo", json!({}));
+    assert_eq!(query(&mut s), stamp);
+    run(&mut s, "redo", json!({}));
+
+    run(&mut s, "activate", json!({"level": null}));
+    edit(&mut s, json!({"stamp.section_side": "inner", "note": "changed upstream"}), json!([]));
+    let dir = std::env::temp_dir().join(format!("datum-feature-metadata-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.json");
+    run(&mut s, "save", json!({"path": path}));
+    let mut reopened = Session::default();
+    run(&mut reopened, "open", json!({"path": path}));
+    assert_eq!(query(&mut reopened), json!({"stamp.section_side": "inner", "stamp.cut": "flat", "note": "changed upstream"}));
+    run(&mut reopened, "activate", json!({"level": "variant"}));
+    assert_eq!(query(&mut reopened), json!({"stamp.section_side": "inner", "stamp.cut": "tool", "memo": null}));
     std::fs::remove_dir_all(&dir).unwrap();
 }

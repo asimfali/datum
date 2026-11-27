@@ -994,8 +994,8 @@ impl Op {
         }
     }
 
-    /// Keeps each sketch's `metadata` about its own lines and arcs (D276): a curve's map goes
-    /// once the curve does, and maps of no properties go; an empty property name is an error. A
+    /// Keeps each sketch's `metadata` about its own primitives: an element's map goes
+    /// once the element does, and maps of no properties go; an empty property name is an error. A
     /// component's part holds sketches too, so they are checked as well.
     pub fn normalize_metadata(&mut self) -> Result<(), String> {
         match self {

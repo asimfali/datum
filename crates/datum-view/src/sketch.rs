@@ -517,10 +517,10 @@ impl SketchEdit {
     /// The feature's operation, from its JSON.
     fn op(&self) -> Result<Op, String> {
         let mut fields = self.json.as_object().cloned().unwrap_or_default();
-        fields.remove("name");
-        fields.remove("inputs");
-        fields.remove("status");
-        fields.remove("error");
+        // The editor keeps the inspected feature, while Op accepts only operation parameters.
+        for key in ["name", "inputs", "title", "enabled", "metadata", "status", "warnings", "error"] {
+            fields.remove(key);
+        }
         serde_json::from_value(Json::Object(fields)).map_err(|e| e.to_string())
     }
 
@@ -2117,6 +2117,21 @@ mod tests {
             "lines": {"l1": {"from": "p1", "to": "p2"}}}});
         let id = TopoId::derive("feature").tag("s").finish();
         SketchEdit::new("s".into(), Context { id, inputs: Vec::new(), sources: Vec::new() }, json, BTreeMap::new(), None)
+    }
+
+    #[test]
+    fn feature_metadata_does_not_prevent_opening_a_sketch() {
+        let outline = open_outline();
+        let mut feature = outline.json;
+        feature["metadata"] = json!({"stamp.cut": "tool"});
+        feature["title"] = json!("Stamp section");
+        feature["sketch"]["metadata"] = json!({"l1": {"stamp.role": "transition"}});
+        let editing = SketchEdit::new(outline.feature, outline.context, feature, BTreeMap::new(), None);
+
+        assert!(editing.placed.is_ok(), "{:?}", editing.placed.as_ref().err());
+        assert_eq!(editing.json["metadata"]["stamp.cut"], "tool");
+        let Op::Sketch { sketch, .. } = editing.op().unwrap() else { panic!("expected sketch") };
+        assert_eq!(sketch.metadata["l1"]["stamp.role"], "transition");
     }
 
     #[test]

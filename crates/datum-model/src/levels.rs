@@ -171,7 +171,7 @@ impl Doc {
             }
         }
         if let Some(old) = old {
-            let removed = removed_curves(&old, graph);
+            let removed = removed_metadata_elements(&old, graph);
             if !removed.is_empty() {
                 self.clear_lost_metadata(&below, &removed);
             }
@@ -201,8 +201,11 @@ impl Doc {
                 let Some(sketch) = feature.get_mut("sketch").and_then(Value::as_object_mut) else { continue };
                 // A curve the level gives itself keeps its properties; a patch that only overrides
                 // an inherited one does not (a `construction` mark is no line of its own, D152).
-                let keep: BTreeSet<String> =
-                    gone.iter().filter(|curve| owns_curve(sketch, curve) || parent_has_curve(parent, &name, curve)).cloned().collect();
+                let keep: BTreeSet<String> = gone
+                    .iter()
+                    .filter(|curve| owns_metadata_element(sketch, curve) || parent_has_metadata_element(parent, &name, curve))
+                    .cloned()
+                    .collect();
                 let mut empty = false;
                 if let Some(metadata) = sketch.get_mut("metadata").and_then(Value::as_object_mut) {
                     metadata.retain(|curve, _| !gone.contains(curve) || keep.contains(curve));
@@ -763,14 +766,14 @@ fn level_has_metadata(level: &Level) -> bool {
     })
 }
 
-/// The lines and arcs `old` has that `new` no longer does, by sketch feature (D276).
-fn removed_curves(old: &Graph, new: &Graph) -> BTreeMap<String, BTreeSet<String>> {
+/// The primitives `old` has that `new` no longer does, by sketch feature (D276).
+fn removed_metadata_elements(old: &Graph, new: &Graph) -> BTreeMap<String, BTreeSet<String>> {
     let mut removed = BTreeMap::new();
     for node in old.nodes() {
         let Op::Sketch { sketch, .. } = &node.op else { continue };
         let Some(ix) = new.find(&node.name) else { continue };
         let Op::Sketch { sketch: now, .. } = &new.nodes()[ix as usize].op else { continue };
-        let gone: BTreeSet<String> = sketch.lines.keys().chain(sketch.arcs.keys()).filter(|n| !now.has_metadata_curve(n)).cloned().collect();
+        let gone: BTreeSet<String> = sketch.metadata_elements().filter(|n| !now.has_metadata_element(n)).cloned().collect();
         if !gone.is_empty() {
             removed.insert(node.name.clone(), gone);
         }
@@ -779,26 +782,21 @@ fn removed_curves(old: &Graph, new: &Graph) -> BTreeMap<String, BTreeSet<String>
 }
 
 /// Whether `parent` has the curve `curve` in sketch feature `feature`.
-fn parent_has_curve(parent: &Graph, feature: &str, curve: &str) -> bool {
+fn parent_has_metadata_element(parent: &Graph, feature: &str, curve: &str) -> bool {
     parent.find(feature).is_some_and(|ix| match &parent.nodes()[ix as usize].op {
-        Op::Sketch { sketch, .. } => sketch.has_metadata_curve(curve),
+        Op::Sketch { sketch, .. } => sketch.has_metadata_element(curve),
         _ => false,
     })
 }
 
-/// Whether a level's patch gives itself the line or arc `curve`, rather than overriding an
-/// inherited one: a line is `from` and `to`, an arc `from`, `to` and `center`, all names (a
-/// `construction` mark alone is no curve of its own, D152).
-fn owns_curve(sketch: &Map<String, Value>, curve: &str) -> bool {
-    let full = |key: &str, fields: &[&str]| {
-        sketch
-            .get(key)
-            .and_then(Value::as_object)
-            .and_then(|m| m.get(curve))
-            .and_then(Value::as_object)
-            .is_some_and(|v| fields.iter().all(|f| v.get(*f).and_then(Value::as_str).is_some()))
-    };
-    full("lines", &["from", "to"]) || full("arcs", &["from", "to", "center"])
+/// Whether the patch defines an entire primitive, so its metadata stays if the parent drops it.
+fn owns_metadata_element(sketch: &Map<String, Value>, name: &str) -> bool {
+    let entry = |key: &str| sketch.get(key).and_then(|v| v.get(name));
+    let full = |key: &str, fields: &[&str]| entry(key).is_some_and(|v| fields.iter().all(|f| v.get(*f).and_then(Value::as_str).is_some()));
+    entry("points").is_some_and(Value::is_array)
+        || full("lines", &["from", "to"])
+        || full("arcs", &["from", "to", "center"])
+        || (full("circles", &["center"]) && entry("circles").and_then(|v| v.get("diameter")).is_some_and(|v| !v.is_null()))
 }
 
 /// `base` with `level`'s parameters and features: the parent's changed by merging, the level's
@@ -903,42 +901,24 @@ fn merge_of(target: &mut Value, patch: &Value, key: &str) {
             list.extend(p.get("add").and_then(Value::as_array).into_iter().flatten().cloned());
             *t = Value::Array(list);
         }
-        (t, Value::Object(p)) if key == "metadata" => {
-            if !matches!(t, Value::Object(_)) {
+        (t, Value::Object(p)) if key == "feature.metadata" => merge_properties(t, p),
+        (t, Value::Object(p)) if key == "sketch.metadata" => {
+            if !t.is_object() {
                 *t = Value::Object(Map::new());
             }
             if let Value::Object(t) = t {
-                for (curve, entry) in p {
+                for (element, entry) in p {
                     match entry {
-                        // The whole record goes, as when the curve's own metadata did.
                         Value::Null => {
-                            t.remove(curve);
+                            t.remove(element);
                         }
-                        // Strictly a level's change: `set` gives properties (a JSON null is a
-                        // value), `remove` takes them away; the rest stays the parent's (D152).
-                        // Keys other than these are no part of the format and change nothing.
-                        Value::Object(e) => {
-                            let mut props = t.get(curve).and_then(Value::as_object).cloned().unwrap_or_default();
-                            let mut touched = false;
-                            if let Some(set) = e.get("set").and_then(Value::as_object) {
-                                touched = true;
-                                for (k, v) in set {
-                                    props.insert(k.clone(), v.clone());
-                                }
-                            }
-                            if let Some(remove) = e.get("remove").and_then(Value::as_array) {
-                                touched = true;
-                                for k in remove.iter().filter_map(Value::as_str) {
-                                    props.remove(k);
-                                }
-                            }
-                            if !touched {
-                                continue;
-                            }
-                            if props.is_empty() {
-                                t.remove(curve);
-                            } else {
-                                t.insert(curve.clone(), Value::Object(props));
+                        Value::Object(patch)
+                            if patch.get("set").is_some_and(Value::is_object) || patch.get("remove").is_some_and(Value::is_array) =>
+                        {
+                            let props = t.entry(element.clone()).or_insert(Value::Null);
+                            merge_properties(props, patch);
+                            if props.as_object().is_some_and(Map::is_empty) {
+                                t.remove(element);
                             }
                         }
                         _ => {}
@@ -951,12 +931,50 @@ fn merge_of(target: &mut Value, patch: &Value, key: &str) {
                 if v.is_null() {
                     t.remove(k);
                 } else {
-                    merge_of(t.entry(k.clone()).or_insert(Value::Null), v, k);
+                    merge_of(t.entry(k.clone()).or_insert(Value::Null), v, patch_key(key, k));
                 }
             }
         }
         (t, p) => *t = p.clone(),
     }
+}
+
+fn patch_key<'a>(parent: &str, key: &'a str) -> &'a str {
+    match (parent, key) {
+        ("", "metadata") => "feature.metadata",
+        ("sketch", "metadata") => "sketch.metadata",
+        _ => key,
+    }
+}
+
+fn merge_properties(target: &mut Value, patch: &Map<String, Value>) {
+    if !target.is_object() {
+        *target = Value::Object(Map::new());
+    }
+    if let Value::Object(props) = target {
+        if let Some(set) = patch.get("set").and_then(Value::as_object) {
+            props.extend(set.clone());
+        }
+        if let Some(remove) = patch.get("remove").and_then(Value::as_array) {
+            for name in remove.iter().filter_map(Value::as_str) {
+                props.remove(name);
+            }
+        }
+    }
+}
+
+fn patch_properties(old: Option<&Map<String, Value>>, new: Option<&Map<String, Value>>) -> Option<Value> {
+    let set: Map<String, Value> =
+        new.into_iter().flatten().filter(|(k, v)| old.and_then(|m| m.get(*k)) != Some(*v)).map(|(k, v)| (k.clone(), v.clone())).collect();
+    let remove: Vec<&String> = old.into_iter().flat_map(Map::keys).filter(|k| new.is_none_or(|m| !m.contains_key(*k))).collect();
+    let mut patch = Map::new();
+    if !set.is_empty() {
+        patch.insert("set".into(), Value::Object(set));
+    }
+    if !remove.is_empty() {
+        patch.insert("remove".into(), json!(remove));
+    }
+    (!patch.is_empty()).then_some(Value::Object(patch))
 }
 
 /// The merge patch taking `a` to `b`; none if they are equal.
@@ -983,51 +1001,28 @@ fn patch_of(a: &Value, b: &Value, key: &str) -> Option<Value> {
             // The same set in another order: nothing to keep.
             (!p.is_empty()).then_some(Value::Object(p))
         }
-        (Value::Object(x), Value::Object(y)) if key == "metadata" => {
-            let mut p = Map::new();
-            for (curve, props) in y {
-                let Some(props) = props.as_object() else { continue };
-                let before = x.get(curve).and_then(Value::as_object);
-                let mut set = Map::new();
-                for (k, v) in props {
-                    if before.and_then(|m| m.get(k)) != Some(v) {
-                        set.insert(k.clone(), v.clone());
-                    }
-                }
-                let remove: Vec<Value> = before.into_iter().flat_map(|m| m.keys()).filter(|k| !props.contains_key(*k)).map(|k| json!(k)).collect();
-                let mut entry = Map::new();
-                if !set.is_empty() {
-                    entry.insert("set".into(), Value::Object(set));
-                }
-                if !remove.is_empty() {
-                    entry.insert("remove".into(), Value::Array(remove));
-                }
-                if !entry.is_empty() {
-                    p.insert(curve.clone(), Value::Object(entry));
-                }
-            }
-            for (curve, props) in x {
-                if y.contains_key(curve) {
-                    continue;
-                }
-                let remove: Vec<Value> = props.as_object().into_iter().flat_map(|m| m.keys()).map(|k| json!(k)).collect();
-                if !remove.is_empty() {
-                    p.insert(curve.clone(), json!({"remove": remove}));
-                }
-            }
-            // Nothing changed: no patch, nothing kept in the level.
+        (Value::Object(x), Value::Object(y)) if key == "feature.metadata" => patch_properties(Some(x), Some(y)),
+        (Value::Object(x), Value::Object(y)) if key == "sketch.metadata" => {
+            let names: BTreeSet<&String> = x.keys().chain(y.keys()).collect();
+            let p: Map<String, Value> = names
+                .into_iter()
+                .filter_map(|n| {
+                    let old = x.get(n).and_then(Value::as_object);
+                    let new = y.get(n).and_then(Value::as_object);
+                    patch_properties(old, new).map(|patch| (n.clone(), patch))
+                })
+                .collect();
             (!p.is_empty()).then_some(Value::Object(p))
         }
         (Value::Object(x), Value::Object(y)) => {
             let mut p = Map::new();
-            // A sketch's metadata, even when one side has none yet: the absent side is an empty
-            // map, and the change is per curve and property (D152, D276), never a bare map.
+            // An absent metadata map is empty. Levels change properties individually.
             let object = |v: Option<&Value>| v.filter(|v| v.is_object()).cloned().unwrap_or_else(|| Value::Object(Map::new()));
             for (k, v) in y {
-                if key == "sketch" && k == "metadata" {
+                if matches!(patch_key(key, k), "sketch.metadata" | "feature.metadata") {
                     let old = object(x.get(k));
                     let new = object(Some(v));
-                    if let Some(d) = patch_of(&old, &new, "metadata") {
+                    if let Some(d) = patch_of(&old, &new, patch_key(key, k)) {
                         p.insert(k.clone(), d);
                     }
                     continue;
@@ -1044,10 +1039,10 @@ fn patch_of(a: &Value, b: &Value, key: &str) -> Option<Value> {
                 }
             }
             for k in x.keys().filter(|k| !y.contains_key(*k)) {
-                if key == "sketch" && k == "metadata" {
+                if matches!(patch_key(key, k), "sketch.metadata" | "feature.metadata") {
                     let old = object(Some(&x[k]));
                     let empty = Value::Object(Map::new());
-                    if let Some(d) = patch_of(&old, &empty, "metadata") {
+                    if let Some(d) = patch_of(&old, &empty, patch_key(key, k)) {
                         p.insert(k.clone(), d);
                     }
                     continue;

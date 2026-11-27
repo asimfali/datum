@@ -174,6 +174,7 @@ pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<Node
         .map(|i| g.find(i).ok_or_else(|| format!("`{name}`: unknown input `{i}` (features come after their inputs)")))
         .collect::<Result<Vec<_>, _>>()?;
     let enabled = fields.remove("enabled").map(|v| enabled_of(&name, v)).transpose()?;
+    let metadata = fields.remove("metadata").map(|v| session::metadata_properties("feature metadata", &v)).transpose()?;
     let title = fields.remove("title").map(|v| title_of(&name, v)).transpose()?.flatten();
     if let Some(other) = g.nodes().iter().find(|n| n.title.as_deref() == Some(&name)) {
         return Err(format!("`{name}`: the key is the title of feature `{}`", other.name));
@@ -183,6 +184,9 @@ pub fn add_feature(g: &mut Graph, mut fields: Map<String, Value>) -> Result<Node
     let ix = g.add(&name, op, &inputs).map_err(|e| e.to_string())?;
     if let Some(e) = enabled {
         g.set_enabled(ix, e);
+    }
+    if let Some(metadata) = metadata {
+        g.set_metadata(ix, metadata.into_iter().collect());
     }
     if title.is_some() {
         set_title(g, ix, title)?;
@@ -236,6 +240,9 @@ pub fn feature_json(g: &Graph, ix: NodeIx) -> Map<String, Value> {
     fields.insert("name".into(), Value::String(node.name.clone()));
     if let Some(t) = &node.title {
         fields.insert("title".into(), Value::String(t.clone()));
+    }
+    if !node.metadata.is_empty() {
+        fields.insert("metadata".into(), Value::Object(node.metadata.iter().map(|(k, v)| (k.clone(), v.clone())).collect()));
     }
     if node.enabled != Num::Value(1.0) {
         fields.insert("enabled".into(), serde_json::to_value(&node.enabled).unwrap_or(Value::Null));
