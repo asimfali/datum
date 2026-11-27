@@ -60,7 +60,7 @@ pub struct Sketch {
     /// Patterns by name: copies of a group's profiles (or of one curve's).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub patterns: BTreeMap<String, Pattern>,
-    /// Properties of the sketch's own lines and arcs, by the curve's name, then the property's
+    /// Properties of the sketch's own primitives, by element name, then property name
     /// (D275, D276): `{"<line>": {"stamp.role": "cut", "note": [1, 2]}}`. Any property name and
     /// any JSON value; what one means is for whoever reads it — a preset names `stamp.role`, the
     /// stamping will read it when it starts to (D277). Not geometry: a sketch hashes and computes
@@ -396,20 +396,26 @@ pub enum Measure {
 }
 
 impl Sketch {
-    /// Whether `n` is one of the sketch's own lines or arcs, the curves properties can be of (D276).
-    pub fn has_metadata_curve(&self, n: &str) -> bool {
-        self.lines.contains_key(n) || self.arcs.contains_key(n)
+    /// JSON fields holding the sketch's own named primitives.
+    pub const PRIMITIVE_FIELDS: [&'static str; 4] = ["points", "lines", "arcs", "circles"];
+
+    pub fn has_metadata_element(&self, n: &str) -> bool {
+        self.points.contains_key(n) || self.lines.contains_key(n) || self.arcs.contains_key(n) || self.circles.contains_key(n)
     }
 
-    /// Keeps `metadata` properties of the sketch's own lines and arcs (D276): drops a curve's
-    /// map once its line or arc is gone and maps with no properties, so a name given again later
-    /// is new and unmarked. An empty property name is an error: it names nothing.
+    pub fn metadata_elements(&self) -> impl Iterator<Item = &String> {
+        self.points.keys().chain(self.lines.keys()).chain(self.arcs.keys()).chain(self.circles.keys())
+    }
+
+    /// Drops properties when their primitive is removed or their property map is empty.
+    /// An empty property name is an error.
     pub fn normalize_metadata(&mut self) -> Result<(), String> {
         if let Some((curve, _)) = self.metadata.iter().find(|(_, props)| props.keys().any(String::is_empty)) {
             return Err(format!("metadata of `{curve}`: an empty property name"));
         }
-        let (lines, arcs) = (&self.lines, &self.arcs);
-        self.metadata.retain(|n, props| !props.is_empty() && (lines.contains_key(n) || arcs.contains_key(n)));
+        let mut metadata = std::mem::take(&mut self.metadata);
+        metadata.retain(|n, props| !props.is_empty() && self.has_metadata_element(n));
+        self.metadata = metadata;
         Ok(())
     }
 }

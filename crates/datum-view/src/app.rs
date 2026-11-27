@@ -1051,7 +1051,7 @@ struct Document {
     /// Something under the cursor for the Edge tool: an edge, or a flat cap with its corners.
     edge_hover: Option<forms::EdgeHover>,
     edge_finish: Option<EdgeFinishForm>,
-    /// Properties of the sketch's curves being edited (D276): the F12 editor.
+    /// Properties of the sketch's primitives being edited: the F12 editor.
     metadata: Option<MetadataForm>,
     loft: Option<LoftForm>,
     /// A mirror of a part being asked for: its form (D247).
@@ -10582,13 +10582,14 @@ mod tests {
     #[test]
     fn f12_opens_metadata_on_the_selection() {
         let (mut v, inbox) = sketching();
-        v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into()), Pick::Curve("left_hole".into())];
+        v.docs[v.active].sketch.as_mut().unwrap().selected =
+            vec![Pick::Curve("bottom".into()), Pick::Curve("left_hole".into()), Pick::Point("h1".into())];
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
         h.event(egui::Event::Key { key: egui::Key::F12, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
         drop(h);
         let form = v.docs[v.active].metadata.as_ref().expect("the editor opened");
-        assert_eq!(form.targets, ["bottom"], "a line only: a circle is no target");
+        assert_eq!(form.targets, ["bottom", "left_hole", "h1"]);
         assert!(inbox.try_iter().next().is_none(), "opening sends no command");
         // A second F12 keeps the draft, and the sketch's selection changing does not retarget it.
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
@@ -10596,7 +10597,7 @@ mod tests {
         h.run();
         drop(h);
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
-        assert_eq!(v.docs[v.active].metadata.as_ref().unwrap().targets, ["bottom"]);
+        assert_eq!(v.docs[v.active].metadata.as_ref().unwrap().targets, ["bottom", "left_hole", "h1"]);
     }
 
     /// On a clean sketch F12 opens a form that takes the selection made in the sketch while it is

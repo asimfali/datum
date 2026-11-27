@@ -159,7 +159,7 @@ fn metadata_of_a_sketch_is_read_and_written_through_execute() {
     let before = tool(&mut s, "inspect_model", json!({})).1["features"][0].clone();
     for (params, said) in [
         (json!({"name": "outline", "elements": ["bottom"], "set": {"": 1}}), "empty property name"),
-        (json!({"name": "outline", "elements": ["bottom", "nothing"], "set": {"x": 1}}), "no line or arc"),
+        (json!({"name": "outline", "elements": ["bottom", "nothing"], "set": {"x": 1}}), "no sketch primitive"),
         (json!({"name": "outline", "elements": ["bottom"], "set": 3}), "`set` is an object"),
     ] {
         let (err, text) = tool(&mut s, "execute", json!({"command": "edit_metadata", "params": params}));

@@ -1,4 +1,4 @@
-//! The metadata editor of a sketch (D276): properties of the selected lines and arcs, or of the
+//! The metadata editor of a sketch (D276): properties of the selected primitives, or of the
 //! curves the sketch already marks, chosen from a list; presets fill the properties in (D277).
 //! One Apply sends one `edit_metadata`, and one Undo takes it back; the window itself writes no
 //! JSON. It stays open while the sketch is used: a selection made there does not retarget an
@@ -19,13 +19,13 @@ pub(in crate::app) struct Preset {
     pub(in crate::app) set: Map<String, Json>,
 }
 
-/// What F12 opened: the curves being changed, the properties as typed, and the presets on offer.
+/// What F12 opened: the primitives being changed, the properties as typed, and the presets on offer.
 pub(in crate::app) struct MetadataForm {
     pub(in crate::app) feature: String,
-    /// The curves the edit targets: those selected when F12 was pressed, or one picked from the
+    /// The primitives the edit targets: those selected when F12 was pressed, or one picked from the
     /// marked list. Fixed while the form is open: a selection made in the sketch is not taken.
     pub(in crate::app) targets: Vec<String>,
-    /// The curves the sketch marks (its lines and arcs with properties), to choose one when F12
+    /// The primitives with properties, to choose one when F12
     /// was pressed with nothing selected.
     pub(in crate::app) marked: Vec<String>,
     /// Each property as JSON text, by name; the names of all targets together.
@@ -70,23 +70,23 @@ impl MetadataForm {
     }
 }
 
-/// The curves of `sk`'s selection that the properties can be of: its own lines and arcs.
+/// The sketch's own primitives in the selection.
 pub(in crate::app) fn selection(sk: &crate::sketch::SketchEdit) -> Vec<String> {
     let curves: Vec<String> = sk
         .selected
         .iter()
         .filter_map(|p| match p {
-            crate::sketch::Pick::Curve(n) => Some(n.clone()),
+            crate::sketch::Pick::Curve(n) | crate::sketch::Pick::Point(n) => Some(n.clone()),
             _ => None,
         })
-        .filter(|n| curve(&sk.json, n))
+        .filter(|n| primitive(&sk.json, n))
         .collect();
     unique(&curves)
 }
 
 impl Viewer {
-    /// Opens the metadata editor on the open sketch: its selected lines and arcs, or the list of
-    /// the curves it marks (D276). A second F12 takes the selection a form without targets was
+    /// Opens the metadata editor on the open sketch: its selected primitives, or the list of
+    /// the primitives it marks (D276). A second F12 takes the selection a form without targets was
     /// waiting for, and leaves a draft begun as it is.
     pub(in crate::app) fn open_metadata(&mut self) {
         {
@@ -108,7 +108,7 @@ impl Viewer {
             let Some(sk) = &self.docs[self.active].sketch else { return };
             let targets = selection(sk);
             let marked: Vec<String> =
-                sk.json["sketch"]["metadata"].as_object().into_iter().flat_map(|m| m.keys()).filter(|n| curve(&sk.json, n)).cloned().collect();
+                sk.json["sketch"]["metadata"].as_object().into_iter().flat_map(|m| m.keys()).filter(|n| primitive(&sk.json, n)).cloned().collect();
             let presets = self.metadata_presets();
             let (values, initial, mixed) = draft(&sk.json, &targets);
             (sk.feature.clone(), targets, marked, presets, values, initial, mixed)
@@ -188,13 +188,13 @@ impl Viewer {
                 let Some(form) = d.metadata.as_mut() else { return };
                 if form.targets.is_empty() {
                     if form.marked.is_empty() {
-                        ui.label(self.i18n.t("metadata-none-marked", "No curve is marked yet: select lines or arcs in the sketch, then press F12"));
+                        ui.label(self.i18n.t("metadata-none-marked", "Select a point or curve in the sketch"));
                         if ui.button(self.i18n.t("cancel", "Cancel")).clicked() {
                             close = true;
                         }
                         return;
                     }
-                    ui.label(self.i18n.t("metadata-choose", "A curve of this sketch:"));
+                    ui.label(self.i18n.t("metadata-choose", "Marked elements"));
                     let marked = form.marked.clone();
                     for n in &marked {
                         if ui.selectable_label(false, n).clicked()
@@ -208,7 +208,7 @@ impl Viewer {
                     }
                     return;
                 }
-                ui.label(self.i18n.f("metadata-curves", "Curves: { $names }", &[("names", &form.targets.join(", "))]));
+                ui.label(self.i18n.f("metadata-elements", "Elements: { $names }", &[("names", &form.targets.join(", "))]));
                 let mut picked: Option<String> = None;
                 if !form.presets.is_empty() {
                     egui::ComboBox::from_id_salt("datum_metadata_preset").selected_text(self.i18n.t("metadata-preset", "Preset…")).show_ui(
@@ -307,9 +307,9 @@ impl Viewer {
     }
 }
 
-/// Whether sketch feature JSON `feature` has a line or an arc `n`.
-fn curve(feature: &Json, n: &str) -> bool {
-    ["lines", "arcs"].iter().any(|k| feature["sketch"][*k].get(n).is_some())
+/// Whether the sketch feature defines the named primitive.
+fn primitive(feature: &Json, n: &str) -> bool {
+    datum_sketch::Sketch::PRIMITIVE_FIELDS.into_iter().any(|k| feature["sketch"][k].get(n).is_some())
 }
 
 /// `names` in their order, each once.

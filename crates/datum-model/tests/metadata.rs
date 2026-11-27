@@ -1,4 +1,4 @@
-//! Properties of a sketch's own lines and arcs (D275, D276): by the curve's name, any JSON value,
+//! Properties of a sketch's own primitives (D275, D276): by element name, any JSON value,
 //! read and written through the common commands; they follow a rename, go with a removed curve,
 //! and change no geometry, hash or computation.
 #![allow(clippy::unwrap_used, clippy::panic)]
@@ -33,6 +33,30 @@ fn framed() -> Session {
     );
     run(&mut s, "add", json!({"name": "plate", "op": "extrude", "mode": "new", "inputs": ["outline"], "z0": 0, "z1": 2}));
     s
+}
+
+#[test]
+fn circle_transition_and_point_marks_survive_model_edits() {
+    let mut s = framed();
+    run(
+        &mut s,
+        "edit_sketch",
+        json!({"name": "outline", "circles": {
+        "ring": {"center": "o", "diameter": 2, "construction": true}
+    }, "metadata": {"o": {"note": "center"}}}),
+    );
+    let result = run(
+        &mut s,
+        "edit_metadata",
+        json!({
+            "name": "outline", "elements": ["ring"], "set": {"stamp.role": "transition"}
+        }),
+    );
+    assert_eq!(result["computed"], 0);
+    run(&mut s, "rename_in_sketch", json!({"name": "outline", "from": "ring", "to": "transition"}));
+    assert_eq!(properties(&mut s, "outline", &["transition", "o"]), json!([{"stamp.role": "transition"}, {"note": "center"}]));
+    run(&mut s, "edit_sketch", json!({"name": "outline", "points": {"o": null}}));
+    assert_eq!(run(&mut s, "query_metadata", json!({"name": "outline"}))["elements"], json!([]));
 }
 
 /// The properties `elements` of sketch `name` say now.
@@ -197,7 +221,7 @@ fn direct_sketch_json_is_normalized() {
     );
     assert_eq!(feature(&mut s, "outline")["sketch"]["metadata"], json!({"bottom": {"stamp.role": "cut"}}));
     let e = s.execute("edit_sketch", &json!({"name": "outline", "metadata": {"nothing": {"x": 1}}})).unwrap_err();
-    assert!(e.contains("no line or arc"), "{e}");
+    assert!(e.contains("no sketch primitive"), "{e}");
 }
 
 /// A file with a stale property on a curve it does not have opens cleaned, so the name given

@@ -171,7 +171,7 @@ impl Doc {
             }
         }
         if let Some(old) = old {
-            let removed = removed_curves(&old, graph);
+            let removed = removed_metadata_elements(&old, graph);
             if !removed.is_empty() {
                 self.clear_lost_metadata(&below, &removed);
             }
@@ -201,8 +201,11 @@ impl Doc {
                 let Some(sketch) = feature.get_mut("sketch").and_then(Value::as_object_mut) else { continue };
                 // A curve the level gives itself keeps its properties; a patch that only overrides
                 // an inherited one does not (a `construction` mark is no line of its own, D152).
-                let keep: BTreeSet<String> =
-                    gone.iter().filter(|curve| owns_curve(sketch, curve) || parent_has_curve(parent, &name, curve)).cloned().collect();
+                let keep: BTreeSet<String> = gone
+                    .iter()
+                    .filter(|curve| owns_metadata_element(sketch, curve) || parent_has_metadata_element(parent, &name, curve))
+                    .cloned()
+                    .collect();
                 let mut empty = false;
                 if let Some(metadata) = sketch.get_mut("metadata").and_then(Value::as_object_mut) {
                     metadata.retain(|curve, _| !gone.contains(curve) || keep.contains(curve));
@@ -763,14 +766,14 @@ fn level_has_metadata(level: &Level) -> bool {
     })
 }
 
-/// The lines and arcs `old` has that `new` no longer does, by sketch feature (D276).
-fn removed_curves(old: &Graph, new: &Graph) -> BTreeMap<String, BTreeSet<String>> {
+/// The primitives `old` has that `new` no longer does, by sketch feature (D276).
+fn removed_metadata_elements(old: &Graph, new: &Graph) -> BTreeMap<String, BTreeSet<String>> {
     let mut removed = BTreeMap::new();
     for node in old.nodes() {
         let Op::Sketch { sketch, .. } = &node.op else { continue };
         let Some(ix) = new.find(&node.name) else { continue };
         let Op::Sketch { sketch: now, .. } = &new.nodes()[ix as usize].op else { continue };
-        let gone: BTreeSet<String> = sketch.lines.keys().chain(sketch.arcs.keys()).filter(|n| !now.has_metadata_curve(n)).cloned().collect();
+        let gone: BTreeSet<String> = sketch.metadata_elements().filter(|n| !now.has_metadata_element(n)).cloned().collect();
         if !gone.is_empty() {
             removed.insert(node.name.clone(), gone);
         }
@@ -779,26 +782,21 @@ fn removed_curves(old: &Graph, new: &Graph) -> BTreeMap<String, BTreeSet<String>
 }
 
 /// Whether `parent` has the curve `curve` in sketch feature `feature`.
-fn parent_has_curve(parent: &Graph, feature: &str, curve: &str) -> bool {
+fn parent_has_metadata_element(parent: &Graph, feature: &str, curve: &str) -> bool {
     parent.find(feature).is_some_and(|ix| match &parent.nodes()[ix as usize].op {
-        Op::Sketch { sketch, .. } => sketch.has_metadata_curve(curve),
+        Op::Sketch { sketch, .. } => sketch.has_metadata_element(curve),
         _ => false,
     })
 }
 
-/// Whether a level's patch gives itself the line or arc `curve`, rather than overriding an
-/// inherited one: a line is `from` and `to`, an arc `from`, `to` and `center`, all names (a
-/// `construction` mark alone is no curve of its own, D152).
-fn owns_curve(sketch: &Map<String, Value>, curve: &str) -> bool {
-    let full = |key: &str, fields: &[&str]| {
-        sketch
-            .get(key)
-            .and_then(Value::as_object)
-            .and_then(|m| m.get(curve))
-            .and_then(Value::as_object)
-            .is_some_and(|v| fields.iter().all(|f| v.get(*f).and_then(Value::as_str).is_some()))
-    };
-    full("lines", &["from", "to"]) || full("arcs", &["from", "to", "center"])
+/// Whether the patch defines an entire primitive, so its metadata stays if the parent drops it.
+fn owns_metadata_element(sketch: &Map<String, Value>, name: &str) -> bool {
+    let entry = |key: &str| sketch.get(key).and_then(|v| v.get(name));
+    let full = |key: &str, fields: &[&str]| entry(key).is_some_and(|v| fields.iter().all(|f| v.get(*f).and_then(Value::as_str).is_some()));
+    entry("points").is_some_and(Value::is_array)
+        || full("lines", &["from", "to"])
+        || full("arcs", &["from", "to", "center"])
+        || (full("circles", &["center"]) && entry("circles").and_then(|v| v.get("diameter")).is_some_and(|v| !v.is_null()))
 }
 
 /// `base` with `level`'s parameters and features: the parent's changed by merging, the level's

@@ -439,8 +439,8 @@ const COMMANDS: &[Command] = &[
                       `groups`, `patterns`, `project` and `metadata` are merged by name: an entry replaces the one of that name, null removes it, and with it \
                       whatever refers to it (the lines through a removed point, the constraints and dimensions naming either: \
                       listed in `also_removed`; a removed element leaves its groups, and a group left empty goes; its metadata goes too). \
-                      `metadata` holds the properties of the sketch's own lines and arcs: `{\"<line>\": {\"stamp.role\": \"cut\"}}` \
-                      (D276), a curve's whole property map replaced; any property name and any JSON value. \
+                      `metadata` holds the properties of the sketch's own points, lines, arcs and circles: `{\"<line>\": {\"stamp.role\": \"cut\"}}` \
+                      (D276), an element's whole property map replaced; any property name and any JSON value. \
                       A group is a \
                       list of element names (`{\"cell\": [\"h1\", \"h2\"]}`): only a union, removing it removes no element. \
                       A pattern copies the closed profiles of a group (or a curve) `of` on the grid of `step`: `count` \
@@ -468,9 +468,9 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "query_metadata",
-        description: "Properties of sketch feature `name`'s own lines and arcs (D276): each `{\"element\": <name>, \"properties\": {…}}`, \
-                      with `elements` those named (a missing one has no properties: not an error), without it every marked curve of the sketch. \
-                      A name that is no line or arc is an error. Properties are any JSON values, as written.",
+        description: "Properties of sketch feature `name`'s own points, lines, arcs and circles (D276): each `{\"element\": <name>, \"properties\": {…}}`, \
+                      with `elements` those named (an unmarked element has no properties), without it every marked primitive of the sketch. \
+                      A name that is no sketch primitive is an error. Properties are any JSON values, as written.",
         params: || {
             json!({"type": "object", "properties": {"name": {"type": "string"},
             "elements": {"type": "array", "items": {"type": "string"}}}, "required": ["name"], "additionalProperties": false})
@@ -485,10 +485,10 @@ const COMMANDS: &[Command] = &[
     },
     Command {
         name: "edit_metadata",
-        description: "Properties of `elements` (lines and arcs of sketch feature `name`) in one change, undone as one: `set` gives every \
+        description: "Properties of `elements` (points, lines, arcs and circles of sketch feature `name`) in one change, undone as one: `set` gives every \
                       target the property (a JSON value; null is a value, not a removal), `remove` takes the properties away. Every target \
-                      and property is checked first: an unknown curve is an error, a missing property is not. Any property name and any \
-                      JSON value is kept as written (D276); a preset the window offers is only a way to fill `set`. A curve left with no \
+                      and property is checked first: an unknown primitive is an error, a missing property is not. Any property name and any \
+                      JSON value is kept as written (D276); a preset the window offers is only a way to fill `set`. An element left with no \
                       properties loses its entry. With `component`, `name` is its embedded forming section or boundary.",
         params: || {
             json!({"type": "object", "properties": {"name": {"type": "string"}, "component": {"type": "string"},
@@ -1278,8 +1278,8 @@ fn change_metadata(op: &mut Op, name: &str, elements: &[String], set: &Map<Strin
         return Err(format!("`{name}` is not a sketch"));
     };
     for n in elements {
-        if !sketch.has_metadata_curve(n) {
-            return Err(format!("`{name}` has no line or arc `{n}`"));
+        if !sketch.has_metadata_element(n) {
+            return Err(format!("`{name}` has no sketch primitive `{n}`"));
         }
     }
     let mut changed = false;
@@ -1442,27 +1442,27 @@ impl Session {
         Some(FormingSketch { id: context.id, feature, params: context.parameters, inputs, sources })
     }
 
-    /// The properties of sketch feature `name`'s lines and arcs (D276): those of `elements`, or
-    /// every marked curve of the sketch.
+    /// The properties of sketch feature `name`'s primitives (D276): those of `elements`, or
+    /// every marked primitive of the sketch.
     fn query_metadata(&self, name: &str, elements: Option<&[String]>) -> Result<Value, String> {
         let ix = self.find(name)?;
         let Op::Sketch { sketch, .. } = &self.graph.nodes()[ix as usize].op else {
             return Err(format!("`{name}` is not a sketch"));
         };
-        let curve = |n: &str| sketch.has_metadata_curve(n);
+        let is_primitive = |n: &str| sketch.has_metadata_element(n);
         let properties = |n: &str| sketch.metadata.get(n).cloned().unwrap_or_default();
         let mut list = Vec::new();
         match elements {
             Some(wanted) => {
                 for n in unique(wanted) {
-                    if !curve(&n) {
-                        return Err(format!("`{name}` has no line or arc `{n}`"));
+                    if !is_primitive(&n) {
+                        return Err(format!("`{name}` has no sketch primitive `{n}`"));
                     }
                     list.push(json!({"element": n, "properties": properties(&n)}));
                 }
             }
             None => {
-                for n in sketch.metadata.keys().filter(|n| curve(n)) {
+                for n in sketch.metadata.keys().filter(|n| is_primitive(n)) {
                     list.push(json!({"element": n, "properties": properties(n)}));
                 }
             }
@@ -2402,10 +2402,9 @@ pub fn sketch_inputs(op: &Op, inputs: &[String], on_plane: bool) -> Vec<String> 
     out
 }
 
-/// Whether sketch JSON `sketch` (its `sketch` object) has a line or an arc `n`: the curves whose
-/// properties its metadata holds (D276).
-fn sketch_curve(sketch: &Map<String, Value>, n: &str) -> bool {
-    ["lines", "arcs"].iter().any(|k| sketch.get(*k).and_then(Value::as_object).is_some_and(|m| m.contains_key(n)))
+/// Whether the sketch JSON defines the named primitive.
+fn sketch_metadata_element(sketch: &Map<String, Value>, n: &str) -> bool {
+    datum_sketch::Sketch::PRIMITIVE_FIELDS.into_iter().any(|k| sketch.get(k).and_then(Value::as_object).is_some_and(|m| m.contains_key(n)))
 }
 
 /// `names` in their order, each once.
@@ -2482,8 +2481,8 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
                 continue;
             }
             let props = metadata_properties(&format!("metadata of `{n}`"), v)?;
-            if !props.is_empty() && !sketch_curve(sketch, n) && !gone.contains(n) {
-                return Err(format!("`metadata`: `{n}` is no line or arc of the sketch"));
+            if !props.is_empty() && !sketch_metadata_element(sketch, n) && !gone.contains(n) {
+                return Err(format!("`metadata`: `{n}` is no sketch primitive"));
             }
         }
         let entries = sketch.entry("metadata").or_insert_with(|| json!({})).as_object_mut().ok_or("`metadata` is not an object")?;
@@ -2518,14 +2517,12 @@ pub fn patch_sketch(op: &mut Map<String, Value>, p: &Map<String, Value>) -> Resu
             }
         }
     }
-    // Properties belong to the sketch's own lines and arcs, and go with a curve removed directly
-    // or through its point (D276): a name given again later is new and unmarked. A curve left
-    // with no properties loses its entry: empty maps are not written.
+    // A primitive loses its properties when removed, including when its defining point is removed.
     let mut metadata = match sketch.remove("metadata") {
         Some(Value::Object(m)) => m,
         _ => Map::new(),
     };
-    metadata.retain(|n, props| !gone.contains(n) && !props.as_object().is_some_and(Map::is_empty) && sketch_curve(sketch, n));
+    metadata.retain(|n, props| !gone.contains(n) && !props.as_object().is_some_and(Map::is_empty) && sketch_metadata_element(sketch, n));
     if !metadata.is_empty() {
         sketch.insert("metadata".into(), Value::Object(metadata));
     }
