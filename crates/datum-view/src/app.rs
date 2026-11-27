@@ -305,8 +305,17 @@ impl Keep {
     }
 }
 
+/// Cached display geometry of the selected feature.
+#[derive(Default)]
+struct FeatureOutline {
+    name: String,
+    lines: Vec<[datum_math::Vec3; 2]>,
+    points: Vec<datum_math::Vec3>,
+}
+
 /// What the background thread hands the window after each rebuild.
 struct Model {
+    feature_outline: Option<FeatureOutline>,
     /// `inspect` of the session: features with status, parameters with values.
     inspect: Json,
     scene: Scene,
@@ -348,6 +357,10 @@ struct Model {
     spots: Vec<(Json, datum_math::Vec3)>,
     /// The lines of the sketches shown a work plane may go through: its sketch and its name, ends.
     lines: Vec<PlaneLine>,
+    /// Evaluated 3D outputs, including features consumed by later operations.
+    feature_values: BTreeMap<String, datum_graph::ValueRef>,
+    /// Names aligned with Scene::sketch_ranges.
+    shown_sketches: Vec<String>,
     loft_profiles: Vec<LoftProfile>,
     /// The faces of the bodies shown a flange may stand on (D205).
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
@@ -390,6 +403,40 @@ impl EdgeBase {
     }
 }
 
+impl Model {
+    fn update_feature_outline(&mut self, selected: Option<&str>) {
+        if self.feature_outline.as_ref().map(|outline| outline.name.as_str()) == selected {
+            return;
+        }
+        self.feature_outline = selected.map(|name| {
+            let mut outline = FeatureOutline { name: name.into(), ..FeatureOutline::default() };
+            if let Some(value) = self.feature_values.get(name) {
+                if let Some(sketch) = value.sketch() {
+                    crate::scene::sketch_lines(sketch, &mut outline.lines);
+                    let [o, x, y, _] = sketch.frame;
+                    outline.points.extend(
+                        sketch
+                            .solved
+                            .points
+                            .iter()
+                            .filter(|(n, _)| n.as_str() != datum_ops::ORIGIN)
+                            .map(|(_, p)| sketch.developed.as_ref().map_or_else(|| o + x * p.x + y * p.y, |d| d.point(*p, d.radius))),
+                    );
+                } else if let Some(body) = value.body() {
+                    outline.lines = match self.bodies.iter().position(|n| n == name) {
+                        Some(ix) => self.scene.bodies[ix].edges.clone(),
+                        None => crate::scene::body_outline(body, matches!(&**value, datum_graph::Value::Formed(_))),
+                    };
+                    if outline.lines.is_empty() {
+                        outline.lines = crate::scene::bounds_edges(body.bounds());
+                    }
+                }
+            }
+            outline
+        });
+    }
+}
+
 /// What the view shows of a model: its scene, the GPU vertices, the feature of each body, the
 /// sketch edited with its context, and `inspect`.
 struct Picture {
@@ -402,6 +449,10 @@ struct Picture {
     inspect: Json,
     spots: Vec<(Json, datum_math::Vec3)>,
     lines: Vec<PlaneLine>,
+    /// Evaluated 3D outputs, including features consumed by later operations.
+    feature_values: BTreeMap<String, datum_graph::ValueRef>,
+    /// Names aligned with Scene::sketch_ranges.
+    shown_sketches: Vec<String>,
     loft_profiles: Vec<LoftProfile>,
     ends: Vec<(usize, datum_brep::TopoId, [datum_math::Vec3; 2])>,
     uses: Option<crate::uses::Uses>,
@@ -617,8 +668,23 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
             preview_bodies(&session, &params["inputs"], &mut picture);
         }
         let scene_ms = start.elapsed().as_secs_f64() * 1e3;
-        let Picture { scene, geometry, bodies, begun, solids, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours } =
-            picture;
+        let Picture {
+            scene,
+            geometry,
+            bodies,
+            begun,
+            solids,
+            editing: context,
+            inspect,
+            spots,
+            lines,
+            loft_profiles,
+            ends,
+            uses,
+            contours,
+            feature_values,
+            shown_sketches,
+        } = picture;
         let forming_edit =
             forming_edit.as_ref().and_then(|(component, sketch)| Some((component.clone(), session.forming_sketch(component, sketch)?)));
         if models
@@ -646,6 +712,9 @@ fn worker(requests: Receiver<Request>, models: Sender<Model>, ctx: egui::Context
                 spots,
                 lines,
                 loft_profiles,
+                feature_values,
+                shown_sketches,
+                feature_outline: None,
                 ends,
                 uses,
                 contours,
@@ -852,7 +921,34 @@ fn picture(session: &Session, editing: Option<&str>, using: Option<&str>, meshes
         })
         .collect();
     let uses = using.and_then(|name| crate::uses::uses(graph, evaluation, name, meshes));
-    Picture { scene, geometry, bodies, begun, solids, editing: context, inspect, spots, lines, loft_profiles, ends, uses, contours }
+    let shown_sketches = shown.iter().filter(|(_, v)| v.sketch().is_some()).map(|(name, _)| name.to_string()).collect();
+    let feature_values = graph
+        .nodes()
+        .iter()
+        .zip(&evaluation.results)
+        .filter(|(node, _)| !matches!(node.op, datum_graph::Op::Sketch { flat: Some(_), .. }))
+        .filter_map(|(node, result)| {
+            let value = result.as_ref().ok()?;
+            (value.body().is_some() || value.sketch().is_some()).then(|| (node.name.clone(), value.clone()))
+        })
+        .collect();
+    Picture {
+        scene,
+        geometry,
+        bodies,
+        begun,
+        solids,
+        editing: context,
+        inspect,
+        spots,
+        lines,
+        loft_profiles,
+        ends,
+        uses,
+        contours,
+        feature_values,
+        shown_sketches,
+    }
 }
 
 /// The bodies a preview takes in, which it shows as its result: a form looking up a face of one of
@@ -4651,6 +4747,43 @@ impl Viewer {
         }
     }
 
+    /// The model click selects an existing tree row. Tool pickers keep their own selections.
+    fn select_feature_at(&mut self, rect: egui::Rect, cursor: egui::Pos2) {
+        let work = self.work_planes();
+        let d = &mut self.docs[self.active];
+        let Some(m) = &d.model else { return };
+        let (anchor, radius) = sphere(&m.scene);
+        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        let (vp, _) = d.camera.matrices(anchor, aspect, radius);
+        let project = |p| on_screen(&vp, p - anchor, rect);
+        let on_segment = |[a, b]: [datum_math::Vec3; 2]| {
+            let (a, b) = (project(a)?, project(b)?);
+            let dir = b - a;
+            let t = ((cursor - a).dot(dir) / dir.length_sq().max(f32::MIN_POSITIVE)).clamp(0.0, 1.0);
+            Some((a + dir * t).distance(cursor))
+        };
+        let curves = m
+            .shown_sketches
+            .iter()
+            .zip(&m.scene.sketch_ranges)
+            .flat_map(|(name, range)| m.scene.sketch_lines[range.clone()].iter().filter_map(|&line| Some((name.as_str(), on_segment(line)?))));
+        let points = m.spots.iter().filter_map(|(spot, p)| {
+            spot.get("point")?;
+            Some((spot["of"].as_str()?, project(*p)?.distance(cursor)))
+        });
+        let sketch = curves.chain(points).filter(|(_, dist)| *dist < 6.0).min_by(|a, b| a.1.total_cmp(&b.1));
+        let offset = cursor - rect.center();
+        let x = f64::from(2.0 * offset.x / rect.width().max(1.0));
+        let y = f64::from(-2.0 * offset.y / rect.height().max(1.0));
+        let (origin, dir) = d.camera.ray(x, y, aspect, anchor, radius);
+        let body = || m.scene.pick(origin, dir).and_then(|hit| m.bodies.get(hit.body)).map(String::as_str);
+        let plane = || {
+            let squares: Vec<_> = work.iter().map(|(_, s)| s.clone()).collect();
+            crate::origin::hit(&squares, origin, dir, crate::origin::half(m.scene.bounds)).map(|(_, i)| work[i].0.as_str())
+        };
+        d.tree.selected = sketch.map(|(name, _)| name).or_else(body).or_else(plane).map(String::from);
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui, rs: Option<&egui_wgpu::RenderState>) {
         let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.docs[self.active].viewport = rect;
@@ -4675,6 +4808,12 @@ impl Viewer {
         } else {
             self.view_input(ui, rect, &r);
         }
+        let select_feature = self.docs[self.active].sketch.is_none()
+            && self.docs[self.active].picking.is_none()
+            && !self.waits_for_sketch()
+            && !self.loft_is_picking()
+            && !self.edge_finish_is_picking()
+            && !ui.input(|i| i.modifiers.any() || i.key_down(egui::Key::Space));
         let (loft_hover, edge_hover) = if self.loft_is_picking() {
             let hover = r.hover_pos().or(r.interact_pointer_pos()).and_then(|cursor| self.loft_profile_at(rect, cursor));
             if r.clicked()
@@ -4709,6 +4848,19 @@ impl Viewer {
                 _ => self.docs[self.active].camera.fit(Some((lo, hi)), aspect),
             }
             self.docs[self.active].fitted = true;
+        }
+        if select_feature
+            && r.clicked()
+            && !r.double_clicked()
+            && let Some(cursor) = r.interact_pointer_pos()
+        {
+            self.select_feature_at(rect, cursor);
+        }
+        if !sketched {
+            let d = &mut self.docs[self.active];
+            if let Some(m) = &mut d.model {
+                m.update_feature_outline(d.tree.selected.as_deref());
+            }
         }
         let Some(m) = &self.docs[self.active].model else { return };
         let (view_projection, eye) = match self.docs[self.active].sketch.as_ref().filter(|_| sketched) {
@@ -4769,6 +4921,18 @@ impl Viewer {
                 painter.line_segment([a, b], stroke);
             }
         }
+        if !sketched && let Some(outline) = &m.feature_outline {
+            let project = |p| on_screen(&view_projection, p - anchor, rect);
+            let colour = egui::Color32::from_rgb(235, 110, 20);
+            for &[a, b] in &outline.lines {
+                if let (Some(a), Some(b)) = (project(a), project(b)) {
+                    painter.line_segment([a, b], egui::Stroke::new(2.5, colour));
+                }
+            }
+            for at in outline.points.iter().filter_map(|&p| project(p)) {
+                painter.circle_filled(at, 4.0, colour);
+            }
+        }
         if let Some(cursor) = r.hover_pos().or(r.interact_pointer_pos()) {
             self.edge_finish_hints(ui, &painter, cursor);
         }
@@ -4784,11 +4948,11 @@ impl Viewer {
         // Work planes always; what a click would take lit while picking (a face tinted).
         let size = crate::origin::half(m.scene.bounds);
         let (clip, screen) = (|q| crate::camera::clip(&view_projection, q - anchor), |c| in_rect(c, rect));
-        let work: Vec<crate::origin::Square> = self.work_planes().into_iter().map(|(_, s)| s).collect();
+        let (names, work): (Vec<_>, Vec<_>) = self.work_planes().into_iter().unzip();
         if !sketched {
             let lit = match (self.docs[self.active].picking, self.docs[self.active].under) {
                 (Some(_), Some(Under::Work(k))) => Some(k),
-                _ => None,
+                _ => self.docs[self.active].tree.selected.as_ref().and_then(|name| names.iter().position(|n| n == name)),
             };
             crate::origin::paint(&painter, clip, screen, &work, size, lit, true);
         }
@@ -8839,6 +9003,9 @@ mod tests {
                 spots: Vec::new(),
                 lines: Vec::new(),
                 loft_profiles: Vec::new(),
+                feature_values: BTreeMap::new(),
+                shown_sketches: Vec::new(),
+                feature_outline: None,
                 ends: Vec::new(),
                 uses: None,
                 contours: Vec::new(),
@@ -10901,6 +11068,52 @@ mod tests {
     fn press(h: &mut egui_kittest::Harness<'_, Viewer>, key: egui::Key) {
         h.event(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
         h.run();
+    }
+
+    #[test]
+    fn tree_geometry_and_viewport_selection_share_feature_names() {
+        use datum_math::Vec3;
+
+        let (mut v, _) = viewer("symmetric_plate.json");
+        let mut session = Session::default();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/symmetric_plate.json");
+        session.execute("open", &json!({"path": path})).unwrap();
+        session
+            .execute(
+                "add",
+                &json!({"name": "loose", "op": "sketch", "sketch": {
+                    "points": {"a": [140, 10], "b": [160, 10]},
+                    "lines": {"side": {"from": "a", "to": "b"}}, "constraints": []
+                }}),
+            )
+            .unwrap();
+        let pic = picture(&session, None, None, &mut MeshCache::default());
+        let d = &mut v.docs[0];
+        let m = d.model.as_mut().unwrap();
+        m.scene = pic.scene;
+        m.bodies = pic.bodies;
+        m.feature_values = pic.feature_values;
+        m.shown_sketches = pic.shown_sketches;
+        m.spots = pic.spots;
+        assert!(!m.shown_sketches.iter().any(|n| n == "outline"));
+        m.update_feature_outline(Some("outline"));
+        let outline = m.feature_outline.as_ref().unwrap();
+        assert_eq!(outline.name, "outline");
+        assert!(outline.lines.len() > 4 && !outline.points.is_empty(), "a consumed sketch still shows its curves and points");
+        m.update_feature_outline(Some("plate"));
+        assert!(!m.feature_outline.as_ref().unwrap().lines.is_empty());
+        m.update_feature_outline(None);
+        assert!(m.feature_outline.is_none());
+
+        d.camera.set(Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0));
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 400.0));
+        d.camera.fit(m.scene.bounds, 2.0);
+        let (anchor, radius) = sphere(&m.scene);
+        let (vp, _) = d.camera.matrices(anchor, 2.0, radius);
+        for (point, expected) in [(Vec3::new(150.0, 10.0, 0.0), "loose"), (Vec3::new(40.0, 20.0, 0.0), "plate")] {
+            v.select_feature_at(rect, on_screen(&vp, point - anchor, rect).unwrap());
+            assert_eq!(v.docs[0].tree.selected.as_deref(), Some(expected));
+        }
     }
 
     /// Delete on the selected row removes that feature, and the selection goes with it.

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::f64::consts::TAU;
+use std::ops::Range;
 use std::sync::Arc;
 
 use datum_brep::{Body, Ix, Surface, TopoId, edge_points, face_mesh};
@@ -107,28 +108,9 @@ impl BodyMesh {
             mesh.faces.extend(f.faces);
         }
         mesh.contours = contours(&mesh.triangles, &mesh.normals, &round);
-        // Edges where the surface turns, where a flat face goes smoothly into a curved one, and
-        // where a torus or a sphere ends: those lines are where a bend or a rib starts. A rib is
-        // one tool's surface: its strips meet tangentially, and those seams say nothing on screen;
-        // its outline is the foot, where a flat face meets a curved one. Between nearly coplanar
-        // faces (a terrain's cells, a split face) or along the seams of a cylinder an edge says
-        // nothing either. A display threshold; the model never sees it.
-        let face = |h: Ix| body.loops()[body.half_edges()[h as usize].loop_ix as usize].face as usize;
-        let surface = |h: Ix| &body.faces()[face(h)].surface;
-        let flat = |s: &Surface| matches!(s, Surface::Plane(_));
-        let round = |s: &Surface| matches!(s, Surface::Torus(_));
-        for (e, edge) in body.edges().iter().enumerate() {
-            let pts = edge_points(body, e as Ix, chord);
-            let p = pts[0];
-            let (a, b) = (surface(edge.half), surface(body.half_edges()[edge.half as usize].twin));
-            let normals = [a.normal_at(p), b.normal_at(p)];
-            if flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || normals[0].dot(normals[1]) < SHARP {
-                mesh.edges.extend(pts.windows(2).map(|w| [w[0], w[1]]));
-                if flat(a) && flat(b) && body.edge_curve(edge).is_none() {
-                    let line = FinishEdge { id: edge.id, ends: [pts[0], pts[1]], normals };
-                    mesh.finish_edges.push(line);
-                }
-            }
+        for (points, finish) in drawn_body_edges(body, formed, chord) {
+            mesh.edges.extend(points.windows(2).map(|w| [w[0], w[1]]));
+            mesh.finish_edges.extend(finish);
         }
         // The kernel supplies the corners the tool lights for each cap (D296), including
         // the free corners of a flange and the remaining corners of a partly rounded cap.
@@ -143,6 +125,47 @@ impl BodyMesh {
         }
         mesh
     }
+}
+
+/// The box shown when a smooth body has no visible edges of its own.
+pub(crate) fn bounds_edges((lo, hi): (Vec3, Vec3)) -> Vec<[Vec3; 2]> {
+    let corner =
+        |k: usize| Vec3::new(if k & 1 == 0 { lo.x } else { hi.x }, if k & 2 == 0 { lo.y } else { hi.y }, if k & 4 == 0 { lo.z } else { hi.z });
+    (0..8).flat_map(|k| [1, 2, 4].into_iter().filter(move |axis| k & axis == 0).map(move |axis| [corner(k), corner(k | axis)])).collect()
+}
+
+/// A body's display edges without its face mesh.
+pub(crate) fn body_outline(body: &Body, formed: bool) -> Vec<[Vec3; 2]> {
+    let chord = if body.has_curves() { body.chord() } else { 0.0 };
+    let mut lines = Vec::new();
+    for (points, _) in drawn_body_edges(body, formed, chord) {
+        lines.extend(points.windows(2).map(|w| [w[0], w[1]]));
+    }
+    lines
+}
+
+/// Edges along sharp turns and the boundaries between flat and curved faces.
+/// Seams between nearly coplanar faces and the tangent seams of formed surfaces stay hidden.
+fn drawn_body_edges(body: &Body, formed: bool, chord: f64) -> impl Iterator<Item = (Vec<Vec3>, Option<FinishEdge>)> + '_ {
+    let surface = |h: Ix| {
+        let face = body.loops()[body.half_edges()[h as usize].loop_ix as usize].face;
+        &body.faces()[face as usize].surface
+    };
+    let flat = |s: &Surface| matches!(s, Surface::Plane(_));
+    let round = |s: &Surface| matches!(s, Surface::Torus(_));
+    body.edges().iter().enumerate().filter_map(move |(e, edge)| {
+        let points = edge_points(body, e as Ix, chord);
+        let p = points[0];
+        let (a, b) = (surface(edge.half), surface(body.half_edges()[edge.half as usize].twin));
+        let normals = [a.normal_at(p), b.normal_at(p)];
+        let visible = flat(a) != flat(b) || (!formed && (round(a) || round(b)) && a != b) || normals[0].dot(normals[1]) < SHARP;
+        if !visible {
+            return None;
+        }
+        let finish =
+            (flat(a) && flat(b) && body.edge_curve(edge).is_none()).then(|| FinishEdge { id: edge.id, ends: [points[0], points[1]], normals });
+        Some((points, finish))
+    })
 }
 
 /// The chords of a curve of sketch `p` through `pts`, in place: in the sketch's plane, or on its
@@ -161,6 +184,22 @@ pub fn chords(p: &datum_ops::Placed, pts: Vec<[f64; 2]>, out: &mut Vec<[Vec3; 2]
             place(Vec2::new(a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
         };
         out.extend((0..n).map(|k| [at(k), at(k + 1)]));
+    }
+}
+
+/// The sketch's curves and pattern copies, as lines in place.
+pub(crate) fn sketch_lines(p: &datum_ops::Placed, out: &mut Vec<[Vec3; 2]>) {
+    let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()).chain(p.ellipses.keys());
+    for pts in curves.filter_map(|n| SketchEdit::curve_points(p, n)) {
+        chords(p, pts, out);
+    }
+    for c in &p.patterns {
+        for (k, at) in &c.at {
+            if !(c.source && *k == [0, 0]) {
+                SketchEdit::copy_outline(p, c, at).into_iter().for_each(|pts| chords(p, pts, out));
+            }
+        }
+        c.chains.iter().for_each(|copy| chords(p, copy.outline(), out));
     }
 }
 
@@ -186,6 +225,8 @@ impl MeshCache {
 pub struct Scene {
     pub bodies: Vec<Arc<BodyMesh>>,
     pub sketch_lines: Vec<[Vec3; 2]>,
+    /// Indices into `sketch_lines` for each sketch in input order.
+    pub(crate) sketch_ranges: Vec<Range<usize>>,
     pub bounds: Option<(Vec3, Vec3)>,
     /// The rest of the product around what is worked on (D160): drawn, not picked; `faded`, by
     /// its edges alone, faint, so as not to hide the part being worked on.
@@ -208,19 +249,9 @@ impl Scene {
                 // Work planes are drawn over the picture, from the model's inspection.
                 Value::Flat(_) | Value::Plane(_) => {}
                 Value::Sketch(p) => {
-                    let curves = p.lines.keys().chain(p.arcs.keys()).chain(p.circles.keys()).chain(p.ellipses.keys());
-                    for pts in curves.filter_map(|n| SketchEdit::curve_points(p, n)) {
-                        chords(p, pts, &mut s.sketch_lines);
-                    }
-                    // The copies of patterns, as the profiles they make (the cell itself is drawn above).
-                    for c in &p.patterns {
-                        for (k, at) in &c.at {
-                            if !(c.source && *k == [0, 0]) {
-                                SketchEdit::copy_outline(p, c, at).into_iter().for_each(|pts| chords(p, pts, &mut s.sketch_lines));
-                            }
-                        }
-                        c.chains.iter().for_each(|copy| chords(p, copy.outline(), &mut s.sketch_lines));
-                    }
+                    let start = s.sketch_lines.len();
+                    sketch_lines(p, &mut s.sketch_lines);
+                    s.sketch_ranges.push(start..s.sketch_lines.len());
                 }
             }
         }
