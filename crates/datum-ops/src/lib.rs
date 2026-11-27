@@ -267,8 +267,10 @@ pub enum Op {
         /// input of the flange, as a work plane of `to` is: parts meet without knowing of each
         /// other. Takes `height` (the usual D205 height, square to the sheet; a non-right angle
         /// there makes the wall's length along the flange follow from it), one edge, no
-        /// `height_along`, no `angle` but a right one. `flip`: derived from the face, the field is
-        /// ignored.
+        /// `height_along`, no `angle` but a right one. `flip` reverses the wall's direction along
+        /// the selected face. On the side edge of a flat sheet, where the face's plane meets the sheet's
+        /// outer surface past it, the sheet is lengthened by a strip to the bend, square to the edge
+        /// at both ends (D311).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_face: Option<FaceTo>,
     },

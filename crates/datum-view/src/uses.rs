@@ -144,10 +144,11 @@ pub fn uses(graph: &Graph, evaluation: &Evaluation, name: &str, cache: &mut Mesh
                     u.edges.push((ends, id));
                 }
             }
-            // The flat face of another body the wall reaches (D305), the body an input of it.
+            // The flat face of another body the wall reaches (D305), the body an input of it: the
+            // input's place in the graph is what its result is filed by, not its place in `inputs`.
             if let Some(t) = to_face
                 && let Some(i) = node.inputs.iter().position(|&i| graph.nodes()[i as usize].name == t.from)
-                && let Some(face_of) = evaluation.results[i].as_ref().ok().and_then(|v| v.body())
+                && let Some(face_of) = evaluation.results[node.inputs[i] as usize].as_ref().ok().and_then(|v| v.body())
                 && let Some(face) = TopoId::parse(&t.face)
                 && face_of.faces().binary_search_by_key(&face, |f| f.id).is_ok()
             {
@@ -366,6 +367,27 @@ mod tests {
         let other = body.faces().iter().map(|f| f.id).find(|id| *id != u.faces[0].1).unwrap();
         s.execute("edit", &json!({"name": "flange1", "to_face": {"face": format!("{other:?}"), "from": "sheet1", "gap": 0.0}})).unwrap();
         assert_eq!(uses_in(&s, "flange1").unwrap().faces, [("sheet1".to_string(), other)]);
+    }
+
+    /// A flange to a face on a side edge of a flat sheet lists the body and the face as well
+    /// (D311), and the side edge among the edges it stands on; a face edited is the one it says.
+    #[test]
+    fn a_side_edge_flange_to_a_face_lists_the_body() {
+        let mut s = open("flange-to-face-side.json");
+        let u = uses_in(&s, "flange_to_face").unwrap();
+        assert_eq!(u.inputs, ["flat_sheet", "target_plate"]);
+        let ix = s.graph().find("flange_to_face").unwrap() as usize;
+        let Op::Flange { to_face: Some(t), edges, .. } = &s.graph().nodes()[ix].op else { panic!("a flange to a face") };
+        assert_eq!(u.faces, [(t.from.clone(), TopoId::parse(&t.face).unwrap())]);
+        // It stands on the side edge picked, one of the edges it is offered.
+        let edge = TopoId::parse(&edges[0]).unwrap();
+        assert_eq!(u.used_edges, [edge]);
+        assert!(u.edges.iter().any(|(ends, id)| *id == edge && ends[0] != ends[1]), "the side edge is offered");
+        // Another face of that body, the use follows the change.
+        let body = s.evaluation().results[s.graph().find("target_plate").unwrap() as usize].as_ref().unwrap().body().unwrap();
+        let other = body.faces().iter().map(|f| f.id).find(|id| *id != u.faces[0].1).unwrap();
+        s.execute("edit", &json!({"name": "flange_to_face", "to_face": {"face": format!("{other:?}"), "from": "target_plate", "gap": 0.0}})).unwrap();
+        assert_eq!(uses_in(&s, "flange_to_face").unwrap().faces, [("target_plate".to_string(), other)]);
     }
 
     /// An extrusion on one profile of two uses it and its sketch only; on none named, both.
