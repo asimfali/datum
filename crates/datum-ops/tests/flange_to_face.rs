@@ -811,6 +811,110 @@ fn a_side_edge_wall_lies_on_the_face_on_either_side() {
     }
 }
 
+/// The author's own pair (`test11.json`): his sketches and planes, the sheet and the plate he
+/// reaches. Thickness 2 and radius 1 are explicit, as the reference model has them, instead of the
+/// part's rule «Лист 2 мм»; `shift` moves the plate along its face's own normal — toward the sheet
+/// for a positive one, the way an edit of his model does.
+fn test11_pair(shift: f64) -> (Body, Body) {
+    // sketch1 → plane1, the sheet's frame; sketch2 on it, the sheet's path.
+    let first = serde_json::json!({"points": {"p1": [-1.3574660633484164, -6.4856711915535445], "p2": [6.666666666666667, 1.5686274509803921]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}}});
+    let path = op(serde_json::json!({"op": "sketch", "sketch": first})).eval(id("sketch1"), &[]).unwrap();
+    let plane = op(serde_json::json!({"op": "plane", "line": {"input": 0, "line": "l1"}, "offset": 0.0})).eval(id("plane1"), &[&path]).unwrap();
+    let tim = serde_json::json!({"points": {"p1": [5.552729121620299, 0.0], "p2": [-55.80008689283115, -78.96728415677512]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}},
+        "constraints": [{"line": "l1", "type": "length", "value": 100.0}, {"points": ["origin", "p1"], "type": "coincident"}]});
+    let sheet_path = op(serde_json::json!({"op": "sketch", "sketch": tim})).eval(id("sketch2"), &[&plane]).unwrap();
+    let a =
+        op(serde_json::json!({"op": "sheet", "thickness": 2.0, "radius": 1.0, "path": "l1", "side": "left", "start": "p2", "z0": 0.0, "z1": 100.0}))
+            .eval(id("sheet1"), &[&sheet_path])
+            .unwrap()
+            .body()
+            .unwrap()
+            .clone();
+    // sketch3 on the XZ plane, the plate's path; the plate across it (`shift` along its face).
+    let (nx, nz) = (0.9511114136136289, -0.3088479867084847);
+    let third = serde_json::json!({"points": {"p1": [-36.85137824886752, 55.08677724429659], "p2": [-88.48739184270492, -103.92867370945268]},
+        "lines": {"l1": {"from": "p1", "to": "p2"}}});
+    let plate_path = op(serde_json::json!({"op": "sketch", "sketch": third,
+        "plane": {"normal": [0.0, -1.0, 0.0], "origin": [nx * shift, 0.0, nz * shift], "x_axis": [1.0, 0.0, 0.0]}}))
+    .eval(id("sketch3"), &[])
+    .unwrap();
+    let b = op(
+        serde_json::json!({"op": "sheet", "thickness": 2.0, "radius": 1.0, "path": "l1", "side": "left", "start": "p2", "z0": -100.0, "z1": 100.0}),
+    )
+    .eval(id("sheet2"), &[&plate_path])
+    .unwrap()
+    .body()
+    .unwrap()
+    .clone();
+    (a, b)
+}
+
+/// The plate's face the sheet reaches: its largest flat face whose outward normal turns toward the
+/// sheet, and the plane of it.
+fn face_toward(plate: &Body, sheet: &Body) -> (String, Vec3, Vec3) {
+    let centre = sheet.vertices().iter().fold(Vec3::ZERO, |s, v| s + v.point) * (1.0 / sheet.vertices().len() as f64);
+    let x = (0..plate.faces().len())
+        .filter(|&x| plate.faces()[x].surface.plane().is_some())
+        .filter(|&x| {
+            let p = plate.faces()[x].surface.plane().unwrap();
+            let n = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+            (centre - p.origin).dot(n) > 0.0
+        })
+        .max_by(|&x, &y| plate.face_area(x as u32).total_cmp(&plate.face_area(y as u32)))
+        .unwrap();
+    let p = plate.faces()[x].surface.plane().unwrap();
+    let n = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+    (format!("{:?}", plate.faces()[x].id), p.origin, n)
+}
+
+/// The side edge of the sheet the author's flange stands on: the long edge of its outer surface
+/// whose nearest face of the plate is the one it reaches — the view's own pick, the nearest of them.
+fn authors_side_edge(sheet: &Body, plate: &Body, face: &str) -> String {
+    let mut found: Vec<(f64, String)> = flange_edges(sheet)
+        .into_iter()
+        .filter(|(_, p)| libm::hypot(p[1].x - p[0].x, libm::hypot(p[1].y - p[0].y, p[1].z - p[0].z)) > 50.0)
+        .filter(|(e, _)| flange_face_near(sheet, *e, &[("sheet2", plate)]).is_some_and(|(_, f)| format!("{f:?}") == face))
+        .map(|(e, p)| {
+            let mid = (p[0] + p[1]) * 0.5;
+            ((mid - sheet.vertices()[0].point).dot(mid - sheet.vertices()[0].point), format!("{e:?}"))
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.total_cmp(&b.0));
+    found.into_iter().next().map(|(_, e)| e).unwrap()
+}
+
+/// The author's own case (`test11.json`, D311): the wall on the side edge of the sheet reaches the
+/// plate's face and lies outside its material, the bend turned over the plate's edge; the plate
+/// moved, the strip and the wall follow it the same way round.
+#[test]
+fn the_authors_case_lies_on_the_plate_outside_it() {
+    let (sheet0, plate0) = test11_pair(0.0);
+    let (face, at0, n) = face_toward(&plate0, &sheet0);
+    for (shift, gap) in [(0.0, 0.0), (0.0, 3.0), (5.0, 0.0)] {
+        let (a, b) = test11_pair(shift);
+        let (_, at, face_n) = face_toward(&b, &a);
+        assert!(close(face_n.dot(n), 1.0), "the face is the same one, turned the same way");
+        assert!(close((at - at0).dot(n), shift), "shift {shift}: the face moved {}", (at - at0).dot(n));
+        let edge = authors_side_edge(&a, &b, &face);
+        let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, gap, serde_json::json!({"radius": SIDE_R})).unwrap();
+        assert!(close(normal.dot(n), 1.0), "the face's plane is the one asked for");
+        // The wall's outer face is on the face's plane, `gap` off it; its own way out is the
+        // face's turned — `−n`, the material behind it, toward the sheet.
+        let (o, w) = new_face_across(&a, &out, plane, normal);
+        assert!(close(w.dot(normal), -1.0), "shift {shift}, gap {gap}: the wall's outer normal {w:?} against {normal:?}");
+        assert!(close(distance(o, normal, plane), gap), "shift {shift}, gap {gap}: the wall is {} from the face", distance(o, normal, plane));
+        // None of the flange's vertices is in the plate's material: the plate's thickness on the
+        // far side of its face, the flange on this side of it.
+        let off = plane.dot(normal);
+        let least = out.vertices().iter().map(|v| v.point.dot(normal) - off).fold(f64::INFINITY, f64::min);
+        assert!(least > -1e-9, "shift {shift}, gap {gap}: the flange reaches {least} into the plate");
+        // The strip is there, and the sheet's own body is part of the flange.
+        assert!(out.volume() > a.volume(), "shift {shift}: {} against {}", out.volume(), a.volume());
+    }
+}
+
 #[test]
 fn a_side_edge_is_lengthened_to_a_face_past_it() {
     let a = side_sheet();

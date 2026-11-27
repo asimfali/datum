@@ -506,6 +506,10 @@ impl FaceBend {
     }
 }
 
+/// How near the wall's own way out has to be the face's, turned, for the wall to lie on the face
+/// (D311): a bend's turn and a plane's normal leave this much, no more.
+const LANDING: f64 = 1e-9;
+
 /// The bend a flange on edge `e` of `target` needs to reach the flat face `face` (D305): its
 /// normal goes across the edge and the bend turns out of the sheet toward it (`sin a > 0`). The
 /// face's plane may meet the sheet's outer surface along a line past an end of a flat sheet instead
@@ -527,6 +531,9 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
         oblique: bool,
     }
     let mut best: Option<Candidate> = None;
+    // A face across the edge was met: no side of the sheet lays the wall on it — a different thing
+    // from no face across the edge at all.
+    let mut crossed = false;
     for sign in [1.0, -1.0] {
         let n = f * sign;
         for flip in [false, true] {
@@ -543,6 +550,7 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
             // whose plane meets the sheet's outer surface along a line across the edge is turned
             // to by a bend about that line, its angle the one between the two planes (D311).
             let oblique = !within_rounding(n.dot(w), 1.0);
+            crossed |= oblique;
             // A face whose plane meets the sheet along a line across the edge (D311) is met from the
             // sheet, its plane beyond the edge along `out`: the other sign of its normal would put
             // the wall's material on the far side of the face, through it. The bend turns to the
@@ -565,19 +573,28 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
                 continue;
             }
             let mut a = libm::atan2(sin, n.dot(up)).to_degrees();
-            // The angle past the perpendicular is no less the face's: turning the sheet's own normal
-            // `up` about the line of the bend must land it on the face's normal. Where the face
-            // stands over the sheet's front, that is the obtuse one (D311): the wall lies on the
-            // face, turned past a right angle, not standing out of it.
+            // The wall's outer face must lie on the face's plane with its material on the sheet's
+            // side: its outward normal `T = out·sin a − up·cos a` is the face's own, turned,
+            // `T = −n` (D305, and D311 where the bend turns about the line of the bend, not the
+            // edge). Checked, not assumed: the edge's stored way round may turn the bend the other
+            // way, and a wall through the face — its material inside the other part — is no flange.
+            // The strip keeps the lengthened face's own plane, so `out` here is the new edge's too.
+            // The obtuse angle comes out of `atan2` by itself where the face stands over the
+            // sheet's front; the other root of the turn is tried as well, the side that misses
+            // left.
             if oblique {
                 let line = unit(up.cross(n));
+                let axis = if line.cross(out).dot(up) > 0.0 { line } else { line * -1.0 };
                 let land = |a: f64| {
                     let (sn, cs) = libm::sincos(a.to_radians());
-                    (1.0 - turned(up, line, (sn, cs)).dot(n)).abs()
+                    (turned(up, axis, (sn, cs)).dot(n) - 1.0).abs()
                 };
                 let (was, other) = (land(a), land(180.0 - a));
-                if other < was {
+                if was > LANDING && other < was {
                     a = 180.0 - a;
+                }
+                if !(a > 0.0 && a < 180.0) || land(a) > LANDING {
+                    continue;
                 }
             }
             if !(a > 0.0 && a < 180.0) {
@@ -602,7 +619,15 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
             }
         }
     }
-    let Some(c) = best else { return Ok(None) };
+    let Some(c) = best else {
+        return if crossed {
+            Err(BrepError::Degenerate(
+                "flange: a flange to a face: the wall's outer surface cannot lie on the face with its material on the sheet's side".into(),
+            ))
+        } else {
+            Ok(None)
+        };
+    };
     let base = bases[usize::from(c.flip)].take().ok_or_else(|| BrepError::Invalid("flange: the edge's base was not tried".into()))?;
     Ok(Some(FaceBend { flip: c.flip, n: c.n, out: c.out, a: c.a, t: c.t, base, oblique: c.oblique }))
 }
