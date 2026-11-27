@@ -300,9 +300,14 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         }
         let mut body = target.clone();
         for &e in &ids {
-            let (d, ends) = dims_for_face(&body, e, dims, face)?;
+            let (mut d, ends) = dims_for_face(&body, e, dims, face)?;
             if ends.iter().any(|&x| x > 0.0) {
+                // Rebuilding the oblique end can change which sheet surface is the front.
+                let up = if dims.flip { Some(base(&body, e, d.flip, &BTreeSet::new())?.up) } else { None };
                 body = extended(&body, e, ends)?;
+                if let Some(up) = up {
+                    d.flip = base(&body, e, false, &BTreeSet::new())?.up.dot(up) < 0.0;
+                }
             }
             body = flanges(feature, &body, &[format!("{e:?}")], d)?;
         }
@@ -359,20 +364,25 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
     if !dims.width.is_edge() {
         return Err(BrepError::Unsupported("flange: a flange to a face narrower than its edge comes later".into()));
     }
-    // The wall's side follows the face it reaches (D311): the wall's outer face goes on from the
-    // sheet's outer surface, its slab between that face's plane and the sheet. The wall on the
-    // other side of the part is the face's own opposite one, reached in its stead — not the same
-    // face turned round, which would lay the slab on the same side all the same.
-    if dims.flip {
-        return Err(BrepError::Unsupported(
-            "flange: a flange to a face: the wall's side follows the face; reach the face's opposite one for the wall's other side".into(),
-        ));
-    }
-    let Some(c) = bend_to_face(target, e, face)? else {
+    let Some(mut c) = bend_to_face(target, e, face)? else {
         return Err(BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()));
     };
+    if dims.flip {
+        c.flip = !c.flip;
+        c.base = base(target, e, c.flip, &BTreeSet::new())?;
+        // With q pointing out across the bend line, the inner wall normal is
+        // -q sin(a) + up cos(a). Both up and cos(a) change sign, so the wall
+        // keeps its normal and its direction along the plane reverses.
+        c.a = 180.0 - c.a;
+    }
     let (ends, recess_angle) = if c.oblique {
-        (c.strip(target, face, dims.radius)?, None)
+        let mut ends = c.strip(target, face, dims.radius)?;
+        if dims.flip && c.flip {
+            // The two long edges run in opposite directions around the end face.
+            // Extension is measured in the order of the unflipped base.
+            ends.reverse();
+        }
+        (ends, None)
     } else {
         let (absolute, extension) = c.setback(target, face, dims.radius, dims.flush)?;
         ([extension; 2], (absolute > 0.0).then(|| 2.0 * libm::atan(absolute / (dims.radius + c.t)).to_degrees()))

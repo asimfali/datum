@@ -1387,35 +1387,6 @@ fn wall_edge_label<'a>(i18n: &'a crate::i18n::I18n, e: &str) -> &'a str {
     }
 }
 
-/// The flat faces of `body` whose own way out is the face `face`'s turned (D311): a part's other
-/// side, or the far side of one stepped in its thickness, where a wall reaches all the same. By the
-/// distance of their planes along the face's own way out, then by the lower face ID; none if `face`
-/// is no flat face of the body or nothing lies across it.
-fn faces_across(body: &datum_brep::Body, face: datum_brep::TopoId) -> Vec<datum_brep::TopoId> {
-    let Some(current) = body.faces().iter().find(|f| f.id == face) else { return Vec::new() };
-    let datum_brep::Surface::Plane(plane) = current.surface else { return Vec::new() };
-    let n = plane.normal * (1.0 / plane.normal.dot(plane.normal).sqrt());
-    let mut found: Vec<(f64, datum_brep::TopoId)> = body
-        .faces()
-        .iter()
-        .filter(|f| f.id != face)
-        .filter_map(|f| {
-            let datum_brep::Surface::Plane(p) = f.surface else { return None };
-            let u = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
-            // Opposed to the rounding a plane's normal is worked out to, as the kernel counts it.
-            (u.dot(n) < 0.0 && datum_ops::nearly_parallel(u, n)).then(|| ((p.origin - plane.origin).dot(n), f.id))
-        })
-        .collect();
-    found.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    found.into_iter().map(|(_, id)| id).collect()
-}
-
-/// The face across `face` of the body called `body` among the model's, if there is one (D311).
-fn face_across(model: Option<&Model>, body: &str, face: &str) -> Vec<datum_brep::TopoId> {
-    let Some(b) = model.and_then(|m| m.solids.iter().find(|(n, _)| n == body)).and_then(|(_, v)| v.body()) else { return Vec::new() };
-    datum_brep::TopoId::parse(face).map_or_else(Vec::new, |id| faces_across(b, id))
-}
-
 /// The nearest flat face of another body a flange on the edge picked reaches (D305), as the form
 /// says one: the sheet is the body of that edge, the others are the bodies of the picture in the
 /// order it shows them, the sheet and the flange's own result left out.
@@ -6523,12 +6494,8 @@ impl Viewer {
                         f.face = None;
                         f.to[2].0.clear();
                         if f.reaches {
-                            // One edge to a face: no width to take, no corner to close, and the
-                            // wall's side is the face's — an inherited `flip` would be refused
-                            // (D311).
                             f.extent = "edge";
                             f.corner = "open";
-                            f.flip = false;
                             // The nearest face of another body the flange can reach: shown at
                             // once; the picture or the button picks another (D305).
                             f.face = nearest_face(&d.flange_edges, d.model.as_ref(), &f.name);
@@ -6560,23 +6527,7 @@ impl Viewer {
                         );
                     });
                 }
-                if f.reaches {
-                    // The face across this one (D311): the part's other side — a plate's far side,
-                    // or the far side of one stepped in its thickness — where the wall reaches all
-                    // the same. The side of the wall follows the face, so the engineer takes the
-                    // part's other side by the face, not by turning the same one round.
-                    let across = f.face.as_ref().map(|(body, id)| face_across(d.model.as_ref(), body, id)).unwrap_or_default();
-                    let current = f.face.as_ref().and_then(|(_, id)| datum_brep::TopoId::parse(id));
-                    let on = across.first().is_some_and(|first| Some(*first) != current);
-                    if ui.add_enabled_ui(!across.is_empty(), |ui| flip_tile(ui, self.i18n.t("flange-flip", "Other side"), on)).inner.clicked()
-                        && let Some((body, _)) = f.face.clone()
-                    {
-                        let next = current.and_then(|c| across.iter().position(|id| *id == c)).map_or(0, |k| (k + 1) % across.len());
-                        if let Some(id) = across.get(next) {
-                            f.face = Some((body, format!("{id:?}")));
-                        }
-                    }
-                } else if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
+                if flip_tile(ui, self.i18n.t("flange-flip", "Other side"), f.flip).clicked() {
                     // The side of the sheet the bend stands on (D205).
                     f.flip = !f.flip;
                 }
@@ -12583,101 +12534,14 @@ mod tests {
             (&want["inputs"], &want["to_face"]["from"], &want["to_face"]["face"], &want["angle"]),
             (&json!(["flat_sheet", "target_plate"]), &json!("target_plate"), &json!(format!("{face:?}")), &json!(90.0))
         );
-    }
-
-    /// A flange reaching a face takes the part's other side by the face across the one reached
-    /// (D311): the tile steps to the parallel face turned the other way of the same body — a plate's
-    /// far side — and back, while the wall's own `flip` stays the face's.
-    #[test]
-    fn a_flange_reaching_a_face_takes_its_other_side() {
-        let (mut v, inbox) = viewer("flange-to-face-side.json");
-        v.docs[v.active].flange_edges = vec![("flat_sheet".into(), datum_brep::TopoId(0xab))];
-        // The model's bodies: the sheet of the case and the plate its face is of.
-        let solids = solids_of("flange-to-face-side.json", &["flat_sheet", "target_plate"]);
-        (v.docs[0].model.as_mut().unwrap().bodies, v.docs[0].model.as_mut().unwrap().solids) =
-            (vec!["flat_sheet".into(), "target_plate".into()], solids);
-        let body = |v: &Viewer, name: &str| {
-            v.docs[0].model.as_ref().unwrap().solids.iter().find(|(n, _)| n == name).and_then(|(_, b)| b.body().cloned()).unwrap()
-        };
-        let (sheet, plate) = (body(&v, "flat_sheet"), body(&v, "target_plate"));
-        // The side edge of the sheet, and the face the flange takes by itself there.
-        let edge = datum_ops::flange_edges(&sheet)
-            .into_iter()
-            .find(|(_, p)| p.iter().all(|q| q.z.abs() < 1e-9 && q.y.abs() < 1e-9))
-            .map(|(e, _)| e)
-            .expect("the side edge");
-        let (near_body, near) = datum_ops::flange_face_near(&sheet, edge, &[("target_plate", &plate)]).expect("a face to reach");
-        assert_eq!(near_body, "target_plate");
-        let across = faces_across(&plate, near);
-        assert_eq!(across.len(), 1, "a plate has the one face across its side: {across:?}");
-        let far = across[0];
-        let face = |id: datum_brep::TopoId| Some(("target_plate".to_string(), format!("{id:?}")));
-        v.docs[0].flange = None;
-        v.open_flange();
-        let mut h = form_harness(v);
-        h.run();
-        h.get_by_label("Reach a face of another body").click();
-        h.run();
-        h.state_mut().docs[0].flange.as_mut().unwrap().face = face(near);
-        h.run();
-        h.run();
-        inbox.try_iter().for_each(drop);
-        // The face across it: the plate's far side, the wall's `flip` the face's as it was.
         h.get_by_label("Other side").click();
         h.run();
         let form = h.state().docs[0].flange.as_ref().unwrap();
-        assert_eq!(form.face, face(far), "the far side taken");
-        assert!(!form.flip, "the side of the wall is the face's, not the flange's own `flip`");
-        let want =
-            inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).last().expect("a preview");
-        assert_eq!((&want["to_face"]["from"], &want["to_face"]["face"]), (&json!("target_plate"), &json!(format!("{far:?}"))));
-        // And once more round, back to the near one.
-        h.get_by_label("Other side").click();
-        h.run();
-        assert_eq!(h.state().docs[0].flange.as_ref().unwrap().face, face(near), "back to the near side");
-    }
-
-    /// Reaching a face takes the wall's side from it (D311): an inherited `flip` of the form is
-    /// dropped when the face is turned to, and no face across the one reached leaves the tile
-    /// disabled — a part whose faces have no parallel other one, as a triangular prism's sides.
-    #[test]
-    fn reaching_a_face_drops_the_flip_and_needs_a_face_across() {
-        let (mut v, _inbox) = viewer("flange-to-face-side.json");
-        v.docs[v.active].flange_edges = vec![("flat_sheet".into(), datum_brep::TopoId(0xab))];
-        v.open_flange();
-        v.docs[0].flange.as_mut().unwrap().flip = true;
-        let mut h = form_harness(v);
-        h.run();
-        h.get_by_label("Reach a face of another body").click();
-        h.run();
-        assert!(!h.state().docs[0].flange.as_ref().unwrap().flip, "the side is the face's");
-        // A triangular prism's side face: nothing lies across it.
-        let mut session = Session::default();
-        session
-            .execute("add", &json!({"name": "tri", "op": "prism", "polygon": [[0.0, 0.0], [10.0, 0.0], [5.0, 8.0]], "z0": 0.0, "z1": 5.0}))
-            .unwrap();
-        let ix = session.graph().find("tri").unwrap() as usize;
-        let tri: datum_brep::Body = session.evaluation().results[ix].as_ref().unwrap().body().unwrap().clone();
-        let side = tri
-            .faces()
-            .iter()
-            .find(|f| {
-                f.surface.plane().is_some_and(|p| {
-                    let n = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
-                    n.z.abs() < 0.5
-                })
-            })
-            .map(|f| f.id)
-            .expect("a side of the prism");
-        assert!(faces_across(&tri, side).is_empty(), "a triangular prism's side has no face across it");
-        let m = h.state_mut().docs[0].model.as_mut().unwrap();
-        (m.bodies, m.solids) = (vec!["tri".into()], vec![("tri".into(), std::sync::Arc::new(datum_ops::Value::Body(tri.clone())))]);
-        h.state_mut().docs[0].flange.as_mut().unwrap().face = Some(("tri".into(), format!("{side:?}")));
-        h.run();
-        h.run();
-        h.get_by_label("Other side").click();
-        h.run();
-        assert_eq!(h.state().docs[0].flange.as_ref().unwrap().face, Some(("tri".into(), format!("{side:?}"))), "nothing across it, nothing taken");
+        assert!(form.flip);
+        assert_eq!(form.face, Some(("target_plate".to_string(), format!("{face:?}"))));
+        let want = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).last().unwrap();
+        assert_eq!(want["flip"], true);
+        assert_eq!(want["to_face"]["face"], format!("{face:?}"));
     }
 
     /// With no face of another body to reach, the form waits for one to be picked; then the body

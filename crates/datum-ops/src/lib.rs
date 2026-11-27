@@ -51,7 +51,7 @@ pub use sheet::{Sheet, Side, path_ends, path_name, paths, sheet};
 pub use sketch::ChainPiece;
 pub use sketch::{
     Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
-    face_plane, nearly_parallel, open_curves, parallel, place, profile_curves, profile_regions,
+    face_plane, open_curves, parallel, place, profile_curves, profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, LineCut, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 
@@ -267,8 +267,8 @@ pub enum Op {
         /// input of the flange, as a work plane of `to` is: parts meet without knowing of each
         /// other. Takes `height` (the usual D205 height, square to the sheet; a non-right angle
         /// there makes the wall's length along the flange follow from it), one edge, no
-        /// `height_along`, no `angle` but a right one. `flip`: derived from the face, the field is
-        /// ignored. On the side edge of a flat sheet, where the face's plane meets the sheet's
+        /// `height_along`, no `angle` but a right one. `flip` reverses the wall's direction along
+        /// the selected face. On the side edge of a flat sheet, where the face's plane meets the sheet's
         /// outer surface past it, the sheet is lengthened by a strip to the bend, square to the edge
         /// at both ends (D311).
         #[serde(default, skip_serializing_if = "Option::is_none")]

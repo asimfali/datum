@@ -1119,24 +1119,77 @@ fn a_side_edge_flange_unfolds_with_the_strip() {
     assert!(close(area, material), "the blank is {area}, the part's material {material}");
 }
 
-/// The flange's `flip` in a reach asks for the wall on the other side of the part (D311): the side
-/// follows the face, and the other side is that face's opposite one — said so, not laid aslant.
 #[test]
-fn a_wall_the_other_way_round_is_refused() {
+fn a_flipped_end_wall_reaches_the_same_face() {
     let a = flange_sheet();
-    let b = target_sheet([0.0, 37.0], 90.0);
-    let face = face_through(&b, [0.0, 37.0]);
-    let e = reach(&a, &b, &face, 0.0, serde_json::json!({"flip": true})).unwrap_err();
-    let BrepError::Unsupported(why) = e else { panic!("end: {e:?}") };
-    assert!(why.contains("side follows the face"), "end: {why}");
+    for (x, angle) in [(0.0, 90.0), (10.0, 60.0)] {
+        let b = target_sheet([x, 37.0], angle);
+        let face = face_through(&b, [x, 37.0]);
+        for gap in [0.0, 3.0] {
+            let (out, at, n) = reach(&a, &b, &face, gap, serde_json::json!({"flip": true})).unwrap();
+            out.validate().unwrap();
+            let faces = wall_faces(&a, &out, at, n);
+            assert_eq!(faces.len(), 2, "{faces:?}");
+            assert!(faces.iter().any(|d| close(d.abs(), gap)), "{faces:?}");
+        }
+    }
+}
+
+#[test]
+fn the_authors_case_flips_the_wall_along_the_same_face() {
     let (a, b) = test11_pair(0.0);
     let (face, _, _) = face_toward(&b, &a);
     let edge = authors_side_edge(&a, &b, &face);
-    let e = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R, "flip": true})).unwrap_err();
-    let BrepError::Unsupported(why) = e else { panic!("side: {e:?}") };
-    assert!(why.contains("side follows the face"), "side: {why}");
-    let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
-    let (o, w) = new_face_across(&a, &out, plane, normal);
-    assert!(close(w.dot(normal), -1.0), "the wall of the side by itself");
-    assert!(close(distance(o, normal, plane), 0.0));
+    let unit = |v: Vec3| v * (1.0 / v.dot(v).sqrt());
+    let sheet_centre = a.vertices().iter().fold(Vec3::ZERO, |sum, v| sum + v.point) * (1.0 / a.vertices().len() as f64);
+    let largest = (0..a.faces().len()).max_by(|&i, &j| a.face_area(i as u32).total_cmp(&a.face_area(j as u32))).unwrap();
+    let sheet_normal = unit(a.faces()[largest].surface.plane().unwrap().normal);
+    let (_, ends) = flange_edges(&a).into_iter().find(|(e, _)| format!("{e:?}") == edge).unwrap();
+    let way = unit(ends[1] - ends[0]);
+    let away = ends[0] - sheet_centre;
+    let outwards = unit(away - way * away.dot(way) - sheet_normal * away.dot(sheet_normal));
+    let bend_origin = |body: &Body| {
+        body.faces()
+            .iter()
+            .find_map(|f| match f.surface {
+                Surface::Cylinder(c) => Some(c.origin),
+                _ => None,
+            })
+            .unwrap()
+    };
+    let bend_side = |body: &Body| (bend_origin(body) - sheet_centre).dot(sheet_normal);
+    let (regular, _, _) = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
+    let flipped_up = sheet_normal * -bend_side(&regular).signum();
+    for gap in [0.0, 3.0] {
+        let (out, at, n) = reach_edge(&a, &b, &edge, &face, gap, serde_json::json!({"radius": SIDE_R, "flip": true})).unwrap();
+        out.validate().unwrap();
+        let faces = wall_faces(&a, &out, at, n);
+        assert_eq!(faces.len(), 2, "{faces:?}");
+        assert!(close(faces[0], gap) && close(faces[1], gap + T), "{faces:?}");
+        assert!(out.vertices().iter().all(|v| (v.point - at).dot(n) > -1e-9));
+        assert!(bend_side(&out) * bend_side(&regular) < 0.0);
+        // The inner wall normal makes an acute angle with the flipped base normal.
+        let (_, wall_normal) = new_face_across(&a, &out, at, n);
+        assert!(close(wall_normal.dot(n), -1.0));
+        assert!(-wall_normal.dot(flipped_up) > 0.0);
+        // The wall's free edge runs away from the flipped base, opposite the regular wall.
+        for (body, up) in [(&out, flipped_up), (&regular, flipped_up * -1.0)] {
+            let i = new_face_across_index(&a, body, at, n) as u32;
+            let tangent = bend_origin(body) - n * (SIDE_R + T);
+            let heights: Vec<_> = body
+                .face_loops(i)
+                .flat_map(|l| body.loop_half_edges(l))
+                .map(|h| (body.point(body.half_edges()[h as usize].origin) - tangent).dot(up))
+                .collect();
+            assert!(heights.iter().all(|h| *h >= -1e-9), "{heights:?}");
+            assert!(heights.iter().any(|h| *h > 0.0), "{heights:?}");
+        }
+        // Intersect the opposite sheet surface with the offset plane and remove the tangent
+        // length of the outer bend, resolved in the direction in which the strip grows.
+        for (p, (_, width)) in ends.into_iter().zip(grew(&a, &out, &edge, way, outwards)) {
+            let p = p - flipped_up * ((p - sheet_centre).dot(flipped_up) + T / 2.0);
+            let want = grow_at(p, outwards, flipped_up, at, n, gap);
+            assert!(close(width, want), "{width} against {want}");
+        }
+    }
 }

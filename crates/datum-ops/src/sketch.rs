@@ -432,7 +432,7 @@ pub(crate) fn within_rounding(x: f64, size: f64) -> bool {
 
 /// Whether `a` and `b` lie along one line but for those bits: the two faces of a wall not along the
 /// axes, or bends turned one after another, are not parallel exactly (D233).
-pub fn nearly_parallel(a: Vec3, b: Vec3) -> bool {
+pub(crate) fn nearly_parallel(a: Vec3, b: Vec3) -> bool {
     let (a, b) = (a * (1.0 / a.dot(a).sqrt()), b * (1.0 / b.dot(b).sqrt()));
     let c = a.cross(b);
     within_rounding(c.dot(c).sqrt(), 1.0)
