@@ -499,6 +499,27 @@
     "pocket": "a5cf4357502ca0a6d0758843ca25e3884e2c864bed2679b3ce2e8b022b037267",
     "pocket_sketch": "a0f71a762196d90768a8bd80916299b1165fff8b1d006f9fe1579181c8e48f1c"
   },
+  "stamp-dimple-cone.json": {
+    "blank": "868bb0483a6b08af22e7d808a7dc8a8ccfde3e1b39ea47aad522ffb4460750d5",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "places": "74e1a37f36e1f5251e6440b7ca1c0b1c3d4c0b810a44780e4645f41f32e2cf20",
+    "plate": "61483531a953e072747eca6c8a933e076fffbb2912112686b90c856fad890e4c",
+    "stamp": "c2b1a26c2283ce539621873f157e758dbdd65ae4a3cbc4a46c79a2efb39e23d7"
+  },
+  "stamp-dimple-pierced.json": {
+    "blank": "ebe94dda068a3b92c0113605258e15c5d4755ae32ac83050f3e0f5983e2de3bc",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "places": "74e1a37f36e1f5251e6440b7ca1c0b1c3d4c0b810a44780e4645f41f32e2cf20",
+    "plate": "61483531a953e072747eca6c8a933e076fffbb2912112686b90c856fad890e4c",
+    "stamp": "092000388e462134da8c64198d10e3e89f70090e97f41f59b6448537d408b058"
+  },
+  "stamp-dimple-sphere.json": {
+    "blank": "868bb0483a6b08af22e7d808a7dc8a8ccfde3e1b39ea47aad522ffb4460750d5",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "places": "74e1a37f36e1f5251e6440b7ca1c0b1c3d4c0b810a44780e4645f41f32e2cf20",
+    "plate": "61483531a953e072747eca6c8a933e076fffbb2912112686b90c856fad890e4c",
+    "stamp": "b28f6b29cb1e1578aee3f5e6eb1faab9557bd88c8d557890ae43a178a792daa0"
+  },
   "stamp-emboss.json": {
     "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
     "places": "74e1a37f36e1f5251e6440b7ca1c0b1c3d4c0b810a44780e4645f41f32e2cf20",

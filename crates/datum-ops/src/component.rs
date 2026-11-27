@@ -18,6 +18,7 @@ use crate::sketch::{Placed, nearly_parallel, open_chains_named, within_rounding}
 use crate::{LineOf, Placement, Value, describe_arity, input_sketch, line_ends, num, sketch_point};
 
 mod bridge;
+mod dimple;
 mod pocket;
 mod section;
 mod stitch;
@@ -126,6 +127,8 @@ pub struct Roles {
 /// JSON) and the earlier features it takes as `inputs`.
 #[derive(Clone, Debug, PartialEq, Serialize, JsonSchema)]
 pub struct PartFeature {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, serde_json::Value>,
     pub name: String,
     pub op: crate::Op,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -140,6 +143,8 @@ impl<'de> Deserialize<'de> for PartFeature {
         #[serde(deny_unknown_fields)]
         struct Fields {
             name: String,
+            #[serde(default)]
+            metadata: BTreeMap<String, serde_json::Value>,
             op: serde_json::Value,
             #[serde(default)]
             inputs: Option<serde_json::Value>,
@@ -157,7 +162,7 @@ impl<'de> Deserialize<'de> for PartFeature {
                 .map(str::to_string)
                 .collect(),
         };
-        Ok(Self { name: f.name, op, inputs })
+        Ok(Self { name: f.name, op, inputs, metadata: f.metadata })
     }
 }
 
