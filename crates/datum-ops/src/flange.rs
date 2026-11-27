@@ -300,9 +300,9 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
         }
         let mut body = target.clone();
         for &e in &ids {
-            let (d, extension) = dims_for_face(&body, e, dims, face)?;
-            if extension > 0.0 {
-                body = extended(&body, e, extension)?;
+            let (d, ends) = dims_for_face(&body, e, dims, face)?;
+            if ends.iter().any(|&x| x > 0.0) {
+                body = extended(&body, e, ends)?;
             }
             body = flanges(feature, &body, &[format!("{e:?}")], d)?;
         }
@@ -351,15 +351,23 @@ pub fn flanges(feature: TopoId, target: &Body, edges: &[String], dims: FlangeDim
 /// bend to stand there (D305: a sheet short of the face is extended to the line where its outer
 /// surface meets the face's plane, not refused). The face is a plane, so its normal's sign is
 /// chosen where the bend can reach it.
-fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -> Result<(FlangeDims, f64), BrepError> {
+///
+/// Where that line runs obliquely past a side edge of a flat sheet, the sheet is lengthened by a
+/// strip to the bend instead (D311): the line clear of the edge, each end of the edge grows by its
+/// own length, and the bend stands on the new edge, the line of the bend itself.
+fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -> Result<(FlangeDims, [f64; 2]), BrepError> {
     if !dims.width.is_edge() {
         return Err(BrepError::Unsupported("flange: a flange to a face narrower than its edge comes later".into()));
     }
     let Some(c) = bend_to_face(target, e, face)? else {
         return Err(BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()));
     };
-    let (absolute, extension) = c.setback(target, face, dims.radius, dims.flush)?;
-    let recess_angle = (absolute > 0.0).then(|| 2.0 * libm::atan(absolute / (dims.radius + c.t)).to_degrees());
+    let (ends, recess_angle) = if c.oblique {
+        (c.strip(target, face, dims.radius)?, None)
+    } else {
+        let (absolute, extension) = c.setback(target, face, dims.radius, dims.flush)?;
+        ([extension; 2], (absolute > 0.0).then(|| 2.0 * libm::atan(absolute / (dims.radius + c.t)).to_degrees()))
+    };
     Ok((
         FlangeDims {
             height: dims.height,
@@ -378,7 +386,7 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
             to_face: None,
             recess_angle,
         },
-        extension,
+        ends,
     ))
 }
 
@@ -396,6 +404,9 @@ struct FaceBend {
     /// The sheet's thickness.
     t: f64,
     base: Base,
+    /// The face's plane meets the sheet's outer surface along a line across the edge, not along it
+    /// (D311: a side edge of a flat sheet, the line running past it obliquely).
+    oblique: bool,
 }
 
 impl FaceBend {
@@ -440,10 +451,65 @@ impl FaceBend {
         }
         Ok((absolute, extension))
     }
+
+    /// Where the sheet's outer surface meets the face's plane set `gap` off (D305), at each end of
+    /// the edge, along `out`: beyond the edge if positive, short of it if negative (D311). None:
+    /// the two planes do not meet along the edge.
+    fn line(&self, target: &Body, face: FaceTarget) -> Option<[f64; 2]> {
+        let across = self.out.dot(self.n);
+        if within_rounding(across, 1.0) {
+            return None;
+        }
+        let up = self.base.up.dot(self.n);
+        Some(self.base.inner.map(|i| (face.gap - (target.point(i) - face.origin).dot(self.n) + up * self.t) / across))
+    }
+
+    /// The sheet's own width beyond the edge along `out`: how far the edge is from the other side.
+    fn wide(&self, target: &Body) -> f64 {
+        let edge = target.point(self.base.inner[0]);
+        target.vertices().iter().fold(0.0, |wide: f64, v| wide.max((edge - v.point).dot(self.out)))
+    }
+
+    /// The bend's set-back from each end of the edge so that the wall's outer surface is `gap` from
+    /// the face's plane — the place [`FaceBend::setback`] works out from one end (D305): positive
+    /// short of the edge, negative beyond it, where the flat part of the sheet is lengthened by that
+    /// much (D311). Where the face's line crosses the edge, the bend's axis is not along the edge:
+    /// the place is measured from each end of it, the sheet's own length at each.
+    fn setbacks(&self, target: &Body, face: FaceTarget, radius: f64) -> [f64; 2] {
+        let across = self.out.dot(self.n);
+        let up = self.base.up.dot(self.n);
+        // The bend's axis is `r + t` from the face's plane, `r` above the sheet's inner surface: the
+        // two planes cross along it, and `out` brings each end of the edge to it.
+        self.base.inner.map(|i| ((target.point(i) - face.origin).dot(self.n) - face.gap - (radius + self.t) + radius * up) / across)
+    }
+
+    /// How far each end of the edge must grow for the bend to stand where the face sets it, the
+    /// face's plane meeting the sheet's outer surface beyond the edge (D311). The line must lie
+    /// clear of the sheet — across it, beyond its other side, or too near the edge for the bend, it
+    /// is refused.
+    fn strip(&self, target: &Body, face: FaceTarget, radius: f64) -> Result<[f64; 2], BrepError> {
+        let line = self
+            .line(target, face)
+            .ok_or_else(|| BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()))?;
+        let wide = self.wide(target);
+        if line.iter().all(|&d| d.is_finite() && d < -wide) {
+            return Err(BrepError::Degenerate("flange: a flange to a face: the face lies beyond the sheet's other side".into()));
+        }
+        if !line.iter().all(|&d| d.is_finite() && d > 0.0) {
+            return Err(BrepError::Degenerate("flange: a flange to a face: the bend line runs across the sheet, not clear of its edge".into()));
+        }
+        let ends = self.setbacks(target, face, radius).map(|a| -a);
+        if !ends.iter().all(|&e| e > 0.0 && e.is_finite()) {
+            return Err(BrepError::Degenerate("flange: a flange to a face: the bend line leaves no room for the bend at the sheet's edge".into()));
+        }
+        Ok(ends)
+    }
 }
 
 /// The bend a flange on edge `e` of `target` needs to reach the flat face `face` (D305): its
-/// normal goes across the edge and the bend turns out of the sheet toward it (`sin a > 0`).
+/// normal goes across the edge and the bend turns out of the sheet toward it (`sin a > 0`). The
+/// face's plane may meet the sheet's outer surface along a line past an end of a flat sheet instead
+/// (D311): the bend crosses the edge, and turns a strip of the sheet up to the face.
 fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<FaceBend>, BrepError> {
     let empty = BTreeSet::new();
     let f = unit(face.normal);
@@ -458,6 +524,7 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
         up: Vec3,
         a: f64,
         t: f64,
+        oblique: bool,
     }
     let mut best: Option<Candidate> = None;
     for sign in [1.0, -1.0] {
@@ -472,13 +539,20 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
             }
             let (out, up) = (base.out, base.up);
             let w = unit(target.point(base.inner[1]) - target.point(base.inner[0]));
-            // The face's normal goes across the edge: the wall lies in a plane along it.
-            if !within_rounding(n.dot(w), 1.0) {
-                continue;
-            }
+            // The face's normal goes across the edge: the wall lies in a plane along it. A face
+            // whose plane meets the sheet's outer surface along a line across the edge is turned
+            // to by a bend about that line, its angle the one between the two planes (D311).
+            let oblique = !within_rounding(n.dot(w), 1.0);
             // The bend turns `out` toward `up`: its outer surface's normal after the turn is
             // `out·sin a − up·cos a`, parallel to the face when `sin a = −n·out`, `cos a = n·up`.
-            let sin = -n.dot(out);
+            // About a line across the edge (D311) the turn is about that line, not the edge: `sin a`
+            // is the part of the face's normal off the sheet's own.
+            let sin = if oblique {
+                let across = n - up * n.dot(up);
+                across.dot(across).sqrt()
+            } else {
+                -n.dot(out)
+            };
             if !(sin.is_finite() && sin > 0.0) {
                 continue;
             }
@@ -501,13 +575,13 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
                 }
             };
             if better {
-                best = Some(Candidate { flip, n, out, up, a, t });
+                best = Some(Candidate { flip, n, out, up, a, t, oblique });
             }
         }
     }
     let Some(c) = best else { return Ok(None) };
     let base = bases[usize::from(c.flip)].take().ok_or_else(|| BrepError::Invalid("flange: the edge's base was not tried".into()))?;
-    Ok(Some(FaceBend { flip: c.flip, n: c.n, out: c.out, a: c.a, t: c.t, base }))
+    Ok(Some(FaceBend { flip: c.flip, n: c.n, out: c.out, a: c.a, t: c.t, base, oblique: c.oblique }))
 }
 
 /// The nearest flat face of another body that a flange on edge `e` of `sheet` reaches (D305),
@@ -524,8 +598,10 @@ pub fn flange_face_near(sheet: &Body, e: TopoId, bodies: &[(&str, &Body)]) -> Op
             let target = FaceTarget { origin: plane.origin, normal: plane.normal, gap: 0.0 };
             let Ok(Some(bend)) = bend_to_face(sheet, e, target) else { continue };
             // The sheet's rule is not in the body: the bend's place is checked at no radius of its
-            // own, where the flange's build may still find it short of the sheet's far end (D305).
-            if bend.setback(sheet, target, 0.0, false).is_err() {
+            // own, where the flange's build may still find it short of the sheet's far end (D305),
+            // or with the face's line across the edge, past it (D311).
+            let place = if bend.oblique { bend.strip(sheet, target, 0.0).map(|_| ()) } else { bend.setback(sheet, target, 0.0, false).map(|_| ()) };
+            if place.is_err() {
                 continue;
             }
             let [p, q] = bend.base.outer;
@@ -546,19 +622,31 @@ fn flush_recess(radius: f64, thickness: f64, angle: f64) -> f64 {
     (radius + thickness) * if angle == 90.0 { 1.0 } else { libm::tan(0.5 * angle.to_radians()) }
 }
 
-/// `body` with the flat part of the sheet at the end of edge `e` grown `ext` outward (D305): the
-/// end face moved along its own normal, the faces beside it stretching with it. A flange whose
-/// bend lies beyond the sheet's edge stands on the end this makes (the sheet reaches the line
-/// where its outer surface meets the face's plane, `flush_recess` short of the bend's place).
-fn extended(body: &Body, e: TopoId, ext: f64) -> Result<Body, BrepError> {
-    if !(ext > 0.0 && ext.is_finite()) {
-        return Err(BrepError::Degenerate(format!("flange: the sheet's end grows by {ext}, not a length")));
+/// `body` with the flat part of the sheet at the end of edge `e` grown outward (D305): the end face
+/// moved along its own normal, the faces beside it stretching with it. A flange whose bend lies
+/// beyond the sheet's edge stands on the end this makes (the sheet reaches the line where its outer
+/// surface meets the face's plane, `flush_recess` short of the bend's place).
+///
+/// Each end of the edge grows by its own length (D311): a face meeting the sheet along a line across
+/// the edge sets the bend further out at one end than the other, and the end face becomes a
+/// trapezoid, square to the edge at both ends, the sheet's thickness kept.
+fn extended(body: &Body, e: TopoId, ends: [f64; 2]) -> Result<Body, BrepError> {
+    if !ends.iter().all(|&x| x > 0.0 && x.is_finite()) {
+        return Err(BrepError::Degenerate(format!("flange: the sheet's end grows by {ends:?}, not a length")));
     }
-    let Base { out, gone, .. } = base(body, e, false, &BTreeSet::new())?;
+    let Base { inner: [i0, i1], out, gone, .. } = base(body, e, false, &BTreeSet::new())?;
+    let (start, run) = (body.point(i0), body.point(i1) - body.point(i0));
+    let span = run.dot(run);
+    if !span.is_normal() {
+        return Err(BrepError::Invalid("flange: the edge the sheet grows at has no length".into()));
+    }
     let moved: BTreeSet<TopoId> = body.face_spec(gone[0]).loops.concat().into_iter().collect();
     let mut vertices = body.vertices().to_vec();
     for v in &mut vertices {
         if moved.contains(&v.id) {
+            // Where the vertex sits along the edge: 0 at one end, 1 at the other, its own length.
+            let at = (v.point - start).dot(run) / span;
+            let ext = ends[0] + (ends[1] - ends[0]) * at;
             v.point = v.point + out * ext;
         }
     }

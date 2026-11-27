@@ -4,8 +4,8 @@
 #![allow(clippy::unwrap_used, clippy::panic)]
 
 use datum_brep::{Body, BrepError, Surface, TopoId};
-use datum_math::Vec3;
-use datum_ops::{Op, Value, flange_edges, flange_face_near};
+use datum_math::{Vec2, Vec3};
+use datum_ops::{FlatPiece, Op, Value, flange_edges, flange_face_near, unfold_side};
 
 const T: f64 = 2.0;
 const R: f64 = 2.0;
@@ -55,14 +55,18 @@ fn post(center: [f64; 2], diameter: f64, z1: f64) -> Body {
     op(serde_json::json!({"op": "extrude", "z0": 0.0, "z1": z1})).eval(id("post"), &[&p]).unwrap().body().unwrap().clone()
 }
 
-/// The ID of the largest flat face of `b` whose plane contains `q`.
+/// The ID of the largest flat face of `b` whose plane contains point `q`.
 fn face_through(body: &Body, q: [f64; 2]) -> String {
-    let p = Vec3::new(q[0], q[1], 0.0);
+    face_through_point(body, Vec3::new(q[0], q[1], 0.0))
+}
+
+/// [`face_through`] for a point anywhere.
+fn face_through_point(body: &Body, q: Vec3) -> String {
     let x = (0..body.faces().len())
         .filter(|&x| {
             body.faces()[x].surface.plane().is_some_and(|pl| {
                 let n = pl.normal * (1.0 / pl.normal.dot(pl.normal).sqrt());
-                close((p - pl.origin).dot(n), 0.0)
+                close((q - pl.origin).dot(n), 0.0)
             })
         })
         .max_by(|&a, &b| body.face_area(a as u32).total_cmp(&body.face_area(b as u32)))
@@ -653,4 +657,271 @@ fn an_equal_distance_keeps_the_lower_face_id() {
     let second = flange_face_near(&a, end_of(&a), &[("b2", &b2), ("b1", &b1)]).unwrap();
     assert_eq!(first, second, "the order of the bodies does not decide");
     assert_eq!(first.1, f1.min(f2), "the same distance keeps the lower face ID");
+}
+
+// D311: a flange to a face on the side edge of a flat sheet, the face's plane meeting the sheet's
+// outer surface along a line past that edge. The case is the author's `test11.json`: a flat sheet
+// 100 along its path and 100 wide, its side edge at `z = 0`; the line of the bend 78.75 out at
+// the path's start and 53.85 at its end, oblique at ~14°; a plate off the sheet's front at ~70°.
+
+/// `tan 14°`: how oblique the line of the bend is to the side edge.
+const SIDE: f64 = 0.249;
+/// Its distance beyond the side edge at the path's start and at its end.
+const NEAR: f64 = 78.75;
+const FAR: f64 = 53.85;
+/// The flange's radius (the case's sheet is [`T`] thick).
+const SIDE_R: f64 = 1.0;
+
+/// The flat sheet of the case: 100 along the path (`x = -100` to `0`), 100 wide (`z = 0` to `100`),
+/// its outer surface at `y = 0`.
+fn side_sheet() -> Body {
+    sheet("a", [-100.0, 0.0], [0.0, 0.0], "right", "p2", 100.0)
+}
+
+/// The long side edge of the sheet at `z = 0`, on its outer surface: the one at `y = 0`.
+fn side_edge(a: &Body) -> String {
+    flange_edges(a)
+        .into_iter()
+        .filter(|(_, e)| e.iter().all(|p| close(p.z, 0.0)))
+        .min_by(|x, y| x.1[0].y.total_cmp(&y.1[0].y))
+        .map(|(e, _)| format!("{e:?}"))
+        .unwrap()
+}
+
+/// A plate with a flat face at `at` with normal `n` and 400 across it, its material on the far side
+/// of that face.
+fn plate(at: Vec3, n: Vec3) -> Body {
+    let square =
+        serde_json::json!({"op": "prism", "polygon": [[-200.0, -200.0], [200.0, -200.0], [200.0, 200.0], [-200.0, 200.0]], "z0": -6.0, "z1": 0.0});
+    let prism = op(square).eval(id("b.prism"), &[]).unwrap().body().unwrap().clone();
+    let axis = Vec3::new(0.0, 0.0, 1.0).cross(n);
+    let angle = libm::acos(n.z).to_degrees();
+    let moved = serde_json::json!({"op": "transform", "axis": axis.to_array(), "angle_deg": angle, "translate": at.to_array()});
+    op(moved).eval(id("b"), &[&Value::Body(prism)]).unwrap().body().unwrap().clone()
+}
+
+/// The face of the case, `70°` off the sheet's front: its plane meets the sheet's outer surface at
+/// `z` for `x = 0`, [`SIDE`] oblique to the side edge. Its normal is [`Vec3`].
+fn side_face(z0: f64) -> (Vec3, Vec3) {
+    let n_y = libm::cos(70.0f64.to_radians());
+    let n_z = ((1.0 - n_y * n_y) / (1.0 + SIDE * SIDE)).sqrt();
+    (Vec3::new(0.0, 0.0, z0), Vec3::new(-SIDE * n_z, n_y, n_z))
+}
+
+/// [`side_face`] with the line of the bend straight along the side edge, at `z`.
+fn face_across(z0: f64) -> (Vec3, Vec3) {
+    (Vec3::new(0.0, 0.0, z0), Vec3::new(0.0, libm::cos(70.0f64.to_radians()), libm::sin(70.0f64.to_radians())))
+}
+
+/// The target `plate` and its face's ID.
+fn plate_with(at: Vec3, n: Vec3) -> (Body, String) {
+    let b = plate(at, n);
+    let face = face_through_point(&b, at);
+    (b, face)
+}
+
+/// Each end of edge `e` of `before`, as where it stands along `way`, and how far it moved in `after`
+/// along `out` — the strip's width there (D311).
+fn grew(before: &Body, after: &Body, e: &str, way: Vec3, out: Vec3) -> [(f64, f64); 2] {
+    let e = TopoId::parse(e).unwrap();
+    let k = before.edges().binary_search_by_key(&e, |x| x.id).unwrap();
+    let h = before.edges()[k].half;
+    let ids = [h, before.half_edges()[h as usize].twin].map(|h| before.vertices()[before.half_edges()[h as usize].origin as usize].id);
+    let mut ends = ids.map(|vid| {
+        let p = before.point(before.vertices().binary_search_by_key(&vid, |v| v.id).unwrap() as u32);
+        let q = after.point(after.vertices().binary_search_by_key(&vid, |v| v.id).unwrap() as u32);
+        (p.dot(way), (q - p).dot(out))
+    });
+    ends.sort_by(|a, b| a.0.total_cmp(&b.0));
+    ends
+}
+
+/// How far the sheet's side edge at `p` grows to the bend the face sets (D311): the distance along
+/// `out` to the line where its outer surface meets the face's plane, less the bend's own
+/// `flush_recess` of the cut across that line — taken along `out`, an angle off that cut.
+fn grow_at(p: Vec3, out: Vec3, up: Vec3, at: Vec3, n: Vec3, gap: f64) -> f64 {
+    let cut = (n - up * n.dot(up)).dot(n - up * n.dot(up)).sqrt();
+    let angle = libm::atan2(cut, n.dot(up).abs()).to_degrees();
+    (gap - (p - at).dot(n)) / out.dot(n) - (SIDE_R + T) * libm::tan(0.5 * angle.to_radians()) * cut / out.dot(n).abs()
+}
+
+#[test]
+fn a_side_edge_is_lengthened_to_a_face_past_it() {
+    let a = side_sheet();
+    let (at, n) = side_face(-FAR);
+    let (b, face) = plate_with(at, n);
+    let edge = side_edge(&a);
+    let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
+    assert!(close(normal.dot(n).abs(), 1.0), "the face's plane is the one made");
+    // The wall lies parallel to the face, its outer surface on it at no gap.
+    let (o, w) = new_face_across(&a, &out, plane, normal);
+    assert!(close(w.dot(normal).abs(), 1.0), "the wall is parallel to the face: {w:?} against {normal:?}");
+    assert!(close(distance(o, normal, plane), 0.0), "the wall touches the face: {}", distance(o, normal, plane));
+    // The sheet grew by a strip to the bend's line at each end of the side edge, less the bend's
+    // tangent: 78.75 and 53.85 out, the line oblique at 14°.
+    // The line of the bend is the case's: `NEAR` out at the path's start, `FAR` at its end.
+    let out_side = Vec3::new(0.0, 0.0, -1.0);
+    for (x, want) in [(-100.0, NEAR), (0.0, FAR)] {
+        let line = -(Vec3::new(x, 0.0, 0.0) - at).dot(n) / out_side.dot(n);
+        assert!(close(line, want), "at {x}: the line is {line} out of the side edge, not {want}");
+    }
+    let up = Vec3::new(0.0, 1.0, 0.0);
+    let widths = grew(&a, &out, &edge, Vec3::new(1.0, 0.0, 0.0), out_side);
+    for (k, x) in [-100.0, 0.0].into_iter().enumerate() {
+        assert!(close(widths[k].0, x), "the edge's ends: {widths:?}");
+        let want = grow_at(Vec3::new(x, 0.0, 0.0), out_side, up, at, n, 0.0);
+        assert!(close(widths[k].1, want), "at {x}: the strip is {} wide, not {want}", widths[k].1);
+    }
+    assert!(widths[0].1 > widths[1].1, "the line runs nearer the edge at the path's end: {widths:?}");
+}
+
+#[test]
+fn a_side_edge_strip_keeps_the_gap() {
+    let a = side_sheet();
+    let (at, n) = side_face(-FAR);
+    let (b, face) = plate_with(at, n);
+    let edge = side_edge(&a);
+    for gap in [0.5, 3.0] {
+        let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, gap, serde_json::json!({"radius": SIDE_R})).unwrap();
+        let (o, _) = new_face_across(&a, &out, plane, normal);
+        assert!(close(distance(o, normal, plane), gap), "the gap is exactly {gap}: {}", distance(o, normal, plane));
+        // Away from the face the bend comes nearer the edge: the strip is shorter.
+        let out_side = Vec3::new(0.0, 0.0, -1.0);
+        let widths = grew(&a, &out, &edge, Vec3::new(1.0, 0.0, 0.0), out_side);
+        let up = Vec3::new(0.0, 1.0, 0.0);
+        for (k, x) in [-100.0, 0.0].into_iter().enumerate() {
+            let want = grow_at(Vec3::new(x, 0.0, 0.0), out_side, up, at, n, gap);
+            assert!(close(widths[k].1, want), "at {x} with gap {gap}: {} not {want}", widths[k].1);
+        }
+    }
+}
+
+#[test]
+fn a_side_edge_with_a_line_along_it_is_a_rectangle() {
+    let a = side_sheet();
+    let (at, n) = face_across(-70.0);
+    let (b, face) = plate_with(at, n);
+    let edge = side_edge(&a);
+    let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
+    let (o, w) = new_face_across(&a, &out, plane, normal);
+    assert!(close(w.dot(normal).abs(), 1.0), "the wall is parallel to the face");
+    assert!(close(distance(o, normal, plane), 0.0), "the wall touches the face: {}", distance(o, normal, plane));
+    let out_side = Vec3::new(0.0, 0.0, -1.0);
+    let widths = grew(&a, &out, &edge, Vec3::new(1.0, 0.0, 0.0), out_side);
+    let up = Vec3::new(0.0, 1.0, 0.0);
+    for (k, x) in [-100.0, 0.0].into_iter().enumerate() {
+        let want = grow_at(Vec3::new(x, 0.0, 0.0), out_side, up, at, n, 0.0);
+        assert!(close(widths[k].1, want), "at {x}: {} not {want}", widths[k].1);
+    }
+    // Across the edge the line is the same: the strip is as wide at both ends.
+    assert!(close(widths[0].1, widths[1].1), "a straight line, a square strip: {widths:?}");
+}
+
+#[test]
+fn a_side_edge_line_across_the_sheet_is_refused() {
+    let a = side_sheet();
+    let edge = side_edge(&a);
+    // The line runs through the sheet, not past it.
+    for z0 in [70.0, 0.0] {
+        let (at, n) = side_face(z0);
+        let (b, face) = plate_with(at, n);
+        let e = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap_err();
+        let BrepError::Degenerate(why) = e else { panic!("{e:?}") };
+        assert!(why.contains("across the sheet"), "at {z0}: {why}");
+    }
+    // The face is beyond the sheet's other side: a flange on the wrong edge.
+    let (at, n) = side_face(150.0);
+    let (b, face) = plate_with(at, n);
+    let e = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap_err();
+    let BrepError::Degenerate(why) = e else { panic!("{e:?}") };
+    assert!(why.contains("other side"), "{why}");
+    // The line is past the edge but leaves no room for the bend.
+    let (at, n) = side_face(-1.0);
+    let (b, face) = plate_with(at, n);
+    let e = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap_err();
+    let BrepError::Degenerate(why) = e else { panic!("{e:?}") };
+    assert!(why.contains("no room"), "{why}");
+}
+
+#[test]
+fn a_side_edge_face_is_the_near_face_to_reach() {
+    let a = side_sheet();
+    let (at, n) = side_face(-FAR);
+    let (b, face) = plate_with(at, n);
+    let edge = TopoId::parse(&side_edge(&a)).unwrap();
+    assert_eq!(flange_face_near(&a, edge, &[("b", &b)]), Some(("b".to_string(), TopoId::parse(&face).unwrap())));
+}
+
+/// The K-factor the blank of the case is laid at.
+const SIDE_K: f64 = 0.44;
+
+#[test]
+fn a_side_edge_flange_unfolds_with_the_strip() {
+    let a = side_sheet();
+    let (at, n) = side_face(-FAR);
+    let (b, face) = plate_with(at, n);
+    let edge = side_edge(&a);
+    let (out, plane, _) = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
+    let flat = unfold_side(&out, false, SIDE_K).unwrap();
+    // One bend across the strip, both its tangent lines; the blank one region of lines, no arc:
+    // the sheet's far side, its two ends each with the strip on, the wall's two ends and its free
+    // edge.
+    assert_eq!(flat.bends.len(), 2);
+    assert_eq!(flat.counts(), [6, 0, 0]);
+    let lengths: Vec<f64> = flat
+        .pieces
+        .iter()
+        .filter_map(|p| match p {
+            FlatPiece::Line(a, b) => Some(libm::hypot(b.x - a.x, b.y - a.y)),
+            _ => None,
+        })
+        .collect();
+    // The strip is on the blank: the flat part's ends are the sheet's 100 across plus the strip's
+    // own width at each end of the side edge.
+    let (out_side, up) = (Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 1.0, 0.0));
+    for x in [-100.0f64, 0.0] {
+        let strip = grow_at(Vec3::new(x, 0.0, 0.0), out_side, up, at, n, 0.0);
+        assert!(strip > 0.0, "the sheet is short of the face at {x}");
+        assert!(lengths.iter().any(|&l| close(l, 100.0 + strip)), "the strip at {x} is in the blank: {lengths:?}");
+    }
+    // The bend's span across the sheet is the line of the bend's: `100 / cos 14°`, not 100 — the
+    // bend is oblique to the side edge, and the wall's free edge spans as much.
+    let span = 100.0 * libm::hypot(1.0, SIDE);
+    assert!(lengths.iter().any(|&l| close(l, span)), "the wall's free edge spans the oblique bend: {lengths:?}");
+    // The bend lines are the bend's own: the way the 3D line of the bend runs on the blank (the
+    // frame's X and Y on its plane, the path along the body's X), the case's angle to the side edge.
+    let line = Vec3::new(1.0, 0.0, SIDE) * (1.0 / libm::hypot(1.0, SIDE));
+    let [_, ex, ey, _] = flat.frame.unwrap();
+    let [bend, path] = [Vec2::new(line.dot(ex), line.dot(ey)), Vec2::new(ex.x, ey.x)];
+    for l in &flat.bends {
+        let (dx, dy) = (l[1].x - l[0].x, l[1].y - l[0].y);
+        let len = libm::hypot(dx, dy);
+        assert!(close(len, span), "a bend line spans the sheet: {len} of {span}");
+        assert!(close((dx * bend.y - dy * bend.x) / len, 0.0), "the bend line is the bend's own: {l:?}");
+        assert!(close((dx * path.x + dy * path.y).abs() / len, 1.0 / libm::hypot(1.0, SIDE)), "the bend line is oblique to the side edge");
+    }
+    // Between the tangent lines: the bend laid at the K-factor through the angle the face gave.
+    let (dx, dy) = (flat.bends[0][1].x - flat.bends[0][0].x, flat.bends[0][1].y - flat.bends[0][0].y);
+    let (gx, gy) = (flat.bends[1][0].x - flat.bends[0][0].x, flat.bends[1][0].y - flat.bends[0][0].y);
+    let apart = ((gx * dy - gy * dx) / libm::hypot(dx, dy)).abs();
+    let band = (SIDE_R + SIDE_K * T) * 70.0f64.to_radians();
+    assert!(close(apart, band), "the bend is laid {apart} wide, not {band}");
+    // The blank is the material of the part itself: the flat part with the strip, the bend's band
+    // at the neutral layer and the wall — their areas add up to its own.
+    let wall = out.face_area(new_face_across_index(&a, &out, plane, n) as u32);
+    let side = (0..out.faces().len())
+        .filter(|&x| out.faces()[x].surface.plane().is_some_and(|p| close((p.normal * (1.0 / p.normal.dot(p.normal).sqrt())).dot(up).abs(), 1.0)))
+        .max_by(|&x, &y| out.face_area(x as u32).total_cmp(&out.face_area(y as u32)))
+        .unwrap();
+    let area: f64 = 0.5
+        * flat
+            .outer
+            .clone()
+            .map(|k| match &flat.pieces[k] {
+                FlatPiece::Line(a, b) => a.x * b.y - b.x * a.y,
+                _ => 0.0,
+            })
+            .sum::<f64>();
+    let material = out.face_area(side as u32) + span * band + wall;
+    assert!(close(area, material), "the blank is {area}, the part's material {material}");
 }

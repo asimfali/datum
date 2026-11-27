@@ -1,0 +1,59 @@
+{
+  "format": "datum/1",
+  "parameters": {},
+  "features": [
+    {
+      "name": "flat_sheet_path",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "p1": [-100.0, 0.0],
+          "p2": [0.0, 0.0]
+        },
+        "lines": {
+          "l1": {"from": "p1", "to": "p2"}
+        }
+      }
+    },
+    {
+      "name": "flat_sheet",
+      "op": "sheet",
+      "inputs": ["flat_sheet_path"],
+      "thickness": 2,
+      "radius": 1,
+      "path": "l1",
+      "side": "right",
+      "start": "p2",
+      "z0": 0.0,
+      "z1": 100.0
+    },
+    {
+      "name": "plate_square",
+      "op": "prism",
+      "polygon": [[-200.0, -200.0], [200.0, -200.0], [200.0, 200.0], [-200.0, 200.0]],
+      "z0": -6.0,
+      "z1": 0.0
+    },
+    {
+      "name": "target_plate",
+      "op": "transform",
+      "inputs": ["plate_square"],
+      "axis": [-0.3420201433256688, -0.22705062446632848, 0.0],
+      "angle_deg": 24.23774136588332,
+      "translate": [0.0, 0.0, -53.85]
+    },
+    {
+      "name": "flange_to_face",
+      "op": "flange",
+      "inputs": ["flat_sheet", "target_plate"],
+      "edges": ["c71a3ff441bb416edbc482a90f58cc97"],
+      "height": 20,
+      "radius": 1,
+      "to_face": {
+        "face": "dfec3f72fd7ca77b3707e92a636657c0",
+        "from": "target_plate",
+        "gap": 0.0
+      }
+    }
+  ]
+}

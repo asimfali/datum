@@ -1129,7 +1129,8 @@ struct Document {
     plane_draft: Option<(Json, String)>,
     /// The points a work plane through three is picked by so far (D204), as the model's spots.
     plane_points: Vec<(Json, datum_math::Vec3)>,
-    /// The ends of sheet metal picked for a flange (D205): the body's feature and the face.
+    /// The edges of sheet metal picked for a flange (D205): an end's long edge, or a side edge of a
+    /// flat sheet (D311); the body's feature and the edge.
     flange_edges: Vec<(String, datum_brep::TopoId)>,
     /// The feature the model was last told a form is open on.
     using: Option<String>,
@@ -4982,7 +4983,7 @@ impl Viewer {
                 }
             }
         }
-        // The ends picked for a flange, and the face under the cursor while one is asked for.
+        // The edges picked for a flange, and the face under the cursor while one is asked for.
         let tint = |face: datum_brep::TopoId, body: usize, alpha: u8| {
             let mesh = &m.scene.bodies[body];
             let mut tint = egui::Mesh::default();
@@ -5301,7 +5302,7 @@ impl Viewer {
                 chosen = Some((purpose, Under::Origin(crate::origin::FIRST)));
             }
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                // Ends picked stay when a face of the flange's target was being picked (D305).
+                // The edges picked stay when a face of the flange's target was being picked (D305).
                 if purpose == Purpose::Flange {
                     d.flange_edges.clear();
                 }
@@ -6394,7 +6395,7 @@ impl Viewer {
         }
     }
 
-    /// Opens the form of a flange on the ends picked, and stops picking.
+    /// Opens the form of a flange on the edges picked, and stops picking.
     fn open_flange(&mut self) {
         self.close_revolve();
         self.docs[self.active].picking = None;
@@ -12381,7 +12382,7 @@ mod tests {
         assert_eq!(form.fields()["to_face"], Json::Null);
     }
 
-    /// With ends picked, the flange form previews, and Enter on a fresh preview makes it.
+    /// With edges picked, the flange form previews, and Enter on a fresh preview makes it.
     #[test]
     fn enter_makes_a_flange_on_a_fresh_preview() {
         let (v, inbox) = viewer("symmetric_plate.json");
@@ -12404,7 +12405,7 @@ mod tests {
     }
 
     /// The face clicked for a flange's `to_face` is the body's and the face's under the cursor;
-    /// the flange's ends stay (D305).
+    /// the edges picked stay (D305).
     #[test]
     fn a_click_picks_the_face_a_flange_reaches() {
         let (mut v, _inbox) = viewer("symmetric_plate.json");
@@ -12436,7 +12437,7 @@ mod tests {
         let d = &h.state().docs[h.state().active];
         assert!(d.picking.is_none(), "the pick is done");
         assert_eq!(d.flange.as_ref().and_then(|f| f.face.as_ref()).map(|(b, _)| b.as_str()), Some("plate"));
-        assert_eq!(d.flange_edges, ends, "the ends stay");
+        assert_eq!(d.flange_edges, ends, "the edges picked stay");
     }
 
     /// A flange form turned to a face takes the nearest face of another body by itself: the form
@@ -12466,6 +12467,75 @@ mod tests {
         assert_eq!((&want["inputs"], &want["to_face"]["from"], &want["angle"]), (&json!(["sheet2", "sheet1"]), &json!("sheet1"), &json!(90.0)));
     }
 
+    /// A side edge of a flat sheet is a flange's edge like an end's (D311): the click takes it, and
+    /// the form takes the nearest face of another body by itself and previews with it.
+    #[test]
+    fn a_side_edge_reaches_a_face() {
+        let (mut v, inbox) = viewer("flange-to-face-side.json");
+        // The picture of the model before its flange: the sheet's side edge is still whole there.
+        let mut session = Session::default();
+        let model = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/models/flange-to-face-side.json");
+        session.execute("open", &json!({"path": model.display().to_string()})).unwrap();
+        session.execute("remove", &json!({"name": "flange_to_face"})).unwrap();
+        let p = picture(&session, None, None, &mut MeshCache::default());
+        let m = v.docs[v.active].model.as_mut().unwrap();
+        (m.scene, m.bodies, m.solids, m.ends, m.contours) = (p.scene, p.bodies, p.solids, p.ends, p.contours);
+        let sheet = m.bodies.iter().position(|n| n == "flat_sheet").unwrap();
+        // The long side edge of the sheet along its path, on its outer surface: the one at z = 0.
+        let edge = m
+            .ends
+            .iter()
+            .find(|(k, _, [a, b])| *k == sheet && a.z.abs() < 1e-9 && b.z.abs() < 1e-9 && a.y.abs() < 1e-9 && b.y.abs() < 1e-9)
+            .map(|(_, id, _)| *id)
+            .expect("the side edge is an edge a flange stands on");
+        v.docs[v.active].camera.target = datum_math::Vec3::new(-50.0, 0.0, 0.0);
+        v.docs[v.active].camera.distance = 800.0;
+        v.pick(Purpose::Flange);
+        let at = screen_of(&v, datum_math::Vec3::new(-50.0, 0.0, 0.0));
+        let mut h = egui_kittest::Harness::builder().with_size([600.0, 400.0]).build_ui_state(
+            |ui, v: &mut Viewer| {
+                let (rect, r) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+                let offset = r.hover_pos().or(r.interact_pointer_pos()).map(|p| (f64::from(p.x - rect.center().x), f64::from(p.y - rect.center().y)));
+                v.pick_input(ui, rect, &r, offset);
+                v.flange_window(ui.ctx());
+            },
+            v,
+        );
+        h.run();
+        click_with(&mut h, at, egui::Modifiers::NONE);
+        assert_eq!(h.state().docs[0].flange_edges, vec![("flat_sheet".to_string(), edge)], "the side edge is picked");
+        h.state_mut().open_flange();
+        h.run();
+        inbox.try_iter().for_each(drop);
+        h.get_by_label("Reach a face of another body").click();
+        h.run();
+        let d = &h.state().docs[h.state().active];
+        let form = d.flange.as_ref().unwrap();
+        assert!(form.reaches);
+        // The plate's flat face the bend reaches, taken by itself: the plane through the line of
+        // the case's bend.
+        let plate = d.model.as_ref().unwrap().solids.iter().find(|(n, _)| n == "target_plate").and_then(|(_, v)| v.body()).unwrap();
+        let line = datum_math::Vec3::new(0.0, 0.0, -53.85);
+        let face = plate
+            .faces()
+            .iter()
+            .find(|f| {
+                f.surface.plane().is_some_and(|p| {
+                    let n = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+                    (line - p.origin).dot(n).abs() < 1e-9
+                })
+            })
+            .unwrap()
+            .id;
+        assert_eq!(form.face, Some(("target_plate".to_string(), format!("{face:?}"))), "the nearest face is taken");
+        let want = inbox.try_iter().filter_map(|r| if let Request::Preview(Some(("add", p))) = r { Some(p) } else { None }).last();
+        let want = want.expect("a preview of the face taken");
+        assert_eq!(
+            (&want["inputs"], &want["to_face"]["from"], &want["to_face"]["face"], &want["angle"]),
+            (&json!(["flat_sheet", "target_plate"]), &json!("target_plate"), &json!(format!("{face:?}")), &json!(90.0))
+        );
+    }
+
     /// With no face of another body to reach, the form waits for one to be picked; then the body
     /// is its second input and the angle a right one (D305).
     #[test]
@@ -12493,7 +12563,7 @@ mod tests {
         assert_eq!((&want["inputs"], &want["to_face"]["from"], &want["angle"]), (&json!(["sheet2", "target"]), &json!("target"), &json!(90.0)));
     }
 
-    /// Esc while a face is picked for the flange form keeps the form and the ends it stands on
+    /// Esc while a face is picked for the flange form keeps the form and the edges it stands on
     /// (D305): it only gives up the pick.
     #[test]
     fn escape_keeps_the_flange_whose_face_is_picked() {
@@ -12515,7 +12585,7 @@ mod tests {
         h.run();
         let d = &h.state().docs[h.state().active];
         assert!(d.picking.is_none(), "the pick is given up");
-        assert_eq!(d.flange_edges.len(), 1, "the ends stay");
+        assert_eq!(d.flange_edges.len(), 1, "the edges picked stay");
         assert!(d.flange.is_some(), "the form stays");
     }
 

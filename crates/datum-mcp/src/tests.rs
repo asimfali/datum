@@ -387,6 +387,41 @@ fn a_flange_reaches_a_face() {
     assert!(cleared["volume"].as_f64().unwrap() > 0.0);
 }
 
+/// A flange reaches a face from the side edge of a flat sheet too (D311): `add` builds the strip
+/// and the wall on it, an `edit` keeps the body an input, `to_face: null` clears the mode.
+#[test]
+fn a_side_edge_reaches_a_face() {
+    let mut s = Server::default();
+    let model: Value = serde_json::from_str(include_str!("../../../tests/models/flange-to-face-side.json")).unwrap();
+    for f in model["features"].as_array().unwrap() {
+        let r = execute(&mut s, "add", f.clone());
+        assert_eq!(r["failed"], json!([]), "{}: {r}", f["name"]);
+    }
+    // The sheet is lengthened by the strip to the bend and turned up beyond it: more metal than
+    // the sheet alone, and the wall reaches the face.
+    let sheet = tool(&mut s, "mass_properties", json!({"name": "flat_sheet"})).1;
+    let before = tool(&mut s, "mass_properties", json!({"name": "flange_to_face"})).1;
+    assert!(before["volume"].as_f64().unwrap() > sheet["volume"].as_f64().unwrap(), "{before} against {sheet}");
+    // The gap is absolute: 3 moves the wall off the face; the body it reaches stays an input.
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    let face = feature(&m, "flange_to_face")["to_face"]["face"].clone();
+    let r = execute(&mut s, "edit", json!({"name": "flange_to_face", "to_face": {"face": face, "from": "target_plate", "gap": 3.0}}));
+    assert_eq!(r["failed"], json!([]), "{r}");
+    let after = tool(&mut s, "mass_properties", json!({"name": "flange_to_face"})).1;
+    assert_ne!(before["volume"], after["volume"]);
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "flange_to_face")["inputs"], json!(["flat_sheet", "target_plate"]));
+    assert_eq!(feature(&m, "flange_to_face")["to_face"]["from"], "target_plate");
+    // Clearing the mode: the wall goes by the height and a right angle again, the body no input.
+    let r = execute(&mut s, "edit", json!({"name": "flange_to_face", "to_face": null}));
+    assert_eq!(r["failed"], json!([]), "{r}");
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "flange_to_face")["inputs"], json!(["flat_sheet"]));
+    assert!(feature(&m, "flange_to_face")["to_face"].is_null());
+    let cleared = tool(&mut s, "mass_properties", json!({"name": "flange_to_face"})).1;
+    assert!(cleared["volume"].as_f64().unwrap() > 0.0);
+}
+
 /// Each change is one step back; a command that fails changes nothing.
 #[test]
 fn undo_redo_and_whole_commands() {
