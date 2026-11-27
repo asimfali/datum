@@ -915,6 +915,29 @@ fn the_authors_case_lies_on_the_plate_outside_it() {
     }
 }
 
+/// The face across the one the flange takes by itself is the part's other side (D311): the wall
+/// stands on the plate's far face, its slab with the plate's own — flush with the far side — while
+/// the near side's wall stands outside the plate.
+#[test]
+fn the_authors_case_reaches_the_plates_far_side() {
+    let (a, b) = test11_pair(0.0);
+    let (near, at, n) = face_toward(&b, &a);
+    let far = (0..b.faces().len())
+        .filter(|&x| b.faces()[x].surface.plane().is_some() && format!("{:?}", b.faces()[x].id) != near)
+        .max_by(|&x, &y| b.face_area(x as u32).total_cmp(&b.face_area(y as u32)))
+        .map(|x| format!("{:?}", b.faces()[x].id))
+        .unwrap();
+    let edge = authors_side_edge(&a, &b, &near);
+    let (out, plane, normal) = reach_edge(&a, &b, &edge, &far, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
+    assert!(close((plane - at).dot(n).abs(), 2.0), "the far side is the plate's thickness behind: {}", (plane - at).dot(n));
+    // The wall's faces on the plate's own two planes: its slab the plate's, flush with the far side.
+    let faces = wall_faces(&a, &out, at, n);
+    assert_eq!(faces.len(), 2, "the wall's outer face and inner: {faces:?}");
+    assert!(close(faces[0], -2.0), "the wall's outer face on the far side: {}", faces[0]);
+    assert!(close(faces[1], 0.0), "its inner face on the near one: {}", faces[1]);
+    assert!(close(normal.dot(n).abs(), 1.0), "the far face's plane, the plate's other side");
+}
+
 #[test]
 fn a_side_edge_is_lengthened_to_a_face_past_it() {
     let a = side_sheet();
@@ -1094,4 +1117,26 @@ fn a_side_edge_flange_unfolds_with_the_strip() {
             .sum::<f64>();
     let material = out.face_area(side as u32) + span * band + wall;
     assert!(close(area, material), "the blank is {area}, the part's material {material}");
+}
+
+/// The flange's `flip` in a reach asks for the wall on the other side of the part (D311): the side
+/// follows the face, and the other side is that face's opposite one — said so, not laid aslant.
+#[test]
+fn a_wall_the_other_way_round_is_refused() {
+    let a = flange_sheet();
+    let b = target_sheet([0.0, 37.0], 90.0);
+    let face = face_through(&b, [0.0, 37.0]);
+    let e = reach(&a, &b, &face, 0.0, serde_json::json!({"flip": true})).unwrap_err();
+    let BrepError::Unsupported(why) = e else { panic!("end: {e:?}") };
+    assert!(why.contains("side follows the face"), "end: {why}");
+    let (a, b) = test11_pair(0.0);
+    let (face, _, _) = face_toward(&b, &a);
+    let edge = authors_side_edge(&a, &b, &face);
+    let e = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R, "flip": true})).unwrap_err();
+    let BrepError::Unsupported(why) = e else { panic!("side: {e:?}") };
+    assert!(why.contains("side follows the face"), "side: {why}");
+    let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, 0.0, serde_json::json!({"radius": SIDE_R})).unwrap();
+    let (o, w) = new_face_across(&a, &out, plane, normal);
+    assert!(close(w.dot(normal), -1.0), "the wall of the side by itself");
+    assert!(close(distance(o, normal, plane), 0.0));
 }

@@ -359,6 +359,15 @@ fn dims_for_face(target: &Body, e: TopoId, dims: FlangeDims, face: FaceTarget) -
     if !dims.width.is_edge() {
         return Err(BrepError::Unsupported("flange: a flange to a face narrower than its edge comes later".into()));
     }
+    // The wall's side follows the face it reaches (D311): the wall's outer face goes on from the
+    // sheet's outer surface, its slab between that face's plane and the sheet. The wall on the
+    // other side of the part is the face's own opposite one, reached in its stead — not the same
+    // face turned round, which would lay the slab on the same side all the same.
+    if dims.flip {
+        return Err(BrepError::Unsupported(
+            "flange: a flange to a face: the wall's side follows the face; reach the face's opposite one for the wall's other side".into(),
+        ));
+    }
     let Some(c) = bend_to_face(target, e, face)? else {
         return Err(BrepError::Degenerate("flange: a face lies in the sheet's own plane, or where the bend cannot turn to it".into()));
     };

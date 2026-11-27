@@ -51,7 +51,7 @@ pub use sheet::{Sheet, Side, path_ends, path_name, paths, sheet};
 pub use sketch::ChainPiece;
 pub use sketch::{
     Developed, FlatSide, ORIGIN, OriginPlane, Placed, Projection, SketchPlane, Source, chosen, contour_at, crosses, depth_to, extrude_sketch,
-    face_plane, open_curves, parallel, place, profile_curves, profile_regions,
+    face_plane, nearly_parallel, open_curves, parallel, place, profile_curves, profile_regions,
 };
 pub use unfold::{Flat, FlatPiece, LineCut, POLYLINE_DEVIATION, sheet_sides, unfold, unfold_side};
 

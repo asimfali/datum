@@ -111,6 +111,18 @@ fn execute(s: &mut Server, command: &str, params: Value) -> Value {
     r
 }
 
+/// The face across `face` of the flange's target `target_plate` (D311): the plate's other side, by
+/// `query_faces` — the face whose own way out is the one's turned.
+fn far_face(s: &mut Server, face: &Value) -> Value {
+    let near = execute(s, "query_faces", json!({"name": "target_plate"}));
+    let faces = near["faces"].as_array().unwrap();
+    let n = faces.iter().find(|f| f["id"] == *face).expect("the face reached")["normal"].as_array().unwrap().clone();
+    let opposite: Vec<f64> = n.iter().map(|x| -x.as_f64().unwrap()).collect();
+    let far = execute(s, "query_faces", json!({"name": "target_plate", "normal": opposite}));
+    let faces = far["faces"].as_array().unwrap();
+    faces.iter().max_by(|a, b| a["area"].as_f64().unwrap().total_cmp(&b["area"].as_f64().unwrap())).unwrap()["id"].clone()
+}
+
 fn feature<'a>(m: &'a Value, name: &str) -> &'a Value {
     m["features"].as_array().unwrap().iter().find(|f| f["name"] == name).unwrap()
 }
@@ -412,6 +424,16 @@ fn a_side_edge_reaches_a_face() {
     let m = tool(&mut s, "inspect_model", json!({})).1;
     assert_eq!(feature(&m, "flange_to_face")["inputs"], json!(["flat_sheet", "target_plate"]));
     assert_eq!(feature(&m, "flange_to_face")["to_face"]["from"], "target_plate");
+    // The part's other side is the face across the one reached (D311): the flange reaches the
+    // plate's far side there, and builds — the wall laid on that face, its slab with the plate's.
+    let far = far_face(&mut s, &face);
+    let r = execute(&mut s, "edit", json!({"name": "flange_to_face", "to_face": {"face": far, "from": "target_plate", "gap": 0.0}}));
+    assert_eq!(r["failed"], json!([]), "{r}");
+    let m = tool(&mut s, "inspect_model", json!({})).1;
+    assert_eq!(feature(&m, "flange_to_face")["to_face"]["face"], far);
+    let aside = tool(&mut s, "mass_properties", json!({"name": "flange_to_face"})).1;
+    assert_ne!(aside["volume"], after["volume"], "the wall on the other face, another body");
+    assert!(aside["volume"].as_f64().unwrap() > 0.0);
     // Clearing the mode: the wall goes by the height and a right angle again, the body no input.
     let r = execute(&mut s, "edit", json!({"name": "flange_to_face", "to_face": null}));
     assert_eq!(r["failed"], json!([]), "{r}");
