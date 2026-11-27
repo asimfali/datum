@@ -520,6 +520,13 @@
     "plate": "61483531a953e072747eca6c8a933e076fffbb2912112686b90c856fad890e4c",
     "stamp": "4203a20df9a1aa37a02b04dc8d686e05b12310c0dbe4a9d69af2928821102011"
   },
+  "stamp-emboss-window.json": {
+    "blank": "7d69669ca6c8931f9b7b8f7f5c3d1acec3bca7543da001a1502971cf285f48e1",
+    "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
+    "places": "74e1a37f36e1f5251e6440b7ca1c0b1c3d4c0b810a44780e4645f41f32e2cf20",
+    "plate": "61483531a953e072747eca6c8a933e076fffbb2912112686b90c856fad890e4c",
+    "stamp": "7c183f161f9b07fcf76cdadaef9249031125b9a72bbfd0e16858abca965cf05a"
+  },
   "stamp-emboss.json": {
     "outline": "bcbea72d2f05645016ed74543c6bb03eff0742ba6407f3aedd8948a20a5b75ea",
     "places": "74e1a37f36e1f5251e6440b7ca1c0b1c3d4c0b810a44780e4645f41f32e2cf20",

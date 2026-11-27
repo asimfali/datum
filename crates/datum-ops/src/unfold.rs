@@ -115,7 +115,7 @@ pub struct LineCut {
     pub arc: Option<(Vec3, bool)>,
 }
 
-/// One open stamp cut on the blank, in wall coordinates.
+/// One stamp cut on the blank, in wall coordinates.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct StampCut {
     /// The placement face followed by its opposite face across the sheet.
@@ -223,7 +223,7 @@ pub(crate) const ON_KERF: f64 = 1e-7;
 pub(crate) const KERF_PAST: f64 = 4.0;
 
 impl Flat {
-    /// Add each open cut to its developed wall.
+    /// Add each cut to its developed wall.
     pub(crate) fn with_stamp_cuts(mut self, cuts: &[StampCut]) -> Result<Self, BrepError> {
         for cut in cuts {
             let &(_, wall) = self

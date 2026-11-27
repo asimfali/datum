@@ -43,6 +43,11 @@ pub(super) struct Pocket<'a> {
 
 const SECTION_STEPS: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 3), (4, 7), (5, 8), (6, 9)];
 
+struct Opening {
+    points: Vec<Vec3>,
+    centers: Vec<Option<Vec3>>,
+}
+
 struct Station {
     point: Vec3,
     inward: Vec3,
@@ -96,7 +101,7 @@ pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepErr
     let [chain] = contours.paths.as_slice() else { return Err(bad("the section needs one open chain")) };
     if !contours.loops.is_empty()
         || !contours.branches.is_empty()
-        || chain.len() < 3
+        || chain.len() < if closed { 2 } else { 3 }
         || !chain.iter().all(|s| section.lines.contains_key(s.curve))
         || section.circles.values().any(|c| !c.construction)
         || section.ellipses.values().any(|e| !e.construction)
@@ -104,12 +109,16 @@ pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepErr
     {
         return Err(bad("the section needs two walls and a flat raised span"));
     }
-    let coords = names(chain)
+    let mut coords = names(chain)
         .map(|n| {
             let p = super::tongue::to_part(section, section.solved.points[n]) - anchor;
             Vec3::new(p.dot(x), p.dot(y), p.dot(z))
         })
         .collect::<Vec<_>>();
+    let window = closed && chain.len() == 2;
+    if window && coords[0].z > coords[2].z {
+        coords.reverse();
+    }
     let height = coords[1].z;
     let scale = length(last - first).max(height.abs()).max(t).max(r);
     let offset = (boundary.frame[0] - anchor).dot(z);
@@ -119,11 +128,22 @@ pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepErr
     let same = |a: Vec3, b: Vec3| within_rounding(length(a - b), scale);
     let a = coords[0];
     let b = coords[coords.len() - 1];
-    let along = if closed { unit(b - a) } else { slit };
+    let along = if window {
+        unit(Vec3::new(b.x - a.x, b.y - a.y, 0.0))
+    } else if closed {
+        unit(b - a)
+    } else {
+        slit
+    };
     let shoulder_a = coords[1];
     let shoulder_b = coords[coords.len() - 2];
     let draft = if closed { (shoulder_a - a).dot(along) } else { 0.0 };
-    if closed {
+    let shelf_width = (b - shoulder_a).dot(along);
+    if window {
+        if !same(a, Vec3::new(a.x, a.y, 0.0)) || shelf_width <= 0.0 || !same(b, shoulder_a + along * shelf_width) || draft < 0.0 {
+            return Err(bad("the window section needs an inward slope and a flat shelf"));
+        }
+    } else if closed {
         if !same(a, Vec3::new(a.x, a.y, 0.0)) || !same(b, Vec3::new(b.x, b.y, 0.0)) || draft < 0.0 || (shoulder_b - shoulder_a).dot(along) <= 0.0 {
             return Err(bad("the section needs two equal inward slopes from the sheet to the shelf"));
         }
@@ -132,7 +152,7 @@ pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepErr
     }
     if !(height > 0.0 && r > 0.0)
         || !same(shoulder_a, a + normal * height + along * draft)
-        || !same(shoulder_b, b + normal * height - along * draft)
+        || (!window && !same(shoulder_b, b + normal * height - along * draft))
         || coords[1..coords.len() - 1].iter().any(|p| {
             let from = *p - a;
             !same(*p, a + along * from.dot(along) + normal * height)
@@ -196,11 +216,39 @@ pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepErr
         stations.push(Station { point: last, inward: inward(count - 2) });
     }
     axes.push(None);
+    // Offset the nominal boundary to the cut edge given by the section.
+    let opening = if window {
+        let inset = r + draft + shelf_width - root;
+        if inset <= section[3].x.max(section[4].x) {
+            return Err(bad("the window meets the shelf bend"));
+        }
+        let opening = if inset < round {
+            Opening { points: stations.iter().map(|s| s.point + s.inward * inset).collect(), centers: axes.clone() }
+        } else {
+            // Once the corner arcs are consumed, adjacent offset lines meet in a miter.
+            let points = polygon
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| {
+                    let a = inward((i + count - 1) % count);
+                    let b = inward(i);
+                    xy(p, 0.0) + (a + b) * (inset / (1.0 + a.dot(b)))
+                })
+                .collect::<Vec<_>>();
+            if (0..count).any(|i| (points[(i + 1) % count] - points[i]).dot(direction(i)) <= 0.0) {
+                return Err(bad("the inset window collapses"));
+            }
+            Opening { points, centers: vec![None; count] }
+        };
+        Some(opening)
+    } else {
+        None
+    };
     // All sections move towards the convex interior and rise above the original wall.
     let bounds = polygon
         .into_iter()
         .fold((first, first), |(lo, hi), p| (Vec3::new(lo.x.min(p.x), lo.y.min(p.y), -t), Vec3::new(hi.x.max(p.x), hi.y.max(p.y), height)));
-    assemble(feature, wall, face, frame, cut, &transitions, &stations, &axes, &profile, section, t, r, bounds)
+    assemble(feature, wall, face, frame, cut, &transitions, &stations, &axes, &profile, section, t, r, bounds, opening)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -218,6 +266,7 @@ fn assemble(
     t: f64,
     r: f64,
     (lo, hi): (Vec3, Vec3),
+    opening: Option<Opening>,
 ) -> Result<Value, BrepError> {
     let z = Vec3::new(0.0, 0.0, 1.0);
     let id = |tag: &str, station: usize, row: usize| {
@@ -298,6 +347,41 @@ fn assemble(
         }
     }
 
+    let stride = if opening.as_ref().is_some_and(|o| o.points.len() == stations.len()) { 1 } else { 2 };
+    let aperture_id = |tag, i, row| id(tag, i * stride, row);
+    let mut opening_loops = [Vec::new(), Vec::new()];
+    if let Some(opening) = &opening {
+        let at = |i: usize, layer: usize| opening.points[i] + z * section[3 + layer].y;
+        let vertex = |i, layer| aperture_id("stamp.pocket.window.vertex", i, layer);
+        for (layer, ring) in opening_loops.iter_mut().enumerate() {
+            for i in 0..opening.points.len() {
+                let id = vertex(i, layer);
+                ring.push(id);
+                vertices.push(Vertex { id, point: frame.apply(at(i, layer)) });
+            }
+        }
+        for (i, center) in opening.centers.iter().enumerate() {
+            let next = (i + 1) % opening.points.len();
+            let a = at(i, 0);
+            let b = at(next, 0);
+            let surface = if let Some(center) = center {
+                let radius = length(opening.points[i] - *center);
+                for layer in 0..2 {
+                    add_arc(vertex(i, layer), vertex(next, layer), *center + z * section[3 + layer].y, at(i, layer), at(next, layer), radius)?;
+                }
+                Surface::Cylinder(datum_brep::Cylinder { origin: *center, axis: z, radius, convex: false })
+            } else {
+                Surface::Plane(Plane { origin: a, normal: unit(z.cross(b - a)) })
+            };
+            faces.push(FaceSpec {
+                id: aperture_id("stamp.pocket.window.wall", i, 0),
+                surface: surface.moved(&frame),
+                loops: vec![vec![vertex(next, 0), vertex(i, 0), vertex(i, 1), vertex(next, 1)]],
+            });
+        }
+        opening_loops[1].reverse();
+    }
+
     let plane = |p, normal| Surface::Plane(Plane { origin: frame.apply(p), normal: frame.apply_vector(normal) });
     let chain = |k| (0..=n).map(|s| v(s, k)).collect::<Vec<_>>();
     for (k, normal) in [(3, -z), (4, z)] {
@@ -305,7 +389,11 @@ fn assemble(
         if k == 3 {
             ring.reverse();
         }
-        faces.push(FaceSpec { id: id("stamp.pocket.shelf", 0, k), surface: plane(pt(0, section[k]), normal), loops: vec![ring] });
+        let mut loops = vec![ring];
+        if opening.is_some() {
+            loops.push(std::mem::take(&mut opening_loops[k - 3]));
+        }
+        faces.push(FaceSpec { id: id("stamp.pocket.shelf", 0, k), surface: plane(pt(0, section[k]), normal), loops });
     }
     if cut.is_some() {
         let normal = unit((stations[0].point - stations[n].point).cross(z));
@@ -338,7 +426,7 @@ fn assemble(
     faces[bottom].loops.push(chain(0));
     let body = build_with_curves(vertices, faces, curves)?;
     validated(&body)?;
-    let stamp_cuts = cut
+    let mut stamp_cuts: Vec<_> = cut
         .map(|cut| StampCut {
             faces: [face, wall.faces()[bottom].id],
             points: [stations[0].point, stations[n].point].map(|p| frame.apply(p)).into(),
@@ -348,5 +436,17 @@ fn assemble(
         })
         .into_iter()
         .collect();
+    if let Some(opening) = opening {
+        // Use the same XY cut on the blank, on the original plane of the wall.
+        let mut points = opening.points.iter().map(|&p| frame.apply(p)).collect::<Vec<_>>();
+        points.push(points[0]);
+        stamp_cuts.push(StampCut {
+            faces: [face, wall.faces()[bottom].id],
+            points,
+            normal: frame.apply_vector(z),
+            ids: (0..opening.points.len()).map(|i| aperture_id("stamp.pocket.window.cut", i, 0)).collect(),
+            arcs: opening.centers.into_iter().map(|c| c.map(|p| (frame.apply(p), true))).collect(),
+        });
+    }
     Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts })))
 }
