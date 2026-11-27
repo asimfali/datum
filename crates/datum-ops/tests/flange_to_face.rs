@@ -673,9 +673,14 @@ const FAR: f64 = 53.85;
 const SIDE_R: f64 = 1.0;
 
 /// The flat sheet of the case: 100 along the path (`x = -100` to `0`), 100 wide (`z = 0` to `100`),
-/// its outer surface at `y = 0`.
+/// its outer surface at `y = 0`; `side` its material's, above that surface or below it.
+fn side_sheet_on(side: &str) -> Body {
+    sheet("a", [-100.0, 0.0], [0.0, 0.0], side, "p2", 100.0)
+}
+
+/// [`side_sheet_on`] as the mock of the case has it.
 fn side_sheet() -> Body {
-    sheet("a", [-100.0, 0.0], [0.0, 0.0], "right", "p2", 100.0)
+    side_sheet_on("right")
 }
 
 /// The long side edge of the sheet at `z = 0`, on its outer surface: the one at `y = 0`.
@@ -701,11 +706,17 @@ fn plate(at: Vec3, n: Vec3) -> Body {
 }
 
 /// The face of the case, `70°` off the sheet's front: its plane meets the sheet's outer surface at
-/// `z` for `x = 0`, [`SIDE`] oblique to the side edge. Its normal is [`Vec3`].
-fn side_face(z0: f64) -> (Vec3, Vec3) {
-    let n_y = libm::cos(70.0f64.to_radians());
+/// `z` for `x = 0`, [`SIDE`] oblique to the side edge. Its normal's part across the sheet is
+/// `n_y`: positive, the case's mock; negative, the face standing over the sheet's front instead
+/// (`test11.json`'s other side).
+fn side_face_turned(z0: f64, n_y: f64) -> (Vec3, Vec3) {
     let n_z = ((1.0 - n_y * n_y) / (1.0 + SIDE * SIDE)).sqrt();
     (Vec3::new(0.0, 0.0, z0), Vec3::new(-SIDE * n_z, n_y, n_z))
+}
+
+/// [`side_face_turned`] as the mock of the case has it.
+fn side_face(z0: f64) -> (Vec3, Vec3) {
+    side_face_turned(z0, libm::cos(70.0f64.to_radians()))
 }
 
 /// [`side_face`] with the line of the bend straight along the side edge, at `z`.
@@ -741,8 +752,63 @@ fn grew(before: &Body, after: &Body, e: &str, way: Vec3, out: Vec3) -> [(f64, f6
 /// `flush_recess` of the cut across that line — taken along `out`, an angle off that cut.
 fn grow_at(p: Vec3, out: Vec3, up: Vec3, at: Vec3, n: Vec3, gap: f64) -> f64 {
     let cut = (n - up * n.dot(up)).dot(n - up * n.dot(up)).sqrt();
-    let angle = libm::atan2(cut, n.dot(up).abs()).to_degrees();
+    // The bend's own angle: `up` is the sheet's front, the side the bend turns to; a face standing
+    // over the front turns the wall past the perpendicular (D311).
+    let angle = libm::atan2(cut, n.dot(up)).to_degrees();
     (gap - (p - at).dot(n)) / out.dot(n) - (SIDE_R + T) * libm::tan(0.5 * angle.to_radians()) * cut / out.dot(n).abs()
+}
+
+/// The new flat faces of `after` across `n`, by their distance from the plane at `at`: the wall's
+/// outer face first, its inner one after — a wall's material is behind its outer face.
+fn wall_faces(before: &Body, after: &Body, at: Vec3, n: Vec3) -> Vec<f64> {
+    let old: std::collections::BTreeSet<TopoId> = before.faces().iter().map(|f| f.id).collect();
+    let mut faces: Vec<f64> = (0..after.faces().len())
+        .filter(|&x| !old.contains(&after.faces()[x].id))
+        .filter_map(|x| {
+            let p = after.faces()[x].surface.plane()?;
+            let u = p.normal * (1.0 / p.normal.dot(p.normal).sqrt());
+            close(u.cross(n).dot(u.cross(n)).sqrt(), 0.0).then(|| (p.origin - at).dot(n))
+        })
+        .collect();
+    faces.sort_by(f64::total_cmp);
+    faces
+}
+
+/// The wall lies on the face whichever side of the sheet's front the face stands on (D311): the
+/// case's mock, and the author's other side, where the face stands over the front and the bend
+/// turns the wall past the perpendicular. The wall through the face — its material on the far
+/// side, the wall standing out of it — is no flange.
+#[test]
+fn a_side_edge_wall_lies_on_the_face_on_either_side() {
+    let front = libm::cos(70.0f64.to_radians());
+    let (out_side, up) = (Vec3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 1.0, 0.0));
+    for (side, n_y) in [("right", front), ("left", -front)] {
+        let a = side_sheet_on(side);
+        let (at, n) = side_face_turned(-FAR, n_y);
+        let (b, face) = plate_with(at, n);
+        let edge = side_edge(&a);
+        // The sheet's outer surface: the side of its thickness the face's line meets.
+        let outer_y = a.vertices().iter().map(|v| v.point.y).fold(f64::INFINITY, f64::min);
+        for gap in [0.0, 3.0] {
+            let (out, plane, normal) = reach_edge(&a, &b, &edge, &face, gap, serde_json::json!({"radius": SIDE_R})).unwrap();
+            assert!(close(normal.dot(n), 1.0), "the face's plane is the one asked for");
+            // The wall's outer face on the face's plane, `gap` off it; its inner face, the sheet's
+            // thickness behind: the material between the two, on the sheet's side.
+            let faces = wall_faces(&a, &out, plane, normal);
+            assert!(close(faces[0], gap), "{side}, gap {gap}: the wall's outer face is {} from the face, not {gap}", faces[0]);
+            assert!(faces.get(1).is_some_and(|d| close(*d, gap + T)), "{side}, gap {gap}: the material is behind the outer face: {faces:?}");
+            // Its own way out faces the face: the sheet turned the wall `a` from it, not `180 − a`.
+            let (o, w) = new_face_across(&a, &out, plane, normal);
+            assert!(close(w.dot(normal), -1.0), "{side}, gap {gap}: the wall's outer normal {w:?} is not the face's {normal:?} turned");
+            assert!(close(distance(o, normal, plane), gap), "{side}, gap {gap}: {}", distance(o, normal, plane));
+            // The strip to the bend is the same on either side of the sheet's front.
+            let widths = grew(&a, &out, &edge, Vec3::new(1.0, 0.0, 0.0), out_side);
+            for (k, x) in [-100.0f64, 0.0].into_iter().enumerate() {
+                let want = grow_at(Vec3::new(x, outer_y, 0.0), out_side, up, at, n, gap);
+                assert!(close(widths[k].1, want), "{side}, gap {gap}: at {x} the strip is {} wide, not {want}", widths[k].1);
+            }
+        }
+    }
 }
 
 #[test]

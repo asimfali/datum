@@ -543,6 +543,14 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
             // whose plane meets the sheet's outer surface along a line across the edge is turned
             // to by a bend about that line, its angle the one between the two planes (D311).
             let oblique = !within_rounding(n.dot(w), 1.0);
+            // A face whose plane meets the sheet along a line across the edge (D311) is met from the
+            // sheet, its plane beyond the edge along `out`: the other sign of its normal would put
+            // the wall's material on the far side of the face, through it. The bend turns to the
+            // sheet's front, `flip` false: the strip and the bend then land the wall on the face;
+            // the same construction from the sheet's other side skews the wall off it.
+            if oblique && (flip || n.dot(out) >= 0.0) {
+                continue;
+            }
             // The bend turns `out` toward `up`: its outer surface's normal after the turn is
             // `out·sin a − up·cos a`, parallel to the face when `sin a = −n·out`, `cos a = n·up`.
             // About a line across the edge (D311) the turn is about that line, not the edge: `sin a`
@@ -556,7 +564,22 @@ fn bend_to_face(target: &Body, e: TopoId, face: FaceTarget) -> Result<Option<Fac
             if !(sin.is_finite() && sin > 0.0) {
                 continue;
             }
-            let a = libm::atan2(sin, n.dot(up)).to_degrees();
+            let mut a = libm::atan2(sin, n.dot(up)).to_degrees();
+            // The angle past the perpendicular is no less the face's: turning the sheet's own normal
+            // `up` about the line of the bend must land it on the face's normal. Where the face
+            // stands over the sheet's front, that is the obtuse one (D311): the wall lies on the
+            // face, turned past a right angle, not standing out of it.
+            if oblique {
+                let line = unit(up.cross(n));
+                let land = |a: f64| {
+                    let (sn, cs) = libm::sincos(a.to_radians());
+                    (1.0 - turned(up, line, (sn, cs)).dot(n)).abs()
+                };
+                let (was, other) = (land(a), land(180.0 - a));
+                if other < was {
+                    a = 180.0 - a;
+                }
+            }
             if !(a > 0.0 && a < 180.0) {
                 continue;
             }
