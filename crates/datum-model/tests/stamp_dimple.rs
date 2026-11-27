@@ -26,6 +26,26 @@ fn blank_holes(session: &mut Session) -> Vec<FlatPiece> {
 }
 
 #[test]
+fn dimple_bends_use_the_sheet_rule_on_both_skins() {
+    for (source, bends) in [(SPHERE, 1), (CONE, 2), (PIERCED, 2)] {
+        let mut model: Value = serde_json::from_str(source).unwrap();
+        for radius in [0.5, 0.75] {
+            model["features"][3]["radius"] = json!(radius);
+            let session = build(&model);
+            let value = session.value("stamp").unwrap();
+            let body = value.body().unwrap();
+            for expected in [radius, radius + 0.5] {
+                let sectors = body
+                    .faces()
+                    .iter()
+                    .filter(|face| matches!(face.surface, Surface::Torus(t) if t.major > 0.0 && (t.minor - expected).abs() < 1e-8));
+                assert_eq!(sectors.count(), 3 * bends);
+            }
+        }
+    }
+}
+
+#[test]
 fn spherical_and_conical_dimples_preserve_a_solid_blank() {
     let models = [(SPHERE, true), (CONE, false)];
     for (source, spherical) in models {

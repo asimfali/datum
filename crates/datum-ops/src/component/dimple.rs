@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
-use datum_brep::{Axis, Body, BrepError, Ix, ProfileArc, ProfileLoop, Region, TopoId, build_with_curves, revolve};
+use datum_brep::{Axis, Body, BrepError, Ix, Region, TopoId, build_with_curves, revolve};
 use datum_math::{Rigid, Vec2, Vec3};
 use datum_sketch::Circle;
 
-use super::{Forming, Piece, SectionSide, offset};
+use super::{Forming, SectionSide};
+use crate::sheet::{Sheet, SheetPath, Side, bend_profile};
 use crate::{Num, Placed, Value, cut, num, rib::Formed, validated};
 
 fn bad(message: &str) -> BrepError {
@@ -23,7 +24,7 @@ pub(super) fn form(
     boundary: &Placed,
     name: &str,
     circle: &Circle,
-    t: f64,
+    [t, bend_radius]: [f64; 2],
     metadata: &BTreeMap<String, serde_json::Value>,
     forming: &Forming,
 ) -> Result<Value, BrepError> {
@@ -89,7 +90,7 @@ pub(super) fn form(
     };
 
     let root = Vec2::new(r, 0.0);
-    let (points, arcs, hole) = if let [step] = path
+    let (mut points, arcs, hole) = if let [step] = path
         && let Some(arc) = section.arcs.get(step.curve)
     {
         let c = local(&arc.center);
@@ -99,18 +100,7 @@ pub(super) fn form(
         let radius = libm::hypot(r, c.y);
         let c = Vec2::new(0.0, c.y);
         let height = c.y + radius;
-        let displacement = if inner { t } else { -t };
-        let other = radius + displacement;
-        let level = displacement - c.y;
-        let rr = other * other - level * level;
-        if other <= 0.0 || rr <= 0.0 || height <= 0.0 {
-            return Err(bad("the sphere collapses at this thickness"));
-        }
-        (
-            vec![root, Vec2::new(0.0, height), Vec2::new(0.0, height + displacement), Vec2::new(libm::sqrt(rr), displacement)],
-            vec![Some(ProfileArc { center: c, ccw: true }), None, Some(ProfileArc { center: c, ccw: false }), None],
-            0.0,
-        )
+        (vec![root, Vec2::new(0.0, height)], vec![None, Some((c, true))], 0.0)
     } else {
         let [slope, shelf, ..] = path else {
             return Err(bad("a conical section needs a slope and shelf"));
@@ -133,47 +123,46 @@ pub(super) fn form(
             return Err(bad("a full conical section must be symmetric about the circle axis"));
         }
         let hole = if end.x > tol { end.x } else { 0.0 };
-        let displacement = if inner { t } else { -t };
-        let (a, b, _) = offset(&Piece::Line, root, shoulder, displacement)?;
-        let shifted_r = |height: f64| a.x + (b.x - a.x) * ((height - a.y) / (b.y - a.y));
-        let other_shoulder = shifted_r(shoulder.y + displacement);
-        if other_shoulder <= hole {
-            return Err(bad("the shelf collapses at this thickness"));
-        }
-        (
-            vec![
-                root,
-                shoulder,
-                Vec2::new(hole, shoulder.y),
-                Vec2::new(hole, shoulder.y + displacement),
-                Vec2::new(other_shoulder, shoulder.y + displacement),
-                Vec2::new(shifted_r(displacement), displacement),
-            ],
-            Vec::new(),
-            hole,
-        )
+        (vec![root, shoulder, Vec2::new(hole, shoulder.y)], vec![None; 3], hole)
     };
     let origin = onto_wall.apply(center - anchor);
     let z = onto_wall.apply_vector(bz);
     let axis = Axis { origin, axis: z, start: onto_wall.apply_vector(bx) };
     let frame = Rigid::frame(origin, axis.start, z.cross(axis.start), z);
     let id = |tag, index| TopoId::derive(tag).id(feature).tag(name).index(index as u64).finish();
-    let n = points.len();
-    let vertices = (0..n).map(|i| [id("stamp.dimple.profile.vertex", i); 2]).collect::<Vec<_>>();
-    let sides = (0..n).map(|i| id("stamp.dimple.profile.side", i)).collect::<Vec<_>>();
-    // Close the meridian for revolve, then replace that closing surface with the two wall skins.
-    let closing = sides[n - 1];
-    let root_ids = [vertices[0][0], vertices[n - 1][0]];
-    let extent = points.iter().fold(Vec2::default(), |m, p| Vec2::new(m.x.max(p.x), m.y.max(p.y)));
-    let outer = ProfileLoop {
-        points: points.into_iter().map(|p| Vec2::new(p.y - if inner { t } else { 0.0 }, p.x)).collect(),
-        vertices,
-        sides,
-        arcs: arcs
-            .into_iter()
-            .map(|arc| arc.map(|a| ProfileArc { center: Vec2::new(a.center.y - if inner { t } else { 0.0 }, a.center.x), ccw: !a.ccw }))
-            .collect(),
-    };
+    // The flat lead lets the sheet bend builder find the tangency at the root on both skins.
+    points.insert(0, Vec2::new(r + 2.0 * (bend_radius + t), 0.0));
+    let names = &["lead", "root", "shoulder", "tip"][..points.len()];
+    let lines = &["wall", "profile", "shelf"][..arcs.len()];
+    let side = if inner { Side::Right } else { Side::Left };
+    let mut outer = bend_profile(
+        id("stamp.dimple.section", 0),
+        SheetPath { p: &points, names, lines, arcs: &arcs },
+        Sheet { thickness: t, radius: bend_radius, side },
+        &|_, _| false,
+    )?;
+    // Drop the flat lead. Its two tangent rings become holes in the matching wall skins.
+    outer.points.remove(0);
+    outer.points.pop();
+    outer.vertices.remove(0);
+    outer.vertices.pop();
+    outer.sides.remove(0);
+    outer.sides.pop();
+    outer.arcs.remove(0);
+    outer.arcs.pop();
+    let last = outer.points.len() - 1;
+    let closing = id("stamp.dimple.closing", 0);
+    outer.sides[last] = closing;
+    let [outer_root, inner_root] = [outer.vertices[0][0], outer.vertices[last][0]];
+    let extent = outer.points.iter().fold(Vec2::default(), |m, p| Vec2::new(m.x.max(p.x), m.y.max(p.y)));
+    let shift = if inner { t } else { 0.0 };
+    for point in &mut outer.points {
+        *point = Vec2::new(point.y - shift, point.x);
+    }
+    for arc in outer.arcs.iter_mut().flatten() {
+        arc.center = Vec2::new(arc.center.y - shift, arc.center.x);
+        arc.ccw = !arc.ccw;
+    }
     let patch = revolve(&Region { outer, holes: Vec::new(), caps: [closing; 2] }, &axis, TAU)?;
     let extent_r = extent.x;
     let (top, bottom) = super::stitch::wall_faces_in(
@@ -186,7 +175,6 @@ pub(super) fn form(
         || bad("the dimple needs a clear opening in a flat wall"),
     )?;
     let mut faces = (0..wall.faces().len()).map(|i| wall.face_spec(i as Ix)).collect::<Vec<_>>();
-    let [outer_root, inner_root] = if inner { [root_ids[1], root_ids[0]] } else { root_ids };
     for (i, root, reverse) in [(top, outer_root, true), (bottom, inner_root, false)] {
         let ring = (0..3).map(|k| TopoId::derive("revolve.v").id(root).index(k).finish());
         faces[i].loops.push(if reverse { ring.rev().collect() } else { ring.collect() });

@@ -236,7 +236,7 @@ pub(crate) fn form(
             boundary,
             name,
             circle,
-            t,
+            [t, num(radius.ok_or_else(|| invalid("a dimple needs a bend radius from the sheet rule"))?)?],
             &def.features[profile_i].metadata,
             forming,
         );
