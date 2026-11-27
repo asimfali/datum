@@ -223,6 +223,24 @@ pub(crate) fn form(
     let onto_wall = Rigid::into_frame(Vec3::ZERO, bx, by, bz).then(Rigid::frame(origin, wx, wy, wz));
     let face = on.face.ok_or_else(|| invalid("a form needs a placement face"))?;
     let role = |s: &Step<'_>| boundary_def.metadata.get(s.curve).and_then(|m| m.get(STAMP_ROLE)).and_then(serde_json::Value::as_str);
+    if let [(name, circle)] = boundary.circles.iter().filter(|(_, c)| !c.construction).collect::<Vec<_>>().as_slice()
+        && boundary_def.metadata.get(*name).and_then(|m| m.get(STAMP_ROLE)).and_then(serde_json::Value::as_str) == Some("transition")
+    {
+        return super::dimple::form(
+            feature,
+            wall,
+            face,
+            onto_wall,
+            anchor,
+            profile,
+            boundary,
+            name,
+            circle,
+            [t, num(radius.ok_or_else(|| invalid("a dimple needs a bend radius from the sheet rule"))?)?],
+            &def.features[profile_i].metadata,
+            forming,
+        );
+    }
     if forming.round_section && forming.section_side == SectionSide::Outer {
         let contours = boundary.contours(&|_, construction| !construction);
         if let [path] = contours.loops.as_slice()

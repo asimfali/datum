@@ -1451,6 +1451,9 @@ impl Session {
         let mut feature = serde_json::to_value(&sketch.op).ok()?;
         feature["name"] = json!(name);
         feature["inputs"] = json!(sketch.inputs);
+        if !sketch.metadata.is_empty() {
+            feature["metadata"] = json!(sketch.metadata);
+        }
         let prefix: Vec<_> = context.prefix.into_iter().map(|value| value.map(Arc::new)).collect();
         let named = |i: usize| Some((part.features[i].name.clone(), prefix[i].as_ref()?.clone()));
         let inputs = sketch.inputs.iter().filter_map(|name| part.features[..index].iter().position(|f| f.name == *name).and_then(named)).collect();
