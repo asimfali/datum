@@ -1174,6 +1174,13 @@ fn the_authors_case_flips_the_wall_along_the_same_face() {
         assert!(-wall_normal.dot(flipped_up) > 0.0);
         // The wall's free edge runs away from the flipped base, opposite the regular wall.
         for (body, up) in [(&out, flipped_up), (&regular, flipped_up * -1.0)] {
+            for (i, face) in body.faces().iter().enumerate() {
+                let Some(plane) = face.surface.plane() else { continue };
+                for h in body.face_loops(i as u32).flat_map(|l| body.loop_half_edges(l)) {
+                    let point = body.point(body.half_edges()[h as usize].origin);
+                    assert!(close((point - plane.origin).dot(unit(plane.normal)), 0.0), "vertex off plane {:?}", face.id);
+                }
+            }
             let i = new_face_across_index(&a, body, at, n) as u32;
             let tangent = bend_origin(body) - n * (SIDE_R + T);
             let heights: Vec<_> = body

@@ -719,7 +719,13 @@ fn extended(body: &Body, e: TopoId, ends: [f64; 2]) -> Result<Body, BrepError> {
     }
     // The flat faces beside the end stretch along the end's normal, the square ones across it:
     // both stay flat.
-    let faces = (0..body.faces().len() as Ix).map(|x| body.face_spec(x)).collect();
+    let mut faces: Vec<_> = (0..body.faces().len() as Ix).map(|x| body.face_spec(x)).collect();
+    if ends[0] != ends[1] {
+        // The oblique end has turned in the sheet's plane. The flange uses its normal
+        // to grow the wall square to the bend axis and keep both caps planar.
+        let edge = unit(run + out * (ends[1] - ends[0]));
+        faces[gone[0] as usize].surface = Surface::Plane(Plane { origin: start + out * ends[0], normal: unit(out - edge * out.dot(edge)) });
+    }
     build_with_curves(vertices, faces, body.curve_specs())
 }
 
