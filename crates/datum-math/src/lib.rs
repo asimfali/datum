@@ -237,7 +237,8 @@ impl Neg for Sign {
 }
 
 impl Sign {
-    pub(crate) fn of(v: f64) -> Self {
+    /// The sign of `v`: `Positive` above zero, `Negative` below, `Zero` at it.
+    pub fn of(v: f64) -> Self {
         if v > 0.0 {
             Self::Positive
         } else if v < 0.0 {

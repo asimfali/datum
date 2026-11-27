@@ -1,6 +1,7 @@
 //! Datum operations: pure functions from parameters and input values (bodies, sketches) to a
 //! new value.
 
+mod bend;
 mod bent;
 mod boolean;
 mod bounded;
@@ -25,6 +26,7 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ops::RangeInclusive;
 
+pub use bend::{BendStrip, BendStrips, bend_strips};
 pub use bent::NearBend;
 pub use boolean::{BooleanKind, boolean};
 pub use bounded::ChainCopy;
