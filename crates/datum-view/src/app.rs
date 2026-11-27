@@ -8413,7 +8413,7 @@ impl Viewer {
                 }
             }
             // Properties of the selected lines and arcs, or of the sketch's marked curves (D276).
-            Act::Metadata => self.open_metadata(),
+            Act::Metadata => self.open_metadata(ui.ctx().pointer_latest_pos().unwrap_or_else(|| ui.ctx().content_rect().center())),
             // The menu a held right click opens, at once, by the cursor.
             Act::Pattern => {
                 let d = &mut self.docs[self.active];
@@ -10745,6 +10745,41 @@ mod tests {
         )
     }
 
+    #[test]
+    fn f12_positions_each_opening_at_the_cursor() {
+        let (mut v, _) = sketching();
+        v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
+        let id = egui::Id::new(("datum_metadata", v.docs[v.active].id));
+        let mut h = egui_kittest::Harness::builder().with_size([700.0, 500.0]).build_ui_state(
+            |ui, (v, rect): &mut (Viewer, Option<egui::Rect>)| {
+                v.shortcuts(ui);
+                v.metadata_window(ui.ctx());
+                *rect = ui.ctx().memory(|m| m.area_rect(id));
+            },
+            (v, None),
+        );
+        let cursor = egui::pos2(50.0, 70.0);
+        h.event(egui::Event::PointerMoved(cursor));
+        h.key_press(egui::Key::F12);
+        h.run();
+        let first = h.state().1.unwrap();
+        assert!(first.min.distance(cursor) < 24.0, "{first:?}");
+        h.event(egui::Event::PointerMoved(egui::pos2(695.0, 495.0)));
+        h.key_press(egui::Key::F12);
+        h.run();
+        assert_eq!(h.state().1.unwrap().min, first.min);
+
+        h.key_press(egui::Key::Escape);
+        h.run();
+        assert!(h.state().0.docs[0].metadata.is_none());
+        h.hover_at(egui::pos2(695.0, 495.0));
+        h.key_press(egui::Key::F12);
+        h.run();
+        let reopened = h.state().1.unwrap();
+        assert!(reopened.min.x > first.min.x && reopened.min.y > first.min.y, "{reopened:?}");
+        assert!(reopened.max.x <= 700.0 && reopened.max.y <= 500.0, "{reopened:?}");
+    }
+
     /// F12 in a sketch with the lines selected opens the editor on them, sending nothing by
     /// itself; the selection made in the sketch afterwards is not taken for a target.
     #[test]
@@ -10810,7 +10845,7 @@ mod tests {
             sk.selected.clear();
             sk.json["sketch"]["metadata"] = Json::Null;
         }
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         assert!(v.docs[v.active].metadata.as_ref().is_some_and(|f| f.targets.is_empty() && f.marked.is_empty()));
         // The window is open; a curve selected in the sketch becomes its target.
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
@@ -10824,7 +10859,7 @@ mod tests {
     fn a_second_f12_only_fills_a_form_without_targets() {
         let (mut v, _inbox) = sketching();
         v.docs[v.active].sketch.as_mut().unwrap().selected.clear();
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         assert!(v.docs[v.active].metadata.as_ref().is_some_and(|f| f.targets.is_empty()));
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("top".into())];
         let mut h = egui_kittest::Harness::builder().with_size([200.0, 80.0]).build_ui(|ui| v.shortcuts(ui));
@@ -10844,12 +10879,12 @@ mod tests {
     #[test]
     fn leaving_a_sketch_closes_the_metadata_editor() {
         let (mut v, _inbox) = sketching();
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         assert!(v.docs[v.active].metadata.is_some());
         v.leave();
         assert!(v.docs[v.active].metadata.is_none(), "leave closes it");
         let (mut v, _inbox) = viewer_in_sketch();
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         assert!(v.docs[v.active].metadata.is_some());
         v.enter("other".into());
         assert!(v.docs[v.active].metadata.is_none(), "enter closes it");
@@ -10865,7 +10900,7 @@ mod tests {
             sk.selected.clear();
             sk.json["sketch"]["metadata"] = json!({"bottom": {"note": "old"}, "top": {"stamp.role": "cut"}});
         }
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         let form = v.docs[v.active].metadata.as_ref().unwrap();
         assert!(form.targets.is_empty() && form.marked == ["bottom", "top"], "{:?}", form.marked);
         let mut h = metadata_harness(v);
@@ -10894,7 +10929,7 @@ mod tests {
             sk.selected = vec![Pick::Curve("bottom".into()), Pick::Curve("top".into())];
             sk.json["sketch"]["metadata"] = json!({"bottom": {"note": "a"}, "top": {"note": "b", "stamp.role": "cut"}});
         }
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         let form = v.docs[v.active].metadata.as_ref().unwrap();
         assert!(form.mixed.contains("note"), "the targets disagree");
         assert_eq!(form.values.get("note").map(String::as_str), Some(""), "no false common value");
@@ -10918,7 +10953,7 @@ mod tests {
     fn a_preset_fills_the_properties_to_send() {
         let (mut v, inbox) = sketching();
         v.docs[v.active].sketch.as_mut().unwrap().selected = vec![Pick::Curve("bottom".into())];
-        v.open_metadata();
+        v.open_metadata(egui::Pos2::ZERO);
         let form = v.docs[v.active].metadata.as_mut().unwrap();
         form.presets.push(super::forms::Preset {
             id: "mine".into(),

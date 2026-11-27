@@ -32,6 +32,8 @@ pub(in crate::app) struct Preset {
 /// The target and draft properties of an F12 edit.
 pub(in crate::app) struct MetadataForm {
     scope: Scope,
+    /// Window position to apply once, even if egui remembers an earlier opening.
+    opening_at: Option<egui::Pos2>,
     pub(in crate::app) feature: String,
     /// The primitives the edit targets: those selected when F12 was pressed, or one picked from the
     /// marked list. Fixed while the form is open: a selection made in the sketch is not taken.
@@ -109,7 +111,7 @@ impl Viewer {
 
     /// Opens the editor on the sketch selection or the selected tree feature.
     /// F12 keeps an open draft and lets an empty primitive draft take the current selection.
-    pub(in crate::app) fn open_metadata(&mut self) {
+    pub(in crate::app) fn open_metadata(&mut self, cursor: egui::Pos2) {
         {
             let d = &mut self.docs[self.active];
             if let Some(form) = &mut d.metadata {
@@ -144,6 +146,7 @@ impl Viewer {
         let (presets, preset_problems) = self.metadata_presets();
         self.docs[self.active].metadata = Some(MetadataForm {
             scope,
+            opening_at: Some(cursor + egui::vec2(12.0, 12.0)),
             feature,
             targets,
             marked,
@@ -209,12 +212,19 @@ impl Viewer {
         let popup = ctx.any_popup_open();
         let mut close = !popup && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let mut apply = false;
-        egui::Window::new(self.i18n.label(Act::Metadata))
-            .id(egui::Id::new("datum_metadata"))
+        let document_id = d.id;
+        let opening_at = d.metadata.as_mut().and_then(|form| form.opening_at.take());
+        let mut window = egui::Window::new(self.i18n.label(Act::Metadata));
+        if let Some(at) = opening_at {
+            window = window.current_pos(at);
+        }
+        window
+            .id(egui::Id::new(("datum_metadata", document_id)))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
+            .movable(false)
+            .constrain_to(ctx.content_rect())
             .show(ctx, |ui| {
                 let d = &mut self.docs[self.active];
                 let Some(form) = d.metadata.as_mut() else { return };
