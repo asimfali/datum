@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::f64::consts::TAU;
 
-use datum_brep::{Axis, Body, BrepError, Ix, Region, TopoId, build_with_curves, revolve};
+use datum_brep::{Axis, Body, BrepError, Ix, ProfileArc, Region, TopoId, build_with_curves, revolve};
 use datum_math::{Rigid, Vec2, Vec3};
 use datum_sketch::Circle;
 
@@ -25,6 +25,7 @@ pub(super) fn form(
     name: &str,
     circle: &Circle,
     [t, bend_radius]: [f64; 2],
+    k_factor: Option<&Num>,
     metadata: &BTreeMap<String, serde_json::Value>,
     forming: &Forming,
 ) -> Result<Value, BrepError> {
@@ -90,17 +91,37 @@ pub(super) fn form(
     };
 
     let root = Vec2::new(r, 0.0);
-    let (mut points, arcs, hole) = if let [step] = path
+    let (mut points, arcs, blank_radius, toroidal) = if let [step] = path
         && let Some(arc) = section.arcs.get(step.curve)
     {
         let c = local(&arc.center);
-        if step.forward || c.x.abs() > tol || c.y > tol || !from_root(Vec2::new(-local(step.to).x, local(step.to).y)) {
-            return Err(bad("a spherical section needs an axis-centred arc across the circle"));
+        let end = local(step.to);
+        if step.forward && (c.x - r).abs() <= tol && c.y > 0.0 && end.x > 0.0 && end.x < r && end.y > 0.0 && end.y <= c.y {
+            let k = k_factor.map(num).transpose()?.unwrap_or(0.5);
+            if !(0.0..=1.0).contains(&k) {
+                return Err(bad("the K-factor must be between zero and one"));
+            }
+            // At this concave transition the wall's outer skin is on the bend's inner radius.
+            let start = local(step.from);
+            let neutral_radius = libm::hypot(start.x - c.x, start.y - c.y);
+            let angle = ProfileArc { center: c, ccw: false }.turn(start, end).abs();
+            let blank_radius = r - neutral_radius * angle;
+            let outer_radius = neutral_radius - k * t;
+            let outer_center = Vec2::new(r, outer_radius);
+            let largest = outer_radius + t;
+            if outer_radius <= 0.0 || r - largest * libm::sin(angle) <= 0.0 || (cut_on_blank && blank_radius <= 0.0) {
+                return Err(BrepError::Degenerate("toroidal stamp: the skin or blank opening collapses".into()));
+            }
+            let tip = Vec2::new(r - outer_radius * libm::sin(angle), outer_radius * (1.0 - libm::cos(angle)));
+            (vec![root, tip], vec![None, Some((outer_center, false))], blank_radius, true)
+        } else if step.forward || c.x.abs() > tol || c.y > tol || !from_root(Vec2::new(-end.x, end.y)) {
+            return Err(bad("an arc section needs a tangent inward toroidal arc or an axis-centred spherical arc across the circle"));
+        } else {
+            let radius = libm::hypot(r, c.y);
+            let c = Vec2::new(0.0, c.y);
+            let height = c.y + radius;
+            (vec![root, Vec2::new(0.0, height)], vec![None, Some((c, true))], 0.0, false)
         }
-        let radius = libm::hypot(r, c.y);
-        let c = Vec2::new(0.0, c.y);
-        let height = c.y + radius;
-        (vec![root, Vec2::new(0.0, height)], vec![None, Some((c, true))], 0.0)
     } else {
         let [slope, shelf, ..] = path else {
             return Err(bad("a conical section needs a slope and shelf"));
@@ -123,7 +144,7 @@ pub(super) fn form(
             return Err(bad("a full conical section must be symmetric about the circle axis"));
         }
         let hole = if end.x > tol { end.x } else { 0.0 };
-        (vec![root, shoulder, Vec2::new(hole, shoulder.y)], vec![None; 3], hole)
+        (vec![root, shoulder, Vec2::new(hole, shoulder.y)], vec![None; 3], hole, false)
     };
     let origin = onto_wall.apply(center - anchor);
     let z = onto_wall.apply_vector(bz);
@@ -134,12 +155,13 @@ pub(super) fn form(
     points.insert(0, Vec2::new(r + 2.0 * (bend_radius + t), 0.0));
     let names = &["lead", "root", "shoulder", "tip"][..points.len()];
     let lines = &["wall", "profile", "shelf"][..arcs.len()];
+    let inner = inner && !toroidal;
     let side = if inner { Side::Right } else { Side::Left };
     let mut outer = bend_profile(
         id("stamp.dimple.section", 0),
         SheetPath { p: &points, names, lines, arcs: &arcs },
         Sheet { thickness: t, radius: bend_radius, side },
-        &|_, _| false,
+        &|_, _| toroidal,
     )?;
     // Drop the flat lead. Its two tangent rings become holes in the matching wall skins.
     outer.points.remove(0);
@@ -187,12 +209,12 @@ pub(super) fn form(
     curves.extend(patch.curve_specs());
     let body = build_with_curves(vertices, faces, curves)?;
     validated(&body)?;
-    let blank = if hole > 0.0 && cut_on_blank {
+    let blank = if blank_radius > 0.0 && cut_on_blank {
         let mut cut_sketch = boundary.clone();
         cut_sketch.frame = [origin, axis.start, z.cross(axis.start), z];
         cut_sketch.face = Some(face);
         cut_sketch.solved.points.insert(circle.center.clone(), Vec2::default());
-        cut_sketch.circles = [(name.to_owned(), Circle { diameter: Num::Value(2.0 * hole), ..circle.clone() })].into();
+        cut_sketch.circles = [(name.to_owned(), Circle { diameter: Num::Value(2.0 * blank_radius), ..circle.clone() })].into();
         cut::from_face(id("stamp.dimple.blank", 0), wall, &cut_sketch, cut::Reach::Through)?
     } else {
         wall.clone()
