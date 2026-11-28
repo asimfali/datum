@@ -380,6 +380,7 @@ pub(crate) fn unrolled(body: &Body, f: usize, c: &Cylinder, k: f64) -> Result<De
                 let piece = if edge.half == h { piece } else { piece.reversed() };
                 turn += (piece.to.x - piece.from.x) / piece.dev.neutral * piece.dev.axis.dot(axis).signum();
             }
+            Some(Curve::Cubic(_)) => return Err(unsupported("the face outline has a cubic edge")),
             Some(Curve::Rolled { .. }) => return Err(unsupported("the face's outline is a cut")),
         }
         if turn < least {
@@ -650,6 +651,7 @@ fn edge_shape(name: &str, body: &Body, e: usize) -> Result<Shape, BrepError> {
         None => Ok(Shape::Line(pa, pb)),
         // The edge turns counterclockwise about its axis from its lower-ID vertex.
         Some(Curve::Arc(arc)) => Ok(Shape::Arc((arc.center, None), pa, pb, arc.axis)),
+        Some(Curve::Cubic(_)) => Err(BrepError::Unsupported(format!("projection `{name}`: a cubic edge"))),
         Some(Curve::Rolled { .. }) => Err(BrepError::Unsupported(format!("projection `{name}`: an edge of a cut in a rolled sheet"))),
     }
 }
@@ -792,6 +794,10 @@ fn section_parts(name: &str, body: &Body, frame: &[Vec3; 4]) -> Result<Vec<(Stri
             Some(Curve::Arc(a)) => {
                 let slant = (a.axis * (1.0 / a.axis.dot(a.axis).sqrt())).cross(z);
                 height(a.center).abs() <= a.radius * slant.dot(slant).sqrt()
+            }
+            Some(Curve::Cubic(c)) => {
+                let [a, b, c, d] = c.points.map(height);
+                a.min(b).min(c).min(d) <= 0.0 && a.max(b).max(c).max(d) >= 0.0
             }
             Some(Curve::Rolled { .. }) => true,
             None => false,
@@ -963,7 +969,9 @@ pub fn place<'a>(
                 }
                 Surface::Cone(_) => return Err(BrepError::Unsupported("a sketch on a cone face".into())),
                 Surface::Torus(_) => return Err(BrepError::Unsupported("a sketch on a torus or sphere face".into())),
-                Surface::Wall(_) => return Err(BrepError::Unsupported("a sketch on the wall of a cut".into())),
+                Surface::Bicubic(_) | Surface::CubicWall(_) | Surface::Wall(_) => {
+                    return Err(BrepError::Unsupported("a sketch on the wall of a cut".into()));
+                }
             }
         }
         (None, None) => match blank {

@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use datum_brep::{Body, BrepError, FaceSpec, Ix, Plane, ProfileArc, Surface, TopoId, Vertex, build_with_curves};
+use datum_brep::{
+    Bicubic, Body, BrepError, Cubic, CubicWall, Curve, CurveSpec, FaceSpec, Ix, Plane, ProfileArc, Surface, TopoId, Vertex, build_with_curves,
+};
 use datum_math::{Rigid, Sign, Vec2, Vec3, orient2d};
 use serde_json::Value as Json;
 
@@ -74,20 +76,22 @@ impl BackBend {
         Ok(Self { center_x, radius, join_x })
     }
 
-    fn section(&self, profile: &Rise, x: f64, skin: usize) -> (f64, f64) {
+    fn section(&self, profile: &Rise, x: f64, skin: usize) -> (f64, f64, f64) {
         let radius = self.radius[skin];
         if x <= self.center_x {
-            (0.0, 0.0)
+            (0.0, 0.0, 0.0)
         } else if x <= self.join_x[skin] {
             let dx = x - self.center_x;
             let vertical = libm::sqrt((radius - dx) * (radius + dx));
-            (dx * dx / (radius + vertical), dx / vertical)
+            (dx * dx / (radius + vertical), dx / vertical, radius * radius / (vertical * vertical * vertical))
         } else {
             let offset = self.radius[0] - radius;
             let dx = x.min(profile.end.x) - profile.center.x;
             let radius = libm::sqrt(profile.radius_squared) + offset;
             let vertical = libm::sqrt((radius - dx) * (radius + dx));
-            (profile.center.y + vertical - offset, if x >= profile.end.x { 0.0 } else { -dx / vertical })
+            let (slope, curvature) =
+                if x >= profile.end.x { (0.0, 0.0) } else { (-dx / vertical, -radius * radius / (vertical * vertical * vertical)) };
+            (profile.center.y + vertical - offset, slope, curvature)
         }
     }
 }
@@ -143,6 +147,7 @@ struct SkinSection {
     plan: Vec2,
     along: Vec2,
     across: Vec2,
+    mixed: Vec2,
     fade: f64,
     fade_slope: f64,
 }
@@ -158,19 +163,25 @@ impl SkinSection {
             plan: Vec2::new(x, width * end_point.y),
             along: Vec2::new(1.0 + width * (end_tangent.x - 1.0), width * end_tangent.y),
             across: Vec2::new(side * dx, side * end_point.y),
+            mixed: Vec2::new(side * (end_tangent.x - 1.0), side * end_tangent.y),
             fade: (1.0 - u) * (1.0 - u) * (1.0 + 2.0 * u),
             fade_slope: -12.0 * side * u * (1.0 - u),
         }
     }
 
-    fn point_and_tangents(&self, profile: (f64, f64), base: f64, direction: f64) -> (Vec3, [Vec3; 2]) {
-        let (rise, slope) = profile;
+    fn point_and_tangents(&self, profile: (f64, f64, f64), base: f64, direction: f64) -> (Vec3, [Vec3; 3]) {
+        let (rise, slope, curvature) = profile;
         let dz_dx = direction * self.fade * slope;
         (
             Vec3::new(self.plan.x, self.plan.y, direction * self.fade * rise + base),
             [
                 Vec3::new(self.along.x, self.along.y, dz_dx * self.along.x),
                 Vec3::new(self.across.x, self.across.y, dz_dx * self.across.x + direction * self.fade_slope * rise),
+                Vec3::new(
+                    self.mixed.x,
+                    self.mixed.y,
+                    dz_dx * self.mixed.x + direction * (self.fade_slope * slope + self.fade * curvature * self.across.x) * self.along.x,
+                ),
             ],
         )
     }
@@ -344,7 +355,7 @@ fn assemble(
             y_bounds = [y_bounds[0].min(y), y_bounds[1].max(y)];
             for k in 0..2 {
                 let base = -(k as f64) * t;
-                let (point, [along, across]) = sample.point_and_tangents(bend.section(profile, x, k), base, height_sign);
+                let (point, [along, across, _]) = sample.point_and_tangents(bend.section(profile, x, k), base, height_sign);
                 if k == 0
                     && j > 0
                     && j < width
@@ -377,37 +388,94 @@ fn assemble(
     };
     faces[top].loops.push(ring(0).into_iter().rev().collect());
     faces[bottom].loops.push(ring(1));
+    let plan = |i, j| {
+        let p = points[&v(i, j, 0)];
+        Vec2::new(p.x, p.y)
+    };
+    let mut skin_edges = BTreeMap::new();
+    let across_step = 1.0 / HALF_WIDTH_STEPS as f64;
+    for i in 0..last {
+        let du = stations[i + 1] - stations[i];
+        for j in 0..width {
+            let [a, b, c, d] = [plan(i, j), plan(i + 1, j), plan(i + 1, j + 1), plan(i, j + 1)];
+            if orient2d(a, b, c) != Sign::Positive || orient2d(a, c, d) != Sign::Positive {
+                return Err(BrepError::Degenerate("louver: the end transition folds in plan".into()));
+            }
+            let side = usize::from(j >= HALF_WIDTH_STEPS);
+            for k in 0..2 {
+                let corners = [(i, j), (i, j + 1), (i + 1, j), (i + 1, j + 1)].map(|(i, j)| {
+                    let across = ((j as f64 - HALF_WIDTH_STEPS as f64) * across_step).abs() * if side == 0 { -1.0 } else { 1.0 };
+                    let station = stations[i];
+                    let end = ends[side].station(station, bend.center_x, cut);
+                    let sample = SkinSection::at(end, station, across, cut);
+                    let point = points[&v(i, j, k)];
+                    let (_, [u, v, uv]) = sample.point_and_tangents(bend.section(profile, point.x, k), -(k as f64) * t, height_sign);
+                    [point, u * du, v * across_step, uv * (du * across_step)]
+                });
+                let mut patch = Bicubic::hermite(corners);
+                let mut ring = [v(i, j, k), v(i + 1, j, k), v(i + 1, j + 1, k), v(i, j + 1, k)];
+                if k == 1 {
+                    patch.points = std::array::from_fn(|u| std::array::from_fn(|v| patch.points[v][u]));
+                    ring.swap(1, 3);
+                }
+                patch.points = patch.points.map(|row| row.map(|p| frame.apply(p)));
+                let mut bounds = patch.boundaries();
+                bounds[2].points.reverse();
+                bounds[3].points.reverse();
+                for (index, mut curve) in bounds.into_iter().enumerate() {
+                    let (a, b) = (ring[index], ring[(index + 1) % 4]);
+                    let (from, to) = (a.min(b), a.max(b));
+                    if from != a {
+                        curve.points.reverse();
+                    }
+                    let existing = skin_edges.entry((from, to)).or_insert(curve);
+                    if *existing != curve {
+                        return Err(BrepError::Invalid("louver: neighboring patches disagree on their shared edge".into()));
+                    }
+                }
+                faces.push(FaceSpec { id: id("stamp.louver.skin.patch", i, j, k), surface: Surface::Bicubic(patch), loops: vec![ring.to_vec()] });
+            }
+        }
+    }
     let mut add = |id, ring: Vec<TopoId>| {
         let [a, b, c] = [points[&ring[0]], points[&ring[1]], points[&ring[2]]];
         let normal = unit((b - a).cross(c - a));
         let surface = Surface::Plane(Plane { origin: a, normal }).moved(&frame);
         faces.push(FaceSpec { id, surface, loops: vec![ring] });
     };
-    let plan = |i, j| {
-        let p = points[&v(i, j, 0)];
-        Vec2::new(p.x, p.y)
-    };
-    for i in 0..last {
-        for j in 0..width {
-            let [a, b, c, d] = [plan(i, j), plan(i + 1, j), plan(i + 1, j + 1), plan(i, j + 1)];
-            if orient2d(a, b, c) != Sign::Positive || orient2d(a, c, d) != Sign::Positive {
-                return Err(BrepError::Degenerate("louver: the end transition folds in plan".into()));
-            }
-            for k in 0..2 {
-                let mut quad = [v(i, j, k), v(i + 1, j, k), v(i + 1, j + 1, k), v(i, j + 1, k)];
-                if k == 1 {
-                    quad.reverse();
-                }
-                add(id("stamp.louver.panel", i, j, 2 * k), vec![quad[0], quad[1], quad[2]]);
-                add(id("stamp.louver.panel", i, j, 2 * k + 1), vec![quad[0], quad[2], quad[3]]);
-            }
-        }
-    }
     for j in 0..width {
         add(id("stamp.louver.cut", last, j, 0), vec![v(last, j + 1, 0), v(last, j, 0), v(last, j, 1), v(last, j + 1, 1)]);
-        add(id("stamp.louver.cut", last, j, 1), vec![lip(j, 0), lip(j + 1, 0), lip(j + 1, 1), lip(j, 1)]);
+        if (width / 4..3 * width / 4).contains(&j) {
+            add(id("stamp.louver.cut", last, j, 1), vec![lip(j, 0), lip(j + 1, 0), lip(j + 1, 1), lip(j, 1)]);
+        }
     }
-    let body = build_with_curves(vertices, faces, wall.curve_specs())?;
+
+    // The stationary lip has a planar land in the middle and a cubic span along each
+    // sampled interval of its returns. Both skins and the cut wall share the same curves.
+    let lip_slope = |j: usize| {
+        let across = (j as f64 - HALF_WIDTH_STEPS as f64) / HALF_WIDTH_STEPS as f64;
+        let end = ends[usize::from(across >= 0.0)].station(cut, bend.center_x, cut);
+        let sample = SkinSection::at(end, cut, across, cut);
+        2.0 * pullback * sample.fade * sample.fade_slope / HALF_WIDTH_STEPS as f64
+    };
+    let mut curves = wall.curve_specs();
+    curves.extend(skin_edges.into_iter().map(|((from, to), c)| CurveSpec { from, to, curve: Curve::Cubic(c) }));
+    for j in (0..width / 4).chain(3 * width / 4..width) {
+        let dy = points[&lip(j + 1, 0)].y - points[&lip(j, 0)].y;
+        let tangents = [j, j + 1].map(|k| frame.apply_vector(Vec3::new(lip_slope(k), dy, 0.0)));
+        let edges = [0, 1].map(|k| {
+            let [from, to] = [lip(j, k), lip(j + 1, k)];
+            let cubic = Cubic::hermite([frame.apply(points[&from]), frame.apply(points[&to])], tangents);
+            curves.push(CurveSpec { from, to, curve: Curve::Cubic(cubic) });
+            cubic
+        });
+        faces.push(FaceSpec {
+            id: id("stamp.louver.cut", last, j, 1),
+            surface: Surface::CubicWall(CubicWall { edges, along: frame.apply_vector(Vec3::new(0.0, 1.0, 0.0)) }),
+            loops: vec![vec![lip(j, 0), lip(j + 1, 0), lip(j + 1, 1), lip(j, 1)]],
+        });
+    }
+    let body = build_with_curves(vertices, faces, curves)?;
     validated(&body)?;
     let cut = StampCut {
         faces: [face, wall.faces()[bottom].id],
@@ -440,17 +508,17 @@ mod tests {
                     let section = bend.section(&profile, sample.plan.x, skin);
                     sample.point_and_tangents(section, -0.5 * skin as f64, side)
                 };
-                let (_, [along, across]) = at(2.0, side);
+                let (_, [along, across, _]) = at(2.0, side);
                 assert_eq!(along.z, 0.0);
                 assert_eq!(across.z, 0.0);
-                let (middle, [along, across]) = at(2.0, side * 0.5);
+                let (middle, [along, across, _]) = at(2.0, side * 0.5);
                 let normal = unit(along.cross(across));
                 let h = 1e-7;
                 let (outside, _) = at(2.0, side * (0.5 + h));
                 assert!(((outside - middle) * (1.0 / h)).dot(normal).abs() < 1e-5);
 
-                let (left, [left_tangent, _]) = at(-h, side * 0.75);
-                let (root, [right_tangent, _]) = at(0.0, side * 0.75);
+                let (left, [left_tangent, ..]) = at(-h, side * 0.75);
+                let (root, [right_tangent, ..]) = at(0.0, side * 0.75);
                 let (right, _) = at(h, side * 0.75);
                 for tangent in [left_tangent, (root - left) * (1.0 / h), (right - root) * (1.0 / h)] {
                     let error = tangent - right_tangent;

@@ -173,20 +173,23 @@ impl Body {
         self.vertices.first().map_or(Vec3::ZERO, |v| v.point)
     }
 
-    /// The curves of face `f` as its loops run them: an arc turning about its axis in the
-    /// direction of the loop, with its start and end, or a piece of a development.
-    fn face_paths(&self, f: Ix) -> impl Iterator<Item = Path> + '_ {
+    /// The curved edges of a face, oriented as its loops run them.
+    fn face_curves(&self, f: Ix) -> impl Iterator<Item = (Curve, Ix)> + '_ {
         self.face_loops(f).flat_map(move |l| self.loop_half_edges(l)).filter_map(move |h| {
             let edge = &self.edges[self.half_edges[h as usize].edge as usize];
             let curve = self.edge_curve(edge)?;
-            let curve = if edge.half == h { curve } else { curve.reversed() };
-            Some(match curve {
-                Curve::Arc(arc) => {
-                    let (u, v) = (self.point(self.half_edges[h as usize].origin), self.point(self.half_edges[self.next(h) as usize].origin));
-                    Path::Arc(arc, u, v)
-                }
-                Curve::Rolled { piece, .. } => Path::Rolled(piece),
-            })
+            Some((if edge.half == h { curve } else { curve.reversed() }, h))
+        })
+    }
+
+    fn face_paths(&self, f: Ix) -> impl Iterator<Item = Path> + '_ {
+        self.face_curves(f).filter_map(move |(curve, h)| match curve {
+            Curve::Arc(arc) => {
+                let (u, v) = (self.point(self.half_edges[h as usize].origin), self.point(self.half_edges[self.next(h) as usize].origin));
+                Some(Path::Arc(arc, u, v))
+            }
+            Curve::Rolled { piece, .. } => Some(Path::Rolled(piece)),
+            Curve::Cubic(_) => None,
         })
     }
 
@@ -195,7 +198,7 @@ impl Body {
         self.face_loops(f).flat_map(move |l| self.loop_half_edges(l)).filter_map(move |h| {
             match self.edge_curve(&self.edges[self.half_edges[h as usize].edge as usize])? {
                 Curve::Rolled { radius, .. } => Some(radius),
-                Curve::Arc(_) => None,
+                Curve::Arc(_) | Curve::Cubic(_) => None,
             }
         })
     }
@@ -216,9 +219,14 @@ impl Body {
                 });
                 let mut seg = Integrals { area_vector: area_vector * 0.5, ..Integrals::default() };
                 let n = unit(plane.normal);
-                for path in self.face_paths(f) {
-                    if let Path::Arc(arc, u, v) = path {
-                        curve::segment(&mut seg, &arc, arc.axis, u, v, n, o);
+                for (curve, h) in self.face_curves(f) {
+                    match curve {
+                        Curve::Arc(arc) => {
+                            let (u, v) = (self.point(self.half_edges[h as usize].origin), self.point(self.half_edges[self.next(h) as usize].origin));
+                            curve::segment(&mut seg, &arc, arc.axis, u, v, n, o);
+                        }
+                        Curve::Cubic(c) => curve::cubic_segment(&mut seg, c, n, o),
+                        Curve::Rolled { .. } => {}
                     }
                 }
                 acc.six_v += seg.six_v;
@@ -235,6 +243,20 @@ impl Body {
                 acc.six_v += rev.six_v;
                 acc.moment = acc.moment + rev.moment;
                 (rev.area, rev.area_vector)
+            }
+            Surface::Bicubic(p) => {
+                let mut face = Integrals::default();
+                curve::bicubic(p, o, &mut face);
+                acc.six_v += face.six_v;
+                acc.moment = acc.moment + face.moment;
+                (face.area, face.area_vector)
+            }
+            Surface::CubicWall(w) => {
+                let mut wall = Integrals::default();
+                curve::cubic_wall(*w, o, &mut wall);
+                acc.six_v += wall.six_v;
+                acc.moment = acc.moment + wall.moment;
+                (wall.area, wall.area_vector)
             }
             Surface::Wall(w) => {
                 let (r0, r1) = self.rolled_radii(f).fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), r| (lo.min(r), hi.max(r)));
@@ -303,6 +325,14 @@ impl Body {
         for f in (0..self.faces.len() as Ix).filter(|&f| matches!(self.faces[f as usize].surface, Surface::Torus(_))) {
             self.extend_over_torus(f, &Rigid::IDENTITY, &mut min, &mut max);
         }
+        for face in &self.faces {
+            if let Surface::Bicubic(p) = &face.surface {
+                for q in p.points.iter().flatten() {
+                    min = Vec3::new(min.x.min(q.x), min.y.min(q.y), min.z.min(q.z));
+                    max = Vec3::new(max.x.max(q.x), max.y.max(q.y), max.z.max(q.z));
+                }
+            }
+        }
         (min, max)
     }
 
@@ -320,6 +350,12 @@ impl Body {
             if let Some(c) = self.edge_curve(edge) {
                 let c = if edge.half == h { c } else { c.reversed() };
                 c.moved(m).extend_bounds(u, v, &mut lo, &mut hi);
+            }
+        }
+        if let Surface::Bicubic(p) = &self.faces[f as usize].surface {
+            for q in p.points.iter().flatten().map(|&p| m.apply(p)) {
+                lo = Vec3::new(lo.x.min(q.x), lo.y.min(q.y), lo.z.min(q.z));
+                hi = Vec3::new(hi.x.max(q.x), hi.y.max(q.y), hi.z.max(q.z));
             }
         }
         self.extend_over_torus(f, m, &mut lo, &mut hi);
@@ -415,6 +451,17 @@ impl Body {
                     Surface::Cylinder(c) => Surface::Cylinder(Cylinder { origin: point(c.origin), axis: dir(c.axis), ..c }),
                     Surface::Cone(c) => Surface::Cone(Cone { origin: point(c.origin), axis: dir(c.axis), ..c }),
                     Surface::Torus(t) => Surface::Torus(Torus { center: point(t.center), axis: dir(t.axis), ..t }),
+                    Surface::Bicubic(p) => {
+                        let mut points = p.points.map(|row| row.map(point));
+                        points.reverse();
+                        Surface::Bicubic(crate::Bicubic { points })
+                    }
+                    Surface::CubicWall(w) => {
+                        let mut w = w.map(point, dir);
+                        w.edges.iter_mut().for_each(|c| c.points.reverse());
+                        w.along = -w.along;
+                        Surface::CubicWall(w)
+                    }
                     Surface::Wall(_) => return Err(developed()),
                 };
                 spec.loops.iter_mut().for_each(|l| l.reverse());
@@ -427,6 +474,7 @@ impl Body {
             .map(|c| match c.curve {
                 // A reflection turns the other way round the reflected axis.
                 Curve::Arc(a) => Ok(CurveSpec { curve: Curve::Arc(Arc { center: point(a.center), axis: -dir(a.axis), ..a }), ..c }),
+                Curve::Cubic(cubic) => Ok(CurveSpec { curve: Curve::Cubic(crate::Cubic { points: cubic.points.map(point) }), ..c }),
                 Curve::Rolled { .. } => Err(developed()),
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -596,6 +644,21 @@ impl Body {
                 floats(&mut b, &[t.major, t.minor]);
                 b.push(u8::from(t.convex));
             }
+            Surface::Bicubic(p) => {
+                b.extend_from_slice(b"bicubic");
+                for q in p.points.iter().flatten() {
+                    floats(&mut b, &q.to_array());
+                }
+            }
+            Surface::CubicWall(w) => {
+                b.extend_from_slice(b"cubic-wall");
+                for edge in w.edges {
+                    for point in edge.points {
+                        floats(&mut b, &point.to_array());
+                    }
+                }
+                floats(&mut b, &w.along.to_array());
+            }
             Surface::Wall(w) => {
                 b.extend_from_slice(b"wall");
                 rolled(&mut b, w);
@@ -613,6 +676,12 @@ impl Body {
                         floats(&mut b, &a.center.to_array());
                         floats(&mut b, &a.axis.to_array());
                         floats(&mut b, &[a.radius]);
+                    }
+                    Some(Curve::Cubic(c)) => {
+                        b.extend_from_slice(b"cubic");
+                        for p in c.points {
+                            floats(&mut b, &p.to_array());
+                        }
                     }
                     Some(Curve::Rolled { piece, radius }) => {
                         b.extend_from_slice(b"rolled");

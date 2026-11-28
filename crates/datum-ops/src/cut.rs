@@ -139,7 +139,7 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
 
     // A profile off the sketch's face (a sketch on a face has its own axes: the model's origin
     // projected, a model axis): said so, with where the face is in those axes (issue #100).
-    let entry = outline(target, f as Ix, &frame)?;
+    let entry = outline_clear_of(target, f as Ix, &frame, &boxes)?;
     if entry.iter().map(|l| l.winding(profiles[0].points[0])).sum::<i32>() == 0 {
         let (lo, hi) = entry[0].bounds();
         return Err(unsupported(format!(
@@ -165,7 +165,7 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
                     let corner = target.half_edges()[target.loops()[target.faces()[g as usize].first_loop as usize].first as usize].origin;
                     (away && p.normal.cross(*z) == Vec3::ZERO, frame.depth(target.point(corner)))
                 };
-                let holds = || outline(target, g, &frame).is_ok_and(|ls| ls.iter().map(|l| l.winding(first)).sum::<i32>() != 0);
+                let holds = || outline_clear_of(target, g, &frame, &boxes).is_ok_and(|ls| ls.iter().map(|l| l.winding(first)).sum::<i32>() != 0);
                 (opposite && d < 0.0 && holds()).then_some((g, d))
             });
             faces.max_by(|a, b| a.1.total_cmp(&b.1)).map(|(g, d)| (Some(g), d))
@@ -180,7 +180,7 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
 
     // Inside both faces, clear of their edges and of their holes.
     for (face, name) in std::iter::once((f as Ix, "entry")).chain(g.map(|g| (g, "exit"))) {
-        let loops = outline(target, face, &frame)?;
+        let loops = outline_clear_of(target, face, &frame, &boxes)?;
         let loop_boxes: Vec<Box2> = loops.iter().map(ProfileLoop::bounds).collect();
         let pairs = between(&boxes, &loop_boxes);
         in_order(pairs.par_iter().map(|&(p, l)| {
@@ -214,7 +214,7 @@ pub fn from_face(feature: TopoId, target: &Body, sketch: &Placed, reach: Reach) 
             parallel && target.face_loops(**h).flat_map(|l| target.loop_points(l)).next().is_some_and(|p| frame.depth(p) == end)
         };
         for &h in other.iter().filter(level) {
-            let loops = outline(target, h, &frame)?;
+            let loops = outline_clear_of(target, h, &frame, &boxes)?;
             let meets = |p: &ProfileLoop| loops.iter().any(|l| p.touches(l) || l.winding(p.points[0]) != 0 || p.winding(l.points[0]) != 0);
             // Degenerate, not unsupported: the general Boolean operation fails there too.
             if profiles.iter().any(meets) {
@@ -377,7 +377,7 @@ fn plane_neighbours(target: &Body, other: &[Ix], frame: &Frame, boxes: &[Box2], 
         let along = match &face.surface {
             Surface::Plane(p) => p.normal.dot(z) == 0.0,
             Surface::Cylinder(c) => c.axis.cross(z) == Vec3::ZERO,
-            Surface::Cone(_) | Surface::Torus(_) | Surface::Wall(_) => false,
+            Surface::Cone(_) | Surface::Torus(_) | Surface::Bicubic(_) | Surface::CubicWall(_) | Surface::Wall(_) => false,
         };
         if !along && face.surface.plane().is_none() {
             return Ok::<_, BrepError>(Some((h, None)));
@@ -388,7 +388,7 @@ fn plane_neighbours(target: &Body, other: &[Ix], frame: &Frame, boxes: &[Box2], 
     }))?;
     let cuts: Vec<(Vec3, Vec3)> = boxes.iter().map(|&(lo, hi)| (Vec3::new(lo.x, lo.y, span.lo), Vec3::new(hi.x, hi.y, span.hi))).collect();
     keep_clear(target, &kinds, &Rigid::into_frame(o, x, y, z), &cuts, span.closed)?;
-    exact_outlines(target, kinds, frame)
+    exact_outlines(target, kinds, frame, boxes)
 }
 
 /// Faces known only by their boxes (`None` in `kinds`) must keep clear of every profile's cut
@@ -406,9 +406,14 @@ fn keep_clear(target: &Body, kinds: &[Option<(Ix, Option<bool>)>], local: &Rigid
 }
 
 /// The outlines of the faces known exactly (`Some(along)` in `kinds`), each loop with `along`.
-fn exact_outlines(target: &Body, kinds: Vec<Option<(Ix, Option<bool>)>>, frame: &Frame) -> Result<Vec<(ProfileLoop, bool)>, BrepError> {
+fn exact_outlines(
+    target: &Body,
+    kinds: Vec<Option<(Ix, Option<bool>)>>,
+    frame: &Frame,
+    boxes: &[Box2],
+) -> Result<Vec<(ProfileLoop, bool)>, BrepError> {
     let exact: Vec<(Ix, bool)> = kinds.into_iter().flatten().filter_map(|(h, along)| Some((h, along?))).collect();
-    let loops = in_order(exact.into_par_iter().map(|(h, along)| Ok::<_, BrepError>((outline(target, h, frame)?, along))))?;
+    let loops = in_order(exact.into_par_iter().map(|(h, along)| Ok::<_, BrepError>((outline_clear_of(target, h, frame, boxes)?, along))))?;
     Ok(loops.into_iter().flat_map(|(ls, along)| ls.into_iter().map(move |l| (l, along))).collect())
 }
 
@@ -464,7 +469,7 @@ fn rolled_neighbours(
         })
         .collect();
     keep_clear(target, &kinds, &local, &cuts, [false, false])?;
-    exact_outlines(target, kinds, frame)
+    exact_outlines(target, kinds, frame, boxes)
 }
 
 /// The loops of face `h` seen along the cut, in the sketch's coordinates. Points that fall
@@ -472,6 +477,17 @@ fn rolled_neighbours(
 /// edges, there and back. In a development an arc about the axis is straight, and a piece of the
 /// same development keeps its arc; a piece of another one has no outline here.
 pub(crate) fn outline(body: &Body, h: Ix, frame: &Frame) -> Result<Vec<ProfileLoop>, BrepError> {
+    outline_impl(body, h, frame, None)
+}
+
+/// A planar outline for predicates confined to the given boxes. A cubic edge and its chord
+/// are both in the control hull, so replacing it by the chord preserves winding and intersection
+/// decisions outside the hull. The original cubic edge is retained when the body is rebuilt.
+pub(crate) fn outline_clear_of(body: &Body, h: Ix, frame: &Frame, boxes: &[Box2]) -> Result<Vec<ProfileLoop>, BrepError> {
+    outline_impl(body, h, frame, Some(boxes))
+}
+
+fn outline_impl(body: &Body, h: Ix, frame: &Frame, boxes: Option<&[Box2]>) -> Result<Vec<ProfileLoop>, BrepError> {
     body.face_loops(h)
         .map(|l| {
             let mut ring = ProfileLoop { points: Vec::new(), vertices: Vec::new(), sides: Vec::new(), arcs: Vec::new() };
@@ -481,6 +497,15 @@ pub(crate) fn outline(body: &Body, h: Ix, frame: &Frame) -> Result<Vec<ProfileLo
                 let curve = body.edge_curve(edge).map(|c| if edge.half == he { c } else { c.reversed() });
                 let arc = match (frame, curve) {
                     (_, None) | (Frame::Rolled { .. }, Some(Curve::Arc(_))) => None,
+                    (Frame::Plane { .. }, Some(Curve::Cubic(c))) => {
+                        let [a, b, c, d] = c.points.map(|p| frame.flat(p));
+                        let lo = Vec2::new(a.x.min(b.x).min(c.x).min(d.x), a.y.min(b.y).min(c.y).min(d.y));
+                        let hi = Vec2::new(a.x.max(b.x).max(c.x).max(d.x), a.y.max(b.y).max(c.y).max(d.y));
+                        if !boxes.is_some_and(|boxes| boxes.iter().all(|&(a, b)| b.x < lo.x || hi.x < a.x || b.y < lo.y || hi.y < a.y)) {
+                            return Err(BrepError::Unsupported("cut: a profile runs close to a cubic edge".into()));
+                        }
+                        None
+                    }
                     (Frame::Plane { z, .. }, Some(Curve::Arc(a))) => Some(ProfileArc { center: frame.flat(a.center), ccw: a.axis.dot(*z) > 0.0 }),
                     (Frame::Rolled { d, .. }, Some(Curve::Rolled { piece, .. })) if piece.dev == d.dev => piece.arc.map(|a| d.arc(a)),
                     _ => return Err(BrepError::Unsupported("cut: a face beside the cut has edges of a cut in another development".into())),

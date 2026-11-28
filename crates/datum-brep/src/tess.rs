@@ -129,6 +129,9 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
         };
         return Ok(FaceMesh { points: vertices.iter().map(|&v| body.point(v)).collect(), normals: vec![n; vertices.len()], vertices, triangles });
     }
+    if let Surface::Bicubic(patch) = &face.surface {
+        return bicubic_mesh(body, f, patch, chord);
+    }
     if let Surface::Wall(w) = face.surface {
         return wall_mesh(body, f, &w, chord);
     }
@@ -156,12 +159,20 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
             angles.push(theta);
             let edge = &body.edges()[he.edge as usize];
             let Some(curve) = body.edge_curve(edge) else { continue };
-            let curve = if edge.half == h { curve } else { curve.reversed() };
-            let inner = curve.inner_points(u, v, chord);
+            let reversed = edge.half != h;
+            let mut inner = match curve {
+                Curve::Cubic(_) => curve.inner_points(u, v, chord),
+                _ if reversed => curve.reversed().inner_points(u, v, chord),
+                _ => curve.inner_points(u, v, chord),
+            };
+            if reversed && matches!(curve, Curve::Cubic(_)) {
+                inner.reverse();
+            }
+            let curve = if reversed { curve.reversed() } else { curve };
             let n = inner.len() + 1;
             // On a cylinder or a cone a curve runs around the axis: θ turns with it, by `at(t)` at `t`.
             let at = |t: f64| match (&frame, &curve) {
-                (None, _) => 0.0,
+                (None, _) | (_, Curve::Cubic(_)) => 0.0,
                 (Some(fr), Curve::Arc(arc)) => arc.sweep(u, v) * fr.axis.dot(arc.axis).signum() * t,
                 (Some(fr), Curve::Rolled { piece, .. }) => {
                     fr.axis.dot(piece.dev.axis).signum() / piece.dev.neutral * (piece.at(t).0.x - piece.from.x)
@@ -206,6 +217,47 @@ pub fn face_mesh(body: &Body, f: Ix, delaunay: bool, chord: f64) -> Result<FaceM
     Ok(FaceMesh { points, normals, vertices, triangles })
 }
 
+/// Mesh an untrimmed rectangular patch. Boundary points come from the shared B-rep edges.
+fn bicubic_mesh(body: &Body, f: Ix, patch: &crate::Bicubic, chord: f64) -> Result<FaceMesh, BrepError> {
+    let corners = [patch.points[0][0], patch.points[3][0], patch.points[3][3], patch.points[0][3]];
+    let uv = [Vec2::new(0.0, 0.0), Vec2::new(1.0, 0.0), Vec2::new(1.0, 1.0), Vec2::new(0.0, 1.0)];
+    let mut mesh = FaceMesh { points: Vec::new(), vertices: Vec::new(), normals: Vec::new(), triangles: Vec::new() };
+    let invalid = || BrepError::Invalid("a bicubic face needs one oriented four-edge loop".into());
+    let face = &body.faces()[f as usize];
+    if face.loop_count != 1 || body.loops()[face.first_loop as usize].len != 4 {
+        return Err(invalid());
+    }
+    let append = |mesh: &mut FaceMesh, p, vertex, q: Vec2| {
+        let [_, du, dv] = patch.at(q.x, q.y);
+        mesh.points.push(p);
+        mesh.vertices.push(vertex);
+        mesh.normals.push(crate::curve::unit(du.cross(dv)));
+    };
+    for h in body.loop_half_edges(face.first_loop) {
+        let he = &body.half_edges()[h as usize];
+        let next = body.half_edges()[he.twin as usize].origin;
+        let Some(k) = corners.iter().position(|&p| p == body.point(he.origin)) else { return Err(invalid()) };
+        if corners[(k + 1) % 4] != body.point(next) {
+            return Err(invalid());
+        }
+        let mut edge = edge_points(body, he.edge, chord);
+        if body.edges()[he.edge as usize].half != h {
+            edge.reverse();
+        }
+        let segments = edge.len() - 1;
+        for (j, p) in edge.into_iter().take(segments).enumerate() {
+            let (a, b) = (uv[k], uv[(k + 1) % 4]);
+            let t = j as f64 / segments as f64;
+            let q = Vec2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+            append(&mut mesh, p, if j == 0 { he.origin } else { Ix::MAX }, q);
+        }
+    }
+    let n = mesh.points.len() as u32;
+    append(&mut mesh, patch.at(0.5, 0.5)[0], Ix::MAX, Vec2::new(0.5, 0.5));
+    mesh.triangles = (0..n).map(|j| [j, (j + 1) % n, n]).collect();
+    Ok(mesh)
+}
+
 /// The wall `w` of face `f` in its own coordinates: distance from the axis, and length along
 /// the piece (the normal `∂r × ∂t` points out of the body). Its points are those of its two
 /// edges along the piece, each at its radius; a vertex's place on the piece is where those edges
@@ -221,7 +273,7 @@ fn wall_mesh(body: &Body, f: Ix, w: &crate::Rolled, chord: f64) -> Result<FaceMe
                 let piece = if edge.half == h { piece } else { piece.reversed() };
                 Some((piece.from == w.from && piece.to == w.to, radius, piece))
             }
-            Curve::Arc(_) => None,
+            Curve::Arc(_) | Curve::Cubic(_) => None,
         }
     };
     // Each point: where it is, the body vertex it is (`Ix::MAX` for none), and `(t, r)`.
@@ -338,6 +390,7 @@ fn torus_mesh(body: &Body, f: Ix, t: &crate::Torus, chord: f64) -> Result<FaceMe
 enum Projection {
     Plane(usize, usize),
     Revolution(crate::Cone),
+    CubicWall(crate::CubicWall),
 }
 
 impl Projection {
@@ -350,7 +403,8 @@ impl Projection {
             }
             Surface::Cylinder(c) => Self::Revolution(c.into()),
             Surface::Cone(c) => Self::Revolution(c),
-            Surface::Torus(_) | Surface::Wall(_) => unreachable!("tori and walls are laid out by their own meshes"),
+            Surface::CubicWall(w) => Self::CubicWall(w),
+            Surface::Torus(_) | Surface::Bicubic(_) | Surface::Wall(_) => unreachable!("tori and walls are laid out by their own meshes"),
         }
     }
 
@@ -362,6 +416,7 @@ impl Projection {
                 let p = p.to_array();
                 Vec2::new(p[*u] + 0.0, p[*v] + 0.0)
             }
+            Self::CubicWall(w) => w.uv(p),
             Self::Revolution(c) => {
                 let side = if c.convex { 1.0 } else { -1.0 };
                 Vec2::new(side * c.radius * theta + 0.0, (p - c.origin).dot(c.axis) * libm::sqrt(1.0 + c.slope * c.slope) + 0.0)

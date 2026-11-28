@@ -1152,6 +1152,8 @@ const COMMANDS: &[Command] = &[
                             json!({"id": id, "torus": {"center": t.center, "axis": t.axis, "major": t.major, "minor": t.minor, "convex": t.convex}, "area": area})
                         }
                         // A wall of a cut through a rolled sheet: its piece in the sheet's development.
+                        Surface::Bicubic(p) => json!({"id": id, "bicubic": p.points, "area": area}),
+                        Surface::CubicWall(w) => json!({"id": id, "cubic_wall": w.edges.map(|c| c.points), "area": area}),
                         Surface::Wall(w) => {
                             let arc = w.arc.map(|a| json!({"center": a.center, "ccw": a.ccw}));
                             json!({"id": id, "wall": {"axis": w.dev.axis, "neutral_radius": w.dev.neutral, "from": w.from, "to": w.to, "arc": arc}, "area": area})
@@ -1166,7 +1168,7 @@ const COMMANDS: &[Command] = &[
         name: "query_edges",
         description: "Edges of a feature's body with their stable IDs, to project into a sketch: each runs from its lower-ID vertex \
                       (`from`, a sketch projection's `<name>.start`) to the other (`to`), with the vertices' IDs and points; an arc \
-                      with its centre, axis and radius. With `face` (an ID from query_faces), only that face's edges, loop by loop.",
+                      with its centre, axis and radius, or a cubic with its control points. With `face` (an ID from query_faces), only that face's edges, loop by loop.",
         params: || json!({"type": "object", "properties": {"name": {"type": "string"}, "face": {"type": "string"}}, "required": ["name"]}),
         run: |s, p| {
             let b = s.body(text(p, "name")?)?;
@@ -1189,6 +1191,7 @@ const COMMANDS: &[Command] = &[
                     let mut j = json!({"id": format!("{:?}", edge.id), "from": vertex(from), "to": vertex(to)});
                     match b.edge_curve(edge) {
                         Some(Curve::Arc(a)) => j["arc"] = json!({"center": a.center, "axis": a.axis, "radius": a.radius}),
+                        Some(Curve::Cubic(c)) => j["cubic"] = json!(c.points),
                         Some(Curve::Rolled { .. }) => j["rolled"] = json!(true),
                         None => {}
                     }
