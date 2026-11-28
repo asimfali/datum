@@ -15,6 +15,7 @@ use crate::{Value, validated};
 
 pub(super) struct Bridge<'a> {
     pub wall: &'a Body,
+    pub blank: &'a Body,
     pub face: TopoId,
     pub thickness: f64,
     pub radius: Option<f64>,
@@ -26,7 +27,7 @@ pub(super) struct Bridge<'a> {
 }
 
 pub(super) fn form(feature: TopoId, forming: &Forming, sketch: &Placed, bridge: Bridge<'_>) -> Result<Value, BrepError> {
-    let Bridge { wall, face, thickness: t, radius, frame, axes: [x, y, z], anchor, corners: [a, b, c, d], sides } = bridge;
+    let Bridge { wall, blank, face, thickness: t, radius, frame, axes: [x, y, z], anchor, corners: [a, b, c, d], sides } = bridge;
     let bad = || BrepError::Unsupported(format!("stamp: section `{}` needs two upright transitions and a flat bridge", forming.section));
     if forming.section_side != SectionSide::Outer {
         return Err(BrepError::Unsupported("stamp: the formed slot supports an outer section".into()));
@@ -179,5 +180,5 @@ pub(super) fn form(feature: TopoId, forming: &Forming, sketch: &Placed, bridge: 
             arcs: vec![None],
         })
         .collect();
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: blank.clone(), imprints: Vec::new(), stamp_cuts })))
 }

@@ -19,6 +19,7 @@ use crate::{LineOf, Placement, Value, describe_arity, input_sketch, line_ends, n
 
 mod bridge;
 mod dimple;
+mod louver;
 mod pocket;
 mod section;
 mod stitch;

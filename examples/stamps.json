@@ -1,0 +1,3650 @@
+{
+  "format": "datum/1",
+  "features": [
+    {
+      "name": "outline",
+      "op": "sketch",
+      "sketch": {
+        "points": {
+          "a": [
+            0,
+            0
+          ],
+          "b": [
+            410,
+            0
+          ],
+          "c": [
+            410,
+            280
+          ],
+          "d": [
+            0,
+            280
+          ]
+        },
+        "lines": {
+          "ab": {
+            "from": "a",
+            "to": "b"
+          },
+          "bc": {
+            "from": "b",
+            "to": "c"
+          },
+          "cd": {
+            "from": "c",
+            "to": "d"
+          },
+          "da": {
+            "from": "d",
+            "to": "a"
+          }
+        }
+      }
+    },
+    {
+      "name": "plate",
+      "op": "plate",
+      "inputs": [
+        "outline"
+      ],
+      "thickness": 0.5
+    },
+    {
+      "name": "places",
+      "op": "sketch",
+      "inputs": [
+        "plate"
+      ],
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "sketch": {
+        "points": {
+          "torus": [
+            125,
+            140
+          ],
+          "dimple_sphere": [
+            265,
+            45
+          ],
+          "dimple_cone": [
+            315,
+            45
+          ],
+          "dimple_pierced": [
+            365,
+            45
+          ],
+          "emboss": [
+            265,
+            110
+          ],
+          "emboss_window": [
+            315,
+            110
+          ],
+          "pocket": [
+            365,
+            110
+          ],
+          "slot": [
+            265,
+            175
+          ],
+          "slot_rounded": [
+            315,
+            175
+          ],
+          "louver": [
+            365,
+            175
+          ],
+          "tongue_straight": [
+            265,
+            235
+          ],
+          "tongue_rounded": [
+            315,
+            235
+          ],
+          "tongue_nose": [
+            365,
+            235
+          ]
+        }
+      }
+    },
+    {
+      "name": "torus",
+      "op": "component",
+      "inputs": [
+        "plate",
+        "places"
+      ],
+      "part": {
+        "name": "Toroidal transition",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2"
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "metadata": {
+              "stamp.cut": "flat"
+            },
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "arcs": {
+                  "a1": {
+                    "center": "p2",
+                    "from": "p1",
+                    "to": "p3"
+                  }
+                },
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 100.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "horizontal"
+                  },
+                  {
+                    "curves": [
+                      "a1",
+                      "l1"
+                    ],
+                    "type": "tangent"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    -100.0,
+                    0.0
+                  ],
+                  "p2": [
+                    -105.68150052417076,
+                    42.88086344810022
+                  ],
+                  "p3": [
+                    -62.61532812764882,
+                    38.83701708927022
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      0.0,
+                      -100.0
+                    ]
+                  ],
+                  "element": "p2",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "circles": {
+                  "c1": {
+                    "center": "origin",
+                    "diameter": 200.0
+                  }
+                },
+                "constraints": [],
+                "lines": {},
+                "metadata": {
+                  "c1": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {}
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "torus"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "dimple_sphere",
+      "op": "component",
+      "inputs": [
+        "torus",
+        "places"
+      ],
+      "part": {
+        "name": "Dimple sphere",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2"
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "metadata": {
+              "stamp.cut": "tool"
+            },
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  0.0,
+                  -1.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "arcs": {
+                  "a1": {
+                    "center": "p2",
+                    "from": "p4",
+                    "to": "p3"
+                  }
+                },
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "a1",
+                    "point": "p1",
+                    "type": "midpoint"
+                  },
+                  {
+                    "points": [
+                      "p4",
+                      "origin"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 15.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "construction": true,
+                    "from": "p3",
+                    "to": "p4"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    3.0
+                  ],
+                  "p2": [
+                    0.2466950692450558,
+                    -2.2625512365292453
+                  ],
+                  "p3": [
+                    -5.25879917184265,
+                    0.0
+                  ],
+                  "p4": [
+                    5.734989648033126,
+                    0.041407867494824016
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      -7.500000000000002,
+                      0.0
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "circles": {
+                  "c1": {
+                    "center": "origin",
+                    "diameter": 15.0
+                  }
+                },
+                "constraints": [],
+                "lines": {},
+                "metadata": {
+                  "c1": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {}
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "dimple_sphere"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "dimple_cone",
+      "op": "component",
+      "inputs": [
+        "dimple_sphere",
+        "places"
+      ],
+      "part": {
+        "name": "Dimple cone",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2"
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "metadata": {
+              "stamp.cut": "tool"
+            },
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  0.0,
+                  -1.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p4",
+                      "origin"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 15.0
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "point": "p1",
+                    "type": "midpoint"
+                  },
+                  {
+                    "degrees": 300.0,
+                    "lines": [
+                      "l3",
+                      "l2"
+                    ],
+                    "type": "angle"
+                  },
+                  {
+                    "line": "l2",
+                    "point": "origin",
+                    "type": "midpoint"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "construction": true,
+                    "from": "p3",
+                    "to": "p4"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p5"
+                  },
+                  "l4": {
+                    "from": "p5",
+                    "to": "p6"
+                  },
+                  "l5": {
+                    "from": "p6",
+                    "to": "p4"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    3.0
+                  ],
+                  "p2": [
+                    0.2466950692450558,
+                    -2.2625512365292453
+                  ],
+                  "p3": [
+                    -8.583934306475951,
+                    0.0
+                  ],
+                  "p4": [
+                    6.416065693524048,
+                    0.0
+                  ],
+                  "p5": [
+                    -6.851883498907074,
+                    3.0
+                  ],
+                  "p6": [
+                    6.851883498907074,
+                    3.0
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      -7.500000000000002,
+                      0.0
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "circles": {
+                  "c1": {
+                    "center": "origin",
+                    "diameter": 15.0
+                  }
+                },
+                "constraints": [],
+                "lines": {},
+                "metadata": {
+                  "c1": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {}
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "dimple_cone"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "dimple_pierced",
+      "op": "component",
+      "inputs": [
+        "dimple_cone",
+        "places"
+      ],
+      "part": {
+        "name": "Dimple pierced",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2"
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "metadata": {
+              "stamp.cut": "flat"
+            },
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  0.0,
+                  -1.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p4",
+                      "origin"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 15.0
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "degrees": 300.0,
+                    "lines": [
+                      "l3",
+                      "l2"
+                    ],
+                    "type": "angle"
+                  },
+                  {
+                    "line": "l2",
+                    "point": "origin",
+                    "type": "midpoint"
+                  },
+                  {
+                    "line": "l6",
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p7"
+                    ],
+                    "type": "horizontal_distance",
+                    "value": 4.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "construction": true,
+                    "from": "p3",
+                    "to": "p4"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p5"
+                  },
+                  "l6": {
+                    "from": "p5",
+                    "to": "p7"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    3.0
+                  ],
+                  "p2": [
+                    0.2466950692450558,
+                    -2.2625512365292453
+                  ],
+                  "p3": [
+                    -8.583934306475951,
+                    0.0
+                  ],
+                  "p4": [
+                    6.416065693524048,
+                    0.0
+                  ],
+                  "p5": [
+                    -6.851883498907074,
+                    3.0
+                  ],
+                  "p7": [
+                    -4.282608695652174,
+                    3.0
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      -7.500000000000002,
+                      0.0
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "circles": {
+                  "c1": {
+                    "center": "origin",
+                    "diameter": 15.0
+                  }
+                },
+                "constraints": [],
+                "lines": {},
+                "metadata": {
+                  "c1": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {}
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "dimple_pierced"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "emboss",
+      "op": "component",
+      "inputs": [
+        "dimple_pierced",
+        "places"
+      ],
+      "part": {
+        "name": "Formed emboss",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2",
+          "round_section": true
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p2"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 10.0
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p3",
+                      "p5"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "lines": [
+                      "l2",
+                      "l4"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l3",
+                      "l5"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "horizontal_distance",
+                    "value": 25.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p1"
+                  },
+                  "l4": {
+                    "from": "p4",
+                    "to": "p5"
+                  },
+                  "l5": {
+                    "from": "p5",
+                    "to": "p1"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    3.000000000000001
+                  ],
+                  "p2": [
+                    -11.768115942028986,
+                    0.0
+                  ],
+                  "p3": [
+                    -10.0,
+                    3.000000000000001
+                  ],
+                  "p4": [
+                    11.768115942028986,
+                    2.95979075102054e-17
+                  ],
+                  "p5": [
+                    10.0,
+                    3.000000000000001
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      0.0,
+                      12.5
+                    ]
+                  ],
+                  "element": "p4",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      -12.5
+                    ]
+                  ],
+                  "element": "p2",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "points": [
+                      "p5",
+                      "origin"
+                    ],
+                    "type": "coincident"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 15.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 14.0
+                  },
+                  {
+                    "line": "l2",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "v1",
+                      "p8"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "length",
+                    "value": 10.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "v2",
+                    "to": "p6"
+                  },
+                  "l2": {
+                    "from": "p6",
+                    "to": "p7"
+                  },
+                  "l3": {
+                    "from": "p7",
+                    "to": "p8"
+                  },
+                  "l4": {
+                    "from": "p8",
+                    "to": "v1"
+                  },
+                  "l5": {
+                    "from": "v2",
+                    "to": "v1"
+                  }
+                },
+                "metadata": {
+                  "l1": {
+                    "stamp.role": "transition"
+                  },
+                  "l2": {
+                    "stamp.role": "transition"
+                  },
+                  "l3": {
+                    "stamp.role": "transition"
+                  },
+                  "l4": {
+                    "stamp.role": "transition"
+                  },
+                  "l5": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {
+                  "p5": [
+                    0.0,
+                    0.0
+                  ],
+                  "p6": [
+                    -15.0,
+                    -12.5
+                  ],
+                  "p7": [
+                    -15.0,
+                    1.5
+                  ],
+                  "p8": [
+                    -9.653978999894166,
+                    12.5
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "emboss"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "emboss_window",
+      "op": "component",
+      "inputs": [
+        "emboss",
+        "places"
+      ],
+      "part": {
+        "name": "Formed emboss with window",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2",
+          "round_section": true
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p2"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "horizontal_distance",
+                    "value": 25.0
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 2.0
+                  },
+                  {
+                    "degrees": 35.0,
+                    "lines": [
+                      "l2",
+                      "l1"
+                    ],
+                    "type": "angle"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p5"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    3.000000000000001
+                  ],
+                  "p2": [
+                    -11.768115942028986,
+                    0.0
+                  ],
+                  "p3": [
+                    -10.0,
+                    3.000000000000001
+                  ],
+                  "p4": [
+                    11.768115942028986,
+                    2.95979075102054e-17
+                  ],
+                  "p5": [
+                    -8.442028985507246,
+                    3.0000000000000004
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      0.0,
+                      12.5
+                    ]
+                  ],
+                  "element": "p4",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      -12.5
+                    ]
+                  ],
+                  "element": "p2",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "points": [
+                      "p5",
+                      "origin"
+                    ],
+                    "type": "coincident"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 15.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 14.0
+                  },
+                  {
+                    "line": "l2",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "v1",
+                      "p8"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "length",
+                    "value": 10.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "v2",
+                    "to": "p6"
+                  },
+                  "l2": {
+                    "from": "p6",
+                    "to": "p7"
+                  },
+                  "l3": {
+                    "from": "p7",
+                    "to": "p8"
+                  },
+                  "l4": {
+                    "from": "p8",
+                    "to": "v1"
+                  },
+                  "l5": {
+                    "from": "v2",
+                    "to": "v1"
+                  }
+                },
+                "metadata": {
+                  "l1": {
+                    "stamp.role": "transition"
+                  },
+                  "l2": {
+                    "stamp.role": "transition"
+                  },
+                  "l3": {
+                    "stamp.role": "transition"
+                  },
+                  "l4": {
+                    "stamp.role": "transition"
+                  },
+                  "l5": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {
+                  "p5": [
+                    0.0,
+                    0.0
+                  ],
+                  "p6": [
+                    -15.0,
+                    -12.5
+                  ],
+                  "p7": [
+                    -15.0,
+                    1.5
+                  ],
+                  "p8": [
+                    -9.653978999894166,
+                    12.5
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "emboss_window"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "pocket",
+      "op": "component",
+      "inputs": [
+        "emboss_window",
+        "places"
+      ],
+      "part": {
+        "name": "Formed pocket",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2",
+          "round_section": true
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p2"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 10.0
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p3",
+                      "p5"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "lines": [
+                      "l2",
+                      "l4"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l3",
+                      "l5"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "vertical"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p1"
+                  },
+                  "l4": {
+                    "from": "p4",
+                    "to": "p5"
+                  },
+                  "l5": {
+                    "from": "p5",
+                    "to": "p1"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    5.0
+                  ],
+                  "p2": [
+                    -9.831266705737322,
+                    0.0
+                  ],
+                  "p3": [
+                    -9.831266705737322,
+                    5.0
+                  ],
+                  "p4": [
+                    10.0,
+                    0.0
+                  ],
+                  "p5": [
+                    10.0,
+                    3.0
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      0.0,
+                      10.000000000000002
+                    ]
+                  ],
+                  "element": "p5",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      -10.000000000000002
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "points": [
+                      "p5",
+                      "origin"
+                    ],
+                    "type": "coincident"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l3",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "v1",
+                      "p8"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 10.0
+                  },
+                  {
+                    "line": "l5",
+                    "type": "length",
+                    "value": 5.0
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 14.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "v1",
+                    "to": "v2"
+                  },
+                  "l2": {
+                    "from": "v2",
+                    "to": "p6"
+                  },
+                  "l3": {
+                    "from": "p6",
+                    "to": "p7"
+                  },
+                  "l4": {
+                    "from": "p7",
+                    "to": "p8"
+                  },
+                  "l5": {
+                    "from": "p8",
+                    "to": "v1"
+                  }
+                },
+                "metadata": {
+                  "l2": {
+                    "stamp.role": "transition"
+                  },
+                  "l3": {
+                    "stamp.role": "transition"
+                  },
+                  "l4": {
+                    "stamp.role": "transition"
+                  },
+                  "l5": {
+                    "stamp.role": "transition"
+                  },
+                  "l1": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "points": {
+                  "p5": [
+                    0.0,
+                    0.0
+                  ],
+                  "p6": [
+                    -10.260869565217392,
+                    -10.000000000000002
+                  ],
+                  "p7": [
+                    -10.260869565217392,
+                    3.246376811594203
+                  ],
+                  "p8": [
+                    -6.579710144927537,
+                    10.000000000000002
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "pocket"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "slot",
+      "op": "component",
+      "inputs": [
+        "pocket",
+        "places"
+      ],
+      "part": {
+        "name": "Formed slot",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2"
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p2"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 10.0
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p3",
+                      "p5"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "lines": [
+                      "l2",
+                      "l4"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l3",
+                      "l5"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "vertical"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p1"
+                  },
+                  "l4": {
+                    "from": "p4",
+                    "to": "p5"
+                  },
+                  "l5": {
+                    "from": "p5",
+                    "to": "p1"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    5.0
+                  ],
+                  "p2": [
+                    -9.831266705737322,
+                    0.0
+                  ],
+                  "p3": [
+                    -9.831266705737322,
+                    5.0
+                  ],
+                  "p4": [
+                    10.0,
+                    0.0
+                  ],
+                  "p5": [
+                    10.0,
+                    3.0
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      0.0,
+                      10.000000000000002
+                    ]
+                  ],
+                  "element": "p5",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      -10.000000000000002
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "points": [
+                      "p5",
+                      "origin"
+                    ],
+                    "type": "coincident"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l5",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l6",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l3",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l2",
+                    "point": "p5",
+                    "type": "midpoint"
+                  },
+                  {
+                    "line": "l4",
+                    "point": "p5",
+                    "type": "midpoint"
+                  },
+                  {
+                    "curve": "l6",
+                    "point": "v1",
+                    "type": "on"
+                  },
+                  {
+                    "line": "l6",
+                    "type": "length",
+                    "value": 8.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "p1",
+                    "to": "p2"
+                  },
+                  "l2": {
+                    "construction": true,
+                    "from": "p1",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p4",
+                    "to": "p1"
+                  },
+                  "l4": {
+                    "construction": true,
+                    "from": "p2",
+                    "to": "p4"
+                  },
+                  "l5": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l6": {
+                    "from": "p3",
+                    "to": "p4"
+                  }
+                },
+                "metadata": {
+                  "l1": {
+                    "stamp.role": "transition"
+                  },
+                  "l6": {
+                    "stamp.role": "transition"
+                  },
+                  "l3": {
+                    "stamp.role": "cut"
+                  },
+                  "l5": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    -4.000000000000001,
+                    -9.594202898550726
+                  ],
+                  "p2": [
+                    4.000000000000001,
+                    -9.594202898550726
+                  ],
+                  "p3": [
+                    4.000000000000001,
+                    9.594202898550726
+                  ],
+                  "p4": [
+                    -4.000000000000001,
+                    9.594202898550726
+                  ],
+                  "p5": [
+                    0.0,
+                    0.0
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "slot"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.4,
+      "k_factor": 0.5
+    },
+    {
+      "name": "slot_rounded",
+      "op": "component",
+      "inputs": [
+        "slot",
+        "places"
+      ],
+      "part": {
+        "name": "Formed slot",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2",
+          "round_section": true
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  0.0,
+                  1.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p2"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p3"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 10.0
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p2",
+                      "p4"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l1",
+                    "points": [
+                      "p3",
+                      "p5"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "lines": [
+                      "l2",
+                      "l4"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l3",
+                      "l5"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "vertical"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p3",
+                    "to": "p1"
+                  },
+                  "l4": {
+                    "from": "p4",
+                    "to": "p5"
+                  },
+                  "l5": {
+                    "from": "p5",
+                    "to": "p1"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    5.0
+                  ],
+                  "p2": [
+                    -9.831266705737322,
+                    0.0
+                  ],
+                  "p3": [
+                    -9.831266705737322,
+                    5.0
+                  ],
+                  "p4": [
+                    10.0,
+                    0.0
+                  ],
+                  "p5": [
+                    10.0,
+                    3.0
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      0.0,
+                      10.000000000000002
+                    ]
+                  ],
+                  "element": "p5",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      -10.000000000000002
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "points": [
+                      "p5",
+                      "origin"
+                    ],
+                    "type": "coincident"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l5",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l6",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l3",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l2",
+                    "point": "p5",
+                    "type": "midpoint"
+                  },
+                  {
+                    "line": "l4",
+                    "point": "p5",
+                    "type": "midpoint"
+                  },
+                  {
+                    "curve": "l6",
+                    "point": "v1",
+                    "type": "on"
+                  },
+                  {
+                    "line": "l6",
+                    "type": "length",
+                    "value": 8.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "p1",
+                    "to": "p2"
+                  },
+                  "l2": {
+                    "construction": true,
+                    "from": "p1",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p4",
+                    "to": "p1"
+                  },
+                  "l4": {
+                    "construction": true,
+                    "from": "p2",
+                    "to": "p4"
+                  },
+                  "l5": {
+                    "from": "p2",
+                    "to": "p3"
+                  },
+                  "l6": {
+                    "from": "p3",
+                    "to": "p4"
+                  }
+                },
+                "metadata": {
+                  "l1": {
+                    "stamp.role": "transition"
+                  },
+                  "l6": {
+                    "stamp.role": "transition"
+                  },
+                  "l3": {
+                    "stamp.role": "cut"
+                  },
+                  "l5": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    -4.000000000000001,
+                    -9.594202898550726
+                  ],
+                  "p2": [
+                    4.000000000000001,
+                    -9.594202898550726
+                  ],
+                  "p3": [
+                    4.000000000000001,
+                    9.594202898550726
+                  ],
+                  "p4": [
+                    -4.000000000000001,
+                    9.594202898550726
+                  ],
+                  "p5": [
+                    0.0,
+                    0.0
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "slot_rounded"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.4,
+      "k_factor": 0.5
+    },
+    {
+      "name": "louver",
+      "op": "component",
+      "inputs": [
+        "slot_rounded",
+        "places"
+      ],
+      "part": {
+        "name": "Louver",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2"
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "op": {
+              "op": "sketch",
+              "sketch": {
+                "arcs": {
+                  "a1": {
+                    "center": "p6",
+                    "from": "p7",
+                    "to": "p8"
+                  }
+                },
+                "constraints": [
+                  {
+                    "points": [
+                      "origin",
+                      "p8"
+                    ],
+                    "type": "coincident"
+                  },
+                  {
+                    "line": "l1",
+                    "type": "horizontal"
+                  },
+                  {
+                    "curves": [
+                      "a1",
+                      "l1"
+                    ],
+                    "type": "tangent"
+                  },
+                  {
+                    "points": [
+                      "origin",
+                      "p7"
+                    ],
+                    "type": "horizontal_distance",
+                    "value": 10.0
+                  },
+                  {
+                    "line": "l1",
+                    "point": "origin",
+                    "type": "point_line",
+                    "value": 2.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "construction": true,
+                    "from": "p7",
+                    "to": "p9"
+                  }
+                },
+                "points": {
+                  "p6": [
+                    6.989649560285593,
+                    -15.137864944007637
+                  ],
+                  "p7": [
+                    6.989649560285593,
+                    1.5357716131029897
+                  ],
+                  "p8": [
+                    7.706161656417472e-18,
+                    -7.679539864310641e-18
+                  ],
+                  "p9": [
+                    10.171761822053222,
+                    1.5357716131029897
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "inputs": [
+              "sketch1"
+            ],
+            "name": "sketch2",
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  0.0,
+                  -1.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      8.174335926435694,
+                      0.0
+                    ]
+                  ],
+                  "element": "p9",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      0.0
+                    ]
+                  ],
+                  "element": "p8",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "arcs": {
+                  "a1": {
+                    "center": "p2",
+                    "from": "p1",
+                    "to": "p3"
+                  },
+                  "a2": {
+                    "center": "p6",
+                    "from": "p7",
+                    "to": "p5"
+                  }
+                },
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 25.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "p3",
+                      "origin"
+                    ],
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l3",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l3",
+                    "points": [
+                      "p1",
+                      "p5"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l3",
+                    "points": [
+                      "p2",
+                      "p6"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l3",
+                    "points": [
+                      "p3",
+                      "p7"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l3",
+                    "points": [
+                      "v1",
+                      "p8"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "lines": [
+                      "l1",
+                      "l4"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l2",
+                      "l5"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "curves": [
+                      "a1",
+                      "a2"
+                    ],
+                    "type": "equal_radius"
+                  },
+                  {
+                    "line": "l4",
+                    "type": "length",
+                    "value": 25.0
+                  },
+                  {
+                    "line": "l4",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "p7",
+                      "origin"
+                    ],
+                    "type": "vertical"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "v1",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p3",
+                    "to": "origin"
+                  },
+                  "l3": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "p4"
+                  },
+                  "l4": {
+                    "from": "p8",
+                    "to": "p5"
+                  },
+                  "l5": {
+                    "from": "p7",
+                    "to": "origin"
+                  }
+                },
+                "metadata": {
+                  "a1": {
+                    "stamp.role": "transition"
+                  },
+                  "a2": {
+                    "stamp.role": "transition"
+                  },
+                  "l1": {
+                    "stamp.role": "cut"
+                  },
+                  "l2": {
+                    "stamp.role": "transition"
+                  },
+                  "l4": {
+                    "stamp.role": "cut"
+                  },
+                  "l5": {
+                    "stamp.role": "transition"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    8.174335926435694,
+                    25.0
+                  ],
+                  "p2": [
+                    9.96924253695339,
+                    15.363959378848495
+                  ],
+                  "p3": [
+                    0.16765301988070203,
+                    15.302221774644705
+                  ],
+                  "p4": [
+                    19.293421643201146,
+                    0.0
+                  ],
+                  "p5": [
+                    8.174335926435694,
+                    -25.0
+                  ],
+                  "p6": [
+                    9.88604399072282,
+                    -15.263188645219103
+                  ],
+                  "p7": [
+                    0.0,
+                    -15.302863189061014
+                  ],
+                  "p8": [
+                    8.174335926435694,
+                    0.0
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "louver"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.5,
+      "k_factor": 0.5
+    },
+    {
+      "name": "tongue_straight",
+      "op": "component",
+      "inputs": [
+        "louver",
+        "places"
+      ],
+      "part": {
+        "name": "Straight tongue",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "section",
+          "boundary": "boundary"
+        },
+        "parameters": [
+          {
+            "name": "nose_length",
+            "value": 5
+          }
+        ],
+        "features": [
+          {
+            "name": "section",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "origin": [
+                  0,
+                  0,
+                  0
+                ],
+                "x_axis": [
+                  1,
+                  0,
+                  0
+                ],
+                "normal": [
+                  0,
+                  -1,
+                  0
+                ]
+              },
+              "sketch": {
+                "points": {
+                  "root": [
+                    0,
+                    0
+                  ],
+                  "root_top": [
+                    0,
+                    3
+                  ],
+                  "shoulder": [
+                    5,
+                    3
+                  ],
+                  "nose_tip": [
+                    9.82962913144534,
+                    4.294095225512604
+                  ]
+                },
+                "lines": {
+                  "root_wall": {
+                    "from": "root",
+                    "to": "root_top"
+                  },
+                  "shelf": {
+                    "from": "root_top",
+                    "to": "shoulder"
+                  },
+                  "nose": {
+                    "from": "shoulder",
+                    "to": "nose_tip"
+                  }
+                },
+                "constraints": [
+                  {
+                    "type": "fix",
+                    "point": "root"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "root_top"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "shoulder"
+                  },
+                  {
+                    "type": "length",
+                    "line": "nose",
+                    "value": "nose_length"
+                  },
+                  {
+                    "type": "angle",
+                    "lines": [
+                      "shelf",
+                      "nose"
+                    ],
+                    "degrees": 15
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "boundary",
+            "inputs": [
+              "section"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "section_tip": {
+                  "from": "section",
+                  "element": "nose_tip",
+                  "at": [
+                    [
+                      9.82962913144534,
+                      0
+                    ]
+                  ]
+                }
+              },
+              "plane": {
+                "origin": [
+                  0,
+                  0,
+                  0
+                ],
+                "x_axis": [
+                  1,
+                  0,
+                  0
+                ],
+                "normal": [
+                  0,
+                  0,
+                  1
+                ]
+              },
+              "sketch": {
+                "points": {
+                  "root_left": [
+                    0,
+                    -5
+                  ],
+                  "root_right": [
+                    0,
+                    5
+                  ],
+                  "tip_right": [
+                    9.82962913144534,
+                    5
+                  ],
+                  "tip_left": [
+                    9.82962913144534,
+                    -5
+                  ]
+                },
+                "lines": {
+                  "root": {
+                    "from": "root_left",
+                    "to": "root_right"
+                  },
+                  "side_right": {
+                    "from": "root_right",
+                    "to": "tip_right"
+                  },
+                  "tip": {
+                    "from": "tip_right",
+                    "to": "tip_left"
+                  },
+                  "side_left": {
+                    "from": "tip_left",
+                    "to": "root_left"
+                  }
+                },
+                "metadata": {
+                  "root": {
+                    "stamp.role": "transition"
+                  },
+                  "side_right": {
+                    "stamp.role": "cut"
+                  },
+                  "tip": {
+                    "stamp.role": "cut"
+                  },
+                  "side_left": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "constraints": [
+                  {
+                    "type": "fix",
+                    "point": "root_left"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "root_right"
+                  },
+                  {
+                    "type": "horizontal",
+                    "line": "side_left"
+                  },
+                  {
+                    "type": "horizontal",
+                    "line": "side_right"
+                  },
+                  {
+                    "type": "vertical",
+                    "line": "tip"
+                  },
+                  {
+                    "type": "vertical",
+                    "points": [
+                      "section_tip",
+                      "tip_right"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "tongue_straight"
+        }
+      ],
+      "thickness": 0.5
+    },
+    {
+      "name": "tongue_rounded",
+      "op": "component",
+      "inputs": [
+        "tongue_straight",
+        "places"
+      ],
+      "part": {
+        "name": "Rounded tongue",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "section",
+          "boundary": "boundary",
+          "round_section": true
+        },
+        "parameters": [
+          {
+            "name": "nose_length",
+            "value": 5
+          }
+        ],
+        "features": [
+          {
+            "name": "section",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "origin": [
+                  0,
+                  0,
+                  0
+                ],
+                "x_axis": [
+                  1,
+                  0,
+                  0
+                ],
+                "normal": [
+                  0,
+                  -1,
+                  0
+                ]
+              },
+              "sketch": {
+                "points": {
+                  "root": [
+                    0,
+                    0
+                  ],
+                  "root_top": [
+                    0,
+                    3
+                  ],
+                  "shoulder": [
+                    5,
+                    3
+                  ],
+                  "nose_tip": [
+                    9.82962913144534,
+                    4.294095225512604
+                  ]
+                },
+                "lines": {
+                  "root_wall": {
+                    "from": "root",
+                    "to": "root_top"
+                  },
+                  "shelf": {
+                    "from": "root_top",
+                    "to": "shoulder"
+                  },
+                  "nose": {
+                    "from": "shoulder",
+                    "to": "nose_tip"
+                  }
+                },
+                "constraints": [
+                  {
+                    "type": "fix",
+                    "point": "root"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "root_top"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "shoulder"
+                  },
+                  {
+                    "type": "length",
+                    "line": "nose",
+                    "value": "nose_length"
+                  },
+                  {
+                    "type": "angle",
+                    "lines": [
+                      "shelf",
+                      "nose"
+                    ],
+                    "degrees": 15
+                  }
+                ]
+              }
+            }
+          },
+          {
+            "name": "boundary",
+            "inputs": [
+              "section"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "section_tip": {
+                  "from": "section",
+                  "element": "nose_tip",
+                  "at": [
+                    [
+                      9.82962913144534,
+                      0
+                    ]
+                  ]
+                }
+              },
+              "plane": {
+                "origin": [
+                  0,
+                  0,
+                  0
+                ],
+                "x_axis": [
+                  1,
+                  0,
+                  0
+                ],
+                "normal": [
+                  0,
+                  0,
+                  1
+                ]
+              },
+              "sketch": {
+                "points": {
+                  "root_left": [
+                    0,
+                    -5
+                  ],
+                  "root_right": [
+                    0,
+                    5
+                  ],
+                  "tip_right": [
+                    9.82962913144534,
+                    5
+                  ],
+                  "tip_left": [
+                    9.82962913144534,
+                    -5
+                  ]
+                },
+                "lines": {
+                  "root": {
+                    "from": "root_left",
+                    "to": "root_right"
+                  },
+                  "side_right": {
+                    "from": "root_right",
+                    "to": "tip_right"
+                  },
+                  "tip": {
+                    "from": "tip_right",
+                    "to": "tip_left"
+                  },
+                  "side_left": {
+                    "from": "tip_left",
+                    "to": "root_left"
+                  }
+                },
+                "metadata": {
+                  "root": {
+                    "stamp.role": "transition"
+                  },
+                  "side_right": {
+                    "stamp.role": "cut"
+                  },
+                  "tip": {
+                    "stamp.role": "cut"
+                  },
+                  "side_left": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "constraints": [
+                  {
+                    "type": "fix",
+                    "point": "root_left"
+                  },
+                  {
+                    "type": "fix",
+                    "point": "root_right"
+                  },
+                  {
+                    "type": "horizontal",
+                    "line": "side_left"
+                  },
+                  {
+                    "type": "horizontal",
+                    "line": "side_right"
+                  },
+                  {
+                    "type": "vertical",
+                    "line": "tip"
+                  },
+                  {
+                    "type": "vertical",
+                    "points": [
+                      "section_tip",
+                      "tip_right"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "tongue_rounded"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.4,
+      "k_factor": 0.5
+    },
+    {
+      "name": "tongue_nose",
+      "op": "component",
+      "inputs": [
+        "tongue_rounded",
+        "places"
+      ],
+      "part": {
+        "name": "Tongue with rounded tip",
+        "kind": "stamp",
+        "anchor": [
+          0,
+          0,
+          0
+        ],
+        "roles": {},
+        "forming": {
+          "section": "sketch1",
+          "boundary": "sketch2",
+          "round_section": true
+        },
+        "features": [
+          {
+            "name": "sketch1",
+            "inputs": [],
+            "op": {
+              "op": "sketch",
+              "plane": {
+                "normal": [
+                  0.0,
+                  -1.0,
+                  0.0
+                ],
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x_axis": [
+                  1.0,
+                  0.0,
+                  0.0
+                ]
+              },
+              "sketch": {
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "length",
+                    "value": 5.0
+                  },
+                  {
+                    "line": "l2",
+                    "type": "horizontal"
+                  },
+                  {
+                    "line": "l3",
+                    "type": "length",
+                    "value": 5.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 3.0
+                  },
+                  {
+                    "degrees": 15.0,
+                    "lines": [
+                      "l2",
+                      "l3"
+                    ],
+                    "type": "angle"
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p1",
+                    "to": "p2"
+                  },
+                  "l3": {
+                    "from": "p2",
+                    "to": "p3"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    5.0
+                  ],
+                  "p2": [
+                    5.0,
+                    5.0
+                  ],
+                  "p3": [
+                    9.849458693696906,
+                    6.217682379821399
+                  ]
+                }
+              }
+            }
+          },
+          {
+            "name": "sketch2",
+            "inputs": [
+              "sketch1"
+            ],
+            "op": {
+              "op": "sketch",
+              "project": {
+                "v1": {
+                  "at": [
+                    [
+                      9.82962913144534,
+                      0.0
+                    ]
+                  ],
+                  "element": "p3",
+                  "from": "sketch1"
+                },
+                "v2": {
+                  "at": [
+                    [
+                      0.0,
+                      0.0
+                    ]
+                  ],
+                  "element": "p1",
+                  "from": "sketch1"
+                }
+              },
+              "sketch": {
+                "arcs": {
+                  "a1": {
+                    "center": "p5",
+                    "from": "p4",
+                    "to": "p3"
+                  },
+                  "a2": {
+                    "center": "p10",
+                    "from": "p8",
+                    "to": "p9"
+                  }
+                },
+                "constraints": [
+                  {
+                    "line": "l1",
+                    "type": "vertical"
+                  },
+                  {
+                    "points": [
+                      "v1",
+                      "p2"
+                    ],
+                    "type": "vertical"
+                  },
+                  {
+                    "line": "l2",
+                    "type": "horizontal"
+                  },
+                  {
+                    "curve": "l2",
+                    "point": "p2",
+                    "type": "on"
+                  },
+                  {
+                    "curve": "l3",
+                    "point": "p2",
+                    "type": "on"
+                  },
+                  {
+                    "curves": [
+                      "l2",
+                      "a1"
+                    ],
+                    "type": "tangent"
+                  },
+                  {
+                    "curves": [
+                      "l3",
+                      "a1"
+                    ],
+                    "type": "tangent"
+                  },
+                  {
+                    "arc": "a1",
+                    "type": "radius",
+                    "value": 2.0
+                  },
+                  {
+                    "line": "l4",
+                    "points": [
+                      "p1",
+                      "p6"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l4",
+                    "points": [
+                      "p2",
+                      "p7"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l4",
+                    "points": [
+                      "p3",
+                      "p8"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l4",
+                    "points": [
+                      "p4",
+                      "p9"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "line": "l4",
+                    "points": [
+                      "p5",
+                      "p10"
+                    ],
+                    "type": "symmetric"
+                  },
+                  {
+                    "lines": [
+                      "l1",
+                      "l5"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l2",
+                      "l6"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "lines": [
+                      "l3",
+                      "l7"
+                    ],
+                    "type": "equal"
+                  },
+                  {
+                    "curves": [
+                      "a1",
+                      "a2"
+                    ],
+                    "type": "equal_radius"
+                  },
+                  {
+                    "curve": "l6",
+                    "point": "p7",
+                    "type": "on"
+                  },
+                  {
+                    "curve": "l7",
+                    "point": "p7",
+                    "type": "on"
+                  },
+                  {
+                    "curves": [
+                      "l6",
+                      "a2"
+                    ],
+                    "type": "tangent"
+                  },
+                  {
+                    "curves": [
+                      "l7",
+                      "a2"
+                    ],
+                    "type": "tangent"
+                  },
+                  {
+                    "arc": "a2",
+                    "type": "radius",
+                    "value": 2.0
+                  },
+                  {
+                    "line": "l1",
+                    "type": "length",
+                    "value": 5.0
+                  }
+                ],
+                "lines": {
+                  "l1": {
+                    "from": "origin",
+                    "to": "p1"
+                  },
+                  "l2": {
+                    "from": "p1",
+                    "to": "p3"
+                  },
+                  "l3": {
+                    "from": "p4",
+                    "to": "v1"
+                  },
+                  "l4": {
+                    "construction": true,
+                    "from": "origin",
+                    "to": "v1"
+                  },
+                  "l5": {
+                    "from": "origin",
+                    "to": "p6"
+                  },
+                  "l6": {
+                    "from": "p6",
+                    "to": "p8"
+                  },
+                  "l7": {
+                    "from": "p9",
+                    "to": "v1"
+                  }
+                },
+                "metadata": {
+                  "a1": {
+                    "stamp.role": "cut"
+                  },
+                  "a2": {
+                    "stamp.role": "cut"
+                  },
+                  "l1": {
+                    "stamp.role": "transition"
+                  },
+                  "l2": {
+                    "stamp.role": "cut"
+                  },
+                  "l3": {
+                    "stamp.role": "cut"
+                  },
+                  "l5": {
+                    "stamp.role": "transition"
+                  },
+                  "l6": {
+                    "stamp.role": "cut"
+                  },
+                  "l7": {
+                    "stamp.role": "cut"
+                  }
+                },
+                "points": {
+                  "p1": [
+                    0.0,
+                    10.0
+                  ],
+                  "p10": [
+                    7.829629131445339,
+                    -8.0
+                  ],
+                  "p2": [
+                    9.829629131445342,
+                    10.0
+                  ],
+                  "p3": [
+                    7.82962913144534,
+                    10.0
+                  ],
+                  "p4": [
+                    9.82962913144534,
+                    8.0
+                  ],
+                  "p5": [
+                    7.829629131445341,
+                    8.0
+                  ],
+                  "p6": [
+                    0.0,
+                    -10.0
+                  ],
+                  "p7": [
+                    9.82962913144534,
+                    -10.0
+                  ],
+                  "p8": [
+                    7.829629131445338,
+                    -10.0
+                  ],
+                  "p9": [
+                    9.82962913144534,
+                    -8.0
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      },
+      "placements": [
+        {
+          "placement": "point",
+          "input": 1,
+          "point": "tongue_nose"
+        }
+      ],
+      "thickness": 0.5,
+      "radius": 0.4,
+      "k_factor": 0.5
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "inputs": [
+        "tongue_nose"
+      ],
+      "k_factor": 0.5
+    }
+  ]
+}

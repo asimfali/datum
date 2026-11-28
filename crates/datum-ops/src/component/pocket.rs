@@ -30,6 +30,7 @@ fn xy(p: Vec2, z: f64) -> Vec3 {
 
 pub(super) struct Pocket<'a> {
     pub wall: &'a Body,
+    pub blank: &'a Body,
     pub face: TopoId,
     pub frame: Rigid,
     pub section: &'a Placed,
@@ -54,7 +55,7 @@ struct Station {
 }
 
 pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepError> {
-    let Pocket { wall, face, frame, section, boundary, anchor, cut, mut transitions, thickness: t, radius: r } = pocket;
+    let Pocket { wall, blank, face, frame, section, boundary, anchor, cut, mut transitions, thickness: t, radius: r } = pocket;
     let [_, x, y, z] = boundary.frame;
     let point = |name: &str| {
         let p = super::tongue::to_part(boundary, boundary.solved.points[name]) - anchor;
@@ -248,13 +249,13 @@ pub(super) fn form(feature: TopoId, pocket: Pocket<'_>) -> Result<Value, BrepErr
     let bounds = polygon
         .into_iter()
         .fold((first, first), |(lo, hi), p| (Vec3::new(lo.x.min(p.x), lo.y.min(p.y), -t), Vec3::new(hi.x.max(p.x), hi.y.max(p.y), height)));
-    assemble(feature, wall, face, frame, cut, &transitions, &stations, &axes, &profile, section, t, r, bounds, opening)
+    assemble(feature, [wall, blank], face, frame, cut, &transitions, &stations, &axes, &profile, section, t, r, bounds, opening)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn assemble(
     feature: TopoId,
-    wall: &Body,
+    [wall, blank]: [&Body; 2],
     face: TopoId,
     frame: Rigid,
     cut: Option<&str>,
@@ -448,5 +449,5 @@ fn assemble(
             arcs: opening.centers.into_iter().map(|c| c.map(|p| (frame.apply(p), true))).collect(),
         });
     }
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: blank.clone(), imprints: Vec::new(), stamp_cuts })))
 }

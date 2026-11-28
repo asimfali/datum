@@ -1034,6 +1034,7 @@ impl Op {
                     return Ok(Value::Flat(Box::new(flat)));
                 }
                 Self::Plane { .. } | Self::Sketch { flat: None, .. } => {}
+                Self::Component { part, .. } if part.forming.is_some() => {}
                 _ => {
                     return Err(BrepError::Unsupported(format!(
                         "{}: applying this operation to a sheet with a formed stamp comes later",
@@ -1189,7 +1190,11 @@ impl Op {
             Self::Component { part, params, placements, thickness, radius, k_factor, .. } => {
                 return if let Some(forming) = &part.forming {
                     let rule = [thickness.as_ref(), radius.as_ref(), k_factor.as_ref()];
-                    component::form_from_sketches(feature, part, forming, params, placements, rule, values)
+                    let mut result = component::form_from_sketches(feature, part, forming, params, placements, rule, values)?;
+                    if let (Value::Formed(previous), Value::Formed(next)) = (values[0], &mut result) {
+                        next.stamp_cuts.splice(..0, previous.stamp_cuts.iter().cloned());
+                    }
+                    Ok(result)
                 } else if part.roles.form.is_some() {
                     component::form(feature, part, params, placements, thickness.clone(), radius.clone(), values)
                 } else {
