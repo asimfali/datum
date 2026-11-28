@@ -659,6 +659,7 @@ impl Value {
     /// Add the stamp's open cuts on the sheet blank.
     pub fn with_stamp_cuts(&self, flat: Flat) -> Result<Flat, BrepError> {
         match self {
+            Self::Formed(f) if let Some(reason) = f.blank_unsupported => Err(BrepError::Unsupported(reason.into())),
             Self::Formed(f) if !f.stamp_cuts.is_empty() => flat.with_stamp_cuts(&f.stamp_cuts),
             _ => Ok(flat),
         }
@@ -1053,7 +1054,13 @@ impl Op {
                         laid = rib::imprint(&laid, i)?;
                     }
                     validated(&laid)?;
-                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone(), stamp_cuts: Vec::new() })))
+                    Ok(Value::Formed(Box::new(rib::Formed {
+                        body: laid,
+                        blank: body,
+                        imprints: f.imprints.clone(),
+                        blank_unsupported: None,
+                        stamp_cuts: Vec::new(),
+                    })))
                 }
                 other => Ok(other),
             };
@@ -1183,7 +1190,7 @@ impl Op {
                     _ => (body.clone(), Vec::new()),
                 };
                 imprints.push(i);
-                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, stamp_cuts: Vec::new() })));
+                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, blank_unsupported: None, stamp_cuts: Vec::new() })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
             Self::Component { part, params, placements, thickness, radius, k_factor, .. } => {

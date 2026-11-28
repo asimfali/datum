@@ -179,5 +179,5 @@ pub(super) fn form(feature: TopoId, forming: &Forming, sketch: &Placed, bridge: 
             arcs: vec![None],
         })
         .collect();
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), blank_unsupported: None, stamp_cuts })))
 }

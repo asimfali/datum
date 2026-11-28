@@ -448,5 +448,5 @@ fn assemble(
             arcs: opening.centers.into_iter().map(|c| c.map(|p| (frame.apply(p), true))).collect(),
         });
     }
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), blank_unsupported: None, stamp_cuts })))
 }

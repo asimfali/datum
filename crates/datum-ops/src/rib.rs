@@ -47,6 +47,7 @@ pub struct Formed {
     pub body: Body,
     pub blank: Body,
     pub imprints: Vec<Imprint>,
+    pub(crate) blank_unsupported: Option<&'static str>,
     pub(crate) stamp_cuts: Vec<crate::unfold::StampCut>,
 }
 

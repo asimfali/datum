@@ -219,5 +219,5 @@ pub(super) fn form(
     } else {
         wall.clone()
     };
-    Ok(Value::Formed(Box::new(Formed { body, blank, imprints: Vec::new(), stamp_cuts: Vec::new() })))
+    Ok(Value::Formed(Box::new(Formed { body, blank, imprints: Vec::new(), blank_unsupported: None, stamp_cuts: Vec::new() })))
 }

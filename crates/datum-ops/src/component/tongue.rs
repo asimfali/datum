@@ -242,6 +242,30 @@ pub(crate) fn form(
             forming,
         );
     }
+    let end_transitions = boundary
+        .arcs
+        .iter()
+        .filter(|(name, arc)| {
+            !arc.construction
+                && boundary_def.metadata.get(*name).and_then(|m| m.get(STAMP_ROLE)).and_then(serde_json::Value::as_str) == Some("transition")
+        })
+        .count();
+    if end_transitions == 2 {
+        return super::louver::form(
+            feature,
+            super::louver::Louver {
+                wall,
+                face,
+                onto_wall,
+                anchor,
+                section: profile,
+                boundary,
+                thickness: t,
+                metadata: &boundary_def.metadata,
+                section_side: forming.section_side,
+            },
+        );
+    }
     if forming.round_section && forming.section_side == SectionSide::Outer {
         let contours = boundary.contours(&|_, construction| !construction);
         if let [path] = contours.loops.as_slice()
@@ -391,7 +415,7 @@ pub(crate) fn form(
         ids: outline.ids,
         arcs: outline.arcs.into_iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
     };
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), stamp_cuts: vec![cut] })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), blank_unsupported: None, stamp_cuts: vec![cut] })))
 }
 
 fn free_boundary(
