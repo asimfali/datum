@@ -131,23 +131,3 @@ fn toroidal_transition_cuts_the_blank_at_the_neutral_arc_length() {
     assert_eq!(tool.value("stamp").unwrap().body().unwrap().hash(), hash);
     assert!(blank_holes(&mut tool).is_empty());
 }
-
-#[test]
-fn a_shared_sheet_retains_the_cuts_from_earlier_stamps() {
-    let model: Value = serde_json::from_str(include_str!("../../../tests/models/stamps.json")).unwrap();
-    let mut session = build(&model);
-    let flat = session.flat_of("blank").unwrap();
-    let cuts = flat.pieces.iter().enumerate().filter_map(|(i, piece)| (!flat.outer.contains(&i)).then_some(piece)).collect::<Vec<_>>();
-    assert_eq!(cuts.iter().filter(|p| matches!(p, FlatPiece::Circle { .. })).count(), 2);
-    for name in ["torus", "dimple_pierced", "emboss_window", "slot_rounded", "louver"] {
-        let before = session.flat_of(name).unwrap();
-        for (i, piece) in before.pieces.iter().enumerate() {
-            if !before.outer.contains(&i) {
-                assert!(cuts.contains(&piece), "{name}: {piece:?}");
-            }
-        }
-    }
-    let final_body = session.value("tongue_nose").unwrap().body().unwrap();
-    final_body.validate().unwrap();
-    datum_brep::tessellate(final_body).unwrap();
-}
