@@ -1310,6 +1310,7 @@ impl Blank {
         let curve = target.edge_curve(edge).map(|c| if edge.half == h { c } else { c.reversed() });
         Ok(match (curve, &self.strips[i].lay) {
             (None, _) | (Some(Curve::Arc(_)), Lay::Bend { .. }) => None,
+            (Some(Curve::Cubic(_)), _) => return Err(BrepError::Unsupported("cubic edges in a sheet bend".into())),
             (Some(Curve::Arc(arc)), Lay::Plane { n, .. }) => Some(ProfileArc { center: flat(arc.center), ccw: arc.axis.dot(*n) > 0.0 }),
             (Some(Curve::Rolled { piece, .. }), Lay::Bend { dev, map, .. }) => piece.arc.map(|pa| {
                 // The piece's development and the strip's turn about one axis, maybe the other
@@ -1591,6 +1592,7 @@ impl Blank {
                         let piece = match curve {
                             None => None,
                             Some(Curve::Arc(a)) => Some(Curve::Arc(a)),
+                            Some(Curve::Cubic(_)) => return Err(BrepError::Unsupported("splitting cubic edges in a sheet bend".into())),
                             Some(Curve::Rolled { piece, radius }) => {
                                 // The same on both sides of the sheet: the curve's own ends where
                                 // they stay, a new end from where it is on the blank.
@@ -1831,7 +1833,7 @@ impl Blank {
                                     (w.to.x - w.from.x) * (piece.to.x - piece.from.x) + (w.to.y - w.from.y) * (piece.to.y - piece.from.y) > 0.0;
                                 Some(Surface::Wall(if same { piece } else { piece.reversed() }))
                             }
-                            Curve::Arc(_) => None,
+                            Curve::Arc(_) | Curve::Cubic(_) => None,
                         })
                         .unwrap_or(spec.surface),
                     other => other,

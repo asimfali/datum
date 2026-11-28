@@ -267,6 +267,7 @@ pub(crate) fn form(
                 section: profile,
                 boundary,
                 thickness: t,
+                bend_radius: num(radius.ok_or_else(|| invalid("a louver needs a bend radius from the sheet rule"))?)?,
                 metadata: &boundary_def.metadata,
                 section_side: forming.section_side,
             },

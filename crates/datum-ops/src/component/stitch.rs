@@ -211,7 +211,7 @@ pub(super) fn wall_faces_in(
     }
     let ring = rectangle(Vec2::new(start, sides[0]), Vec2::new(end, sides[1]));
     let holds = |f| {
-        let loops = crate::cut::outline(wall, f, &frame)?;
+        let loops = crate::cut::outline_clear_of(wall, f, &frame, &[ring.bounds()])?;
         Ok::<_, BrepError>(
             !loops.iter().any(|l| ring.touches(l) || ring.winding(l.points[0]) != 0)
                 && loops.iter().map(|l| l.winding(ring.points[0])).sum::<i32>() != 0,
@@ -252,7 +252,7 @@ pub(super) fn wall_faces_in(
         if !exact {
             return Err(bad());
         }
-        let loops = crate::cut::outline(wall, i as Ix, &frame)?;
+        let loops = crate::cut::outline_clear_of(wall, i as Ix, &frame, &[footprint.bounds()])?;
         if loops.iter().any(|l| footprint.touches(l) || footprint.winding(l.points[0]) != 0)
             || loops.iter().map(|l| l.winding(footprint.points[0])).sum::<i32>() != 0
         {

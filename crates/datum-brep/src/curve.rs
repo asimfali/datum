@@ -74,13 +74,110 @@ impl Torus {
     }
 }
 
+/// A strip between a cubic and its translation. The parameter runs linearly along
+/// `along`, which is perpendicular to the translation between the two boundary curves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CubicWall {
+    pub edges: [Cubic; 2],
+    pub along: Vec3,
+}
+
+impl CubicWall {
+    pub(crate) fn uv(self, point: Vec3) -> Vec2 {
+        let start = self.edges[0].points[0];
+        let run = self.edges[0].points[3] - start;
+        let across = self.edges[1].points[0] - start;
+        let relative = point - start;
+        Vec2::new(relative.dot(self.along) / run.dot(self.along), relative.dot(across) / across.dot(across))
+    }
+
+    pub(crate) fn map(self, point: impl Fn(Vec3) -> Vec3, direction: impl Fn(Vec3) -> Vec3) -> Self {
+        Self { edges: self.edges.map(|c| Cubic { points: c.points.map(&point) }), along: direction(self.along) }
+    }
+
+    fn normal(self, point: Vec3) -> Vec3 {
+        let uv = self.uv(point);
+        let [(a, da), (b, db)] = self.edges.map(|c| c.at(uv.x.clamp(0.0, 1.0)));
+        let v = uv.y.clamp(0.0, 1.0);
+        unit((da + (db - da) * v).cross(b - a))
+    }
+}
+
+/// A rectangular bicubic Bézier face. The first index runs along u, the second along v.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bicubic {
+    pub points: [[Vec3; 4]; 4],
+}
+
+impl Bicubic {
+    /// Corner positions and the derivatives in the patch parameters, in the order
+    /// (0,0), (0,1), (1,0), (1,1). The derivatives include the lengths of the parameter spans.
+    pub fn hermite(corners: [[Vec3; 4]; 4]) -> Self {
+        let mut points = [[Vec3::ZERO; 4]; 4];
+        for (k, [p, du, dv, duv]) in corners.into_iter().enumerate() {
+            let (i, j) = (3 * (k / 2), 3 * (k % 2));
+            let (n, m) = (if i == 0 { 1 } else { 2 }, if j == 0 { 1 } else { 2 });
+            let (u, v) = (if i == 0 { 1.0 / 3.0 } else { -1.0 / 3.0 }, if j == 0 { 1.0 / 3.0 } else { -1.0 / 3.0 });
+            points[i][j] = p;
+            points[n][j] = p + du * u;
+            points[i][m] = p + dv * v;
+            points[n][m] = p + du * u + dv * v + duv * (u * v);
+        }
+        Self { points }
+    }
+
+    pub fn at(&self, u: f64, v: f64) -> [Vec3; 3] {
+        let rows = self.points.map(|points| Cubic { points }.at(v));
+        let (p, du) = Cubic { points: rows.map(|r| r.0) }.at(u);
+        let (dv, _) = Cubic { points: rows.map(|r| r.1) }.at(u);
+        [p, du, dv]
+    }
+
+    pub fn boundaries(&self) -> [Cubic; 4] {
+        let p = &self.points;
+        [p.map(|row| row[0]), p[3], p.map(|row| row[3]), p[0]].map(|points| Cubic { points })
+    }
+
+    fn normal(&self, point: Vec3) -> Vec3 {
+        for (i, u) in [(0, 0.0), (3, 1.0)] {
+            for (j, v) in [(0, 0.0), (3, 1.0)] {
+                if self.points[i][j] == point {
+                    let [_, du, dv] = self.at(u, v);
+                    return unit(du.cross(dv));
+                }
+            }
+        }
+        // The untrimmed patch is regular and small. Invert a point on it with a bounded
+        // Gauss-Newton iteration. The tessellator already knows its parameters.
+        let (mut u, mut v) = (0.5, 0.5);
+        for _ in 0..12 {
+            let [p, a, b] = self.at(u, v);
+            let r = point - p;
+            let (aa, ab, bb) = (a.dot(a), a.dot(b), b.dot(b));
+            let wedge = a.cross(b);
+            let determinant = wedge.dot(wedge);
+            if determinant == 0.0 {
+                break;
+            }
+            let (ra, rb) = (r.dot(a), r.dot(b));
+            u = (u + (bb * ra - ab * rb) / determinant).clamp(0.0, 1.0);
+            v = (v + (aa * rb - ab * ra) / determinant).clamp(0.0, 1.0);
+        }
+        let [_, a, b] = self.at(u, v);
+        unit(a.cross(b))
+    }
+}
+
 /// The surface a face lies on.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)] // Faces keep value semantics, including their Bézier controls.
 pub enum Surface {
     Plane(Plane),
     Cylinder(Cylinder),
     Cone(Cone),
     Torus(Torus),
+    CubicWall(CubicWall),
+    Bicubic(Bicubic),
     /// The wall of a cut through a rolled sheet (M5c): the piece swept along the radius, out of
     /// the body to the left of the piece's direction in the development.
     Wall(Rolled),
@@ -90,7 +187,7 @@ impl Surface {
     pub fn plane(&self) -> Option<&Plane> {
         match self {
             Self::Plane(p) => Some(p),
-            Self::Cylinder(_) | Self::Cone(_) | Self::Torus(_) | Self::Wall(_) => None,
+            Self::Cylinder(_) | Self::Cone(_) | Self::Torus(_) | Self::CubicWall(_) | Self::Bicubic(_) | Self::Wall(_) => None,
         }
     }
 
@@ -100,7 +197,7 @@ impl Surface {
         match *self {
             Self::Cylinder(c) => Some(c.into()),
             Self::Cone(c) => Some(c),
-            Self::Plane(_) | Self::Torus(_) | Self::Wall(_) => None,
+            Self::Plane(_) | Self::Torus(_) | Self::CubicWall(_) | Self::Bicubic(_) | Self::Wall(_) => None,
         }
     }
 
@@ -111,6 +208,8 @@ impl Surface {
             Self::Cylinder(c) => Self::Cylinder(Cylinder { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
             Self::Cone(c) => Self::Cone(Cone { origin: m.apply(c.origin), axis: m.apply_vector(c.axis), ..c }),
             Self::Torus(t) => Self::Torus(Torus { center: m.apply(t.center), axis: m.apply_vector(t.axis), ..t }),
+            Self::Bicubic(p) => Self::Bicubic(Bicubic { points: p.points.map(|row| row.map(|p| m.apply(p))) }),
+            Self::CubicWall(w) => Self::CubicWall(w.map(|p| m.apply(p), |v| m.apply_vector(v))),
             Self::Wall(w) => Self::Wall(Rolled { dev: w.dev.moved(m), ..w }),
         }
     }
@@ -135,6 +234,8 @@ impl Surface {
                 let n = unit(w - rim);
                 if t.convex { n } else { -n }
             }
+            Self::CubicWall(w) => w.normal(p),
+            Self::Bicubic(b) => b.normal(p),
             Self::Wall(w) => {
                 let (q, r) = w.dev.unroll(p, w.from.x);
                 w.normal(q, r)
@@ -558,10 +659,46 @@ impl Rolled {
     }
 }
 
-/// The curve of an edge: an arc, or a piece of a development at `radius` from its axis.
+/// A cubic Bézier segment with its endpoints included in the control polygon.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Cubic {
+    pub points: [Vec3; 4],
+}
+
+impl Cubic {
+    /// Interpolates endpoints and derivatives with respect to the unit parameter.
+    pub fn hermite([a, b]: [Vec3; 2], [da, db]: [Vec3; 2]) -> Self {
+        Self { points: [a, a + da * (1.0 / 3.0), b - db * (1.0 / 3.0), b] }
+    }
+
+    /// Position and derivative on the unit interval.
+    pub fn at(self, t: f64) -> (Vec3, Vec3) {
+        let [a, b, c, d] = self.points;
+        let lerp = |p: Vec3, q: Vec3| p + (q - p) * t;
+        let q = lerp(lerp(a, b), lerp(b, c));
+        let r = lerp(lerp(b, c), lerp(c, d));
+        (lerp(q, r), (r - q) * 3.0)
+    }
+
+    fn inner_points(self, chord: f64) -> Vec<Vec3> {
+        let [a, b, c, d] = self.points;
+        // Max second derivative is bounded by the endpoint values. The secant error on
+        // an interval of length h is at most h² times that bound divided by eight.
+        let second = |p: Vec3, q: Vec3, r: Vec3| {
+            let v = (r - q) - (q - p);
+            v.dot(v)
+        };
+        let bound = 6.0 * libm::sqrt(second(a, b, c).max(second(b, c, d)));
+        let spans = libm::sqrt(bound / (8.0 * chord)).ceil().clamp(1.0, SEGMENTS[1]) as usize;
+        (1..spans).map(|k| self.at(k as f64 / spans as f64).0).collect()
+    }
+}
+
+/// The curve of an edge: an arc, a cubic Bézier, or a developed piece at `radius` from its axis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Curve {
     Arc(Arc),
+    Cubic(Cubic),
     Rolled { piece: Rolled, radius: f64 },
 }
 
@@ -570,6 +707,10 @@ impl Curve {
     pub fn reversed(&self) -> Self {
         match self {
             Self::Arc(a) => Self::Arc(a.reversed()),
+            Self::Cubic(c) => {
+                let [a, b, c, d] = c.points;
+                Self::Cubic(Cubic { points: [d, c, b, a] })
+            }
             Self::Rolled { piece, radius } => Self::Rolled { piece: piece.reversed(), radius: *radius },
         }
     }
@@ -578,6 +719,7 @@ impl Curve {
     pub fn moved(&self, m: &Rigid) -> Self {
         match *self {
             Self::Arc(a) => Self::Arc(Arc { center: m.apply(a.center), axis: m.apply_vector(a.axis), ..a }),
+            Self::Cubic(c) => Self::Cubic(Cubic { points: c.points.map(|p| m.apply(p)) }),
             Self::Rolled { piece, radius } => Self::Rolled { piece: Rolled { dev: piece.dev.moved(m), ..piece }, radius },
         }
     }
@@ -585,7 +727,7 @@ impl Curve {
     pub fn arc(&self) -> Option<&Arc> {
         match self {
             Self::Arc(a) => Some(a),
-            Self::Rolled { .. } => None,
+            Self::Cubic(_) | Self::Rolled { .. } => None,
         }
     }
 
@@ -594,6 +736,7 @@ impl Curve {
     pub fn inner_points(&self, from: Vec3, to: Vec3, chord: f64) -> Vec<Vec3> {
         match self {
             Self::Arc(a) => a.inner_points(from, to, chord).collect(),
+            Self::Cubic(c) => c.inner_points(chord),
             Self::Rolled { piece, radius } => {
                 let n = piece.chords(*radius, chord);
                 (1..n).map(|k| piece.dev.point(piece.at(k as f64 / n as f64).0, *radius)).collect()
@@ -605,6 +748,12 @@ impl Curve {
     pub fn extend_bounds(&self, from: Vec3, to: Vec3, lo: &mut Vec3, hi: &mut Vec3) {
         match self {
             Self::Arc(a) => a.extend_bounds(from, to, lo, hi),
+            Self::Cubic(c) => {
+                for p in c.points {
+                    *lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                    *hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+                }
+            }
             Self::Rolled { piece, radius } => piece.extend_bounds(*radius, lo, hi),
         }
     }
@@ -738,6 +887,67 @@ pub(crate) fn segment(acc: &mut Integrals, arc: &Arc, k: Vec3, u: Vec3, v: Vec3,
     acc.six_v += six_v;
     acc.moment = acc.moment + (centroid - o) * (3.0 * six_v);
     acc.area_vector = acc.area_vector + n * area;
+}
+
+/// The planar correction between a cubic and its chord, integrated around its first
+/// endpoint. With the chord as the return edge, its contribution is zero in these coordinates.
+pub(crate) fn cubic_segment(acc: &mut Integrals, cubic: Cubic, n: Vec3, o: Vec3) {
+    let anchor = cubic.points[0];
+    let local = Cubic { points: cubic.points.map(|p| p - anchor) };
+    let mut area = 0.0;
+    let mut first = Vec3::ZERO;
+    for (x, w) in GAUSS {
+        for t in [0.5 * (1.0 - x), 0.5 * (1.0 + x)] {
+            let (q, dq) = local.at(t);
+            let flux = q.cross(dq).dot(n) * (0.5 * w);
+            area += 0.5 * flux;
+            first = first + q * (flux / 3.0);
+        }
+    }
+    let height = (anchor - o).dot(n);
+    acc.six_v += 2.0 * height * area;
+    acc.moment = acc.moment + (first + (anchor - o) * area) * (6.0 * height);
+    acc.area_vector = acc.area_vector + n * area;
+}
+
+pub(crate) fn cubic_wall(wall: CubicWall, origin: Vec3, acc: &mut Integrals) {
+    let [a, b] = wall.edges.map(|curve| Cubic { points: curve.points.map(|p| p - origin) });
+    for (x, wx) in GAUSS {
+        for u in [0.5 * (1.0 - x), 0.5 * (1.0 + x)] {
+            let (p, dp) = a.at(u);
+            let (q, dq) = b.at(u);
+            let across = q - p;
+            // The volume and moment integrands are at most cubic across the strip.
+            for v in [0.5 - 0.5 / libm::sqrt(3.0), 0.5 + 0.5 / libm::sqrt(3.0)] {
+                let r = p + across * v;
+                let normal = (dp + (dq - dp) * v).cross(across) * (0.25 * wx);
+                let flux = r.dot(normal);
+                acc.area += libm::sqrt(normal.dot(normal));
+                acc.area_vector = acc.area_vector + normal;
+                acc.six_v += 2.0 * flux;
+                acc.moment = acc.moment + r * (6.0 * flux);
+            }
+        }
+    }
+}
+
+pub(crate) fn bicubic(patch: &Bicubic, origin: Vec3, acc: &mut Integrals) {
+    let local = Bicubic { points: patch.points.map(|row| row.map(|p| p - origin)) };
+    for (x, wx) in GAUSS {
+        for u in [0.5 * (1.0 - x), 0.5 * (1.0 + x)] {
+            for (y, wy) in GAUSS {
+                for v in [0.5 * (1.0 - y), 0.5 * (1.0 + y)] {
+                    let [p, du, dv] = local.at(u, v);
+                    let normal = du.cross(dv) * (0.25 * wx * wy);
+                    let flux = p.dot(normal);
+                    acc.area += libm::sqrt(normal.dot(normal));
+                    acc.area_vector = acc.area_vector + normal;
+                    acc.six_v += 2.0 * flux;
+                    acc.moment = acc.moment + p * (6.0 * flux);
+                }
+            }
+        }
+    }
 }
 
 /// Nodes and weights of 8-point Gauss–Legendre on `[-1, 1]`, positive half.

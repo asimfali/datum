@@ -173,6 +173,29 @@ fn attach_curves(body: &mut Body, curves: Vec<CurveSpec>) -> Result<(), BrepErro
         let ends = (body.vertices[he.origin as usize].id, body.vertices[body.half_edges[he.twin as usize].origin as usize].id);
         if let Ok(k) = keys.binary_search_by_key(&ends, |k| k.0) {
             let a = &curves[keys[k].1 as usize];
+            if let Curve::Cubic(c) = a.curve {
+                let twin = &body.half_edges[he.twin as usize];
+                let supported = [he, twin].iter().all(|h| match body.faces[body.loops[h.loop_ix as usize].face as usize].surface {
+                    Surface::Plane(_) => true,
+                    Surface::Bicubic(p) => {
+                        p.boundaries().iter().any(|edge| edge.points == c.points || edge.points.into_iter().eq(c.points.into_iter().rev()))
+                    }
+                    Surface::CubicWall(w) => {
+                        w.edges.iter().any(|edge| edge.points == c.points || edge.points.into_iter().eq(c.points.into_iter().rev()))
+                    }
+                    _ => false,
+                });
+                if !supported {
+                    return Err(BrepError::Unsupported("a cubic edge must bound a plane or match a cubic wall boundary".into()));
+                }
+                let (from, to) = if a.from == ends.0 { (he.origin, twin.origin) } else { (twin.origin, he.origin) };
+                if c.points[0] != body.point(from)
+                    || c.points[3] != body.point(to)
+                    || c.points.iter().any(|p| !p.to_array().into_iter().all(f64::is_finite))
+                {
+                    return Err(BrepError::Invalid("cubic controls must be finite and match the edge endpoints".into()));
+                }
+            }
             body.edges[e].curve = Some(body.curves.len() as Ix);
             body.curves.push(if a.from == ends.0 { a.curve } else { a.curve.reversed() });
             found += 1;

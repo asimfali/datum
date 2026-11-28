@@ -37,6 +37,12 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
                     Surface::Cone(c) => c.origin = c.origin + o,
                     Surface::Torus(t) => t.center = t.center + o,
                     Surface::Wall(w) => w.dev.origin = w.dev.origin + o,
+                    Surface::Bicubic(p) => p.points = p.points.map(|row| row.map(|q| q + o)),
+                    Surface::CubicWall(w) => {
+                        for edge in &mut w.edges {
+                            edge.points = edge.points.map(|p| p + o);
+                        }
+                    }
                 }
                 s.loops.iter_mut().flatten().for_each(|v| *v = id(*v));
                 s
@@ -48,6 +54,7 @@ pub fn pattern_grid(feature: TopoId, source: &Body, count: [u32; 2], step: [Vec3
             .map(|a| {
                 let curve = match a.curve {
                     Curve::Arc(arc) => Curve::Arc(datum_brep::Arc { center: arc.center + o, ..arc }),
+                    Curve::Cubic(c) => Curve::Cubic(datum_brep::Cubic { points: c.points.map(|p| p + o) }),
                     Curve::Rolled { mut piece, radius } => {
                         piece.dev.origin = piece.dev.origin + o;
                         Curve::Rolled { piece, radius }

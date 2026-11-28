@@ -795,3 +795,40 @@ proptest! {
         prop_assert!(r.faces().iter().zip(b.faces()).all(|(a, c)| a.id == c.id));
     }
 }
+
+#[test]
+fn a_cubic_seam_has_one_geometry_in_brep_mesh_and_step() {
+    let cube = unit_cube();
+    let mut faces = specs(&cube);
+    let top = faces.iter().position(|f| f.surface.plane().unwrap().normal.z > 0.0).unwrap();
+    let face = faces.swap_remove(top);
+    let points = [Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 1.0), Vec3::new(1.0, 1.0, 1.0), Vec3::new(0.0, 1.0, 1.0)];
+    let [a, b, c, d] = points.map(|point| cube.vertices().iter().find(|v| v.point == point).unwrap().id);
+    let ids = [id("cubic.lower"), id("cubic.upper")];
+    for (id, ring) in ids.into_iter().zip([[a, b, c], [a, c, d]]) {
+        faces.push(FaceSpec { id, surface: face.surface, loops: vec![ring.to_vec()] });
+    }
+    let curve = Cubic::hermite([points[0], points[2]], [Vec3::new(1.0, 1.75, 0.0), Vec3::new(1.0, 0.25, 0.0)]);
+    let body = build_with_curves(cube.vertices().to_vec(), faces, vec![CurveSpec { from: a, to: c, curve: Curve::Cubic(curve) }]).unwrap();
+    body.validate().unwrap();
+    let (p, derivative) = curve.at(0.5);
+    assert_eq!(p, Vec3::new(0.5, 0.6875, 1.0));
+    let error = derivative - Vec3::new(1.0, 1.0, 0.0);
+    assert!(error.dot(error) < 1e-24);
+    assert!((body.volume() - 1.0).abs() < 1e-12);
+    let meshes = ids.map(|id| {
+        let f = body.faces().iter().position(|f| f.id == id).unwrap() as Ix;
+        let area = if id == ids[0] { 0.625 } else { 0.375 };
+        assert!((body.face_area(f) - area).abs() < 1e-12);
+        face_mesh(&body, f, false, 0.001).unwrap()
+    });
+    let interior = |m: &FaceMesh| {
+        let mut points: Vec<_> = m.points.iter().zip(&m.vertices).filter_map(|(&p, &v)| (v == Ix::MAX).then_some(p)).collect();
+        points.sort_by(|a, b| a.x.total_cmp(&b.x));
+        points
+    };
+    assert!(interior(&meshes[0]).len() > 1);
+    assert_eq!(interior(&meshes[0]), interior(&meshes[1]));
+    let file = step(&[&body], "cubic seam", false).unwrap();
+    assert_eq!(file.text.matches("B_SPLINE_CURVE_WITH_KNOTS").count(), 1);
+}

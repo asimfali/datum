@@ -241,6 +241,10 @@ impl Writer {
             let curve = match b.edge_curve(e) {
                 None => self.line(from, to),
                 Some(Curve::Arc(a)) => self.circle(a.center, a.axis, from, a.radius),
+                Some(Curve::Cubic(c)) => {
+                    let points = c.points.map(|p| self.point(p));
+                    self.put(format_args!("B_SPLINE_CURVE_WITH_KNOTS('',3,{},.UNSPECIFIED.,.F.,.F.,(4,4),(0.,1.),.UNSPECIFIED.)", List(&points)))
+                }
                 Some(Curve::Rolled { piece, radius }) => match exact(&piece) {
                     Some(Exact::Along) => self.line(from, to),
                     Some(Exact::Around { center, axis }) => self.circle(center, axis, from, radius),
@@ -290,6 +294,23 @@ impl Writer {
                         (self.put(format_args!("SURFACE_OF_REVOLUTION('',#{circle},#{axis})")), t.convex)
                     }
                 }
+                Surface::Bicubic(p) => {
+                    let grid = p.points.map(|row| row.map(|point| self.point(point)));
+                    let surface = self.put(format_args!(
+                        "B_SPLINE_SURFACE_WITH_KNOTS('',3,3,{},.UNSPECIFIED.,.F.,.F.,.F.,(4,4),(4,4),(0.,1.),(0.,1.),.UNSPECIFIED.)",
+                        Grid(&grid)
+                    ));
+                    (surface, true)
+                }
+                Surface::CubicWall(w) => {
+                    let [a, b] = w.edges.map(|edge| edge.points);
+                    let grid: [[u32; 2]; 4] = std::array::from_fn(|i| [self.point(a[i]), self.point(b[i])]);
+                    let surface = self.put(format_args!(
+                        "B_SPLINE_SURFACE_WITH_KNOTS('',3,1,{},.UNSPECIFIED.,.F.,.F.,.F.,(4,4),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.)",
+                        Grid(&grid)
+                    ));
+                    (surface, true)
+                }
                 Surface::Wall(w) if walls[f] > 0 => self.wall(&w, radii(b, f as Ix)?, walls[f]),
                 Surface::Wall(w) => {
                     // A straight piece along the axis or around it: the wall is flat.
@@ -300,7 +321,9 @@ impl Writer {
             };
             let surface = match face.surface {
                 Surface::Plane(_) => self.put(format_args!("PLANE('',#{surface})")),
-                Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_) | Surface::Wall(_) => surface,
+                Surface::Cylinder(_) | Surface::Cone(_) | Surface::Torus(_) | Surface::CubicWall(_) | Surface::Bicubic(_) | Surface::Wall(_) => {
+                    surface
+                }
             };
             let mut bounds = Vec::with_capacity(face.loop_count as usize);
             for (k, l) in b.face_loops(f as Ix).enumerate() {
@@ -486,9 +509,9 @@ impl fmt::Display for List<'_> {
 }
 
 /// Control points of a surface as a STEP list of lists: `((#1,#2),(#3,#4))`.
-struct Grid<'a>(&'a [[u32; 2]]);
+struct Grid<'a, const N: usize>(&'a [[u32; N]]);
 
-impl fmt::Display for Grid<'_> {
+impl<const N: usize> fmt::Display for Grid<'_, N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_char('(')?;
         for (i, row) in self.0.iter().enumerate() {

@@ -383,7 +383,7 @@ pub fn projectable(sources: &[(String, datum_graph::ValueRef)], placed: &Placed,
                         Some(Curve::Arc(c)) => {
                             Some((arc(c.center, c.radius, pa, Some(pb), c.axis)?, round(c.center, c.radius, pa, Some(pb), c.axis)))
                         }
-                        Some(Curve::Rolled { .. }) => None,
+                        Some(Curve::Cubic(_)) | Some(Curve::Rolled { .. }) => None,
                     }
                 })
                 .collect();
