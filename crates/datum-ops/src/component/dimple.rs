@@ -16,7 +16,7 @@ fn bad(message: &str) -> BrepError {
 #[allow(clippy::too_many_arguments)]
 pub(super) fn form(
     feature: TopoId,
-    wall: &Body,
+    [wall, blank]: [&Body; 2],
     face: TopoId,
     onto_wall: Rigid,
     anchor: Vec3,
@@ -215,9 +215,9 @@ pub(super) fn form(
         cut_sketch.face = Some(face);
         cut_sketch.solved.points.insert(circle.center.clone(), Vec2::default());
         cut_sketch.circles = [(name.to_owned(), Circle { diameter: Num::Value(2.0 * blank_radius), ..circle.clone() })].into();
-        cut::from_face(id("stamp.dimple.blank", 0), wall, &cut_sketch, cut::Reach::Through)?
+        cut::from_face(id("stamp.dimple.blank", 0), blank, &cut_sketch, cut::Reach::Through)?
     } else {
-        wall.clone()
+        blank.clone()
     };
-    Ok(Value::Formed(Box::new(Formed { body, blank, imprints: Vec::new(), blank_unsupported: None, stamp_cuts: Vec::new() })))
+    Ok(Value::Formed(Box::new(Formed { body, blank, imprints: Vec::new(), stamp_cuts: Vec::new() })))
 }

@@ -10,10 +10,12 @@ use super::tongue::to_part;
 use super::{STAMP_ROLE, SectionSide, unit};
 use crate::rib::Formed;
 use crate::sketch::Placed;
+use crate::unfold::StampCut;
 use crate::{Value, validated};
 
 pub(super) struct Louver<'a> {
     pub wall: &'a Body,
+    pub blank: &'a Body,
     pub face: TopoId,
     pub onto_wall: Rigid,
     pub anchor: Vec3,
@@ -82,7 +84,7 @@ impl End {
 }
 
 pub(super) fn form(feature: TopoId, louver: Louver<'_>) -> Result<Value, BrepError> {
-    let Louver { wall, face, onto_wall, anchor, section, boundary, thickness, metadata, section_side } = louver;
+    let Louver { wall, blank, face, onto_wall, anchor, section, boundary, thickness, metadata, section_side } = louver;
     if section_side != SectionSide::Outer {
         return Err(bad("the preview takes the outer section"));
     }
@@ -161,35 +163,47 @@ pub(super) fn form(feature: TopoId, louver: Louver<'_>) -> Result<Value, BrepErr
     if (lower.end.x - cut).abs() > tol || tip.x > cut + tol {
         return Err(bad("the cuts must meet on a line at or beyond the end of the middle arc"));
     }
+    let mut cut_edge = Vec::with_capacity(2);
     for (role_name, x, endpoint) in [("transition", 0.0, [lower.start.y, upper.start.y]), ("cut", cut, [lower.end.y, upper.end.y])] {
         for y in endpoint {
             let center = Vec2::new(x, 0.0);
             let end = Vec2::new(x, y);
-            let count = active_lines
+            let matches = active_lines
                 .iter()
-                .filter(|(name, line)| {
+                .filter_map(|(name, line)| {
+                    if role(name) != Some(role_name) {
+                        return None;
+                    }
                     let [a, b] = [plan(&line.from), plan(&line.to)];
-                    role(name) == Some(role_name) && ((same(a, center) && same(b, end)) || (same(b, center) && same(a, end)))
+                    [(a, b), (b, a)].into_iter().find_map(|(p, q)| (same(p, center) && same(q, end)).then_some((*name, q)))
                 })
-                .count();
-            if count != 1 {
+                .collect::<Vec<_>>();
+            let [edge] = matches.as_slice() else {
                 return Err(bad("the root and slit need two marked segments each"));
+            };
+            if role_name == "cut" {
+                cut_edge.push(*edge);
             }
         }
     }
+    let [(first, a), (last, b)] = cut_edge.as_slice() else {
+        return Err(bad("the slit needs both marked segments"));
+    };
+    let cut_id = TopoId::derive("stamp.louver.slit").id(feature).tag(first).tag(last).finish();
+    let slit = [*a, *b].map(|p| frame.apply(Vec3::new(p.x, p.y, 0.0)));
     let sweep = ProfileArc { center: profile_center, ccw: false }.turn(root, tip).abs();
     let pullback = libm::sqrt(profile.radius_squared) * sweep - tip.x;
     if pullback <= 0.0 {
         return Err(bad("the raised section has no allowance for an open slit"));
     }
 
-    assemble(feature, wall, face, frame, thickness, &profile, [lower, upper], cut, pullback, height_sign)
+    assemble(feature, [wall, blank], face, frame, thickness, &profile, [lower, upper], cut, pullback, height_sign, (slit, cut_id))
 }
 
 #[allow(clippy::too_many_arguments)]
 fn assemble(
     feature: TopoId,
-    wall: &Body,
+    [wall, blank]: [&Body; 2],
     face: TopoId,
     frame: Rigid,
     t: f64,
@@ -198,6 +212,7 @@ fn assemble(
     cut: f64,
     pullback: f64,
     height_sign: f64,
+    (slit, cut_id): ([Vec3; 2], TopoId),
 ) -> Result<Value, BrepError> {
     // Include the horizontal land after the drawn arc and the ends of the middle plateau.
     const SECTION_STEPS: usize = 16;
@@ -290,11 +305,12 @@ fn assemble(
     }
     let body = build_with_curves(vertices, faces, wall.curve_specs())?;
     validated(&body)?;
-    Ok(Value::Formed(Box::new(Formed {
-        body,
-        blank: wall.clone(),
-        imprints: Vec::new(),
-        blank_unsupported: Some("louver: the end returns need a manufacturing development rule"),
-        stamp_cuts: Vec::new(),
-    })))
+    let cut = StampCut {
+        faces: [face, wall.faces()[bottom].id],
+        points: slit.into(),
+        normal: frame.apply_vector(Vec3::new(0.0, 0.0, 1.0)),
+        ids: vec![cut_id],
+        arcs: vec![None],
+    };
+    Ok(Value::Formed(Box::new(Formed { body, blank: blank.clone(), imprints: Vec::new(), stamp_cuts: vec![cut] })))
 }

@@ -188,7 +188,12 @@ pub(crate) fn form(
     let [Placement::Point(placement)] = placements else {
         return Err(unsupported(format!("a formed stamp needs one point placement: part `{}`", def.name)));
     };
-    let [Value::Body(wall), _] = values else { return Err(unsupported("a formed stamp needs an unformed sheet and a placement sketch")) };
+    let [sheet, _] = values else { return Err(invalid("a formed stamp needs a sheet and a placement sketch")) };
+    let (wall, blank) = match sheet {
+        Value::Body(body) => (body, body),
+        Value::Formed(formed) if formed.imprints.is_empty() => (&formed.body, &formed.blank),
+        _ => return Err(unsupported("a formed stamp needs a sheet without ribs")),
+    };
     let on = input_sketch(values, placement.input, "formed stamp placement")?;
     on_wall(def, wall, on, "formed stamp")?;
     let t = num(thickness.ok_or_else(|| invalid("a formed stamp needs a thickness from the sheet rule"))?)?;
@@ -228,7 +233,7 @@ pub(crate) fn form(
     {
         return super::dimple::form(
             feature,
-            wall,
+            [wall, blank],
             face,
             onto_wall,
             anchor,
@@ -255,6 +260,7 @@ pub(crate) fn form(
             feature,
             super::louver::Louver {
                 wall,
+                blank,
                 face,
                 onto_wall,
                 anchor,
@@ -284,6 +290,7 @@ pub(crate) fn form(
                     feature,
                     super::pocket::Pocket {
                         wall,
+                        blank,
                         face,
                         frame: onto_wall,
                         section: profile,
@@ -315,6 +322,7 @@ pub(crate) fn form(
             profile,
             super::bridge::Bridge {
                 wall,
+                blank,
                 face,
                 thickness: t,
                 radius: radius.filter(|_| forming.round_section).map(num).transpose()?,
@@ -415,7 +423,7 @@ pub(crate) fn form(
         ids: outline.ids,
         arcs: outline.arcs.into_iter().map(|arc| arc.map(|arc| (at_wall(arc.center), arc.ccw))).collect(),
     };
-    Ok(Value::Formed(Box::new(Formed { body, blank: wall.clone(), imprints: Vec::new(), blank_unsupported: None, stamp_cuts: vec![cut] })))
+    Ok(Value::Formed(Box::new(Formed { body, blank: blank.clone(), imprints: Vec::new(), stamp_cuts: vec![cut] })))
 }
 
 fn free_boundary(

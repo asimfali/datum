@@ -404,6 +404,15 @@
       "thickness": 0.5,
       "radius": 0.5,
       "k_factor": 0.5
+    },
+    {
+      "name": "blank",
+      "op": "unfold",
+      "face": "a5b6771cb252be4ce5807d72a33abb7c",
+      "inputs": [
+        "stamp"
+      ],
+      "k_factor": 0.5
     }
   ]
 }

@@ -1,8 +1,9 @@
 //! A two-sketch louver, including its open slit and return to the wall.
-#![allow(clippy::unwrap_used)]
+#![allow(clippy::unwrap_used, clippy::panic)]
 
 use datum_math::{Sign, Vec2, Vec3, orient2d};
 use datum_model::Session;
+use datum_ops::FlatPiece;
 use serde_json::{Value, json};
 
 #[test]
@@ -53,6 +54,16 @@ fn louver_opens_a_slit_and_returns_to_the_wall_at_both_ends() {
         "the slit should be open through the sheet"
     );
 
-    let error = session.flat_of("stamp").unwrap_err();
-    assert!(error.contains("louver"), "{error}");
+    let flat = session.flat_of("stamp").unwrap();
+    assert_eq!(flat.pieces, session.flat_of("blank").unwrap().pieces);
+    let [flat_origin, fx, fy, _] = flat.frame.unwrap();
+    let project = |p: Vec3| {
+        let q = p - flat_origin;
+        Vec2::new(q.dot(fx), q.dot(fy))
+    };
+    let expected = [-25.0, 25.0].map(|end| project(origin + x * slit_x + y * end));
+    let inside = flat.pieces.iter().enumerate().filter_map(|(i, p)| (!flat.outer.contains(&i)).then_some(p)).collect::<Vec<_>>();
+    let [FlatPiece::Line(a, b)] = inside.as_slice() else { panic!("expected one straight cut, got {inside:?}") };
+    let same = |a: Vec2, b: Vec2| close(a.x, b.x) && close(a.y, b.y);
+    assert!((same(*a, expected[0]) && same(*b, expected[1])) || (same(*b, expected[0]) && same(*a, expected[1])));
 }

@@ -659,7 +659,6 @@ impl Value {
     /// Add the stamp's open cuts on the sheet blank.
     pub fn with_stamp_cuts(&self, flat: Flat) -> Result<Flat, BrepError> {
         match self {
-            Self::Formed(f) if let Some(reason) = f.blank_unsupported => Err(BrepError::Unsupported(reason.into())),
             Self::Formed(f) if !f.stamp_cuts.is_empty() => flat.with_stamp_cuts(&f.stamp_cuts),
             _ => Ok(flat),
         }
@@ -1035,6 +1034,7 @@ impl Op {
                     return Ok(Value::Flat(Box::new(flat)));
                 }
                 Self::Plane { .. } | Self::Sketch { flat: None, .. } => {}
+                Self::Component { part, .. } if part.forming.is_some() => {}
                 _ => {
                     return Err(BrepError::Unsupported(format!(
                         "{}: applying this operation to a sheet with a formed stamp comes later",
@@ -1054,13 +1054,7 @@ impl Op {
                         laid = rib::imprint(&laid, i)?;
                     }
                     validated(&laid)?;
-                    Ok(Value::Formed(Box::new(rib::Formed {
-                        body: laid,
-                        blank: body,
-                        imprints: f.imprints.clone(),
-                        blank_unsupported: None,
-                        stamp_cuts: Vec::new(),
-                    })))
+                    Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank: body, imprints: f.imprints.clone(), stamp_cuts: Vec::new() })))
                 }
                 other => Ok(other),
             };
@@ -1190,13 +1184,17 @@ impl Op {
                     _ => (body.clone(), Vec::new()),
                 };
                 imprints.push(i);
-                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, blank_unsupported: None, stamp_cuts: Vec::new() })));
+                return Ok(Value::Formed(Box::new(rib::Formed { body: laid, blank, imprints, stamp_cuts: Vec::new() })));
             }
             Self::Revolve { axis, angle, profiles } => revolve::revolve_sketch(feature, sketch(0)?, axis, num(angle)?, profiles)?,
             Self::Component { part, params, placements, thickness, radius, k_factor, .. } => {
                 return if let Some(forming) = &part.forming {
                     let rule = [thickness.as_ref(), radius.as_ref(), k_factor.as_ref()];
-                    component::form_from_sketches(feature, part, forming, params, placements, rule, values)
+                    let mut result = component::form_from_sketches(feature, part, forming, params, placements, rule, values)?;
+                    if let (Value::Formed(previous), Value::Formed(next)) = (values[0], &mut result) {
+                        next.stamp_cuts.splice(..0, previous.stamp_cuts.iter().cloned());
+                    }
+                    Ok(result)
                 } else if part.roles.form.is_some() {
                     component::form(feature, part, params, placements, thickness.clone(), radius.clone(), values)
                 } else {
