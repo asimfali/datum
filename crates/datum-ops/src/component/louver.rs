@@ -22,6 +22,7 @@ pub(super) struct Louver<'a> {
     pub section: &'a Placed,
     pub boundary: &'a Placed,
     pub thickness: f64,
+    pub bend_radius: f64,
     pub metadata: &'a BTreeMap<String, BTreeMap<String, Json>>,
     pub section_side: SectionSide,
 }
@@ -35,7 +36,6 @@ struct Rise {
     center: Vec2,
     radius_squared: f64,
     sign: f64,
-    start: Vec2,
     end: Vec2,
 }
 
@@ -46,17 +46,48 @@ impl Rise {
             return Err(bad("an arc needs to span the section on one side of its centre"));
         }
         let radius = libm::hypot(start.x - center.x, start.y - center.y);
-        Ok(Self { center, radius_squared: radius * radius, sign, start, end })
+        Ok(Self { center, radius_squared: radius * radius, sign, end })
+    }
+}
+
+/// Two concentric reverse bends tangent to the flat sheet and the middle section.
+struct BackBend {
+    center_x: f64,
+    radius: [f64; 2],
+    join_x: [f64; 2],
+}
+
+impl BackBend {
+    fn new(profile: &Rise, inside: f64, thickness: f64, height_sign: f64) -> Result<Self, BrepError> {
+        if !inside.is_finite() || inside <= 0.0 {
+            return Err(bad("the sheet rule needs a positive bend radius"));
+        }
+        let radius = if height_sign < 0.0 { [inside + thickness, inside] } else { [inside, inside + thickness] };
+        let distance = radius[0] + libm::sqrt(profile.radius_squared);
+        let dy = radius[0] - profile.center.y;
+        let dx = libm::sqrt((distance - dy) * (distance + dy));
+        let center_x = profile.center.x - dx;
+        let join_x = radius.map(|r| center_x + dx * r / distance);
+        if !center_x.is_finite() || center_x >= 0.0 || join_x.iter().any(|&x| x >= profile.end.x) {
+            return Err(bad("the bend does not fit between the flat wall and the middle arc"));
+        }
+        Ok(Self { center_x, radius, join_x })
     }
 
-    fn at(&self, x: f64) -> f64 {
-        if x <= self.start.x {
-            self.start.y
-        } else if x >= self.end.x {
-            self.end.y
+    fn section(&self, profile: &Rise, x: f64, skin: usize) -> (f64, f64) {
+        let radius = self.radius[skin];
+        if x <= self.center_x {
+            (0.0, 0.0)
+        } else if x <= self.join_x[skin] {
+            let dx = x - self.center_x;
+            let vertical = libm::sqrt((radius - dx) * (radius + dx));
+            (dx * dx / (radius + vertical), dx / vertical)
         } else {
-            let dx = x - self.center.x;
-            self.center.y + self.sign * libm::sqrt((self.radius_squared - dx * dx).max(0.0))
+            let offset = self.radius[0] - radius;
+            let dx = x.min(profile.end.x) - profile.center.x;
+            let radius = libm::sqrt(profile.radius_squared) + offset;
+            let vertical = libm::sqrt((radius - dx) * (radius + dx));
+            (profile.center.y + vertical - offset, if x >= profile.end.x { 0.0 } else { -dx / vertical })
         }
     }
 }
@@ -81,10 +112,72 @@ impl End {
         let (x, y) = (self.start.x - self.center.x, self.start.y - self.center.y);
         Vec2::new(self.center.x + x * cos - y * sin, self.center.y + x * sin + y * cos)
     }
+
+    fn station(&self, station: f64, rear: f64, cut: f64) -> (Vec2, Vec2) {
+        let speed = self.turn / cut;
+        let tangent = |point: Vec2| Vec2::new((self.center.y - point.y) * speed + self.start.x / cut, (point.x - self.center.x) * speed);
+        if station < 0.0 {
+            // Extend the end arc to the flat start of the reverse bend. This Hermite span
+            // matches the longitudinal direction at the rear and the arc tangent at zero.
+            let span = -rear;
+            let u = (station - rear) / span;
+            let correction = span * u * u * (u - 1.0);
+            let slope = u * (3.0 * u - 2.0);
+            let start_tangent = tangent(self.start);
+            (
+                Vec2::new(station + correction * (start_tangent.x - 1.0), self.start.y + correction * start_tangent.y),
+                Vec2::new(1.0 + slope * (start_tangent.x - 1.0), slope * start_tangent.y),
+            )
+        } else {
+            let fraction = (station / cut).min(1.0);
+            let end_point = self.at(fraction);
+            // Put the sketch's solved root on the common station at working precision.
+            (Vec2::new(end_point.x - (1.0 - fraction) * self.start.x, end_point.y), tangent(end_point))
+        }
+    }
+}
+
+/// The transverse section of a skin and its two tangent vectors. The plan frame carries the
+/// skew of the end arc independently of the fade from the middle section to the wall.
+struct SkinSection {
+    plan: Vec2,
+    along: Vec2,
+    across: Vec2,
+    fade: f64,
+    fade_slope: f64,
+}
+
+impl SkinSection {
+    fn at((end_point, end_tangent): (Vec2, Vec2), station: f64, across: f64, cut: f64) -> Self {
+        let width = across.abs();
+        let side = across.signum();
+        let dx = if station >= cut { 0.0 } else { end_point.x - station };
+        let x = station + width * dx;
+        let u = (2.0 * width - 1.0).max(0.0);
+        Self {
+            plan: Vec2::new(x, width * end_point.y),
+            along: Vec2::new(1.0 + width * (end_tangent.x - 1.0), width * end_tangent.y),
+            across: Vec2::new(side * dx, side * end_point.y),
+            fade: (1.0 - u) * (1.0 - u) * (1.0 + 2.0 * u),
+            fade_slope: -12.0 * side * u * (1.0 - u),
+        }
+    }
+
+    fn point_and_tangents(&self, profile: (f64, f64), base: f64, direction: f64) -> (Vec3, [Vec3; 2]) {
+        let (rise, slope) = profile;
+        let dz_dx = direction * self.fade * slope;
+        (
+            Vec3::new(self.plan.x, self.plan.y, direction * self.fade * rise + base),
+            [
+                Vec3::new(self.along.x, self.along.y, dz_dx * self.along.x),
+                Vec3::new(self.across.x, self.across.y, dz_dx * self.across.x + direction * self.fade_slope * rise),
+            ],
+        )
+    }
 }
 
 pub(super) fn form(feature: TopoId, louver: Louver<'_>) -> Result<Value, BrepError> {
-    let Louver { wall, blank, face, onto_wall, anchor, section, boundary, thickness, metadata, section_side } = louver;
+    let Louver { wall, blank, face, onto_wall, anchor, section, boundary, thickness, bend_radius, metadata, section_side } = louver;
     if section_side != SectionSide::Outer {
         return Err(bad("the preview takes the outer section"));
     }
@@ -197,7 +290,8 @@ pub(super) fn form(feature: TopoId, louver: Louver<'_>) -> Result<Value, BrepErr
         return Err(bad("the raised section has no allowance for an open slit"));
     }
 
-    assemble(feature, [wall, blank], face, frame, thickness, &profile, [lower, upper], cut, pullback, height_sign, (slit, cut_id))
+    let bend = BackBend::new(&profile, bend_radius, thickness, height_sign)?;
+    assemble(feature, [wall, blank], face, frame, thickness, &profile, &bend, [lower, upper], cut, pullback, height_sign, (slit, cut_id))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -208,6 +302,7 @@ fn assemble(
     frame: Rigid,
     t: f64,
     profile: &Rise,
+    bend: &BackBend,
     ends: [&End; 2],
     cut: f64,
     pullback: f64,
@@ -218,6 +313,10 @@ fn assemble(
     const SECTION_STEPS: usize = 16;
     const HALF_WIDTH_STEPS: usize = 12;
     let mut stations = (0..=SECTION_STEPS).map(|i| profile.end.x * i as f64 / SECTION_STEPS as f64).collect::<Vec<_>>();
+    stations.extend((0..HALF_WIDTH_STEPS).map(|i| bend.center_x * (1.0 - i as f64 / HALF_WIDTH_STEPS as f64)));
+    stations.extend(bend.join_x);
+    stations.sort_by(f64::total_cmp);
+    stations.dedup_by(|a, b| a == b);
     if cut > profile.end.x {
         stations.push(cut);
     }
@@ -235,22 +334,27 @@ fn assemble(
     let mut y_bounds = [0.0_f64; 2];
     let mut x_min = 0.0_f64;
     for (i, &station) in stations.iter().enumerate() {
-        let ends = ends.map(|end| end.at(station / cut));
+        let end_stations = ends.map(|end| end.station(station, bend.center_x, cut));
         for j in 0..=width {
             let across = (j as f64 - HALF_WIDTH_STEPS as f64) / HALF_WIDTH_STEPS as f64;
-            let end = if across < 0.0 { ends[0] } else { ends[1] };
-            let x = if i == 0 || i == last { station } else { station + across.abs() * (end.x - station) };
-            let y = across.abs() * end.y;
+            let end = end_stations[usize::from(across >= 0.0)];
+            let sample = SkinSection::at(end, station, across, cut);
+            let Vec2 { x, y } = sample.plan;
             x_min = x_min.min(x);
             y_bounds = [y_bounds[0].min(y), y_bounds[1].max(y)];
-            let u = (2.0 * across.abs() - 1.0).max(0.0);
-            let fade = (1.0 - u) * (1.0 - u) * (1.0 + 2.0 * u);
-            let height = if i == 0 { 0.0 } else { height_sign * fade * profile.at(x) };
             for k in 0..2 {
-                let z = -(k as f64) * t;
-                vertex(v(i, j, k), Vec3::new(x, y, height + z));
+                let base = -(k as f64) * t;
+                let (point, [along, across]) = sample.point_and_tangents(bend.section(profile, x, k), base, height_sign);
+                if k == 0
+                    && j > 0
+                    && j < width
+                    && orient2d(Vec2::default(), Vec2::new(along.x, along.y), Vec2::new(across.x, across.y)) != Sign::Positive
+                {
+                    return Err(BrepError::Degenerate("louver: the end transition folds in plan".into()));
+                }
+                vertex(v(i, j, k), point);
                 if i == last && j != 0 && j != width {
-                    vertex(lip(j, k), Vec3::new(cut + pullback * fade * fade, y, z));
+                    vertex(lip(j, k), Vec3::new(cut + pullback * sample.fade * sample.fade, y, base));
                 }
             }
         }
@@ -313,4 +417,73 @@ fn assemble(
         arcs: vec![None],
     };
     Ok(Value::Formed(Box::new(Formed { body, blank: blank.clone(), imprints: Vec::new(), stamp_cuts: vec![cut] })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn end_return_is_tangent_at_the_flat_wall_and_the_middle_section() -> Result<(), BrepError> {
+        let profile = Rise::new(Vec2::new(3.0, -4.0), Vec2::default(), Vec2::new(3.0, 1.0), 0.0)?;
+        for side in [-1.0, 1.0] {
+            let end = End {
+                start: Vec2::new(0.0, side * 8.0),
+                end: Vec2::new(4.0, side * 12.0),
+                center: Vec2::new(4.0, side * 8.0),
+                turn: -side * std::f64::consts::FRAC_PI_2,
+            };
+            let bend = BackBend::new(&profile, 0.75, 0.5, side)?;
+            for skin in 0..2 {
+                let at = |station, across| {
+                    let sample = SkinSection::at(end.station(station, bend.center_x, 4.0), station, across, 4.0);
+                    let section = bend.section(&profile, sample.plan.x, skin);
+                    sample.point_and_tangents(section, -0.5 * skin as f64, side)
+                };
+                let (_, [along, across]) = at(2.0, side);
+                assert_eq!(along.z, 0.0);
+                assert_eq!(across.z, 0.0);
+                let (middle, [along, across]) = at(2.0, side * 0.5);
+                let normal = unit(along.cross(across));
+                let h = 1e-7;
+                let (outside, _) = at(2.0, side * (0.5 + h));
+                assert!(((outside - middle) * (1.0 / h)).dot(normal).abs() < 1e-5);
+
+                let (left, [left_tangent, _]) = at(-h, side * 0.75);
+                let (root, [right_tangent, _]) = at(0.0, side * 0.75);
+                let (right, _) = at(h, side * 0.75);
+                for tangent in [left_tangent, (root - left) * (1.0 / h), (right - root) * (1.0 / h)] {
+                    let error = tangent - right_tangent;
+                    assert!(error.dot(error) < 1e-10);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn back_bend_is_tangent_on_both_skins_for_either_forming_direction() -> Result<(), BrepError> {
+        let profile = Rise::new(Vec2::new(3.0, -4.0), Vec2::default(), Vec2::new(3.0, 1.0), 0.0)?;
+        let thickness = 0.5;
+        let inside = 0.75;
+        for sign in [-1.0, 1.0] {
+            let bend = BackBend::new(&profile, inside, thickness, sign)?;
+            let [a, b] = bend.radius;
+            assert_eq!(a.min(b), inside);
+            assert_eq!(a.max(b), inside + thickness);
+            for (skin, radius) in bend.radius.into_iter().enumerate() {
+                let join = bend.join_x[skin];
+                let dx = join - bend.center_x;
+                let rise = bend.section(&profile, join, skin).0;
+                let offset = bend.radius[0] - radius;
+                let radial = Vec2::new(dx, rise - radius);
+                let profile_radial = Vec2::new(join - profile.center.x, rise + offset - profile.center.y);
+                assert!((libm::hypot(radial.x, radial.y) - radius).abs() < 1e-12);
+                assert!((libm::hypot(profile_radial.x, profile_radial.y) - (5.0 + offset)).abs() < 1e-12);
+                assert!((radial.x * profile_radial.y - radial.y * profile_radial.x).abs() < 1e-12);
+                assert_eq!(bend.section(&profile, bend.center_x, skin).0, 0.0);
+            }
+        }
+        Ok(())
+    }
 }
